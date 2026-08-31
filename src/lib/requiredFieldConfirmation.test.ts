@@ -993,6 +993,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
           }],
         },
         submissionAttempt: body.submissionAttempt,
+        terminalResult: { resultId: 'a'.repeat(64) },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;

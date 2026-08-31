@@ -35,6 +35,8 @@ const MANAGED_SUBMISSION_ATTEMPT = Object.freeze({
   claimId: '22222222-2222-4222-8222-222222222222',
   executionId: '33333333-3333-4333-8333-333333333333',
 });
+const MANAGED_TERMINAL_RESULT_ID = 'a'.repeat(64);
+const OTHER_MANAGED_TERMINAL_RESULT_ID = 'b'.repeat(64);
 
 const managedProviderDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
 
@@ -56,11 +58,14 @@ test('managed terminal retrieval and acknowledgement preserve the exact attempt 
         return new Response(JSON.stringify({
           acknowledged: true,
           submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+          resultId: MANAGED_TERMINAL_RESULT_ID,
           acknowledgedAt: '2026-08-31T10:00:01.000Z',
+          cleanupState: 'completed',
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
       return new Response(JSON.stringify({
         state: 'completed',
+        resultId: MANAGED_TERMINAL_RESULT_ID,
         submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
         completedAt: '2026-08-31T10:00:00.000Z',
         expiresAt: '2026-09-30T10:00:00.000Z',
@@ -75,14 +80,178 @@ test('managed terminal retrieval and acknowledgement preserve the exact attempt 
 
     const terminal = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
     assert.equal(terminal.state, 'completed');
-    await acknowledgeManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
+    if (terminal.state !== 'completed') assert.fail('Expected a completed terminal result');
+    assert.equal(terminal.resultId, MANAGED_TERMINAL_RESULT_ID);
+    await acknowledgeManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT, terminal.resultId);
+    await acknowledgeManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT, terminal.resultId);
     assert.match(requests[0]!.url,
       /\/api\/run-results\?runId=11111111-1111-4111-8111-111111111111&claimId=22222222-2222-4222-8222-222222222222&executionId=33333333-3333-4333-8333-333333333333$/);
     assert.deepEqual(requests[1], {
       url: 'https://stratus.example/api/run-results/acknowledge',
       method: 'POST',
-      body: { submissionAttempt: MANAGED_SUBMISSION_ATTEMPT },
+      body: {
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        resultId: MANAGED_TERMINAL_RESULT_ID,
+      },
     });
+    assert.deepEqual(requests[2], requests[1], 'an idempotent retry repeats the exact result ID');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed correlated synchronous responses require a durable terminal result ID', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const responses = [
+    { terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID } },
+    {},
+    { terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID.toUpperCase() } },
+  ];
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { submissionAttempt?: unknown };
+      const response = responses.shift()!;
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application submitted',
+          url: 'https://portal.example/complete',
+          text: 'Thank you',
+          submissionAttempt: body.submissionAttempt,
+          ...response,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const options = {
+      requestContinuation: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    };
+    const run = await runManagedBrowser('https://portal.example/apply', [], options);
+    assert.equal(run.terminalResult?.resultId, MANAGED_TERMINAL_RESULT_ID);
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], options),
+      /missing its durable terminal result ID/i,
+    );
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], options),
+      /64 lowercase hexadecimal characters/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal retrieval refuses terminal records without an exact result ID', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const responses = [undefined, MANAGED_TERMINAL_RESULT_ID.toUpperCase()];
+  try {
+    globalThis.fetch = (async () => {
+      const resultId = responses.shift();
+      return new Response(JSON.stringify({
+        state: 'failed',
+        ...(resultId ? { resultId } : {}),
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        completedAt: '2026-08-31T10:00:00.000Z',
+        expiresAt: '2026-09-30T10:00:00.000Z',
+        error: { code: 'SANDBOX_RUN_FAILED', message: 'Provider response stream reset' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /terminal result ID must be 64 lowercase hexadecimal characters/i,
+    );
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /terminal result ID must be 64 lowercase hexadecimal characters/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal acknowledgement never sends a missing or mismatched result ID', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let fetches = 0;
+  try {
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response(JSON.stringify({
+        acknowledged: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        resultId: OTHER_MANAGED_TERMINAL_RESULT_ID,
+        acknowledgedAt: '2026-08-31T10:00:01.000Z',
+        cleanupState: 'completed',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await assert.rejects(
+      acknowledgeManagedBrowserTerminalResult(
+        MANAGED_SUBMISSION_ATTEMPT,
+        undefined as unknown as string,
+      ),
+      /64 lowercase hexadecimal characters/i,
+    );
+    assert.equal(fetches, 0, 'an invalid result ID is refused before any network request');
+    await assert.rejects(
+      acknowledgeManagedBrowserTerminalResult(
+        MANAGED_SUBMISSION_ATTEMPT,
+        MANAGED_TERMINAL_RESULT_ID,
+      ),
+      /did not match its durable result ID/i,
+    );
+    assert.equal(fetches, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal acknowledgement surfaces a provider wrong-result rejection', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      error: {
+        code: 'TERMINAL_RESULT_ID_MISMATCH',
+        message: 'The terminal result ID does not match the retained result',
+      },
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await assert.rejects(
+      acknowledgeManagedBrowserTerminalResult(
+        MANAGED_SUBMISSION_ATTEMPT,
+        MANAGED_TERMINAL_RESULT_ID,
+      ),
+      /does not match the retained result/i,
+    );
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
@@ -131,6 +300,7 @@ test('managed terminal retrieval rejects progress bound to another execution', a
   try {
     globalThis.fetch = (async () => new Response(JSON.stringify({
       state: 'indeterminate',
+      resultId: MANAGED_TERMINAL_RESULT_ID,
       submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
       completedAt: '2026-08-31T10:01:10.000Z',
       expiresAt: '2026-09-30T10:01:10.000Z',
@@ -182,6 +352,7 @@ test('managed terminal retrieval preserves pending, missing, expired, failed, an
     new Response(null, { status: 410 }),
     new Response(JSON.stringify({
       state: 'failed',
+      resultId: MANAGED_TERMINAL_RESULT_ID,
       submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
       completedAt: '2026-08-31T10:00:00.000Z',
       expiresAt: '2026-09-30T10:00:00.000Z',
@@ -189,6 +360,7 @@ test('managed terminal retrieval preserves pending, missing, expired, failed, an
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
     new Response(JSON.stringify({
       state: 'indeterminate',
+      resultId: OTHER_MANAGED_TERMINAL_RESULT_ID,
       submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
       completedAt: '2026-08-31T10:01:10.000Z',
       expiresAt: '2026-09-30T10:01:10.000Z',
@@ -221,6 +393,7 @@ test('managed terminal retrieval preserves pending, missing, expired, failed, an
     const failed = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
     assert.equal(failed.state, 'failed');
     if (failed.state === 'failed') {
+      assert.equal(failed.resultId, MANAGED_TERMINAL_RESULT_ID);
       assert.deepEqual(failed.error, {
         code: 'SANDBOX_RUN_FAILED',
         message: 'Provider response stream reset',
@@ -229,6 +402,7 @@ test('managed terminal retrieval preserves pending, missing, expired, failed, an
     const indeterminate = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
     assert.equal(indeterminate.state, 'indeterminate');
     if (indeterminate.state === 'indeterminate') {
+      assert.equal(indeterminate.resultId, OTHER_MANAGED_TERMINAL_RESULT_ID);
       assert.equal(indeterminate.runProgress?.verificationSubmitPressed, true);
       const failure = managedBrowserTerminalFailureError(indeterminate);
       assert.ok(failure instanceof ManagedBrowserProviderProgressError);
@@ -547,6 +721,7 @@ test('managed Stratus continuation sends an opaque token and actions without reo
       url: 'https://portal.example/complete',
       text: 'Thank you',
       submissionAttempt: body.submissionAttempt,
+      terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
     } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -637,6 +812,7 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
             humanVerification: null,
             submitOutcome,
             submissionAttempt: body.submissionAttempt,
+            terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
           },
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -656,6 +832,7 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
             formStillPresent: false,
           },
           submissionAttempt: body.submissionAttempt,
+          terminalResult: { resultId: OTHER_MANAGED_TERMINAL_RESULT_ID },
         },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
@@ -1285,6 +1462,7 @@ test('managed Stratus proves the exact employer URL before actions and before a 
         } } : {}),
         submitOutcome: { pressed: true, state: 'confirmed' },
         submissionAttempt: body.submissionAttempt,
+        terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;

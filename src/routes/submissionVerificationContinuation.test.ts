@@ -107,6 +107,44 @@ test('continuation acknowledgement follows either a confirmed fact or a structur
   assert.match(fold, /acknowledgeManagedTerminalFold\(/);
 });
 
+test('every managed acknowledgement carries the exact durable result ID returned by Stratus', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const acknowledgementStart = runner.indexOf('async function acknowledgeManagedTerminalFold(');
+  const acknowledgementEnd = runner.indexOf('function recoveredSecurityCodeState(', acknowledgementStart);
+  const acknowledgement = runner.slice(acknowledgementStart, acknowledgementEnd);
+  assert.match(acknowledgement, /resultId: string/);
+  assert.match(
+    acknowledgement,
+    /acknowledgeManagedBrowserTerminalResult\(submissionAttempt, resultId\)/,
+  );
+
+  const recoveryStart = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
+  const recoveryEnd = runner.indexOf('async function claimSubmission(', recoveryStart);
+  const recovery = runner.slice(recoveryStart, recoveryEnd);
+  assert.match(recovery, /terminal\.resultId/);
+  assert.match(
+    recovery,
+    /recoverManagedInitialSecurityCodeChallenge\([\s\S]*submissionAttempt,[\s\S]*terminal\.resultId,[\s\S]*result/,
+  );
+
+  const managedStart = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
+  const managedEnd = runner.indexOf("if (!claimedReview.browser_session_id)", managedStart);
+  const managed = runner.slice(managedStart, managedEnd);
+  assert.match(managed, /const initialTerminalResultId = managedBrowserTerminalResultId\(result\)/);
+  assert.match(
+    managed,
+    /securityCodeTerminalResultId = managedBrowserTerminalResultId\(receiptResult\)/,
+  );
+  assert.match(
+    managed,
+    /receiptObservationTerminalResultId = managedBrowserTerminalResultId\(observed\)/,
+  );
+  assert.match(
+    managed,
+    /successfulSubmissionAttempt,[\s\S]*initialTerminalResultId,[\s\S]*fastify/,
+  );
+});
+
 test('managed verification resumes once by token, never by URL, then verifies the receipt', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');

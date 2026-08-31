@@ -52,6 +52,7 @@ import {
   isManagedStratusProvider,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
+  managedBrowserTerminalResultId,
   managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
   ManagedBrowserAssertionFailureError,
@@ -1653,11 +1654,12 @@ async function acknowledgeManagedTerminalFold(
   row: ResumeRow,
   attemptBinding: SubmissionAttemptBinding,
   submissionAttempt: ManagedSubmissionAttempt,
+  resultId: string,
   fastify: FastifyInstance,
 ): Promise<void> {
   if (!await managedAttemptHasDurableFold(row, attemptBinding, submissionAttempt)) return;
   try {
-    await acknowledgeManagedBrowserTerminalResult(submissionAttempt);
+    await acknowledgeManagedBrowserTerminalResult(submissionAttempt, resultId);
   } catch (error) {
     fastify.log.warn({
       applicationId: row.id,
@@ -1665,6 +1667,35 @@ async function acknowledgeManagedTerminalFold(
       detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal acknowledgement failed',
     }, 'Managed terminal result was folded but its acknowledgement failed');
   }
+}
+
+async function acknowledgeManagedTerminalFoldAfterRetrieval(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  submissionAttempt: ManagedSubmissionAttempt,
+  fastify: FastifyInstance,
+): Promise<void> {
+  let terminal;
+  try {
+    terminal = await getManagedBrowserTerminalResult(submissionAttempt);
+  } catch (error) {
+    fastify.log.warn({
+      applicationId: row.id,
+      attemptId: attemptBinding.attemptId,
+      detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal result ID retrieval failed',
+    }, 'Managed terminal result could not be identified for acknowledgement');
+    return;
+  }
+  if (terminal.state !== 'completed'
+    && terminal.state !== 'failed'
+    && terminal.state !== 'indeterminate') return;
+  await acknowledgeManagedTerminalFold(
+    row,
+    attemptBinding,
+    submissionAttempt,
+    terminal.resultId,
+    fastify,
+  );
 }
 
 function recoveredSecurityCodeState(
@@ -1731,6 +1762,7 @@ async function foldManagedSecurityCodeContinuationResult(
   review: ApplicationReviewState,
   attemptBinding: SubmissionAttemptBinding,
   submissionAttempt: ManagedSubmissionAttempt,
+  resultId: string,
   result: ManagedBrowserResult,
   capturedAt: string,
   fastify: FastifyInstance,
@@ -1742,7 +1774,7 @@ async function foldManagedSecurityCodeContinuationResult(
       attemptBinding,
       'The retained verification result has no immutable employer URL binding',
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
     return 'folded';
   }
   const expectedApplicationUrl = portalApplicationUrl(
@@ -1764,7 +1796,7 @@ async function foldManagedSecurityCodeContinuationResult(
       error instanceof Error ? error.message.slice(0, 500) : 'Recovered verification proof was incomplete',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
     return 'folded';
   }
 
@@ -1807,7 +1839,7 @@ async function foldManagedSecurityCodeContinuationResult(
           receiptEvidence: { result, expectedApplicationUrl },
         });
       }
-      await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+      await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
       return 'folded';
     }
   }
@@ -1829,7 +1861,7 @@ async function foldManagedSecurityCodeContinuationResult(
       verification,
     },
   );
-  await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+  await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
   return 'folded';
 }
 
@@ -1857,7 +1889,7 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
 
   const authorization = await submissionBoundaryAuthorization(row.user_id, attemptBinding.attemptId);
   if (authorization) {
-    await acknowledgeManagedTerminalFold(
+    await acknowledgeManagedTerminalFoldAfterRetrieval(
       row,
       attemptBinding,
       managedInitialSubmissionAttempt(attemptBinding, authorization),
@@ -1871,7 +1903,12 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       'The retained verification result stayed pending until its provider deadline expired',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    await acknowledgeManagedTerminalFoldAfterRetrieval(
+      row,
+      attemptBinding,
+      plan.submissionAttempt,
+      fastify,
+    );
     return 'folded';
   }
 
@@ -1901,7 +1938,6 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       'The retained verification result could not be retrieved before its provider deadline expired',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
     return 'folded';
   }
   const terminalDecision = managedContinuationTerminalDecision(
@@ -1917,7 +1953,6 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       'The retained verification result stayed pending until its provider deadline expired',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
     return 'folded';
   }
   if (terminalDecision === 'gone') {
@@ -1927,7 +1962,6 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       'The retained verification result expired before Litos could fold it',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
     return 'folded';
   }
   if ((terminalDecision === 'failed' || terminalDecision === 'indeterminate')
@@ -1945,7 +1979,13 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       error.message.slice(0, 500) || 'The retained verification run ended without a terminal receipt',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      plan.submissionAttempt,
+      terminal.resultId,
+      fastify,
+    );
     return 'folded';
   }
   if (terminal.state !== 'completed') {
@@ -1955,7 +1995,6 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       'The retained verification result could not be classified',
       { verification: review.verification },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
     return 'folded';
   }
   return foldManagedSecurityCodeContinuationResult(
@@ -1963,6 +2002,7 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
     review,
     attemptBinding,
     plan.submissionAttempt,
+    terminal.resultId,
     terminal.run,
     terminal.completedAt,
     fastify,
@@ -1974,6 +2014,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
   review: ApplicationReviewState,
   attemptBinding: SubmissionAttemptBinding,
   initialSubmissionAttempt: ManagedSubmissionAttempt,
+  initialResultId: string,
   result: ManagedBrowserResult,
   capturedAt: string,
   challenge: NonNullable<ReturnType<typeof readManagedSecurityCodeChallenge>>,
@@ -2029,6 +2070,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       row,
       attemptBinding,
       initialSubmissionAttempt,
+      initialResultId,
       fastify,
     );
     return 'folded' as const;
@@ -2114,6 +2156,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       row,
       attemptBinding,
       initialSubmissionAttempt,
+      initialResultId,
       fastify,
     );
     return 'folded';
@@ -2172,6 +2215,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
         row,
         attemptBinding,
         initialSubmissionAttempt,
+        initialResultId,
         fastify,
       );
       return 'folded';
@@ -2202,6 +2246,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
           row,
           attemptBinding,
           initialSubmissionAttempt,
+          initialResultId,
           fastify,
         );
         return 'folded';
@@ -2231,6 +2276,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       pendingReview,
       attemptBinding,
       continuationSubmissionAttempt,
+      managedBrowserTerminalResultId(continued),
       continued,
       new Date().toISOString(),
       fastify,
@@ -2239,6 +2285,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       row,
       attemptBinding,
       initialSubmissionAttempt,
+      initialResultId,
       fastify,
     );
     return folded;
@@ -2273,6 +2320,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       row,
       attemptBinding,
       initialSubmissionAttempt,
+      initialResultId,
       fastify,
     );
     return 'folded';
@@ -2326,18 +2374,25 @@ export async function recoverManagedSubmissionTerminalResult(
     return 'pending';
   }
 
-  const persistUnverified = async (message: string, categories: ApplicationAttentionCategory[]) => {
+  const persistUnverified = async (
+    message: string,
+    categories: ApplicationAttentionCategory[],
+    resultId?: string,
+  ) => {
     await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
       message,
       attentionReason: 'Litos could not prove the final employer result for this exact application. Check the employer portal and record whether it was received.',
       attentionCategories: [...new Set([...categories, 'unverified_submission' as const])],
     });
-    await acknowledgeManagedTerminalFold(
-      row,
-      attemptBinding,
-      submissionAttempt,
-      fastify,
-    );
+    if (resultId) {
+      await acknowledgeManagedTerminalFold(
+        row,
+        attemptBinding,
+        submissionAttempt,
+        resultId,
+        fastify,
+      );
+    }
     return 'folded' as const;
   };
 
@@ -2360,6 +2415,7 @@ export async function recoverManagedSubmissionTerminalResult(
     return persistUnverified(
       error.message.slice(0, 500) || 'The retained managed run ended without a terminal receipt',
       [],
+      terminal.resultId,
     );
   }
   if (terminal.state !== 'completed') {
@@ -2368,7 +2424,11 @@ export async function recoverManagedSubmissionTerminalResult(
 
   const result = terminal.run;
   if (!attemptBinding.postingIdentity.portalUrl) {
-    return persistUnverified('The retained managed result has no immutable employer URL binding', []);
+    return persistUnverified(
+      'The retained managed result has no immutable employer URL binding',
+      [],
+      terminal.resultId,
+    );
   }
   const expectedApplicationUrl = portalApplicationUrl(
     detectPortal(attemptBinding.postingIdentity.portalUrl),
@@ -2401,6 +2461,7 @@ export async function recoverManagedSubmissionTerminalResult(
     return persistUnverified(
       error instanceof Error ? error.message.slice(0, 500) : 'Recovered managed proof was incomplete',
       ['required_field'],
+      terminal.resultId,
     );
   }
   if (challenge) {
@@ -2409,6 +2470,7 @@ export async function recoverManagedSubmissionTerminalResult(
       review,
       attemptBinding,
       submissionAttempt,
+      terminal.resultId,
       result,
       terminal.completedAt,
       challenge,
@@ -2421,6 +2483,7 @@ export async function recoverManagedSubmissionTerminalResult(
     return persistUnverified(
       `The recovered managed result was ${verdict.kind}`,
       [],
+      terminal.resultId,
     );
   }
   const capturedAt = terminal.completedAt;
@@ -2440,6 +2503,7 @@ export async function recoverManagedSubmissionTerminalResult(
     return persistUnverified(
       'The recovered confirmation did not match its immutable application and packet binding',
       [],
+      terminal.resultId,
     );
   }
   if (result.screenshot) {
@@ -2462,7 +2526,13 @@ export async function recoverManagedSubmissionTerminalResult(
       }, 'Recovered confirmation persisted before screenshot enrichment failed');
     }
   }
-  await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+  await acknowledgeManagedTerminalFold(
+    row,
+    attemptBinding,
+    submissionAttempt,
+    terminal.resultId,
+    fastify,
+  );
   return 'folded';
 }
 
@@ -8591,6 +8661,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       if (recovery !== 'not_recoverable') return;
       throw error;
     }
+    const initialTerminalResultId = managedBrowserTerminalResultId(result);
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
     if (initialSubmitOutcome?.pressed === true) {
@@ -8625,8 +8696,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl);
     }
     let receiptResult = result;
-    let securityCodeContinuationDispatched = false;
-    let receiptObservationDispatched = false;
+    let securityCodeTerminalResultId: string | undefined;
+    let receiptObservationTerminalResultId: string | undefined;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialSecurityCodeState = initialChallenge
       ? beginSecurityCodeState({
@@ -8853,13 +8924,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           }
           try {
             // Exactly one bounded continuation call. An uncertain click is never retried.
-            securityCodeContinuationDispatched = true;
             receiptResult = await continueManagedBrowser(continuationToken, codeActions, {
               submissionAttempt: securityCodeSubmissionAttempt,
               requestBudget: continuationRequestBudget,
               providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
               minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
             });
+            securityCodeTerminalResultId = managedBrowserTerminalResultId(receiptResult);
             if (readManagedSubmitOutcome(receiptResult)?.pressed === true) {
               await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
                 evidenceCode: 'stratus_verification_press_echoed',
@@ -8948,15 +9019,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const observation = await observeManagedReceiptOnce({
         initial: receiptResult,
         expectedApplicationUrl: applicationUrl,
-        observe: (continuationToken) => {
-          receiptObservationDispatched = true;
-          return continueManagedBrowser(continuationToken, [], {
+        observe: async (continuationToken) => {
+          const observed = await continueManagedBrowser(continuationToken, [], {
             screenshot: true,
             submissionAttempt: receiptObservationSubmissionAttempt,
             // This continuation is read-only, but it still must not hold the runner or a provider
             // socket forever while the parent attempt is waiting for an exact receipt verdict.
             timeoutMs: MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,
           });
+          receiptObservationTerminalResultId = managedBrowserTerminalResultId(observed);
+          return observed;
         },
       });
       receiptResult = observation.receiptResult;
@@ -9039,21 +9111,24 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         row,
         attemptBinding,
         successfulSubmissionAttempt,
+        initialTerminalResultId,
         fastify,
       );
-      if (securityCodeContinuationDispatched) {
+      if (securityCodeTerminalResultId) {
         await acknowledgeManagedTerminalFold(
           row,
           attemptBinding,
           securityCodeSubmissionAttempt,
+          securityCodeTerminalResultId,
           fastify,
         );
       }
-      if (receiptObservationDispatched) {
+      if (receiptObservationTerminalResultId) {
         await acknowledgeManagedTerminalFold(
           row,
           attemptBinding,
           receiptObservationSubmissionAttempt,
+          receiptObservationTerminalResultId,
           fastify,
         );
       }

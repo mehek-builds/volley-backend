@@ -22,6 +22,7 @@ export type ManagedSubmissionAttempt = {
 };
 
 const MANAGED_SUBMISSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MANAGED_TERMINAL_RESULT_ID = /^[a-f0-9]{64}$/;
 
 function readManagedSubmissionAttempt(value: unknown): ManagedSubmissionAttempt | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -59,6 +60,21 @@ function assertManagedSubmissionAttemptEcho(result: ManagedBrowserResult, expect
   if (!sameManagedSubmissionAttempt(result.submissionAttempt, expected)) {
     throw new Error('Managed browser result did not match its durable submission attempt');
   }
+}
+
+function managedTerminalResultId(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !MANAGED_TERMINAL_RESULT_ID.test(value)) {
+    throw new Error(`Managed Stratus ${label} must be 64 lowercase hexadecimal characters`);
+  }
+  return value;
+}
+
+/** Exact identifier of the durable terminal record referenced by a correlated synchronous run. */
+export function managedBrowserTerminalResultId(result: ManagedBrowserResult): string {
+  if (!result.terminalResult || typeof result.terminalResult !== 'object') {
+    throw new Error('Managed Stratus synchronous result is missing its durable terminal result ID');
+  }
+  return managedTerminalResultId(result.terminalResult.resultId, 'terminal result ID');
 }
 
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
@@ -202,6 +218,8 @@ export type ManagedBrowserResult = {
   text: string;
   /** Exact non-PII correlation echoed for every submit-capable run and continuation. */
   submissionAttempt?: ManagedSubmissionAttempt;
+  /** Exact durable result reference, required on every correlated synchronous response. */
+  terminalResult?: { resultId: string };
   screenshot?: string | null;
   filledFields?: string[];
   /**
@@ -1207,6 +1225,7 @@ export async function runManagedBrowser(
     throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
   }
   if (expectedSubmissionAttempt) assertManagedSubmissionAttemptEcho(payload.run, expectedSubmissionAttempt);
+  if (expectedSubmissionAttempt) managedBrowserTerminalResultId(payload.run);
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }
@@ -1273,6 +1292,7 @@ export async function continueManagedBrowser(
     throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
   }
   assertManagedSubmissionAttemptEcho(payload.run, expectedSubmissionAttempt);
+  managedBrowserTerminalResultId(payload.run);
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }
@@ -1280,6 +1300,7 @@ export async function continueManagedBrowser(
 export type ManagedBrowserTerminalResult =
   | {
     state: 'completed';
+    resultId: string;
     submissionAttempt: ManagedSubmissionAttempt;
     completedAt: string;
     expiresAt: string;
@@ -1287,6 +1308,7 @@ export type ManagedBrowserTerminalResult =
   }
   | {
     state: 'failed' | 'indeterminate';
+    resultId: string;
     submissionAttempt: ManagedSubmissionAttempt;
     completedAt: string;
     expiresAt: string;
@@ -1347,6 +1369,7 @@ export async function getManagedBrowserTerminalResult(
   if (!sameManagedSubmissionAttempt(payload.submissionAttempt, expected)) {
     throw new Error('Managed Stratus terminal result did not match its durable submission attempt');
   }
+  const resultId = managedTerminalResultId(payload.resultId, 'terminal result ID');
   const completedAt = canonicalManagedTimestamp(payload.completedAt, 'terminal completion time');
   const expiresAt = canonicalManagedTimestamp(payload.expiresAt, 'terminal result expiry');
   if (payload.state === 'completed') {
@@ -1358,7 +1381,7 @@ export async function getManagedBrowserTerminalResult(
     if (options.actions) {
       assertRequiredManagedCapabilities(run, normalizeStratusActions(options.actions));
     }
-    return { state: 'completed', submissionAttempt: expected, completedAt, expiresAt, run };
+    return { state: 'completed', resultId, submissionAttempt: expected, completedAt, expiresAt, run };
   }
   const providerError = payload.error as ManagedBrowserError | undefined;
   if (providerError == null) throw new Error(`Managed Stratus ${payload.state} terminal result is missing its error`);
@@ -1370,6 +1393,7 @@ export async function getManagedBrowserTerminalResult(
   }
   return {
     state: payload.state,
+    resultId,
     submissionAttempt: expected,
     completedAt,
     expiresAt,
@@ -1397,9 +1421,17 @@ export function managedBrowserTerminalFailureError(
 /** Acknowledge only after the correlated result has been durably folded into Litos state. */
 export async function acknowledgeManagedBrowserTerminalResult(
   submissionAttempt: ManagedSubmissionAttempt,
+  resultId: string,
   options: { timeoutMs?: number } = {},
-): Promise<{ acknowledged: true; submissionAttempt: ManagedSubmissionAttempt; acknowledgedAt: string }> {
+): Promise<{
+  acknowledged: true;
+  submissionAttempt: ManagedSubmissionAttempt;
+  resultId: string;
+  acknowledgedAt: string;
+  cleanupState: 'completed';
+}> {
   const expected = managedSubmissionAttempt(submissionAttempt, true)!;
+  const expectedResultId = managedTerminalResultId(resultId, 'terminal acknowledgement result ID');
   const timeoutMs = options.timeoutMs ?? 10_000;
   assertManagedBrowserTimeout(timeoutMs, 'Managed Stratus terminal acknowledgement');
   const signal = AbortSignal.timeout(timeoutMs);
@@ -1408,7 +1440,7 @@ export async function acknowledgeManagedBrowserTerminalResult(
     method: 'POST',
     headers,
     signal,
-    body: JSON.stringify({ submissionAttempt: expected }),
+    body: JSON.stringify({ submissionAttempt: expected, resultId: expectedResultId }),
   });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
@@ -1417,10 +1449,22 @@ export async function acknowledgeManagedBrowserTerminalResult(
   if (payload.acknowledged !== true || !sameManagedSubmissionAttempt(payload.submissionAttempt, expected)) {
     throw new Error('Managed Stratus terminal acknowledgement did not match its durable submission attempt');
   }
+  const acknowledgedResultId = managedTerminalResultId(
+    payload.resultId,
+    'terminal acknowledgement result ID',
+  );
+  if (acknowledgedResultId !== expectedResultId) {
+    throw new Error('Managed Stratus terminal acknowledgement did not match its durable result ID');
+  }
+  if (payload.cleanupState !== 'completed') {
+    throw new Error('Managed Stratus terminal acknowledgement did not complete durable cleanup');
+  }
   return {
     acknowledged: true,
     submissionAttempt: expected,
+    resultId: expectedResultId,
     acknowledgedAt: canonicalManagedTimestamp(payload.acknowledgedAt, 'terminal acknowledgement time'),
+    cleanupState: 'completed',
   };
 }
 
