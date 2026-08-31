@@ -35,9 +35,19 @@ function databaseUrlFromEnvironment() {
 
 async function main() {
   const refundFlag = process.argv.indexOf('--refund');
-  const email = refundFlag === -1 ? null : process.argv[refundFlag + 1];
-  if (refundFlag !== -1 && !email) {
-    console.error('Usage: refund-onboarding-build-claim.mjs [--refund <email>]');
+  /* --reset hands the whole grant back: counter to zero, stamp cleared, as if no setup build was
+     ever claimed. Exists for the operator's own test accounts (asked for by name, 2026-09-01);
+     the same still-in-setup guard applies, so it can never turn a finished account into a free
+     tier. --refund stays the narrow repair: one claim back, only at the limit. */
+  const resetFlag = process.argv.indexOf('--reset');
+  if (refundFlag !== -1 && resetFlag !== -1) {
+    console.error('Pick one of --refund or --reset.');
+    process.exit(2);
+  }
+  const mode = refundFlag !== -1 ? 'refund' : resetFlag !== -1 ? 'reset' : 'list';
+  const email = mode === 'refund' ? process.argv[refundFlag + 1] : mode === 'reset' ? process.argv[resetFlag + 1] : null;
+  if (mode !== 'list' && !email) {
+    console.error('Usage: refund-onboarding-build-claim.mjs [--refund <email> | --reset <email>]');
     process.exit(2);
   }
 
@@ -53,6 +63,24 @@ async function main() {
     const identity = await client.query('select current_database() as db, inet_server_addr()::text as addr');
     console.log(`Connected to "${identity.rows[0].db}" at ${identity.rows[0].addr ?? 'local socket'}.`);
     await client.query("set statement_timeout = '30s'");
+
+    if (mode === 'reset') {
+      const updated = await client.query(
+        `update "users"
+            set "onboarding_builds_used" = 0,
+                "onboarding_build_granted_at" = null
+          where "email" = $1
+            and "onboarding_completed_at" is null
+          returning "email"`,
+        [email],
+      );
+      if (updated.rowCount === 0) {
+        console.log(`Nothing reset: "${email}" was not found still in setup.`);
+        return;
+      }
+      console.log(`Reset: ${updated.rows[0].email} has both setup builds available again (0 of ${LIMIT} used).`);
+      return;
+    }
 
     if (!email) {
       const rows = await client.query(
