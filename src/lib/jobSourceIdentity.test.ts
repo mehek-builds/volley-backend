@@ -78,8 +78,11 @@ test('Phase 2 configures exactly 49 verified Workable employers with canonical c
 });
 
 test('Phase 2 keeps the verified employer catalog diverse across all seven pollable ATS families', () => {
-  // 469 reviewed sources plus 580 verified Greenhouse sources for the 100,000-posting floor.
-  assert.equal(JOB_SOURCES.length, 1_049, 'the reviewed catalog must not silently shrink or grow');
+  // 469 reviewed sources plus 579 verified Greenhouse sources for the 100,000-posting floor.
+  // Was 580 Greenhouse until 2026-08-31, when source-identity CI found the Svetness Personal
+  // Training board returned 404 and it was retired. Verified before removal: the Greenhouse API
+  // answers 404 for that token where a live board answers 200.
+  assert.equal(JOB_SOURCES.length, 1_048, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual(
     [...families].sort(),
