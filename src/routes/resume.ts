@@ -226,12 +226,19 @@ export function submissionAuthorityEnvelopeForUnattemptedPacket(input: {
     retry_safety: { kind: 'no_evidence' };
   }
   | undefined {
+  // The client validator only accepts a canonical numeric revision (digits, <= int64). Requiring
+  // the same here means a divergent revision shape returns undefined at the source instead of
+  // being emitted and silently rejected downstream, which would strand the packet with no signal.
+  const revisionIsCanonical = typeof input.revision === 'string'
+    && input.revision.length <= 19
+    && /^(?:0|[1-9][0-9]*)$/.test(input.revision)
+    && (input.revision.length < 19 || input.revision <= '9223372036854775807');
   if (input.projectionState !== 'none'
     || input.retrySafetyKind !== 'no_evidence'
-    || typeof input.revision !== 'string') return undefined;
+    || !revisionIsCanonical) return undefined;
   return {
     schema_version: 'submission-authority-v1',
-    revision: input.revision,
+    revision: input.revision as string,
     state: 'none',
     application_id: input.packetId,
     packet_id: input.packetId,
@@ -1851,16 +1858,6 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       loadApplicationProfileLike(userId),
       Promise.resolve(apiBaseFor(request)),
     ]);
-    // The submission-authority envelope the dashboard's employer-action gate reads off each
-    // packet. That gate authorizes a first send only from the complete server envelope: a bare
-    // projection state of none is not enough on its own, it also requires retry_safety, so an
-    // absent envelope stays fail-closed. The client types have always carried these fields but no
-    // route emitted them, so every packet arrived with both undefined and the gate refused every
-    // application. This computes the same authoritative projection the submission path uses, in one
-    // batched read over this page's packets, and serialises it. On error the fields are omitted, not
-    // defaulted, so the gate stays blocked exactly as today rather than authorising a send on an
-    // unverified negative: a genuinely un-attempted packet reads none plus no_evidence and is freed,
-    // while a sent one reads repair_required plus blocked_unverified and stays refused.
     /* The public submission-authority envelope the dashboard's employer-action gate reads off each
      * packet. That gate derives the packet's authority from `packet.submission_authority` alone, and
      * treats an ABSENT or unparsable envelope as quarantined: it will not authorize a send. The

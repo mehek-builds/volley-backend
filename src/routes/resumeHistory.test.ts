@@ -118,4 +118,15 @@ describe('submissionAuthorityEnvelopeForUnattemptedPacket', () => {
       revision: undefined,
     }), undefined);
   });
+
+  it('emits no envelope for a non-canonical revision the client would reject', () => {
+    for (const revision of ['', 'abc', '01', '-1', '1.0', '99999999999999999999']) {
+      assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
+        packetId: PACKET,
+        projectionState: 'none',
+        retrySafetyKind: 'no_evidence',
+        revision,
+      }), undefined, `revision ${JSON.stringify(revision)} must be rejected`);
+    }
+  });
 });
