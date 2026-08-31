@@ -203,6 +203,16 @@ export const monitorQuerySchema = z.object({
   drain_started_at: z.string().datetime({ offset: true }).optional(),
   initialize_drain: z.literal('true').optional(),
 });
+export const MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS = 30_000;
+export function jobMonitorDrainStartedAtAllowed(
+  value: string | undefined,
+  now = new Date(),
+) {
+  if (!value) return true;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed)
+    && parsed <= now.getTime() + MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS;
+}
 export function jobMonitorDrainShouldInitialize(
   drainStartedAt: string | undefined,
   initializeDrain: boolean,
@@ -432,13 +442,30 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let hasFailure = false;
+    let firstFailure: unknown;
     const fail = (error: unknown) => {
       if (settled) return;
-      settled = true;
-      reject(error);
+      if (!hasFailure) {
+        hasFailure = true;
+        firstFailure = error;
+      }
+      /* The route holds a database advisory lock around this queue. Do not reject while a started
+         sibling can still mutate proof state, or the request releases that lock too early. */
+      if (active === 0) {
+        settled = true;
+        reject(firstFailure);
+      }
     };
     const schedule = () => {
       if (settled) return;
+      if (hasFailure) {
+        if (active === 0) {
+          settled = true;
+          reject(firstFailure);
+        }
+        return;
+      }
       if (completed === candidates.length && now() < nextWorkableStart) {
         if (!completionTimerPending) {
           completionTimerPending = true;
@@ -473,12 +500,23 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         if (candidate.ats_name === 'workable') {
           nextWorkableStart = timestamp + workableStartIntervalMs;
         }
-        void operation(candidate).then(() => {
+        let task: Promise<void>;
+        try {
+          task = operation(candidate);
+        } catch (error) {
+          task = Promise.reject(error);
+        }
+        void task.then(() => {
           active -= 1;
           activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 1) - 1);
           completed += 1;
           schedule();
-        }, fail);
+        }, (error) => {
+          active -= 1;
+          activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 1) - 1);
+          completed += 1;
+          fail(error);
+        });
       }
 
       const workableWaiting = pending.some((candidate) => candidate.ats_name === 'workable');
@@ -672,6 +710,10 @@ export function inventoryTargetMet(surfacedPostings: number, surfacedGroupedRole
 export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
 export const GROUP_PROJECTION_REFRESH_STATEMENT_TIMEOUT_MS = 120_000;
 export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
+export const POLL_SOURCE_LOCK_TIMEOUT_MS = 5_000;
+/* One large board may update thousands of rows in chunks. Two minutes leaves room for that bounded
+   database work while guaranteeing a stuck statement cannot consume the 15-minute worker request. */
+export const POLL_SOURCE_STATEMENT_TIMEOUT_MS = 120_000;
 /** Variety classification is diagnostic, so keep its Node payload bounded at production scale. */
 export const MONITOR_VARIETY_SAMPLE_SIZE = 25_000;
 
@@ -2052,16 +2094,30 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * That is the correct trade - the manual step is on the rare true case, not the common false one.
      */
     if (listedCount === 0) {
-      const [existing] = await db
-        .select({ active: sql<number>`count(*)::int` })
-        .from(monitored_jobs)
-        .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
-      if (shouldKeepPostingsOnEmptyFetch(listedCount, existing?.active ?? 0)) {
+      const emptyFetchMessage = await db.transaction(async (tx) => {
+        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+        await tx.execute(sql.raw(
+          `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+        ));
+        const [existing] = await tx
+          .select({ active: sql<number>`count(*)::int` })
+          .from(monitored_jobs)
+          .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
+        if (!shouldKeepPostingsOnEmptyFetch(listedCount, existing?.active ?? 0)) return null;
         const message = `Board returned no postings while ${existing!.active} are live; keeping them and not deactivating.`;
-        await db.update(career_page_sources)
+        await tx.update(career_page_sources)
           .set({ last_polled_at: new Date(), last_error: message })
           .where(eq(career_page_sources.id, source.id));
-        return { source_id: source.id, company: source.company_name, jobs: 0, ok: false as const, error: message };
+        return message;
+      });
+      if (emptyFetchMessage) {
+        return {
+          source_id: source.id,
+          company: source.company_name,
+          jobs: 0,
+          ok: false as const,
+          error: emptyFetchMessage,
+        };
       }
     }
 
@@ -2106,6 +2162,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       : portalName ?? source.portal_company_name;
     const detailStatus = detailRefreshStatus(fetched.detail_progress);
     await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+      await tx.execute(sql.raw(
+        `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+      ));
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
       /* Rippling, Breezy, and Crelate confirm open IDs before fetching descriptions. A failed or
          deferred detail request cannot revoke that stronger list evidence. Reactivate those
@@ -2258,10 +2318,16 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
     const keyMarker = detailCursorKeyMarker(retryDetailCursorKey);
     const marker = `${cursorMarker}${keyMarker ? ` ${keyMarker}` : ''}`;
     const message = `${baseMessage.slice(0, Math.max(1, 2000 - marker.length))}${marker}`;
-    await db.update(career_page_sources).set({
-      ...(keepInCurrentDrainOnError ? {} : { last_polled_at: new Date() }),
-      last_error: message,
-    }).where(eq(career_page_sources.id, source.id));
+    await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+      await tx.execute(sql.raw(
+        `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+      ));
+      await tx.update(career_page_sources).set({
+        ...(keepInCurrentDrainOnError ? {} : { last_polled_at: new Date() }),
+        last_error: message,
+      }).where(eq(career_page_sources.id, source.id));
+    });
     return { source_id: source.id, company: source.company_name, jobs: 0, ok: false as const, error: message };
   }
 }
@@ -3848,6 +3914,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     let failed = 0;
     let gracePreserved = 0;
     let transientDeferred = 0;
+    const failureSummaries: Array<{
+      source_id: string;
+      company: string;
+      ats_name: string;
+      error: string;
+      transient: boolean;
+      grace_preserved: boolean;
+      crelate_429_exhausted: boolean;
+    }> = [];
     await runProviderAwareLogoQueue(candidates, async (candidate) => {
         const candidateMethod = candidate.logo_verification_method;
         if (!candidateMethod) {
@@ -4012,6 +4087,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           failed += 1;
           if (transient) transientDeferred += 1;
           if (proofStillFresh) gracePreserved += 1;
+          failureSummaries.push({
+            source_id: candidate.id,
+            company: candidate.company_name,
+            ats_name: candidate.ats_name,
+            error: persistedReason,
+            transient,
+            grace_preserved: proofStillFresh,
+            crelate_429_exhausted: terminalCrelate429,
+          });
         }
     });
 
@@ -4062,6 +4146,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       selected_sources: candidates.length,
       verified_sources: verified,
       failed_sources: failed,
+      failure_summaries: failureSummaries,
       transient_deferred_sources: transientDeferred,
       grace_preserved_sources: gracePreserved,
       due_sources: dueSources,
@@ -4096,6 +4181,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const parsedQuery = monitorQuerySchema.safeParse(request.query);
     if (!parsedQuery.success) {
       return reply.status(400).send({ error: 'Invalid job-monitor query', detail: parsedQuery.error.issues });
+    }
+    if (!jobMonitorDrainStartedAtAllowed(parsedQuery.data.drain_started_at)) {
+      return reply.status(400).send({
+        error: 'drain_started_at is too far in the future',
+        maximum_future_skew_ms: MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS,
+      });
     }
     const drainStartedAt = parsedQuery.data.drain_started_at
       ? new Date(parsedQuery.data.drain_started_at)
@@ -4201,6 +4292,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       poll_eligible_sources: pollEligibleSourceCount?.total ?? 0,
       selected_sources: sources.length,
       deferred_sources: deferredSources,
+      remaining_polling_sources: deferredSources,
       polling_complete: pollingComplete,
       stopped_for_time_budget: pollRun.stopped_for_time_budget,
       polling_elapsed_ms: pollRun.elapsed_ms,

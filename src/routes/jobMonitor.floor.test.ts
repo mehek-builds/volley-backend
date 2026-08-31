@@ -7,6 +7,9 @@ import {
   VERIFIED_ACTIVE_WINDOW_DAYS,
   MINIMUM_SPONSOR_SURFACED_JOBS,
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
+  MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS,
+  POLL_SOURCE_LOCK_TIMEOUT_MS,
+  POLL_SOURCE_STATEMENT_TIMEOUT_MS,
   TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
@@ -25,6 +28,7 @@ import {
   groupedRoleAlertTriggered,
   inventoryTargetMet,
   jobMonitorDrainShouldInitialize,
+  jobMonitorDrainStartedAtAllowed,
   pollingQueueStatus,
   publicVerifiedEvidenceGateEnabled,
   mergeJobSources,
@@ -123,6 +127,42 @@ test('post-poll metric statements leave time for the cron to answer', () => {
   assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 14 * 60_000 - POLL_TIME_BUDGET_MS);
 });
 
+test('every pollSource database unit installs bounded lock and statement timeouts first', () => {
+  assert.equal(POLL_SOURCE_LOCK_TIMEOUT_MS, 5_000);
+  assert.equal(POLL_SOURCE_STATEMENT_TIMEOUT_MS, 120_000);
+  assert.ok(POLL_SOURCE_STATEMENT_TIMEOUT_MS < 15 * 60_000);
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const poll = source.slice(
+    source.indexOf('export async function pollSource'),
+    source.indexOf('/* The board\'s filter set'),
+  );
+  const emptyGuard = poll.slice(
+    poll.indexOf('if (listedCount === 0)'),
+    poll.indexOf('/* CURRENTNESS IS ESTABLISHED AT INGEST'),
+  );
+  const atomicWrite = poll.slice(
+    poll.indexOf('const detailStatus = detailRefreshStatus'),
+    poll.indexOf('/* WHO DOES THE PORTAL SAY THIS BOARD BELONG TO?'),
+  );
+  const failureWrite = poll.slice(poll.lastIndexOf('} catch (error)'));
+
+  const assertTimeoutsPrecede = (unit: string, firstWork: string, label: string) => {
+    const lockTimeout = unit.indexOf('set local lock_timeout');
+    const statementTimeout = unit.indexOf('set local statement_timeout');
+    const mutation = unit.indexOf(firstWork);
+    assert.ok(lockTimeout >= 0, `${label} must set a local lock timeout`);
+    assert.ok(statementTimeout > lockTimeout, `${label} must set statement timeout after lock timeout`);
+    assert.ok(mutation > statementTimeout, `${label} must install both timeouts before database work`);
+  };
+
+  assertTimeoutsPrecede(emptyGuard, '.select({ active:', 'empty-board guard');
+  assertTimeoutsPrecede(atomicWrite, 'tx.update(monitored_jobs)', 'atomic source and job write');
+  assertTimeoutsPrecede(failureWrite, 'tx.update(career_page_sources)', 'failure-state write');
+  assert.equal(poll.match(/set local lock_timeout/g)?.length, 3);
+  assert.equal(poll.match(/set local statement_timeout/g)?.length, 3);
+});
+
 test('source 401 completes on the second pass of the same drain run', () => {
   assert.deepEqual(pollingQueueStatus(401), { deferredSources: 401, pollingComplete: false });
   assert.deepEqual(pollingQueueStatus(1), { deferredSources: 1, pollingComplete: false });
@@ -156,6 +196,21 @@ test('a client-owned cursor can initialize discovery exactly for the first logic
   const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
   assert.match(route, /if \(initializeDrain\) \{/);
   assert.match(route, /const brandedSources = initializeDrain/);
+});
+
+test('route cursor validation tolerates small clock skew but rejects a clearly future drain', () => {
+  const now = new Date('2026-08-30T10:16:00.000Z');
+  assert.equal(MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS, 30_000);
+  assert.equal(jobMonitorDrainStartedAtAllowed('2026-08-30T10:16:30.000Z', now), true);
+  assert.equal(jobMonitorDrainStartedAtAllowed('2026-08-30T10:16:30.001Z', now), false);
+  assert.equal(jobMonitorDrainStartedAtAllowed(undefined, now), true);
+
+  const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const handler = route.slice(route.indexOf("fastify.get('/internal/job-monitor'"));
+  assert.ok(
+    handler.indexOf('jobMonitorDrainStartedAtAllowed') < handler.indexOf('tryAcquireJobMonitorLock'),
+    'future cursors must fail before the route acquires the advisory lock or touches monitor state',
+  );
 });
 
 test('target-role database aggregates are shaped without exposing literal role text', async () => {

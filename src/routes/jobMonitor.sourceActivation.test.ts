@@ -131,6 +131,33 @@ test('logo verification bounds each provider and spaces Workable starts', async 
   );
 });
 
+test('logo queue waits for every started sibling before surfacing an operation failure', async () => {
+  let releaseDelayed!: () => void;
+  const delayed = new Promise<void>((resolve) => { releaseDelayed = resolve; });
+  let delayedStarted = false;
+  let delayedSettled = false;
+  let queueSettled = false;
+
+  const queue = runProviderAwareLogoQueue([
+    { ats_name: 'greenhouse', index: 0 },
+    { ats_name: 'greenhouse', index: 1 },
+  ], async (candidate) => {
+    if (candidate.index === 0) throw new Error('logo write failed');
+    delayedStarted = true;
+    await delayed;
+    delayedSettled = true;
+  }, { concurrency: 2, providerConcurrency: 2 });
+  const rejection = assert.rejects(queue, /logo write failed/).then(() => { queueSettled = true; });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(delayedStarted, true);
+  assert.equal(queueSettled, false, 'the queue must retain the advisory-lock scope for its sibling');
+  releaseDelayed();
+  await rejection;
+  assert.equal(delayedSettled, true);
+  assert.equal(queueSettled, true);
+});
+
 test('one degraded provider cannot make a logo request exceed its bounded candidate budget', () => {
   const candidates = [
     ...Array.from({ length: 200 }, (_, index) => ({ ats_name: 'greenhouse', index })),

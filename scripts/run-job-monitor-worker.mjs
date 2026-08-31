@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url';
 const MAX_TIMER_MS = 2_147_483_647;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15 * 60_000;
 const MINIMUM_REQUEST_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
+export const DRAIN_STARTED_AT_FUTURE_SKEW_MS = 30_000;
 
 export const INVENTORY_FLOOR_FIELDS = Object.freeze([
   Object.freeze({
@@ -74,7 +75,9 @@ function validatedDrainStartedAt(raw, now, name) {
   const value = String(raw).trim();
   if (!validDrainStartedAt(value)) throw new Error(`${name} must be a valid timestamp`);
   const parsed = new Date(value);
-  if (parsed.getTime() > now.getTime()) throw new Error(`${name} cannot be in the future`);
+  if (parsed.getTime() > now.getTime() + DRAIN_STARTED_AT_FUTURE_SKEW_MS) {
+    throw new Error(`${name} is too far in the future`);
+  }
   return parsed.toISOString();
 }
 
@@ -193,7 +196,14 @@ export function structuredMonitor(result) {
     && typeof result.body === 'object'
     && typeof result.body.polling_complete === 'boolean'
     && validDrainStartedAt(result.body.drain_started_at)
-    && Array.isArray(result.body.results);
+    && Array.isArray(result.body.results)
+    && nonnegativeCount(result.body.remaining_polling_sources)
+    && result.body.polling_complete === (result.body.remaining_polling_sources === 0)
+    && nonnegativeCount(result.body.failed)
+    && result.body.results.every((item) => item
+      && typeof item === 'object'
+      && typeof item.ok === 'boolean')
+    && result.body.failed === result.body.results.filter((item) => !item.ok).length;
 }
 
 function monitorMetricsTimedOut(result) {
@@ -270,11 +280,9 @@ function logMonitorPass(logger, event, pass, monitor, drainStartedAt, extra = {}
 
 async function requestLogoStatus({ requestJson, config, logger, pass }) {
   const logos = await requestJson(`/internal/job-monitor/verify-logos?limit=${config.logoLimit}`);
-  if (logos.status === 200
-    && logos.body
-    && typeof logos.body.verification_complete === 'boolean'
-    && nonnegativeCount(logos.body.remaining_sources)
-    && logos.body.verification_complete === (logos.body.remaining_sources === 0)) {
+  const body = logos.body;
+  const structured = logos.status === 200 && structuredLogoProof(body);
+  if (structured) {
     const retryAfterMs = nonnegativeCount(logos.body.retry_after_ms)
       ? Math.min(MAX_TIMER_MS, logos.body.retry_after_ms)
       : 0;
@@ -290,7 +298,20 @@ async function requestLogoStatus({ requestJson, config, logger, pass }) {
       remaining_sources: logos.body.remaining_sources,
       retry_after_ms: retryAfterMs,
     }));
-    return { ok: true, complete: logos.body.verification_complete, retryAfterMs };
+    return {
+      ok: true,
+      complete: body.verification_complete,
+      retryAfterMs,
+      remainingSources: body.remaining_sources,
+      dueSources: body.due_sources,
+      failedSources: body.failed_sources,
+      transientDeferredSources: body.transient_deferred_sources,
+      gracePreservedSources: body.grace_preserved_sources,
+      scheduledTransientSources: body.scheduled_transient_sources,
+      scheduledCrelateCircuitSources: body.scheduled_crelate_circuit_sources,
+      failureSummaries: body.failure_summaries,
+      crelateCircuit: body.crelate_circuit,
+    };
   }
   logger.error(JSON.stringify({
     event: 'logo_verification_failed',
@@ -300,6 +321,57 @@ async function requestLogoStatus({ requestJson, config, logger, pass }) {
     body: logos.body,
   }));
   return { ok: false, complete: false, retryAfterMs: 0 };
+}
+
+export function structuredLogoProof(body) {
+  return body
+    && typeof body === 'object'
+    && typeof body.verification_complete === 'boolean'
+    && nonnegativeCount(body.remaining_sources)
+    && nonnegativeCount(body.due_sources)
+    && nonnegativeCount(body.failed_sources)
+    && nonnegativeCount(body.transient_deferred_sources)
+    && nonnegativeCount(body.grace_preserved_sources)
+    && nonnegativeCount(body.scheduled_transient_sources)
+    && nonnegativeCount(body.scheduled_crelate_circuit_sources)
+    && Array.isArray(body.failure_summaries)
+    && body.crelate_circuit
+    && typeof body.crelate_circuit === 'object'
+    && typeof body.crelate_circuit.state === 'string'
+    && body.verification_complete === (body.remaining_sources === 0)
+    && body.remaining_sources === body.due_sources + body.scheduled_transient_sources
+    && body.failure_summaries.length === body.failed_sources
+    && body.scheduled_crelate_circuit_sources <= body.scheduled_transient_sources;
+}
+
+function pollFailureSummaries(body) {
+  return body.results
+    .filter((result) => !result.ok)
+    .map((result) => ({
+      source_id: result.source_id ?? null,
+      company: result.company ?? null,
+      error: result.error ?? null,
+    }));
+}
+
+export function certifiedDrainProofComplete(result) {
+  return result?.certified === true
+    && result.polling_complete === true
+    && result.logo_verification_complete === true
+    && result.remaining_polling_sources === 0
+    && result.remaining_logo_sources === 0
+    && nonnegativeCount(result.poll_failed_sources)
+    && nonnegativeCount(result.logo_failed_sources)
+    && nonnegativeCount(result.logo_transient_deferred_sources)
+    && nonnegativeCount(result.logo_grace_preserved_sources)
+    && nonnegativeCount(result.logo_due_sources)
+    && nonnegativeCount(result.logo_scheduled_transient_sources)
+    && nonnegativeCount(result.logo_scheduled_crelate_circuit_sources)
+    && Array.isArray(result.poll_failure_summaries)
+    && Array.isArray(result.logo_failure_summaries)
+    && result.logo_crelate_circuit
+    && typeof result.logo_crelate_circuit === 'object'
+    && typeof result.logo_crelate_circuit.state === 'string';
 }
 
 /**
@@ -485,6 +557,22 @@ export async function runCompleteDrain({
       continue;
     }
 
+    const finalQueueProof = {
+      polling_complete: monitor.body.polling_complete,
+      logo_verification_complete: finalLogos.complete,
+      remaining_polling_sources: monitor.body.remaining_polling_sources,
+      remaining_logo_sources: finalLogos.remainingSources,
+      poll_failed_sources: monitor.body.failed,
+      poll_failure_summaries: pollFailureSummaries(monitor.body),
+      logo_failed_sources: finalLogos.failedSources,
+      logo_transient_deferred_sources: finalLogos.transientDeferredSources,
+      logo_grace_preserved_sources: finalLogos.gracePreservedSources,
+      logo_due_sources: finalLogos.dueSources,
+      logo_scheduled_transient_sources: finalLogos.scheduledTransientSources,
+      logo_scheduled_crelate_circuit_sources: finalLogos.scheduledCrelateCircuitSources,
+      logo_failure_summaries: finalLogos.failureSummaries,
+      logo_crelate_circuit: finalLogos.crelateCircuit,
+    };
     const floors = inventoryFloorAssessment(monitor.body);
     const metricsComplete = monitor.body.metrics_deferred !== true;
     const publicGateEnabled = monitor.body.public_verified_evidence_gate_enabled === true;
@@ -492,7 +580,11 @@ export async function runCompleteDrain({
       && metricsComplete
       && floors.valid
       && floors.met
-      && publicGateEnabled;
+      && publicGateEnabled
+      && finalQueueProof.polling_complete === true
+      && finalQueueProof.logo_verification_complete === true
+      && finalQueueProof.remaining_polling_sources === 0
+      && finalQueueProof.remaining_logo_sources === 0;
     logMonitorPass(logger, 'final_monitor_recount', pass, monitor, drainStartedAt, {
       final_recount_attempt: finalRecountAttempts,
       logo_verification_complete: true,
@@ -501,6 +593,7 @@ export async function runCompleteDrain({
       inventory_floors_met: floors.met,
       inventory_floors: floors.requirements,
       public_verified_evidence_gate_enabled: publicGateEnabled,
+      ...finalQueueProof,
       certified,
     });
 
@@ -534,6 +627,7 @@ export async function runCompleteDrain({
           certified_unique_jobs: monitor.body.certified_unique_jobs,
           certified_unique_grouped_roles: monitor.body.certified_unique_grouped_roles,
           certified_unique_sponsor_jobs: monitor.body.certified_unique_sponsor_jobs,
+          ...finalQueueProof,
         };
       }
 
@@ -554,6 +648,7 @@ export async function runCompleteDrain({
       certified_unique_jobs: monitor.body.certified_unique_jobs,
       certified_unique_grouped_roles: monitor.body.certified_unique_grouped_roles,
       certified_unique_sponsor_jobs: monitor.body.certified_unique_sponsor_jobs,
+      ...finalQueueProof,
     };
   }
 
@@ -607,6 +702,16 @@ export async function runWorkerLoop({
         if (!shouldStop()) await sleepFn(config.floorBreachRetryMs);
         activeDrainStartedAt = null;
         initializeDrainPending = true;
+        continue;
+      }
+
+      if (!certifiedDrainProofComplete(result)) {
+        logger.error(JSON.stringify({
+          event: 'complete_drain_proof_incomplete',
+          drain_started_at: activeDrainStartedAt,
+          retry_ms: config.retryMs,
+        }));
+        if (!shouldStop()) await sleepFn(config.retryMs);
         continue;
       }
 

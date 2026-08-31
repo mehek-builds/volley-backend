@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  DRAIN_STARTED_AT_FUTURE_SKEW_MS,
+  certifiedDrainProofComplete,
   createJsonRequester,
   inventoryFloorAssessment,
   loadConfig,
   runCompleteDrain,
   runWorkerLoop,
+  structuredLogoProof,
+  structuredMonitor,
 } from './run-job-monitor-worker.mjs';
 
 const DRAIN_STARTED_AT = '2026-08-30T10:15:00.000Z';
@@ -33,6 +37,7 @@ function monitor(status, {
 } = {}) {
   const body = {
     polling_complete: pollingComplete,
+    remaining_polling_sources: pollingComplete ? 0 : 1,
     drain_started_at: drainStartedAt,
     results: [],
     selected_sources: pollingComplete ? 0 : 400,
@@ -63,7 +68,13 @@ function monitor(status, {
   return { status, body, error: null };
 }
 
-function logos(verificationComplete, { retryAfterMs = 0, scheduledTransientSources = 0 } = {}) {
+function logos(verificationComplete, {
+  retryAfterMs = 0,
+  scheduledTransientSources = 0,
+  scheduledCrelateCircuitSources = 0,
+  failureSummaries = [],
+} = {}) {
+  const remainingSources = verificationComplete ? 0 : 1;
   return {
     status: 200,
     body: {
@@ -71,9 +82,15 @@ function logos(verificationComplete, { retryAfterMs = 0, scheduledTransientSourc
       selected_sources: verificationComplete ? 0 : 100,
       verified_sources: verificationComplete ? 0 : 100,
       failed_sources: 0,
-      remaining_sources: verificationComplete ? 0 : 1,
+      transient_deferred_sources: 0,
+      grace_preserved_sources: 0,
+      due_sources: remainingSources - scheduledTransientSources,
+      remaining_sources: remainingSources,
       scheduled_transient_sources: scheduledTransientSources,
+      scheduled_crelate_circuit_sources: scheduledCrelateCircuitSources,
+      failure_summaries: failureSummaries,
       retry_after_ms: retryAfterMs,
+      crelate_circuit: { state: scheduledCrelateCircuitSources > 0 ? 'open' : 'closed', retry_at: null },
     },
     error: null,
   };
@@ -118,6 +135,24 @@ function silentLogger() {
     },
   };
 }
+
+test('queue completion responses require explicit consistent zero-remaining proof', () => {
+  const completeMonitor = monitor(200, { pollingComplete: true });
+  assert.equal(structuredMonitor(completeMonitor), true);
+  completeMonitor.body.remaining_polling_sources = 1;
+  assert.equal(structuredMonitor(completeMonitor), false);
+  completeMonitor.body.remaining_polling_sources = 0;
+  delete completeMonitor.body.remaining_polling_sources;
+  assert.equal(structuredMonitor(completeMonitor), false);
+
+  const completeLogos = logos(true).body;
+  assert.equal(structuredLogoProof(completeLogos), true);
+  completeLogos.remaining_sources = 1;
+  assert.equal(structuredLogoProof(completeLogos), false);
+  completeLogos.remaining_sources = 0;
+  completeLogos.scheduled_crelate_circuit_sources = -1;
+  assert.equal(structuredLogoProof(completeLogos), false);
+});
 
 test('timeout and malformed initialization retries keep the same client-owned cursor and flag', async () => {
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
@@ -260,7 +295,22 @@ test('a completed queue always gets a fresh HTTP 200 final recount before comple
     certified_unique_jobs: 500_000,
     certified_unique_grouped_roles: 50_000,
     certified_unique_sponsor_jobs: 5_000,
+    polling_complete: true,
+    logo_verification_complete: true,
+    remaining_polling_sources: 0,
+    remaining_logo_sources: 0,
+    poll_failed_sources: 0,
+    poll_failure_summaries: [],
+    logo_failed_sources: 0,
+    logo_transient_deferred_sources: 0,
+    logo_grace_preserved_sources: 0,
+    logo_due_sources: 0,
+    logo_scheduled_transient_sources: 0,
+    logo_scheduled_crelate_circuit_sources: 0,
+    logo_failure_summaries: [],
+    logo_crelate_circuit: { state: 'closed', retry_at: null },
   });
+  assert.equal(certifiedDrainProofComplete(result), true);
   assert.equal(sequence.length, 0);
   assert.deepEqual(sleeps, [], 'successful queue completion must go straight to the final recount');
   assert.equal(messages.log.at(-1).event, 'final_monitor_recount');
@@ -465,6 +515,7 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
   assert.equal(defaults.requestTimeoutMs, 15 * 60_000,
     'the client must include margin beyond the bounded fourteen-minute route budget');
   assert.equal(defaults.resumeDrainStartedAt, null);
+  assert.equal(DRAIN_STARTED_AT_FUTURE_SKEW_MS, 30_000);
 
   const fallbackRevision = loadConfig({
     LITOS_API_BASE: 'https://litos.example',
@@ -542,13 +593,19 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
     }),
     /JOB_MONITOR_DRAIN_STARTED_AT must be a valid timestamp/,
   );
+  const skewedCursor = loadConfig({
+    LITOS_API_BASE: 'https://litos.example',
+    INTERNAL_CRON_SECRET: 'secret',
+    JOB_MONITOR_DRAIN_STARTED_AT: '2026-08-30T10:16:30.000Z',
+  }, () => new Date('2026-08-30T10:16:00.000Z'));
+  assert.equal(skewedCursor.resumeDrainStartedAt, '2026-08-30T10:16:30.000Z');
   assert.throws(
     () => loadConfig({
       LITOS_API_BASE: 'https://litos.example',
       INTERNAL_CRON_SECRET: 'secret',
-      JOB_MONITOR_DRAIN_STARTED_AT: '2026-08-30T10:16:00.001Z',
+      JOB_MONITOR_DRAIN_STARTED_AT: '2026-08-30T10:16:30.001Z',
     }, () => new Date('2026-08-30T10:16:00.000Z')),
-    /JOB_MONITOR_DRAIN_STARTED_AT cannot be in the future/,
+    /JOB_MONITOR_DRAIN_STARTED_AT is too far in the future/,
   );
 });
 
@@ -650,6 +707,12 @@ test('the worker uses a longer floor backoff and starts the next drain with a fr
   const [completeDrain] = completeDrains;
   assert.ok(completeDrain);
   assert.equal(completeDrain.deployed_sha, 'railway-deployed-sha');
+  assert.equal(completeDrain.polling_complete, true);
+  assert.equal(completeDrain.logo_verification_complete, true);
+  assert.equal(completeDrain.remaining_polling_sources, 0);
+  assert.equal(completeDrain.remaining_logo_sources, 0);
+  assert.deepEqual(completeDrain.poll_failure_summaries, []);
+  assert.deepEqual(completeDrain.logo_failure_summaries, []);
 });
 
 test('persistent projection timeout emits a distinct alert and never completes the drain', async () => {
@@ -668,16 +731,22 @@ test('persistent projection timeout emits a distinct alert and never completes t
     { path: drainPath, response: timedOut() },
     { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
     { path: drainPath, response: timedOut() },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
+    { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
   ];
   const requester = sequenceRequester(sequence);
   const { logger, messages } = silentLogger();
+  const sleeps = [];
   let stopping = false;
 
   await runWorkerLoop({
     config: testConfig({ metricsTimeoutMaxAttempts: 2 }),
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => {
-      if (milliseconds === 370) stopping = true;
+      sleeps.push(milliseconds);
+      if (milliseconds === 999) stopping = true;
     },
     shouldStop: () => stopping,
     logger,
@@ -690,7 +759,14 @@ test('persistent projection timeout emits a distinct alert and never completes t
   assert.ok(alert);
   assert.equal(alert.alert, true);
   assert.equal(alert.metrics_stage, 'group_projection_refresh');
-  assert.equal(messages.log.filter((entry) => entry.event === 'complete_drain').length, 0);
+  assert.equal(requester.calls.filter((path) => path === initializedDrainPath()).length, 1);
+  assert.equal(requester.calls.filter((path) => path === drainPath).length, 4);
+  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
+  assert.deepEqual(sleeps, [37, 370, 999]);
+  const completeDrains = messages.log.filter((entry) => entry.event === 'complete_drain');
+  assert.equal(completeDrains.length, 1);
+  assert.equal(completeDrains[0].drain_started_at, DRAIN_STARTED_AT);
+  assert.equal(certifiedDrainProofComplete(completeDrains[0]), true);
 });
 
 test('only consecutive metrics timeouts trigger the persistent timeout result', async () => {
