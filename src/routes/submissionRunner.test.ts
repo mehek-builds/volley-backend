@@ -52,6 +52,7 @@ import {
   stableManagedDocumentCapability,
   managedFormSnapshotWithStableCapabilities,
   managedContinuationSubmissionAttempt,
+  managedSecurityCodeContinuationRecoveryIsHeld,
   managedInitialSubmissionAttempt,
   undecidedOptionalQuestionLabels,
 } from './submissionRunner';
@@ -131,6 +132,46 @@ test('managed initial, security-code, and observation calls have distinct stable
   assert.notEqual(observation.executionId, initial.executionId);
   assert.notEqual(observation.executionId, security.executionId);
   assert.deepEqual(managedContinuationSubmissionAttempt(binding, 'security_code'), security);
+});
+
+test('only durable pre-dispatch and consumed continuation states stay scheduler-held', () => {
+  const base = {
+    status: 'needs_attention',
+    submission_claimed_at: '2026-08-31T10:00:00.000Z',
+    submission_claim_id: '22222222-2222-4222-8222-222222222222',
+  } as const;
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'searching',
+      continuation_resumed: false,
+    },
+  } as ApplicationReviewState), true);
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'verification_pending',
+      continuation_resumed: true,
+    },
+  } as ApplicationReviewState), true);
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'verification_pending',
+      continuation_resumed: false,
+    },
+  } as ApplicationReviewState), false);
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'handoff',
+      continuation_resumed: true,
+    },
+  } as ApplicationReviewState), false);
 });
 
 test('optional unanswered or refused questions wait for Answer or Skip, while skipped can send', () => {

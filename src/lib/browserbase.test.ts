@@ -14,10 +14,12 @@ import {
   MANAGED_SUBMIT_CHOOSER_POLICY,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
+  managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
   managedDeterministicAssertionRefusal,
   ManagedBrowserAssertionFailureError,
   ManagedBrowserPreSubmitCrashError,
+  ManagedBrowserProviderProgressError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
 } from './browserbase';
@@ -120,7 +122,51 @@ test('managed terminal retrieval rejects a result bound to another execution', a
   }
 });
 
-test('managed terminal retrieval preserves pending, missing, expired, and failed states without relaunching', async () => {
+test('managed terminal retrieval rejects progress bound to another execution', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      state: 'indeterminate',
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      completedAt: '2026-08-31T10:01:10.000Z',
+      expiresAt: '2026-09-30T10:01:10.000Z',
+      error: {
+        code: 'SUBMISSION_EXECUTION_INDETERMINATE',
+        message: 'Managed browser execution ended without a terminal employer result',
+      },
+      runProgress: {
+        version: 1,
+        phase: 0,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: 3,
+        submissionAttempt: {
+          ...MANAGED_SUBMISSION_ATTEMPT,
+          executionId: '44444444-4444-4444-8444-444444444444',
+        },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /did not match its durable submission attempt/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal retrieval preserves pending, missing, expired, failed, and indeterminate states without relaunching', async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
   const previousFetch = globalThis.fetch;
@@ -141,6 +187,27 @@ test('managed terminal retrieval preserves pending, missing, expired, and failed
       expiresAt: '2026-09-30T10:00:00.000Z',
       error: { code: 'SANDBOX_RUN_FAILED', message: 'Provider response stream reset' },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    new Response(JSON.stringify({
+      state: 'indeterminate',
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      completedAt: '2026-08-31T10:01:10.000Z',
+      expiresAt: '2026-09-30T10:01:10.000Z',
+      error: {
+        code: 'SUBMISSION_EXECUTION_INDETERMINATE',
+        message: 'Managed browser execution ended without a terminal employer result',
+      },
+      runProgress: {
+        version: 1,
+        phase: 1,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        policyVersion: 3,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
   ];
   let fetches = 0;
   try {
@@ -159,7 +226,17 @@ test('managed terminal retrieval preserves pending, missing, expired, and failed
         message: 'Provider response stream reset',
       });
     }
-    assert.equal(fetches, 4);
+    const indeterminate = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
+    assert.equal(indeterminate.state, 'indeterminate');
+    if (indeterminate.state === 'indeterminate') {
+      assert.equal(indeterminate.runProgress?.verificationSubmitPressed, true);
+      const failure = managedBrowserTerminalFailureError(indeterminate);
+      assert.ok(failure instanceof ManagedBrowserProviderProgressError);
+      assert.equal(failure.code, 'SUBMISSION_EXECUTION_INDETERMINATE');
+      assert.equal(failure.runProgress.submissionAttempt?.executionId,
+        MANAGED_SUBMISSION_ATTEMPT.executionId);
+    }
+    assert.equal(fetches, 5);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.STRATUS_API_KEY;

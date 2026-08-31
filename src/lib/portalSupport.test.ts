@@ -287,12 +287,12 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   );
 
   const security = runner.slice(
-    runner.indexOf('export async function finishSecurityCodeSubmission'),
-    runner.indexOf('export async function processSubmissionApplication'),
+    runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge'),
+    runner.indexOf('export async function recoverManagedSubmissionTerminalResult'),
   );
   assert.ok(
-    security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('claimSecurityCodeSubmission(row, current)'),
-    'security-code continuation must validate before reserving or refilling the employer form',
+    security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('prepareManagedEmailVerification({'),
+    'recovered security-code continuation must validate before mailbox or employer work',
   );
   const securityClaim = runner.slice(
     runner.indexOf('async function claimSecurityCodeSubmission('),

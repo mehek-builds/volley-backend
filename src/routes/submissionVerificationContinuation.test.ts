@@ -23,7 +23,10 @@ test('a held managed claim retrieves its exact terminal result before any relaun
   const processStart = runner.indexOf('export async function processSubmissionApplication(');
   const prepareStart = runner.indexOf("if (review?.status === 'submit_requested')", processStart);
   const heldClaimPath = runner.slice(processStart, prepareStart);
-  assert.match(heldClaimPath, /if \(submissionClaimIsHeld\(review\)\)/);
+  assert.match(
+    heldClaimPath,
+    /if \(submissionClaimIsHeld\(review\) \|\| managedSecurityCodeContinuationRecoveryIsHeld\(review\)\)/,
+  );
   assert.match(heldClaimPath, /recoverManagedSubmissionTerminalResult\(/);
   assert.match(heldClaimPath, /if \(recovery !== 'not_recoverable'\)/);
 
@@ -35,6 +38,73 @@ test('a held managed claim retrieves its exact terminal result before any relaun
   const acknowledgement = recovery.lastIndexOf('acknowledgeManagedTerminalFold(');
   assert.ok(retrieval >= 0 && durableFold > retrieval && acknowledgement > durableFold);
   assert.doesNotMatch(recovery, /runManagedBrowser\(|continueManagedBrowser\(/);
+});
+
+test('a lost initial challenge response enters the durable continuation state before acknowledgement', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(');
+  const end = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(', start);
+  const recovery = runner.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(recovery, /beginSecurityCodeState\(\{/);
+  assert.match(recovery, /continuation_execution_fingerprint: continuationExecutionFingerprint/);
+  assert.match(recovery, /continuation_resumed: false/);
+  assert.match(recovery, /recordManagedSecurityCodeContinuationSearch\(/);
+  const handoff = recovery.slice(
+    recovery.indexOf('const persistHandoff = async'),
+    recovery.indexOf('const expectedRecipient'),
+  );
+  assert.ok(
+    handoff.indexOf('recordManagedAuthorizedAttemptUnverified')
+      < handoff.indexOf('acknowledgeManagedTerminalFold'),
+    'the exact challenge handoff must commit before the initial result is acknowledged',
+  );
+});
+
+test('a crash after continuation search stays scheduler-visible and reuses the same initial result', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const searchStart = runner.indexOf('export async function recordManagedSecurityCodeContinuationSearch(');
+  const searchEnd = runner.indexOf('type ManagedSubmissionConfirmedInput', searchStart);
+  const search = runner.slice(searchStart, searchEnd);
+  assert.match(search, /const sameSearch =/);
+  assert.match(search, /continuation_execution_fingerprint/);
+  assert.match(search, /return sameSearch \? \{ row: latest, review: latestReview \} : null/);
+
+  const cronStart = runner.indexOf("fastify.get('/internal/application-submission-runner'");
+  const cron = runner.slice(cronStart);
+  assert.match(cron, /verification'->>'status' = 'searching'/);
+  assert.match(cron, /verification'->>'continuation_resumed' = 'false'/);
+  assert.match(cron, /managedSecurityCodeContinuationRecoveryIsHeld\(queuedReview\)/);
+});
+
+test('continuation recovery is GET-only across pending, success, and deadline handoff', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(');
+  const end = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(', start);
+  const recovery = runner.slice(start, end);
+  assert.match(recovery, /managedSecurityCodeContinuationRecoveryPlan\(review, attemptBinding\)/);
+  assert.match(recovery, /getManagedBrowserTerminalResult\(plan\.submissionAttempt\)/);
+  assert.match(recovery, /if \(terminalDecision === 'pending'\) return 'pending'/);
+  assert.match(recovery, /terminalDecision === 'deadline_expired'/);
+  assert.match(recovery, /foldManagedSecurityCodeContinuationResult\(/);
+  assert.doesNotMatch(recovery, /continueManagedBrowser\(|runManagedBrowser\(|portalApplicationUrl\(/);
+});
+
+test('continuation acknowledgement follows either a confirmed fact or a structured handoff', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('async function acknowledgeManagedTerminalFold(');
+  const end = runner.indexOf('function recoveredSecurityCodeState(', start);
+  const acknowledgement = runner.slice(start, end);
+  assert.ok(
+    acknowledgement.indexOf('managedAttemptHasDurableFold')
+      < acknowledgement.indexOf('acknowledgeManagedBrowserTerminalResult'),
+  );
+  const foldStart = runner.indexOf('async function foldManagedSecurityCodeContinuationResult(');
+  const foldEnd = runner.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(', foldStart);
+  const fold = runner.slice(foldStart, foldEnd);
+  assert.match(fold, /recordManagedSubmissionConfirmed\(/);
+  assert.match(fold, /recordManagedSecurityCodeContinuationUnverified\(/);
+  assert.match(fold, /acknowledgeManagedTerminalFold\(/);
 });
 
 test('managed verification resumes once by token, never by URL, then verifies the receipt', async () => {

@@ -66,6 +66,12 @@ import {
 } from '../lib/browserbase';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from '../lib/workableApplicationUrl';
 import {
+  managedContinuationAttemptFingerprint,
+  managedContinuationTerminalDecision,
+  managedRecoveryReviewFoldIsDurable,
+  planManagedContinuationRecovery,
+} from '../lib/managedContinuationRecovery';
+import {
   blockersIncludeCaptcha,
   CAPTCHA_BLOCKER,
   buildManagedCaptchaProbeActions,
@@ -896,9 +902,70 @@ export function managedContinuationSubmissionAttempt(
 export function managedContinuationExecutionFingerprint(
   submissionAttempt: ManagedSubmissionAttempt,
 ): string {
-  return createHash('sha256')
-    .update(`${submissionAttempt.runId}:${submissionAttempt.claimId}:${submissionAttempt.executionId}`)
-    .digest('hex');
+  return managedContinuationAttemptFingerprint(submissionAttempt);
+}
+
+export type ManagedSecurityCodeContinuationRecoveryPlan =
+  | { kind: 'none' }
+  | { kind: 'invalid'; reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid' }
+  | { kind: 'expired'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string }
+  | { kind: 'poll'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string };
+
+/**
+ * Rebuild the only Stratus execution a persisted security-code continuation may observe.
+ * The raw continuation credential is deliberately absent. Once continuation_resumed is true,
+ * recovery is GET-only and the deterministic tuple is the complete remote authority.
+ */
+export function managedSecurityCodeContinuationRecoveryPlan(
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  nowMs = Date.now(),
+): ManagedSecurityCodeContinuationRecoveryPlan {
+  const verification = review.verification;
+  const bindingMatches = attemptBinding.source === 'managed_browser'
+    && attemptBinding.operation === 'initial_submission'
+    && review.submission_claim_id === attemptBinding.attemptId
+    && review.submission_run_id === attemptBinding.submissionRunId
+    && Boolean(attemptBinding.submissionRunId)
+    && Boolean(attemptBinding.submissionClaimId);
+  if (!attemptBinding.submissionRunId || !attemptBinding.submissionClaimId) {
+    if (verification?.runner === 'stratus-managed'
+      && verification.status === 'verification_pending'
+      && verification.continuation_resumed === true) {
+      return { kind: 'invalid', reason: 'binding_mismatch' };
+    }
+    return { kind: 'none' };
+  }
+  const submissionAttempt = managedContinuationSubmissionAttempt(attemptBinding, 'security_code');
+  return planManagedContinuationRecovery({
+    state: verification ? {
+      runner: verification.runner,
+      status: verification.status,
+      continuationResumed: verification.continuation_resumed,
+      continuationExecutionFingerprint: verification.continuation_execution_fingerprint,
+      continuationCallDeadlineAt: verification.continuation_call_deadline_at,
+    } : undefined,
+    bindingMatches,
+    submissionAttempt,
+    nowMs,
+  });
+}
+
+/** A claimed continuation remains cron-visible even though its durable handoff uses needs_attention. */
+export function managedSecurityCodeContinuationRecoveryIsHeld(
+  review: ApplicationReviewState | null | undefined,
+): boolean {
+  return Boolean(
+    review?.submission_claim_id
+    && review.submission_claimed_at
+    && review.verification?.runner === 'stratus-managed'
+    && (
+      (review.verification.status === 'searching'
+        && review.verification.continuation_resumed === false)
+      || (review.verification.status === 'verification_pending'
+        && review.verification.continuation_resumed === true)
+    ),
+  );
 }
 
 /**
@@ -1193,13 +1260,22 @@ export async function recordManagedSecurityCodeContinuationUnverified(
   row: ResumeRow,
   attemptBinding: SubmissionAttemptBinding,
   message: string,
-  options: { previewUrl?: string } = {},
+  options: {
+    previewUrl?: string;
+    securityCode?: ApplicationReviewState['security_code'];
+    verification?: ApplicationReviewState['verification'];
+  } = {},
 ): Promise<boolean> {
   return recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
     message,
     attentionReason: 'Litos used the employer verification control, but could not prove the final result. Check the employer portal and record whether this exact application was received.',
     attentionCategories: ['security_code', 'unverified_submission'],
     ...(options.previewUrl ? { previewUrl: options.previewUrl } : {}),
+    ...(options.securityCode ? { securityCode: options.securityCode } : {}),
+    verification: {
+      ...options.verification,
+      status: 'handoff',
+    },
     requireContinuationResumed: true,
   });
 }
@@ -1224,7 +1300,22 @@ export async function recordManagedSecurityCodeContinuationSearch(
       || latestReview.submission_claim_id !== attemptBinding.attemptId
       || latestReview.submission_run_id !== attemptBinding.submissionRunId) return null;
     if (latestReview.verification?.runner === 'stratus-managed'
-      && latestReview.verification.continuation_resumed !== undefined) return null;
+      && latestReview.verification.continuation_resumed !== undefined) {
+      const sameSearch = latestReview.verification.status === 'searching'
+        && latestReview.verification.continuation_resumed === false
+        && latestReview.verification.continuation_fingerprint
+          === input.verification.continuation_fingerprint
+        && latestReview.verification.continuation_execution_fingerprint
+          === input.verification.continuation_execution_fingerprint
+        && latestReview.verification.requested_at === input.verification.requested_at
+        && latestReview.security_code?.digits === input.securityCode.digits
+        && (latestReview.security_code.sent_to ?? '').trim().toLowerCase()
+          === (input.securityCode.sent_to ?? '').trim().toLowerCase()
+        && latestReview.security_code.requested_at === input.securityCode.requested_at
+        && latestReview.security_code.submit_was_authorized
+          === input.securityCode.submit_was_authorized;
+      return sameSearch ? { row: latest, review: latestReview } : null;
+    }
     const authorization = await submissionBoundaryAuthorization(
       row.user_id,
       attemptBinding.attemptId,
@@ -1519,6 +1610,7 @@ export type ManagedTerminalRecoveryOutcome = 'not_recoverable' | 'pending' | 'fo
 async function managedAttemptHasDurableFold(
   row: ResumeRow,
   attemptBinding: SubmissionAttemptBinding,
+  submissionAttempt: ManagedSubmissionAttempt,
 ): Promise<boolean> {
   const events = (await submissionAttemptEventsForPacket(row.user_id, row.id))
     .filter((event) => event.attempt_id === attemptBinding.attemptId);
@@ -1529,11 +1621,27 @@ async function managedAttemptHasDurableFold(
     eq(generated_resumes.user_id, row.user_id),
   )).limit(1);
   const review = latest ? readApplicationReview(latest.spec) : null;
-  return Boolean(
-    review
-    && review.submission_run_id === attemptBinding.submissionRunId
-    && review.unverified_submission,
-  );
+  if (!review
+    || review.submission_run_id !== attemptBinding.submissionRunId
+    || review.submission_claim_id !== attemptBinding.attemptId
+    || !review.unverified_submission) return false;
+  const continuationAttempt = managedContinuationSubmissionAttempt(attemptBinding, 'security_code');
+  const continuationExecutionFingerprint = managedContinuationExecutionFingerprint(continuationAttempt);
+  const isSecurityCodeContinuation = submissionAttempt.runId === continuationAttempt.runId
+    && submissionAttempt.claimId === continuationAttempt.claimId
+    && submissionAttempt.executionId === continuationAttempt.executionId;
+  return managedRecoveryReviewFoldIsDurable({
+    kind: isSecurityCodeContinuation ? 'continuation' : 'initial',
+    hasUnverifiedResult: true,
+    state: review.verification ? {
+      runner: review.verification.runner,
+      status: review.verification.status,
+      continuationResumed: review.verification.continuation_resumed,
+      continuationExecutionFingerprint: review.verification.continuation_execution_fingerprint,
+      continuationCallDeadlineAt: review.verification.continuation_call_deadline_at,
+    } : undefined,
+    expectedExecutionFingerprint: continuationExecutionFingerprint,
+  });
 }
 
 async function acknowledgeManagedTerminalFold(
@@ -1542,7 +1650,7 @@ async function acknowledgeManagedTerminalFold(
   submissionAttempt: ManagedSubmissionAttempt,
   fastify: FastifyInstance,
 ): Promise<void> {
-  if (!await managedAttemptHasDurableFold(row, attemptBinding)) return;
+  if (!await managedAttemptHasDurableFold(row, attemptBinding, submissionAttempt)) return;
   try {
     await acknowledgeManagedBrowserTerminalResult(submissionAttempt);
   } catch (error) {
@@ -1551,6 +1659,618 @@ async function acknowledgeManagedTerminalFold(
       attemptId: attemptBinding.attemptId,
       detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal acknowledgement failed',
     }, 'Managed terminal result was folded but its acknowledgement failed');
+  }
+}
+
+function recoveredSecurityCodeState(
+  review: ApplicationReviewState,
+  result: ManagedBrowserResult,
+  capturedAt: string,
+): ApplicationReviewState['security_code'] {
+  const current = review.security_code;
+  if (!current) return undefined;
+  const challenge = readManagedSecurityCodeChallenge(result);
+  const challenged = challenge
+    ? beginSecurityCodeState({
+      challenge,
+      attemptedAt: capturedAt,
+      authorized: true,
+      existing: current,
+    })
+    : current;
+  const provisional = [...(current.attempts ?? [])]
+    .reverse()
+    .find((attempt) => attempt.outcome === 'error');
+  if (!provisional) return challenged;
+  const observed = result.securityCodeAttempt?.outcome;
+  const outcome: SecurityCodeAttempt['outcome'] = observed === 'accepted' && !challenge
+    ? 'accepted'
+    : observed === 'rejected' && challenge
+      ? 'rejected'
+      : observed === 'no_control'
+        ? 'no_control'
+        : observed === 'not_entered'
+          ? 'not_entered'
+          : 'error';
+  return withSecurityCodeAttempt(challenged, {
+    at: capturedAt,
+    fingerprint: provisional.fingerprint,
+    outcome,
+  });
+}
+
+async function recoveredManagedPreviewUrl(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  result: ManagedBrowserResult,
+  fastify: FastifyInstance,
+): Promise<string | undefined> {
+  if (!result.screenshot) return undefined;
+  try {
+    const blob = await storeReceiptScreenshot(
+      `users/${row.user_id}/submission-runs/${review.submission_run_id}/receipt.png`,
+      Buffer.from(result.screenshot, 'base64'),
+    );
+    return blob.url;
+  } catch (error) {
+    fastify.log.warn({
+      applicationId: row.id,
+      detail: error instanceof Error ? error.message.slice(0, 200) : 'Receipt enrichment failed',
+    }, 'Recovered managed result could not store its screenshot');
+    return undefined;
+  }
+}
+
+async function foldManagedSecurityCodeContinuationResult(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  submissionAttempt: ManagedSubmissionAttempt,
+  result: ManagedBrowserResult,
+  capturedAt: string,
+  fastify: FastifyInstance,
+): Promise<ManagedTerminalRecoveryOutcome> {
+  const expectedPortalUrl = attemptBinding.postingIdentity.portalUrl;
+  if (!expectedPortalUrl) {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      'The retained verification result has no immutable employer URL binding',
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+    return 'folded';
+  }
+  const expectedApplicationUrl = portalApplicationUrl(
+    detectPortal(expectedPortalUrl),
+    expectedPortalUrl,
+  );
+  const outcome = readManagedSubmitOutcome(result);
+  if (outcome?.pressed === true) {
+    await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
+      evidenceCode: 'stratus_verification_press_echoed',
+    });
+  }
+  try {
+    assertManagedRequiredFieldsConfirmed(result, 'verification');
+  } catch (error) {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      error instanceof Error ? error.message.slice(0, 500) : 'Recovered verification proof was incomplete',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+    return 'folded';
+  }
+
+  const securityCode = recoveredSecurityCodeState(review, result, capturedAt);
+  const challenge = readManagedSecurityCodeChallenge(result);
+  const expectedRecipient = review.applicant_email?.address ?? review.security_code?.sent_to ?? '';
+  const challengeMatches = !challenge
+    || securityCodeChallengeMatchesRecipient(challenge, expectedRecipient);
+  const verdict = exactManagedSubmitVerdict(result, expectedApplicationUrl);
+  const accepted = securityCode?.attempts?.some((attempt) => attempt.outcome === 'accepted') === true;
+  const verification: NonNullable<ApplicationReviewState['verification']> = {
+    ...review.verification,
+    status: challenge ? 'handoff' : 'completed',
+    retry_count: Math.max(1, review.verification?.retry_count ?? 0),
+    completed_at: capturedAt,
+  };
+
+  if (!challenge && verdict.kind === 'confirmed' && accepted) {
+    const receipt: NonNullable<ApplicationReviewState['receipt']> = {
+      confirmation_text: verdict.confirmationText,
+      final_url: result.url,
+      captured_at: capturedAt,
+      source: 'managed_browser',
+    };
+    const confirmed = await recordManagedSubmissionConfirmed(row, attemptBinding, {
+      capturedAt,
+      verification,
+      ...(securityCode ? { securityCode } : {}),
+      receipt,
+      receiptEvidence: { result, expectedApplicationUrl },
+    });
+    if (confirmed) {
+      const screenshotUrl = await recoveredManagedPreviewUrl(row, review, result, fastify);
+      if (screenshotUrl) {
+        await recordManagedSubmissionConfirmed(row, attemptBinding, {
+          capturedAt,
+          verification,
+          ...(securityCode ? { securityCode } : {}),
+          receipt: { ...receipt, screenshot_url: screenshotUrl },
+          receiptEvidence: { result, expectedApplicationUrl },
+        });
+      }
+      await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+      return 'folded';
+    }
+  }
+
+  const previewUrl = await recoveredManagedPreviewUrl(row, review, result, fastify);
+  await recordManagedSecurityCodeContinuationUnverified(
+    row,
+    attemptBinding,
+    challenge
+      ? challengeMatches
+        ? 'The employer still requires its emailed security code after the retained continuation'
+        : 'The retained verification result named a different application email'
+      : verdict.kind === 'confirmed'
+        ? 'The retained verification result did not prove that the exact security code was accepted'
+        : `The retained verification result was ${verdict.kind}`,
+    {
+      ...(previewUrl ? { previewUrl } : {}),
+      ...(securityCode ? { securityCode } : {}),
+      verification,
+    },
+  );
+  await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, fastify);
+  return 'folded';
+}
+
+/** Poll only the exact continuation execution that was committed before the remote call. */
+export async function recoverManagedSecurityCodeContinuationTerminalResult(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  fastify: FastifyInstance,
+): Promise<ManagedTerminalRecoveryOutcome> {
+  if (attemptBinding.packetId !== row.id || attemptBinding.userId !== row.user_id) {
+    return 'not_recoverable';
+  }
+  const plan = managedSecurityCodeContinuationRecoveryPlan(review, attemptBinding);
+  if (plan.kind === 'none') return 'not_recoverable';
+  if (plan.kind === 'invalid') {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      `The retained verification recovery binding was invalid: ${plan.reason}`,
+      { verification: review.verification },
+    );
+    return 'folded';
+  }
+
+  const authorization = await submissionBoundaryAuthorization(row.user_id, attemptBinding.attemptId);
+  if (authorization) {
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      managedInitialSubmissionAttempt(attemptBinding, authorization),
+      fastify,
+    );
+  }
+  if (plan.kind === 'expired') {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      'The retained verification result stayed pending until its provider deadline expired',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    return 'folded';
+  }
+
+  let terminal;
+  try {
+    terminal = await getManagedBrowserTerminalResult(plan.submissionAttempt);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message.slice(0, 500) : 'Terminal retrieval failed';
+    if (/did not match its durable submission attempt/i.test(detail)) {
+      await recordManagedSecurityCodeContinuationUnverified(
+        row,
+        attemptBinding,
+        detail,
+        { verification: review.verification },
+      );
+      return 'folded';
+    }
+    fastify.log.warn({
+      applicationId: row.id,
+      attemptId: attemptBinding.attemptId,
+      detail: detail.slice(0, 200),
+    }, 'Managed verification terminal result could not be retrieved yet');
+    if (Date.now() < Date.parse(plan.providerDeadlineAt)) return 'pending';
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      'The retained verification result could not be retrieved before its provider deadline expired',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    return 'folded';
+  }
+  const terminalDecision = managedContinuationTerminalDecision(
+    terminal.state,
+    plan.providerDeadlineAt,
+    Date.now(),
+  );
+  if (terminalDecision === 'pending') return 'pending';
+  if (terminalDecision === 'deadline_expired') {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      'The retained verification result stayed pending until its provider deadline expired',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    return 'folded';
+  }
+  if (terminalDecision === 'gone') {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      'The retained verification result expired before Litos could fold it',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    return 'folded';
+  }
+  if ((terminalDecision === 'failed' || terminalDecision === 'indeterminate')
+    && (terminal.state === 'failed' || terminal.state === 'indeterminate')) {
+    const error = managedBrowserTerminalFailureError(terminal);
+    if (error instanceof ManagedBrowserProviderProgressError
+      && managedProviderProgressDisposition(error.runProgress, 'verification') === 'pressed') {
+      await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
+        evidenceCode: 'stratus_verification_press_progress',
+      });
+    }
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      error.message.slice(0, 500) || 'The retained verification run ended without a terminal receipt',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    return 'folded';
+  }
+  if (terminal.state !== 'completed') {
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      'The retained verification result could not be classified',
+      { verification: review.verification },
+    );
+    await acknowledgeManagedTerminalFold(row, attemptBinding, plan.submissionAttempt, fastify);
+    return 'folded';
+  }
+  return foldManagedSecurityCodeContinuationResult(
+    row,
+    review,
+    attemptBinding,
+    plan.submissionAttempt,
+    terminal.run,
+    terminal.completedAt,
+    fastify,
+  );
+}
+
+async function recoverManagedInitialSecurityCodeChallenge(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  initialSubmissionAttempt: ManagedSubmissionAttempt,
+  result: ManagedBrowserResult,
+  capturedAt: string,
+  challenge: NonNullable<ReturnType<typeof readManagedSecurityCodeChallenge>>,
+  fastify: FastifyInstance,
+  options: { actions?: ManagedBrowserAction[] },
+): Promise<ManagedTerminalRecoveryOutcome> {
+  const continuationSubmissionAttempt = managedContinuationSubmissionAttempt(
+    attemptBinding,
+    'security_code',
+  );
+  const continuationExecutionFingerprint = managedContinuationExecutionFingerprint(
+    continuationSubmissionAttempt,
+  );
+  const securityCode = beginSecurityCodeState({
+    challenge,
+    attemptedAt: capturedAt,
+    authorized: true,
+    existing: review.security_code,
+  });
+  const continuationToken = result.continuationToken;
+  const continuationExpiresAt = result.continuationExpiresAt;
+  const continuationIsLive = typeof continuationToken === 'string'
+    && typeof continuationExpiresAt === 'string'
+    && Number.isFinite(Date.parse(continuationExpiresAt))
+    && continuationExpiresAt === new Date(Date.parse(continuationExpiresAt)).toISOString()
+    && Date.parse(continuationExpiresAt) > Date.now();
+  let continuationFingerprint: string | undefined;
+  if (continuationIsLive) {
+    try {
+      continuationFingerprint = managedContinuationFingerprint(continuationToken);
+    } catch {
+      continuationFingerprint = undefined;
+    }
+  }
+  const baseVerification: NonNullable<ApplicationReviewState['verification']> = {
+    status: 'handoff',
+    requested_at: capturedAt,
+    retry_count: 0,
+    runner: 'stratus-managed',
+    continuation_execution_fingerprint: continuationExecutionFingerprint,
+    continuation_resumed: false,
+    ...(continuationFingerprint ? { continuation_fingerprint: continuationFingerprint } : {}),
+  };
+  const persistHandoff = async (message: string) => {
+    await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+      message,
+      attentionReason: `${securityCodeAttentionReason(securityCode)} Check the employer portal and record whether this exact application was received.`,
+      attentionCategories: ['security_code', 'unverified_submission'],
+      securityCode,
+      verification: baseVerification,
+    });
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      initialSubmissionAttempt,
+      fastify,
+    );
+    return 'folded' as const;
+  };
+
+  const expectedRecipient = review.applicant_email?.address ?? '';
+  if (!securityCodeChallengeMatchesRecipient(challenge, expectedRecipient)) {
+    return persistHandoff(
+      expectedRecipient
+        ? 'The recovered employer verification recipient did not match this packet'
+      : 'The recovered employer verification challenge had no frozen packet email to match',
+    );
+  }
+  const leadIssues = runnerLeadAlignmentIssues(row);
+  if (leadIssues.length > 0) {
+    return persistHandoff(
+      `The recovered application packet no longer has valid lead-experience evidence: ${leadIssues.join(' ')}`,
+    );
+  }
+  if (!continuationIsLive || !continuationFingerprint) {
+    return persistHandoff('The recovered employer verification capability was missing or expired');
+  }
+
+  const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
+    .from(users).where(eq(users.id, row.user_id)).limit(1);
+  const verificationRoute = await resolveVerificationEmailRoute({
+    userId: row.user_id,
+    applicationId: row.id,
+    expectedRecipient,
+  });
+  const verificationAllowed = verificationRoute === 'application_alias'
+    || (verificationRoute === 'personal_address' && verificationSettings?.enabled === true);
+  if (!verificationAllowed) {
+    return persistHandoff('Automatic mailbox verification was not authorized for the recovered challenge');
+  }
+
+  const searchingProjection = await recordManagedSecurityCodeContinuationSearch(
+    row,
+    attemptBinding,
+    {
+      securityCode,
+      verification: {
+        ...baseVerification,
+        status: 'searching',
+      },
+    },
+  );
+  if (!searchingProjection) return 'folded';
+  let prepared: Awaited<ReturnType<typeof prepareManagedEmailVerification>>;
+  try {
+    prepared = await prepareManagedEmailVerification({
+      result,
+      userId: row.user_id,
+      portalUrl: attemptBinding.postingIdentity.portalUrl ?? result.url,
+      requestedAt: new Date(capturedAt),
+      permissionGranted: true,
+      expectedRecipient,
+      applicationId: row.id,
+      standingChallenge: readManagedSubmitOutcome(result)?.pressed === false,
+      attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
+      delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message.slice(0, 300) : 'Mailbox verification failed';
+    return persistHandoff(`Automatic mailbox verification failed for the recovered challenge: ${detail}`);
+  }
+  const alreadyAttempted = prepared.status === 'ready'
+    && Boolean(findSecurityCodeAttempt(
+      searchingProjection.review.security_code,
+      securityCodeFingerprint(row.id, prepared.code),
+    ));
+  if (prepared.status !== 'ready' || alreadyAttempted) {
+    await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+      message: prepared.status === 'ready'
+        ? 'The recovered mailbox code was already spent on this application'
+        : 'No safe mailbox code arrived for the recovered employer challenge',
+      attentionReason: `${securityCodeAttentionReason(securityCode)} Check the employer portal and record whether this exact application was received.`,
+      attentionCategories: ['security_code', 'unverified_submission'],
+      securityCode,
+      verification: baseVerification,
+    });
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      initialSubmissionAttempt,
+      fastify,
+    );
+    return 'folded';
+  }
+
+  const actionAuthorizationValid = await authorizationValidAtClick(row, review);
+  const actionVerificationRoute = await resolveVerificationEmailRoute({
+    userId: row.user_id,
+    applicationId: row.id,
+    expectedRecipient,
+  });
+  const actionPersonalVerificationEnabled = verificationRoute === 'personal_address'
+    ? (await db.select({ enabled: users.automatic_verification_enabled })
+      .from(users).where(eq(users.id, row.user_id)).limit(1))[0]?.enabled === true
+    : false;
+  const actionVerificationRouteValid = verificationRoute === 'application_alias'
+    ? actionVerificationRoute === 'application_alias'
+    : verificationRoute === 'personal_address'
+      && actionVerificationRoute === 'personal_address'
+      && actionPersonalVerificationEnabled;
+  if (!actionAuthorizationValid || !actionVerificationRouteValid) {
+    return persistHandoff(
+      !actionAuthorizationValid
+        ? 'Submission authorization changed before recovered employer verification'
+        : 'The application email route changed before recovered employer verification',
+    );
+  }
+
+  const enteredSecurityCode = withSecurityCodeAttempt(securityCode, {
+    at: new Date().toISOString(),
+    fingerprint: securityCodeFingerprint(row.id, prepared.code),
+    outcome: 'error',
+  });
+  const codeActions = securityCodeContinuationActions(
+    options.actions ?? [],
+    prepared.code,
+    result.url,
+  ) ?? prepared.actions;
+  const requestBudget = startManagedBrowserRequestBudget(
+    MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,
+  );
+  let continuationAuthorization: { providerDeadlineAt: string };
+  try {
+    continuationAuthorization = await assertManagedSecurityCodeContinuationBoundaryClear(
+      searchingProjection.row,
+      searchingProjection.review,
+      attemptBinding,
+      continuationFingerprint,
+      continuationSubmissionAttempt,
+      continuationExpiresAt,
+      enteredSecurityCode,
+    );
+  } catch (error) {
+    if (error instanceof ManagedSecurityCodeContinuationRefusedError) {
+      await acknowledgeManagedTerminalFold(
+        row,
+        attemptBinding,
+        initialSubmissionAttempt,
+        fastify,
+      );
+      return 'folded';
+    }
+    if (error instanceof FinalSubmissionBoundaryBlockedError
+      || error instanceof FinalSubmissionBoundaryChangedError
+      || error instanceof FinalSubmissionAuthorizationChangedError
+      || error instanceof FinalSubmissionBoundaryAlreadyAuthorizedError) {
+      const [latest] = await db.select().from(generated_resumes).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, row.user_id),
+      )).limit(1);
+      const latestReview = latest ? readApplicationReview(latest.spec) : null;
+      if (latest && latestReview
+        && latestReview.verification?.runner === 'stratus-managed'
+        && latestReview.verification.status === 'verification_pending'
+        && latestReview.verification.continuation_resumed === true) {
+        const recovery = await recoverManagedSecurityCodeContinuationTerminalResult(
+          latest,
+          latestReview,
+          attemptBinding,
+          fastify,
+        );
+        if (recovery !== 'not_recoverable') return recovery;
+      }
+      if (!latestReview || latestReview.verification?.status !== 'searching') {
+        await acknowledgeManagedTerminalFold(
+          row,
+          attemptBinding,
+          initialSubmissionAttempt,
+          fastify,
+        );
+        return 'folded';
+      }
+      return persistHandoff(
+        `Recovered employer verification was withheld by the exact boundary gate: ${error.message}`,
+      );
+    }
+    throw error;
+  }
+
+  try {
+    const continued = await continueManagedBrowser(continuationToken, codeActions, {
+      submissionAttempt: continuationSubmissionAttempt,
+      requestBudget,
+      providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
+      minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
+    });
+    const [pendingRow] = await db.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const pendingReview = pendingRow ? readApplicationReview(pendingRow.spec) : null;
+    if (!pendingRow || !pendingReview) return 'folded';
+    const folded = await foldManagedSecurityCodeContinuationResult(
+      pendingRow,
+      pendingReview,
+      attemptBinding,
+      continuationSubmissionAttempt,
+      continued,
+      new Date().toISOString(),
+      fastify,
+    );
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      initialSubmissionAttempt,
+      fastify,
+    );
+    return folded;
+  } catch (error) {
+    if (error instanceof ManagedBrowserProviderProgressError
+      && managedProviderProgressDisposition(error.runProgress, 'verification') === 'pressed') {
+      await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
+        evidenceCode: 'stratus_verification_press_progress',
+      });
+    }
+    const [pendingRow] = await db.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const pendingReview = pendingRow ? readApplicationReview(pendingRow.spec) : null;
+    if (pendingRow && pendingReview) {
+      const recovered = await recoverManagedSecurityCodeContinuationTerminalResult(
+        pendingRow,
+        pendingReview,
+        attemptBinding,
+        fastify,
+      );
+      if (recovered !== 'not_recoverable') return recovered;
+    }
+    await recordManagedSecurityCodeContinuationUnverified(
+      row,
+      attemptBinding,
+      error instanceof Error ? error.message : 'Recovered managed verification continuation failed',
+      { securityCode: enteredSecurityCode, verification: baseVerification },
+    );
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      initialSubmissionAttempt,
+      fastify,
+    );
+    return 'folded';
   }
 }
 
@@ -1571,6 +2291,13 @@ export async function recoverManagedSubmissionTerminalResult(
     || attemptBinding.userId !== row.user_id
     || review.submission_claim_id !== attemptBinding.attemptId
     || review.submission_run_id !== attemptBinding.submissionRunId) return 'not_recoverable';
+  const continuationRecovery = await recoverManagedSecurityCodeContinuationTerminalResult(
+    row,
+    review,
+    attemptBinding,
+    fastify,
+  );
+  if (continuationRecovery !== 'not_recoverable') return continuationRecovery;
   const authorization = await submissionBoundaryAuthorization(
     row.user_id,
     attemptBinding.attemptId,
@@ -1617,7 +2344,7 @@ export async function recoverManagedSubmissionTerminalResult(
       [],
     );
   }
-  if (terminal.state === 'failed') {
+  if (terminal.state === 'failed' || terminal.state === 'indeterminate') {
     const error = managedBrowserTerminalFailureError(terminal, options.actions ?? []);
     if (error instanceof ManagedBrowserProviderProgressError
       && managedProviderProgressDisposition(error.runProgress, 'application') === 'pressed') {
@@ -1626,7 +2353,7 @@ export async function recoverManagedSubmissionTerminalResult(
       });
     }
     return persistUnverified(
-      error.message.slice(0, 500) || 'The retained managed run failed without a terminal receipt',
+      error.message.slice(0, 500) || 'The retained managed run ended without a terminal receipt',
       [],
     );
   }
@@ -1671,13 +2398,24 @@ export async function recoverManagedSubmissionTerminalResult(
       ['required_field'],
     );
   }
+  if (challenge) {
+    return recoverManagedInitialSecurityCodeChallenge(
+      row,
+      review,
+      attemptBinding,
+      submissionAttempt,
+      result,
+      terminal.completedAt,
+      challenge,
+      fastify,
+      options,
+    );
+  }
   const verdict = exactManagedSubmitVerdict(result, expectedApplicationUrl);
-  if (challenge || verdict.kind !== 'confirmed') {
+  if (verdict.kind !== 'confirmed') {
     return persistUnverified(
-      challenge
-        ? 'The recovered managed result is waiting on employer verification'
-        : `The recovered managed result was ${verdict.kind}`,
-      challenge ? ['security_code'] : [],
+      `The recovered managed result was ${verdict.kind}`,
+      [],
     );
   }
   const capturedAt = terminal.completedAt;
@@ -7876,7 +8614,6 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     let receiptResult = result;
     let securityCodeContinuationDispatched = false;
-    let securityCodeContinuationTerminalRecovered = false;
     let receiptObservationDispatched = false;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialSecurityCodeState = initialChallenge
@@ -8121,84 +8858,38 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             // send. The first receipt cannot authorize a later DOM or a replaced submit node.
             assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
           } catch (error) {
-            let continuationError: unknown = error;
-            let recovered = false;
-            let recoveredTerminalCanBeAcknowledged = false;
-            if (continuationError instanceof ManagedBrowserProviderProgressError) {
-              const disposition = managedProviderProgressDisposition(continuationError.runProgress, 'verification');
+            if (error instanceof ManagedBrowserProviderProgressError) {
+              const disposition = managedProviderProgressDisposition(error.runProgress, 'verification');
               if (disposition === 'pressed') {
                 await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
                   evidenceCode: 'stratus_verification_press_progress',
                 });
               }
             }
-            // A lost HTTP response is not permission to call the one-shot continuation again. Ask
-            // Stratus for the exact retained execution first and accept only its correlated echo.
-            try {
-              const terminal = await getManagedBrowserTerminalResult(securityCodeSubmissionAttempt, {
-                actions: codeActions,
-              });
-              if (terminal.state === 'completed') {
-                receiptResult = terminal.run;
-                recoveredTerminalCanBeAcknowledged = true;
-                if (readManagedSubmitOutcome(receiptResult)?.pressed === true) {
-                  await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
-                    evidenceCode: 'stratus_verification_press_echoed',
-                  });
-                }
-                assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
-                recovered = true;
-                securityCodeContinuationTerminalRecovered = true;
-              } else if (terminal.state === 'failed') {
-                continuationError = managedBrowserTerminalFailureError(terminal, codeActions);
-                recoveredTerminalCanBeAcknowledged = true;
-              } else if (terminal.state === 'gone') {
-                continuationError = new Error('The retained verification result expired before Litos could fold it');
-              } else if (terminal.state === 'not_found') {
-                continuationError = new Error('The verification result was not retained after its one-shot call');
-              }
-            } catch (recoveryError) {
-              if (!(recoveryError instanceof ManagedBrowserProviderProgressError)) {
-                continuationError = recoveryError;
-              }
+            // The one-shot capability was consumed before this call. Recovery may only poll the
+            // deterministic tuple that the gate committed, and a pending read must stay scheduled.
+            const [pendingRow] = await db.select().from(generated_resumes).where(and(
+              eq(generated_resumes.id, row.id),
+              eq(generated_resumes.user_id, row.user_id),
+            )).limit(1);
+            const pendingReview = pendingRow ? readApplicationReview(pendingRow.spec) : null;
+            if (pendingRow && pendingReview) {
+              const recovery = await recoverManagedSecurityCodeContinuationTerminalResult(
+                pendingRow,
+                pendingReview,
+                attemptBinding,
+                fastify,
+              );
+              if (recovery !== 'not_recoverable') return;
             }
-            if (recovered) {
-              // Continue through the ordinary receipt verifier. The acknowledgement happens only
-              // after that verifier commits the parent attempt's terminal Postgres fact.
-            } else {
-            /* AN UNCERTAIN CLICK IS NEVER RETRIED, and that outranks landing somewhere friendlier.
-             *
-             * A throw here can come from either side of the physical submit: the call itself can
-             * fail before anything is clicked, and the confirmation assertion above runs after the
-             * continuation has already returned, which means after a click may have landed. Nothing
-             * available here separates those two, so the packet must not go back to a state that
-             * invites another send. Some boards cap re-applications outright - Deepgram's form says
-             * candidates may not apply more than twice in 60 days - and a duplicate filed because
-             * Litos could not read its own outcome is worse than a packet that asks for a person.
-             *
-             * The attempt is still recorded, because the fingerprint is what stops the same code
-             * being spent again, and 'error' is the honest outcome for a code whose fate is unknown.
-             * needs_attention is not a dead end: it carries the portal and the receipt screenshot,
-             * which is exactly what someone finishing this by hand needs. */
-            const failedAt = new Date().toISOString();
-            recordEnteredCodeOutcome('error', failedAt);
+            recordEnteredCodeOutcome('error', new Date().toISOString());
             await recordManagedSecurityCodeContinuationUnverified(
               row,
               attemptBinding,
-              continuationError instanceof Error
-                ? continuationError.message
-                : 'Managed verification continuation failed',
+              error instanceof Error ? error.message : 'Managed verification continuation failed',
+              { securityCode: enteredSecurityCodeState },
             );
-            if (recoveredTerminalCanBeAcknowledged) {
-              await acknowledgeManagedTerminalFold(
-                row,
-                attemptBinding,
-                securityCodeSubmissionAttempt,
-                fastify,
-              );
-            }
             return;
-            }
           }
           if (!readManagedSecurityCodeChallenge(receiptResult)) {
             verification = {
@@ -8338,7 +9029,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         successfulSubmissionAttempt,
         fastify,
       );
-      if (securityCodeContinuationDispatched || securityCodeContinuationTerminalRecovered) {
+      if (securityCodeContinuationDispatched) {
         await acknowledgeManagedTerminalFold(
           row,
           attemptBinding,
@@ -9520,7 +10211,7 @@ export async function processSubmissionApplication(
   let activeRow = row;
   try {
     let review = readApplicationReview(activeRow.spec);
-    if (submissionClaimIsHeld(review)) {
+    if (submissionClaimIsHeld(review) || managedSecurityCodeContinuationRecoveryIsHeld(review)) {
       const attemptBinding = await persistedRunnerAttemptBinding(activeRow, review!);
       const recovery = await recoverManagedSubmissionTerminalResult(
         activeRow,
@@ -9582,8 +10273,19 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
       .where(sql`(
         (${generated_resumes.spec}->'_review'->>'status' in ('submit_requested', 'submitting')
           and ${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null)
-        or (${generated_resumes.spec}->'_review'->>'status' = 'submitting'
-          and ${generated_resumes.spec}->'_review'->>'submission_claimed_at' is not null
+        or (${generated_resumes.spec}->'_review'->>'submission_claimed_at' is not null
+          and (
+            ${generated_resumes.spec}->'_review'->>'status' = 'submitting'
+            or (
+              ${generated_resumes.spec}->'_review'->'verification'->>'runner' = 'stratus-managed'
+              and (
+                (${generated_resumes.spec}->'_review'->'verification'->>'status' = 'searching'
+                  and ${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'false')
+                or (${generated_resumes.spec}->'_review'->'verification'->>'status' = 'verification_pending'
+                  and ${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'true')
+              )
+            )
+          )
           and exists (
             select 1 from application_submission_attempt_events recovery_event
             where recovery_event.user_id = ${generated_resumes.user_id}
@@ -9610,10 +10312,15 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
       // shrinks to one application. This is a ceiling check on a rare path, not a lock: the exact
       // guarantee is "about the cap", and buying an exact one costs a database counter updated
       // inside the submission claim.
-      const already = await countSubmissionsClaimedToday(row.user_id);
-      if (!withinDailyCap(already, cap)) {
-        deferredForCap += 1;
-        continue;
+      const queuedReview = readApplicationReview(row.spec);
+      const recoveringExistingAttempt = submissionClaimIsHeld(queuedReview)
+        || managedSecurityCodeContinuationRecoveryIsHeld(queuedReview);
+      if (!recoveringExistingAttempt) {
+        const already = await countSubmissionsClaimedToday(row.user_id);
+        if (!withinDailyCap(already, cap)) {
+          deferredForCap += 1;
+          continue;
+        }
       }
       try {
         await processSubmissionApplication(row.id, fastify, { unattended: true });

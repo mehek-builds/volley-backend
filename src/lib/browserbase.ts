@@ -1286,11 +1286,12 @@ export type ManagedBrowserTerminalResult =
     run: ManagedBrowserResult;
   }
   | {
-    state: 'failed';
+    state: 'failed' | 'indeterminate';
     submissionAttempt: ManagedSubmissionAttempt;
     completedAt: string;
     expiresAt: string;
     error: ManagedBrowserError;
+    runProgress?: ManagedBrowserRunProgress;
   }
   | {
     state: 'pending';
@@ -1337,7 +1338,9 @@ export async function getManagedBrowserTerminalResult(
       expiresAt: canonicalManagedTimestamp(payload.expiresAt, 'terminal result expiry'),
     };
   }
-  if (!response.ok || (payload.state !== 'completed' && payload.state !== 'failed')) {
+  if (!response.ok || (payload.state !== 'completed'
+    && payload.state !== 'failed'
+    && payload.state !== 'indeterminate')) {
     const providerError = payload.error as ManagedBrowserError | undefined;
     throw managedBrowserRequestError(providerError, response.status, [], expected);
   }
@@ -1358,18 +1361,34 @@ export async function getManagedBrowserTerminalResult(
     return { state: 'completed', submissionAttempt: expected, completedAt, expiresAt, run };
   }
   const providerError = payload.error as ManagedBrowserError | undefined;
-  if (providerError == null) throw new Error('Managed Stratus failed terminal result is missing its error');
-  return { state: 'failed', submissionAttempt: expected, completedAt, expiresAt, error: providerError };
+  if (providerError == null) throw new Error(`Managed Stratus ${payload.state} terminal result is missing its error`);
+  const runProgress = payload.runProgress === undefined
+    ? null
+    : managedBrowserRunProgress(payload.runProgress, expected);
+  if (payload.runProgress !== undefined && !runProgress) {
+    throw new Error('Managed Stratus terminal progress did not match its durable submission attempt');
+  }
+  return {
+    state: payload.state,
+    submissionAttempt: expected,
+    completedAt,
+    expiresAt,
+    error: providerError,
+    ...(runProgress ? { runProgress } : {}),
+  };
 }
 
 /** Recreate the same typed provider error for a durably retained failed run. */
 export function managedBrowserTerminalFailureError(
-  result: Extract<ManagedBrowserTerminalResult, { state: 'failed' }>,
+  result: Extract<ManagedBrowserTerminalResult, { state: 'failed' | 'indeterminate' }>,
   actions: ManagedBrowserAction[] = [],
 ): Error {
+  const error = result.runProgress && typeof result.error === 'object'
+    ? { ...result.error, runProgress: result.runProgress }
+    : result.error;
   return managedBrowserRequestError(
-    result.error,
-    502,
+    error,
+    result.state === 'indeterminate' ? 409 : 502,
     normalizeStratusActions(actions),
     result.submissionAttempt,
   );
