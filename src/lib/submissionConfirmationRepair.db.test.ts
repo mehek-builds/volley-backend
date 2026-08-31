@@ -20,7 +20,18 @@ const socketDir = mkdtempSync(join(tmpdir(), 'litos-confirmation-repair-'));
 const PORTAL_URL = 'https://apply.workable.com/example/j/A1B2C3D4E5/apply/';
 const RECEIPT_URL = `${PORTAL_URL}?success`;
 const RECEIPT_TEXT = 'Your application has been submitted successfully.';
-const RECEIPT_AT = '2026-08-31T10:00:00.000Z';
+/* Anchored to run time, and every risk event carries an explicit created_at.
+ *
+ * These were fixed 2026-08-31 timestamps. retrySafety rejects the sequence when a
+ * boundary_authorized row's created_at precedes the attempt_opened row's, and only
+ * boundary_authorized set created_at explicitly; attempt_opened and press_observed fell back to
+ * the column default, which is insertion time. So the fixture was valid only while the wall clock
+ * was still behind the hardcoded 09:57Z, and from 10:02Z on 2026-08-31 the three eligibility cases
+ * began failing everywhere, on unrelated commits. Anchoring the dates alone does not fix it: the
+ * ordering has to be explicit on all three, or attempt_opened keeps landing at "now". */
+const RECEIPT_BASE = Date.now();
+const at = (offsetMinutes: number) => new Date(RECEIPT_BASE + offsetMinutes * 60_000);
+const RECEIPT_AT = at(0).toISOString();
 const JOB_CONTEXT = {
   job_id: 'aa283015-a491-4c0f-b41b-0964bb850dc0',
   company: 'Example Company',
@@ -88,7 +99,7 @@ async function seedRepairCandidate(overrides: {
   const artifactId = randomUUID();
   const attemptId = randomUUID();
   const submissionRunId = randomUUID();
-  const attachedAt = new Date('2026-08-31T09:00:00.000Z');
+  const attachedAt = at(-60);
   const objectKey = `users/${userId}/resumes/${randomUUID()}.pdf`;
   const pdfBytes = new TextEncoder().encode(`repair-packet:${packetId}`);
   const resumeEmail = `resume-${userId}@example.test`;
@@ -118,7 +129,7 @@ async function seedRepairCandidate(overrides: {
     updated_at: RECEIPT_AT,
     submitted_at: RECEIPT_AT,
     submission_run_id: submissionRunId,
-    submission_claimed_at: '2026-08-31T09:55:00.000Z',
+    submission_claimed_at: at(-5).toISOString(),
     submission_claim_id: attemptId,
     receipt: {
       confirmation_text: overrides.confirmationText ?? RECEIPT_TEXT,
@@ -238,7 +249,8 @@ async function seedRepairCandidate(overrides: {
     eventId: submissionAttemptEventId(attemptId, 'attempt_opened', 'reservation'),
     eventKind: 'attempt_opened',
     evidenceCode: 'atomic_claim_reserved',
-    observedAt: new Date('2026-08-31T09:55:00.000Z'),
+    observedAt: at(-5),
+    createdAt: at(-5),
   });
   await appendSubmissionAttemptEvent({
     ...binding,
@@ -246,16 +258,17 @@ async function seedRepairCandidate(overrides: {
     eventKind: 'boundary_authorized',
     evidenceCode: 'managed_browser_employer_boundary_authorized',
     boundaryActivationId: randomUUID(),
-    boundaryExpiresAt: new Date('2026-08-31T10:02:00.000Z'),
-    observedAt: new Date('2026-08-31T09:57:00.000Z'),
-    createdAt: new Date('2026-08-31T09:57:00.000Z'),
+    boundaryExpiresAt: at(2),
+    observedAt: at(-3),
+    createdAt: at(-3),
   });
   await appendSubmissionAttemptEvent({
     ...binding,
     eventId: submissionAttemptEventId(attemptId, 'press_observed', 'managed-initial-submit'),
     eventKind: 'press_observed',
     evidenceCode: 'stratus_application_press_echoed',
-    observedAt: new Date('2026-08-31T09:59:00.000Z'),
+    observedAt: at(-1),
+    createdAt: at(-1),
   });
   return { userId, applicationId, packetId, attemptId };
 }
