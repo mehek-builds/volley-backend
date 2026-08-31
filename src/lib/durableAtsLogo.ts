@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 import type { SupportedJobBoard } from './jobMonitor';
-import { publicLogoObjectUrl, putPublicLogoObject } from './objectStorage';
+import { isPublicLogoObjectReadUrlForKey, putPublicLogoObject } from './objectStorage';
 
 export type DurableAtsLogoAsset = {
   provider: SupportedJobBoard;
@@ -67,14 +67,7 @@ export async function persistDurableAtsLogo(
   } catch {
     throw new Error('unsafe_url');
   }
-  let expected: string;
-  try {
-    expected = publicLogoObjectUrl(pathname);
-  } catch {
-    throw new Error('unsafe_url');
-  }
-  if (url.protocol !== 'https:' || url.username || url.password || url.port
-    || url.search || url.hash || url.toString().length > 4000
-    || url.toString() !== expected) throw new Error('unsafe_url');
+  if (url.toString().length > 4000
+    || !isPublicLogoObjectReadUrlForKey(url.toString(), pathname)) throw new Error('unsafe_url');
   return url.toString();
 }

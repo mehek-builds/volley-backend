@@ -67,7 +67,6 @@ export function loadConfig(environment = process.env) {
   const deployedSha = (environment.RAILWAY_GIT_COMMIT_SHA ?? '').trim()
     || (environment.GIT_SHA ?? '').trim()
     || null;
-
   const retryMs = integerSetting(environment.JOB_MONITOR_RETRY_MS, 30_000, {
     name: 'JOB_MONITOR_RETRY_MS',
     max: MAX_TIMER_MS - 1,

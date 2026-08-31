@@ -1,4 +1,8 @@
-# Deploying the Litos backend to Vercel
+# Deploying the Litos backend
+
+The active production migration targets Railway. The Vercel instructions below remain only for
+rollback reference during cutover. Use the Railway verified-job inventory cutover section for the
+current API, worker, object storage, and scheduler configuration.
 
 The app is a Fastify server wrapped as a single Vercel serverless function
 (`api/index.ts`); `vercel.json` rewrites every path to it and raises the function
@@ -295,8 +299,13 @@ Use this order for the Railway migration:
 3. Stop the legacy Vercel job-monitor cron and the scheduled GitHub job-monitor workflow. Keep only
    the workflow's manual fallback.
 4. Run `npm run db:job-logo-evidence:finalize`.
-5. Run `npm run db:job-board-performance` against the production database.
-6. Start exactly one Railway worker replica with the exact command `npm run worker:job-monitor`.
+5. Run `npm run db:job-board-performance` against the production database. This verifies the
+   finalized certification fingerprint constraint before installing the versioned grouped
+   projection, its atomic refresh function, and the posting and search indexes.
+6. Set the Railway worker service start command to `npm run worker:job-monitor` and scale it to
+   exactly one replica. Set the API service start command to `node dist/index.js` and its health
+   check path to `/health`. The shared `railway.json` intentionally declares neither command so the
+   two services cannot inherit the wrong process.
 7. Wait for the worker's `complete_drain` event and verify its deployed SHA and every certified
    inventory floor.
 8. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
@@ -322,10 +331,18 @@ worker sleeps for two hours only after a successful complete drain. Configure an
 the age of the last `complete_drain` log, because a failed drain intentionally retries rather than
 declaring success.
 
+The 500,000-row PostgreSQL 16 benchmark uses 5,000 sources, 60,000 grouped roles, and a cursor at
+90 percent depth. The measured deep posting, searched posting, and grouped cursor queries complete
+in under 36 milliseconds. The full certification refresh completes in about 19.4 seconds locally.
+Production allows up to 120 seconds for that refresh and returns structured stage-specific timeout
+evidence. After consecutive timeouts the worker emits `persistent_metrics_timeout_alert` and never
+emits `complete_drain`.
+
 In GitHub, set `INTERNAL_CRON_SECRET` to the same value as Railway and set the `LITOS_API_BASE`
-Actions variable to the Railway API before retiring Vercel. The job-monitor workflow is manual-only;
-the other maintenance workflows still require their own migration before their Vercel ownership is
-removed.
+Actions variable to the Railway API before retiring Vercel. The job-monitor workflow is manual-only.
+Daily maintenance and the dedicated sub-daily workflows call the explicit Railway API target, fail
+closed when that target is absent, and never fall back to the retired Vercel hostname. Vercel owns
+no scheduled jobs after cutover.
 
 Before enabling Google sign-in, add the identity column without touching existing users:
 

@@ -488,7 +488,9 @@ test('the worker uses a longer floor backoff and starts the next drain with an e
   const scheduled = messages.error.find((entry) => entry.event === 'inventory_floor_repoll_scheduled');
   assert.equal(scheduled.retry_ms, 370);
   assert.equal(scheduled.next_drain_uses_fresh_cursor, true);
-  const completeDrain = messages.log.find((entry) => entry.event === 'complete_drain');
+  const completeDrains = messages.log.filter((entry) => entry.event === 'complete_drain');
+  assert.equal(completeDrains.length, 1);
+  const [completeDrain] = completeDrains;
   assert.ok(completeDrain);
   assert.equal(completeDrain.deployed_sha, 'railway-deployed-sha');
 });

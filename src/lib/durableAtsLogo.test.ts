@@ -39,6 +39,25 @@ test('durable Rippling copies use a content-addressed public path with immutable
   }
 });
 
+test('durable Rippling copies accept only an exact Vercel rollback object path', async () => {
+  const digest = createHash('sha256').update(png).digest('hex');
+  const pathname = `company-logos/rippling/utility/${digest}.png`;
+  const result = await persistDurableAtsLogo({
+    provider: 'rippling',
+    board_token: 'Utility',
+    bytes: png,
+    content_type: 'image/png',
+  }, async () => ({ url: `https://litos.public.blob.vercel-storage.com/${pathname}` }));
+  assert.equal(result, `https://litos.public.blob.vercel-storage.com/${pathname}`);
+
+  await assert.rejects(() => persistDurableAtsLogo({
+    provider: 'rippling',
+    board_token: 'Utility',
+    bytes: png,
+    content_type: 'image/png',
+  }, async () => ({ url: `https://litos.public.blob.vercel-storage.com/${pathname}-wrong` })), /unsafe_url/);
+});
+
 test('durable copy rejects unsupported providers, media types, and returned hosts', async () => {
   const previousBase = process.env.OBJECT_STORAGE_PUBLIC_BASE_URL;
   process.env.OBJECT_STORAGE_PUBLIC_BASE_URL = 'https://api.trylitos.com';
