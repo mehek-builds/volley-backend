@@ -478,7 +478,13 @@ function crelateSettingsUrl(organizationId: string): string {
 }
 
 async function crelateBranding(token: string, fetcher: typeof fetch): Promise<ExtractedBranding> {
-  const vars = parseJson(await fetchText(fetcher, crelateClientVarsUrl(token), 'json', MAX_JSON_BYTES));
+  const vars = parseJson(await fetchText(
+    fetcher,
+    crelateClientVarsUrl(token),
+    'json',
+    MAX_JSON_BYTES,
+    (host) => host === 'jobs.crelate.com',
+  ));
   if (!vars || typeof vars !== 'object') fail('malformed_response');
   const client = vars as Record<string, unknown>;
   const organizationId = text(client.ORG_ID);
@@ -488,7 +494,13 @@ async function crelateBranding(token: string, fetcher: typeof fetch): Promise<Ex
     || orgName !== token.toLowerCase() || !displayName
     || text(client.BASE_URL)?.toLowerCase() !== 'jobs.crelate.com') fail('malformed_response');
 
-  const settingsPayload = parseJson(await fetchText(fetcher, crelateSettingsUrl(organizationId), 'json', MAX_JSON_BYTES));
+  const settingsPayload = parseJson(await fetchText(
+    fetcher,
+    crelateSettingsUrl(organizationId),
+    'json',
+    MAX_JSON_BYTES,
+    (host) => host === 'app.crelate.com',
+  ));
   if (!settingsPayload || typeof settingsPayload !== 'object') fail('malformed_response');
   const settings = settingsPayload as Record<string, unknown>;
   const companyName = text(settings.Title);
