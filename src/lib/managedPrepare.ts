@@ -493,7 +493,7 @@ export async function prepareManagedApplication(
     const parsedProfile = record(currentProfile.parsed) ?? {};
     const accountEmail = currentAccount?.email ?? account?.email ?? undefined;
     const resumeEmail = resumeEmailForUpload(parsedProfile, accountEmail ?? undefined);
-    const applicationProfile = await dependencies.loadApplicationProfile(input.userId);
+    const applicationProfile = await dependencies.loadApplicationProfile(input.userId, tx);
     const contact = mainResumeContactHeader(
       parsedProfile,
       applicationProfile as Record<string, unknown>,
@@ -505,7 +505,7 @@ export async function prepareManagedApplication(
       contactEmail: resumeEmail,
       accountEmail,
       contactFromRequest: false,
-    });
+    }, { executor: tx });
     trackedApplicantEmail(applicantEmail);
 
     let rendered: RenderedMainResume;

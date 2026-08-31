@@ -46,7 +46,10 @@ const BASE_RESUME = {
 
 let database: PGlite;
 let server: PGLiteSocketServer;
-let backendPool: { end(): Promise<void> };
+let backendPool: {
+  end(): Promise<void>;
+  options: { max: number; connectionTimeoutMillis?: number };
+};
 let backendDb: any;
 let app: FastifyInstance;
 let authorization: string;
@@ -382,6 +385,53 @@ test('prepares one Free-plan packet with an exact canonical, artifact, and revie
   assert.equal(storeCalls, 1);
   assert.equal(readCalls, 0);
   assert.equal(packetCalls, 1);
+});
+
+test('default profile and email DB readers complete with the production one-connection pool', async () => {
+  await seedUser(STUDENT, 'student@example.test');
+  assert.equal(backendPool.options.max, 1, 'VERCEL must configure the production pool limit');
+  const previousConnectionTimeout = backendPool.options.connectionTimeoutMillis;
+  backendPool.options.connectionTimeoutMillis = 250;
+  try {
+    const [{ prepareManagedApplication }, { loadApplicationProfileLike }, { planPacketApplicantEmail }] = await Promise.all([
+      import('../lib/managedPrepare'),
+      import('../lib/applicationProfileLike'),
+      import('../lib/packetApplicantEmail'),
+    ]);
+    const result = await prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+      ...dependencies,
+      loadApplicationProfile: loadApplicationProfileLike,
+      planApplicantEmail: (input, planDependencies) => planPacketApplicantEmail(input, {
+        ...planDependencies,
+        deliverability: async () => ({
+          deliverable: true,
+          domain: 'mail.litos.test',
+          reason: 'deliverable',
+          mx_hosts: ['mx.litos.test'],
+          mx_provider: 'resend',
+          mx_provider_agrees: true,
+          resend_domain_status: 'verified',
+          resend_receiving_status: 'enabled',
+          inbound_route_configured: true,
+          checked_at: '2026-08-31T12:00:00.000Z',
+        }),
+        aliasFor: (userId, applicationId) =>
+          `apply+${userId.slice(0, 8)}-${applicationId}@mail.litos.test`,
+      }),
+    });
+    assert.equal(result.state, 'ready_for_review');
+    const seededBank = await database.query<{ total: number }>(
+      'select count(*)::int as total from "experience_bank" where "user_id" = $1',
+      [STUDENT],
+    );
+    assert.equal(seededBank.rows[0]?.total, 1);
+  } finally {
+    if (previousConnectionTimeout === undefined) {
+      delete backendPool.options.connectionTimeoutMillis;
+    } else {
+      backendPool.options.connectionTimeoutMillis = previousConnectionTimeout;
+    }
+  }
 });
 
 test('replays the exact committed result without rendering, storing, or building twice', async () => {

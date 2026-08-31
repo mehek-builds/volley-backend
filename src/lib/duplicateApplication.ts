@@ -290,12 +290,15 @@ async function submittedApplications(
  * tell the applicant those two apart in a sentence. Here they have the same consequence - do not
  * speak for her - so they are not told apart.
  */
-export async function submittedApplicationCompanies(userId: string): Promise<string[]> {
+export async function submittedApplicationCompanies(
+  userId: string,
+  executor: Pick<typeof db, 'select'> = db,
+): Promise<string[]> {
   const [rows, ledgerAttempts] = await Promise.all([
-    db.select({ company: sql<string | null>`${generated_resumes.job_context}->>'company'` })
+    executor.select({ company: sql<string | null>`${generated_resumes.job_context}->>'company'` })
       .from(generated_resumes)
       .where(and(eq(generated_resumes.user_id, userId), alreadyAtEmployer())),
-    blockingSubmissionAttemptsForUser(userId),
+    blockingSubmissionAttemptsForUser(userId, { executor }),
   ]);
   const companies = [
     ...rows.map((row) => row.company?.trim() ?? ''),

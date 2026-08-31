@@ -60,18 +60,24 @@ export function missingBankEntriesFromResumeSpec(
 //
 // created_at is the student's own authoring order; id breaks any same-timestamp tie (onboarding
 // inserts a batch in one statement, so identical timestamps are the normal case, not an edge one).
-export function readExperienceBank(userId: string): Promise<ExperienceBankEntry[]> {
-  return db
+export function readExperienceBank(
+  userId: string,
+  executor: Pick<typeof db, 'select'> = db,
+): Promise<ExperienceBankEntry[]> {
+  return executor
     .select()
     .from(experience_bank)
     .where(eq(experience_bank.user_id, userId))
     .orderBy(experience_bank.created_at, experience_bank.id);
 }
 
-export async function readExperienceBankOrSeedFromBaseResume(userId: string): Promise<ExperienceBankEntry[]> {
-  const existing = await readExperienceBank(userId);
+export async function readExperienceBankOrSeedFromBaseResume(
+  userId: string,
+  executor: Pick<typeof db, 'select' | 'insert'> = db,
+): Promise<ExperienceBankEntry[]> {
+  const existing = await readExperienceBank(userId, executor);
 
-  const [profile] = await db
+  const [profile] = await executor
     .select({ base_resume_json: profiles.base_resume_json })
     .from(profiles)
     .where(eq(profiles.user_id, userId))
@@ -82,6 +88,6 @@ export async function readExperienceBankOrSeedFromBaseResume(userId: string): Pr
   const entries = missingBankEntriesFromResumeSpec(spec, userId, existing);
   if (entries.length === 0) return existing;
 
-  await db.insert(experience_bank).values(entries);
-  return readExperienceBank(userId);
+  await executor.insert(experience_bank).values(entries);
+  return readExperienceBank(userId, executor);
 }

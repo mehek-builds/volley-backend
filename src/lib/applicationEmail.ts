@@ -168,10 +168,11 @@ export async function ensureApplicationEmailAlias(input: {
 export async function applicationForwardingAddress(
   userId: string,
   accountEmail?: string | null,
+  executor: Pick<typeof db, 'select'> = db,
 ): Promise<string | null> {
   const fallback = accountEmail?.trim().toLowerCase() || null;
   try {
-    const rows = await db
+    const rows = await executor
       .select({ preferred: users.application_email_forward_to, account: users.email })
       .from(users)
       .where(eq(users.id, userId))
