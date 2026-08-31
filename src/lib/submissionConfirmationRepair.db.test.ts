@@ -594,6 +594,17 @@ test('a named untouched legacy opening repairs once and replays idempotently', a
   assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 1);
 });
 
+test('an uppercase legacy attempt id still binds the lowercase stored opening', async () => {
+  const fixture = await seedLegacyRepairCandidate();
+  const dryRun = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.generatedAttemptId.toUpperCase(),
+  });
+  assert.equal(dryRun.status, 'eligible', JSON.stringify(dryRun));
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
 test('the manual-capability legacy opening cannot take the managed receipt', async () => {
   const fixture = await seedLegacyRepairCandidate();
   const result = await repairMissingSubmissionConfirmation({

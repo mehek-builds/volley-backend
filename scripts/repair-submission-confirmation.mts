@@ -11,11 +11,12 @@ function valueAfter(flag: string): string | null {
 
 const userId = valueAfter('--user-id');
 const applicationId = valueAfter('--application-id');
+const legacyFlagPresent = process.argv.includes('--legacy-attempt-id');
 const legacyAttemptId = valueAfter('--legacy-attempt-id');
 const apply = process.argv.includes('--apply');
 
 if (!userId || !UUID.test(userId) || !applicationId || !UUID.test(applicationId)
-  || (legacyAttemptId !== null && !LEGACY_ATTEMPT_ID.test(legacyAttemptId))) {
+  || (legacyFlagPresent && (!legacyAttemptId || !LEGACY_ATTEMPT_ID.test(legacyAttemptId)))) {
   console.error('Usage: npx tsx scripts/repair-submission-confirmation.mts --user-id UUID --application-id UUID [--legacy-attempt-id ATTEMPT] [--apply]');
   process.exitCode = 2;
 } else {

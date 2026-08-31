@@ -170,6 +170,8 @@ export async function repairMissingSubmissionConfirmation(input: {
   dryRun?: boolean;
 }): Promise<SubmissionConfirmationRepairResult> {
   const dryRun = input.dryRun !== false;
+  // Postgres uuid columns read back lowercase; normalize so a pasted uppercase id still binds.
+  const legacyAttemptId = input.legacyAttemptId?.toLowerCase();
   const scope = { userId: input.userId, applicationId: input.applicationId, dryRun };
   try {
     return await db.transaction(async (tx) => {
@@ -266,11 +268,11 @@ export async function repairMissingSubmissionConfirmation(input: {
       const openings = relatedEvents.filter((event) => event.event_kind === 'attempt_opened'
         && event.application_id === input.applicationId
         && event.packet_id === packet.id
-        && (input.legacyAttemptId
-          ? event.attempt_id === input.legacyAttemptId && event.source === 'legacy_backfill'
+        && (legacyAttemptId
+          ? event.attempt_id === legacyAttemptId && event.source === 'legacy_backfill'
           : event.attempt_id === review.submission_claim_id));
       if (openings.length === 0) {
-        return refused(scope, 'attempt_binding_missing', input.legacyAttemptId
+        return refused(scope, 'attempt_binding_missing', legacyAttemptId
           ? 'No immutable legacy_backfill attempt opening carries the named attempt for this exact application and packet.'
           : 'No immutable attempt opening matches the canonical application, packet, and receipt claim.');
       }
@@ -280,7 +282,7 @@ export async function repairMissingSubmissionConfirmation(input: {
       }
       const opening = openings[0]!;
       const attemptEvents = relatedEvents.filter((event) => event.attempt_id === opening.attempt_id);
-      if (input.legacyAttemptId) {
+      if (legacyAttemptId) {
         // A conservative backfilled opening is confirmable only while it is untouched: any later
         // fact means the attempt already progressed and must be resolved through its own route.
         if (attemptEvents.length !== 1) {
