@@ -225,9 +225,9 @@ async function seedSourceAndJob() {
   await database.query(
     `insert into "monitored_jobs"
        ("id", "source_id", "external_id", "company_name", "title", "description",
-        "ingest_eligible", "apply_url", "posting_url", "is_active")
+        "apply_url", "posting_url", "is_active")
      values ($1, $2, 'fixture-12345', 'Litos Fixture', 'Backend Engineer', $3,
-             true, $4, $4, true)`,
+             $4, $4, true)`,
     [JOB, SOURCE, DESCRIPTION, APPLY_URL],
   );
 }
