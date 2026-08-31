@@ -97,7 +97,9 @@ test('review writes compare the complete packet, not only its status', () => {
 });
 
 test('extension outcomes only mark confirmed claims applied', () => {
-  assert.match(source, /parsed\.data\.outcome === 'confirmed'[\s\S]*?pipeline_stage: 'applied'/);
+  // The stamp itself lives in persistReviewTransition; what this route owns is the decision, so
+  // what is pinned is that appliedAt is handed over only for a confirmed outcome.
+  assert.match(source, /outcome === 'confirmed' \? \{ appliedAt: new Date\(now\) \}/);
   assert.match(source, /current\.submission_claim_id !== parsed\.data\.claim_id/);
   assert.match(source, /extensionReceiptUrlSchema/);
   assert.match(source, /extensionEmployerReceiptIsSufficient\(/);

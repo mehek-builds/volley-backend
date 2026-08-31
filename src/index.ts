@@ -27,6 +27,7 @@ import { resumeRetentionRoutes } from './routes/resumeRetention';
 import { adapterHealthRoutes } from './routes/adapterHealth';
 import { billingCheckoutAvailable, stripeWebhookAvailable } from './lib/billingCatalog';
 import { managedReceivingCanaryRoutes } from './routes/managedReceivingCanary';
+import { canonicalApplicationHealRoutes } from './routes/canonicalApplicationHeal';
 import { targetingRoutes } from './routes/targeting';
 import { jdMatchRoutes } from './routes/jdMatch';
 import { harvestRoutes } from './routes/harvest';
@@ -454,6 +455,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(resumeRetentionRoutes);
   await fastify.register(adapterHealthRoutes);
   await fastify.register(managedReceivingCanaryRoutes);
+  await fastify.register(canonicalApplicationHealRoutes);
   await fastify.register(dashboardBootstrapRoutes);
 
   // Global error handler

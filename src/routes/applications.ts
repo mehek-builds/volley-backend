@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { deleteObjects, objectStorageUsesRailway, putObject } from '../lib/objectStorage';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withDedicatedDatabase } from '../db/index';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
@@ -265,6 +265,47 @@ function reviewSpec(review: unknown) {
 
 function approvedReviewSpec(review: unknown, approvedAt: string) {
   return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
+}
+
+/* THE ONE DOOR a route's review outcome goes through on its way to disk.
+ *
+ * Every route in this file that can land a packet on 'submitted' - the extension outcome, the
+ * unsupported-portal email send, the attended handoff, the self-submitted door, the unverified
+ * resolution - used to write its own UPDATE and then remember, separately, to tell the canonical
+ * applications row. Five writers remembered; the sixth would have had to know to. This helper is
+ * the choke point that removes the knowing: persist a review transition through it and the
+ * canonical advance happens by construction, gated on the status the persisted review actually
+ * landed on - the same predicate the runner's writeReview uses - and only after the guarded
+ * update confirmed it won, because a 409'd or 202'd write must not advance anything.
+ *
+ * The two parameters that stay with the caller are deliberate. `guards` is the route's own race
+ * boundary - which prior state this answer is allowed to overwrite is knowledge only the route
+ * has. `appliedAt` stamps pipeline_stage 'applied', and it stays explicit rather than derived
+ * from the status because the writers do not all stamp it today (the unverified resolution lands
+ * on 'submitted' without it), and this extraction changes no behavior.
+ *
+ * False means the guarded update found the packet already changed and wrote nothing; every caller
+ * answers that with its own 409 or refreshed 202. */
+async function persistReviewTransition(input: {
+  packetId: string;
+  userId: string;
+  next: ApplicationReviewState;
+  guards: SQL[];
+  appliedAt?: Date;
+}): Promise<boolean> {
+  const updated = await db.update(generated_resumes).set({
+    spec: reviewSpec(input.next),
+    ...(input.appliedAt ? { pipeline_stage: 'applied', pipeline_stage_at: input.appliedAt } : {}),
+  }).where(and(
+    eq(generated_resumes.id, input.packetId),
+    eq(generated_resumes.user_id, input.userId),
+    ...input.guards,
+  )).returning({ id: generated_resumes.id });
+  if (updated.length === 0) return false;
+  if (input.next.status === 'submitted') {
+    await advanceCanonicalApplicationFromPacketSubmission({ packetId: input.packetId, userId: input.userId });
+  }
+  return true;
 }
 
 /* Exported for its own test. Which state a re-run clears and which it carries forward is the whole
@@ -1503,23 +1544,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         confirmationText: parsed.data.confirmation_text,
         finalUrl: parsed.data.final_url,
       }), () => now);
-      const updated = await db.update(generated_resumes).set({
-        spec: reviewSpec(next),
-        ...(outcome === 'confirmed' ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) } : {}),
-      }).where(and(
-        eq(generated_resumes.id, row.id),
-        eq(generated_resumes.user_id, request.jwtPayload!.userId),
-        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-        sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
-        sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
-      )).returning({ id: generated_resumes.id });
-      if (!updated.length) return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
-      // The canonical row learns what the packet just did, gated on the status the persisted
-      // review actually landed on rather than re-deriving it from the outcome the extension sent.
-      if (next.status === 'submitted') {
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
-      }
+      const persisted = await persistReviewTransition({
+        packetId: row.id,
+        userId: request.jwtPayload!.userId,
+        next,
+        guards: [
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+          sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
+          sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+        ],
+        ...(outcome === 'confirmed' ? { appliedAt: new Date(now) } : {}),
+      });
+      if (!persisted) return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
       return reply.send({ application_id: row.id, review: next });
     },
   );
@@ -2354,25 +2391,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             source: 'email_fallback',
           },
         };
-        const updated = await db.update(generated_resumes)
-          .set({
-            spec: reviewSpec(next),
-            pipeline_stage: 'applied',
-            pipeline_stage_at: new Date(submittedAt),
-          })
-          .where(and(
-            eq(generated_resumes.id, row.id),
-            sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
-          ))
-          .returning({ id: generated_resumes.id });
-        if (updated.length === 0) {
+        // The application left as an email; persisting through the shared transition is what makes
+        // the canonical row stop offering to send it.
+        const persisted = await persistReviewTransition({
+          packetId: row.id,
+          userId: request.jwtPayload!.userId,
+          next,
+          guards: [sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`],
+          appliedAt: new Date(submittedAt),
+        });
+        if (!persisted) {
           const refreshed = await ownedResume(request, reply);
           if (!refreshed) return;
           const review = readApplicationReview(refreshed.spec);
           return reply.status(202).send({ application_id: row.id, review: review ?? current });
         }
-        // The application left as an email; the canonical row must stop offering to send it.
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
         const [refreshed] = await db.select().from(generated_resumes).where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, request.jwtPayload!.userId),
@@ -2573,28 +2606,25 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             source: 'attended_handoff' as const,
           },
         };
-        const submitted = await db.update(generated_resumes)
-          .set({
-            spec: reviewSpec(next),
-            pipeline_stage: 'applied',
-            pipeline_stage_at: new Date(now),
-          })
-          .where(and(
-            eq(generated_resumes.id, row.id),
-            eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        // The verified receipt filed the packet; the shared transition tells the canonical row
+        // the same fact.
+        const persisted = await persistReviewTransition({
+          packetId: row.id,
+          userId: request.jwtPayload!.userId,
+          next,
+          guards: [
             sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
             sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
             sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
-          ))
-          .returning({ id: generated_resumes.id });
-        if (submitted.length === 0) {
+          ],
+          appliedAt: new Date(now),
+        });
+        if (!persisted) {
           const refreshed = await ownedResume(request, reply);
           if (!refreshed) return;
           const review = readApplicationReview(refreshed.spec);
           return reply.status(202).send({ application_id: row.id, review: review ?? current });
         }
-        // The verified receipt filed the packet; the canonical row learns the same fact.
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
         return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
       }
       /* attention_acknowledgements goes with attention_reason: this spread bypasses
@@ -2681,21 +2711,20 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           source: 'attended_handoff',
         },
       }, () => now);
-      const submitted = await db.update(generated_resumes)
-        .set({
-          spec: reviewSpec(next),
-          pipeline_stage: 'applied',
-          pipeline_stage_at: new Date(now),
-        })
-        .where(and(
-          eq(generated_resumes.id, row.id),
-          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+      // She sent it herself; persisting through the shared transition is what makes the canonical
+      // row stop offering to send it for her.
+      const persisted = await persistReviewTransition({
+        packetId: row.id,
+        userId: request.jwtPayload!.userId,
+        next,
+        guards: [
           // Conditional on the status this answered for, so a send that started somewhere else in
           // the meantime is not overwritten by an answer about the screen before it.
           sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
-        ))
-        .returning({ id: generated_resumes.id });
-      if (submitted.length === 0) {
+        ],
+        appliedAt: new Date(now),
+      });
+      if (!persisted) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
         return reply.status(202).send({
@@ -2703,8 +2732,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           review: readApplicationReview(refreshed.spec) ?? current,
         });
       }
-      // She sent it herself; the canonical row must stop offering to send it for her.
-      await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
       return reply.send({
         application_id: row.id,
         review: next,
@@ -3075,22 +3102,20 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             + 'Litos can send it again whenever you are ready.',
           attention_categories: ['unverified_submission'],
         }, () => now);
-      const updated = await db.update(generated_resumes)
-        .set({ spec: reviewSpec(next) })
-        .where(and(
-          eq(generated_resumes.id, row.id),
+      // Only the arm that landed on 'submitted' files anything canonical, and the shared
+      // transition gates that on the persisted status; the released claim changes nothing.
+      const persisted = await persistReviewTransition({
+        packetId: row.id,
+        userId: request.jwtPayload!.userId,
+        next,
+        guards: [
           // Conditional on the record still being unresolved, so two clients answering at once
           // cannot both win and leave the packet in the loser's state.
           sql`${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null`,
-        ))
-        .returning({ id: generated_resumes.id });
-      if (updated.length === 0) {
+        ],
+      });
+      if (!persisted) {
         return reply.status(409).send({ error: 'This application was resolved somewhere else first' });
-      }
-      // Only the arm that landed on 'submitted' filed anything; the released claim changes nothing
-      // canonical. Gated on the persisted status, the same predicate the runner's writeReview uses.
-      if (next.status === 'submitted') {
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
       }
       return reply.status(200).send({ application_id: row.id, review: next });
     },
