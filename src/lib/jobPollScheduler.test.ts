@@ -85,6 +85,44 @@ test('spaces Workable starts across consecutive scheduler invocations', async ()
   assert.deepEqual(starts, [10_000, 10_000 + WORKABLE_START_INTERVAL_MS]);
 });
 
+test('spaces concurrent Workable scheduler invocations that share a clock', async () => {
+  let clock = 20_000;
+  const starts: number[] = [];
+  const now = () => clock;
+  const sleep = async (milliseconds: number) => { clock += milliseconds; };
+  const poll = async () => {
+    starts.push(clock);
+    return starts.length;
+  };
+
+  const first = pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+  const second = pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+  await Promise.all([first, second]);
+
+  assert.deepEqual(starts, [20_000, 20_000 + WORKABLE_START_INTERVAL_MS]);
+});
+
+test('holds the final Workable cooldown before propagating a poll rejection', async () => {
+  let clock = 30_000;
+  const waits: number[] = [];
+
+  await assert.rejects(
+    pollSourcesWithinBudget([{ ats_name: 'workable' }], async () => {
+      throw new Error('workable failed');
+    }, {
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        waits.push(milliseconds);
+        clock += milliseconds;
+      },
+    }),
+    /workable failed/,
+  );
+
+  assert.deepEqual(waits, [WORKABLE_START_INTERVAL_MS]);
+  assert.equal(clock, 30_000 + WORKABLE_START_INTERVAL_MS);
+});
+
 test('starts paced Workable polls without waiting for an earlier Workable request to finish', async () => {
   let clock = 0;
   const starts: number[] = [];

@@ -125,6 +125,16 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
     allStarted.push(task);
   };
 
+  const waitForWorkableStartBarrier = async () => {
+    while (true) {
+      const nextWorkableStart = nextWorkableStartByClock.get(now);
+      if (nextWorkableStart === undefined) return;
+      const wait = nextWorkableStart - now();
+      if (wait <= 0) return;
+      await sleep(wait);
+    }
+  };
+
   while ((ordinary.length > 0 || workable.length > 0) && firstError === noError) {
     while (active.size < concurrency && now() < startDeadline && firstError === noError) {
       const currentTime = now();
@@ -162,6 +172,9 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   // A caller can release its distributed lock as soon as this function settles. Wait for every
   // started request, including siblings of a rejected request, before returning or rethrowing.
   await Promise.allSettled(allStarted);
+  // Hold that lock through the final provider cooldown too. This keeps the boundary safe even if
+  // the next invocation lands in a fresh process that cannot see the in-memory barrier.
+  await waitForWorkableStartBarrier();
   if (firstError !== noError) throw firstError;
 
   const results = resultSlots.map((slot) => {
