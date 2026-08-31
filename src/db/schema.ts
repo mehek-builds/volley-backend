@@ -6,6 +6,7 @@ import {
   timestamp,
   jsonb,
   integer,
+  bigint,
   real,
   doublePrecision,
   boolean,
@@ -247,6 +248,25 @@ export const users = pgTable('users', {
   billingSubscriptionUnique: uniqueIndex('users_billing_subscription_unique')
     .on(t.billing_subscription_id)
     .where(sql`${t.billing_subscription_id} is not null`),
+}));
+
+/* One durable cache-coherence token for the complete submission-authority snapshot of a user.
+ * PostgreSQL owns increments through migration-installed triggers so a writer cannot publish an
+ * authority-affecting row without changing the revision in that same transaction. Runtime code
+ * serializes the bigint as a canonical decimal string and never converts it through Number.
+ */
+export const submission_authority_revisions = pgTable('submission_authority_revisions', {
+  user_id: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  schema_version: text('schema_version').default('submission-authority-v1').notNull(),
+  revision: bigint('revision', { mode: 'bigint' }).default(sql`0`).notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  schemaVersionCheck: check('submission_authority_revisions_schema_version_check', sql`
+    ${t.schema_version} = 'submission-authority-v1'
+  `),
+  nonnegativeRevisionCheck: check('submission_authority_revisions_nonnegative_check', sql`
+    ${t.revision} >= 0
+  `),
 }));
 
 /* ---- tables live in prod that main does not otherwise use ----

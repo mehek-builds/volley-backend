@@ -42,21 +42,10 @@ export type ApplicationReviewQuestion = {
    * provenance list, because it is not a claim about how the answer got there.
    */
   options?: string[] | null;
-  /**
-   * THE TEXT A RE-OPENED QUESTION USED TO CARRY, offered back as a prefilled draft.
-   *
-   * Written only by reopenUnfitClosedChoiceQuestions (lib/questionMetadata.ts) when a stored
-   * answer on a strict closed-choice control matches none of the control's measured exact options:
-   * the unfillable answer is blanked so the question re-enters the dashboard flow as a required
-   * blocker with its options, and the removed text lands here so a client that supports drafts can
-   * show her what was there. Cleared by the same pass the moment the question carries a real
-   * answer again.
-   *
-   * DISPLAY ONLY, like `options`, and for the same reason: the employer receives the value she
-   * chooses, never the draft, so hashing it would spend acknowledgements over text nobody sends.
-   * It is not provenance either - it makes no claim about how any answer got anywhere.
-   */
+  /** Previous text retained only for a reopened exact-choice question in the dashboard. */
   answer_draft?: string;
+  /** Dashboard workflow for an optional answer that Litos must not silently decide. */
+  answer_state?: 'unanswered' | 'skipped' | 'litos_refused';
   /* WHO PUT THIS ANSWER HERE, when it was not simply resolved from the profile.
    *
    * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
@@ -212,7 +201,7 @@ type PacketVisibleQuestionField = (typeof PACKET_VISIBLE_QUESTION_FIELDS)[number
  * chose, never the list, so hashing it would spend every stored acknowledgement the first time a
  * board reordered its own options. That is precisely the deadlock the allow-list was narrowed to
  * prevent, and a test in packetAudit.test.ts pins it. */
-type QuestionDisplayField = 'options' | 'answer_draft';
+type QuestionDisplayField = 'options' | 'answer_draft' | 'answer_state';
 type QuestionFieldClassification =
   PacketVisibleQuestionField | AnswerProvenanceField | QuestionDisplayField;
 type UnclassifiedQuestionField =
@@ -303,9 +292,13 @@ export function normalizeApplicationReviewQuestions(
      * later read is the fresher read of the employer's own control, so it wins when present. */
     const optionsMeasured = Object.prototype.hasOwnProperty.call(question, 'options');
     const options = optionsMeasured ? (question.options ?? null) : existing.options;
+    const answerState = question.answer.trim()
+      ? undefined
+      : question.answer_state ?? existing.answer_state;
+    const { answer_state: _existingAnswerState, ...existingWithoutAnswerState } = existing;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
-        ...existing,
+        ...existingWithoutAnswerState,
         required: existing.required || question.required,
         answer: existing.answer.trim() ? existing.answer : question.answer,
       };
@@ -315,19 +308,22 @@ export function normalizeApplicationReviewQuestions(
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
         ...(atsApiField ? { ats_api_field: atsApiField } : {}),
         ...(optionsMeasured ? { options } : {}),
+        ...(answerState ? { answer_state: answerState } : {}),
       };
     } else if (
       (portalSelector && portalSelector !== existing.portal_selector)
       || (portalInputType && portalInputType !== existing.portal_input_type)
       || (atsApiField && atsApiField !== existing.ats_api_field)
       || (optionsMeasured && options !== existing.options)
+      || answerState !== existing.answer_state
     ) {
       normalized[existingIndex] = {
-        ...existing,
+        ...existingWithoutAnswerState,
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
         ...(atsApiField ? { ats_api_field: atsApiField } : {}),
         ...(optionsMeasured ? { options } : {}),
+        ...(answerState ? { answer_state: answerState } : {}),
       };
     }
   }
@@ -602,9 +598,14 @@ export function mergeSubmittedApplicationReviewQuestions(
     const carriedForward = exactReviewedIdentityUnchanged
       ? question
       : { ...questionWithoutProvenance, ...carriedAnswerClaims };
+    const { answer_state: _carriedAnswerState, ...carriedForwardWithoutAnswerState } = carriedForward;
+    const nextAnswerState = submittedQuestion.answer.trim()
+      ? undefined
+      : submittedQuestion.answer_state ?? question.answer_state;
     return {
-      ...carriedForward,
+      ...carriedForwardWithoutAnswerState,
       answer: submittedQuestion.answer,
+      ...(nextAnswerState ? { answer_state: nextAnswerState } : {}),
       kind: submittedQuestion.kind,
       required: question.required || submittedQuestion.required,
       // The stored label is the form identity. A public submit body may update an answer but cannot
@@ -648,9 +649,15 @@ export function mergeSubmittedApplicationReviewQuestions(
       /* The request flag, spent above and never stored: a persisted `confirmed` would be a second,
        * uncheckable copy of the claim answer_source already carries. */
       confirmed: _confirmed,
+      answer_state: submittedAnswerState,
       ...submittedWithoutProvenance
     } = question;
-    merged.push(submittedWithoutProvenance);
+    merged.push({
+      ...submittedWithoutProvenance,
+      ...(!submittedWithoutProvenance.answer.trim() && submittedAnswerState
+        ? { answer_state: submittedAnswerState }
+        : {}),
+    });
   }
   return normalizeApplicationReviewQuestions(merged);
 }
@@ -1100,7 +1107,11 @@ export type ApplicationReviewState = {
     completed_at?: string;
     runner?: 'stratus-managed';
     continuation_fingerprint?: string;
+    continuation_execution_fingerprint?: string;
     continuation_resumed?: boolean;
+    /** Database-clock window in which the one retained-session provider call may still be live. */
+    continuation_call_started_at?: string;
+    continuation_call_deadline_at?: string;
   };
   receipt?: {
     confirmation_text: string;

@@ -51,6 +51,9 @@ import {
   managedActionDiagnosticsForLog,
   stableManagedDocumentCapability,
   managedFormSnapshotWithStableCapabilities,
+  managedContinuationSubmissionAttempt,
+  managedInitialSubmissionAttempt,
+  undecidedOptionalQuestionLabels,
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels } from '../lib/submissionSafety';
@@ -71,6 +74,10 @@ import {
 import { resolveProfileField } from '../lib/profileFieldResolution';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion, ApplicationReviewState } from '../lib/applicationReview';
+import type {
+  SubmissionAttemptBinding,
+  SubmissionBoundaryAuthorization,
+} from '../lib/submissionAttemptLedger';
 import type { SubmissionPacket } from '../lib/portalSubmission';
 import { createEmployerDeliveryBindings, employerDeliveryEnvelope } from '../lib/employerDeliveryIdentity';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
@@ -85,6 +92,62 @@ import {
   CONTROLLED_PORTAL_BINDING_PARAM,
   controlledPortalBinding,
 } from '../lib/controlledTestPortal';
+
+test('managed initial, security-code, and observation calls have distinct stable execution ids', () => {
+  const attemptId = '22222222-2222-4222-8222-222222222222';
+  const binding: SubmissionAttemptBinding = {
+    attemptId,
+    userId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    packetId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    applicationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    source: 'managed_browser',
+    operation: 'initial_submission',
+    postingIdentity: {
+      postingKey: 'workable:example:a1b2c3d4e5',
+      jobId: null,
+      companyRole: 'example|role',
+      company: 'Example',
+      role: 'Role',
+      portalUrl: 'https://apply.workable.com/example/j/A1B2C3D4E5/apply/',
+      portalIdentity: 'https://apply.workable.com',
+    },
+    submissionRunId: '11111111-1111-4111-8111-111111111111',
+    submissionClaimId: attemptId,
+  };
+  const authorization: SubmissionBoundaryAuthorization = {
+    leaseId: '33333333-3333-4333-8333-333333333333',
+    attemptId,
+    activationId: '44444444-4444-4444-8444-444444444444',
+    authorizedAt: '2026-08-31T10:00:00.000Z',
+    expiresAt: '2026-08-31T10:03:00.000Z',
+    serverNow: '2026-08-31T10:00:00.000Z',
+    active: true,
+  };
+  const initial = managedInitialSubmissionAttempt(binding, authorization);
+  const security = managedContinuationSubmissionAttempt(binding, 'security_code');
+  const observation = managedContinuationSubmissionAttempt(binding, 'receipt_observation');
+  assert.equal(initial.executionId, authorization.activationId);
+  assert.notEqual(security.executionId, initial.executionId);
+  assert.notEqual(observation.executionId, initial.executionId);
+  assert.notEqual(observation.executionId, security.executionId);
+  assert.deepEqual(managedContinuationSubmissionAttempt(binding, 'security_code'), security);
+});
+
+test('optional unanswered or refused questions wait for Answer or Skip, while skipped can send', () => {
+  const question = {
+    question: 'Would you like to share anything else?',
+    answer: '',
+    required: false,
+  } as const;
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer_state: 'unanswered' }]), [
+    question.question,
+  ]);
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer_state: 'litos_refused' }]), [
+    question.question,
+  ]);
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer_state: 'skipped' }]), []);
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer: 'My answer' }]), []);
+});
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -3289,7 +3352,7 @@ test('export controls is surfaced but never auto-answered, and neither is any se
   assert.match(result.questionMetadataBlockers[0]?.question ?? '', /^EXPORT CONTROLS/);
 });
 
-test('an optional field Litos cannot answer is still left alone, so submission is not blocked on it', async () => {
+test('optional fields Litos cannot answer remain visible until the applicant answers or skips them', async () => {
   const result = await discoverAndResolveQuestions(
     [
       // No required marker: the employer does not need these, so inventing a required question here
@@ -3305,7 +3368,17 @@ test('an optional field Litos cannot answer is still left alone, so submission i
     'greenhouse',
   );
 
-  assert.deepEqual(result.questions.filter((question) => !question.answer.trim()), []);
+  assert.deepEqual(
+    result.questions.filter((question) => !question.answer.trim()).map((question) => ({
+      question: question.question,
+      required: question.required,
+      answerState: question.answer_state,
+    })),
+    [
+      { question: 'Website', required: false, answerState: 'unanswered' },
+      { question: 'What is your favourite bird?', required: false, answerState: 'unanswered' },
+    ],
+  );
 });
 
 test('required-ness reaches the stored question, so the dashboard and the 422 stop being inert', async () => {
@@ -4922,7 +4995,10 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   const submitStart = source.indexOf('async function submit(row: ResumeRow');
   const submitEnd = source.indexOf('\n/**\n * What a failed run tells the applicant', submitStart);
   const submitBody = source.slice(submitStart, submitEnd);
-  assert.match(submitBody, /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions\)/);
+  assert.match(
+    submitBody,
+    /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions, attemptBinding\)/,
+  );
   assert.match(submitBody, /submitViaAtsSubmissionChannel\([\s\S]{0,180}packetAudit\.audit,[\s\S]{0,80}packetAudit\.questions/);
   const managedStart = submitBody.indexOf('if (isManagedStratusProvider())');
   const directStart = submitBody.indexOf("if (!claimedReview.browser_session_id)", managedStart);
@@ -4938,11 +5014,11 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   assert.ok(direct.indexOf('assertVerifiedBuiltPacket(') < direct.indexOf('getBrowserSession('),
     'direct send must verify before it reconnects to the employer session');
   const controlled = source.slice(source.indexOf('async function submitControlled('), source.indexOf('async function submitViaAtsSubmissionChannel('));
-  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,500}'full', envelope\)/,
+  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,900}'full', envelope\)/,
     'the controlled transport must name its audit-time delivery mode');
-  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await executeAfterFinalSubmissionBoundary\([\s\S]{0,180}\(\) => clickFinalSubmit\(page\)/,
     'controlled submit must recheck the exact posting URL immediately before its click');
-  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await executeAfterFinalSubmissionBoundary\([\s\S]{0,180}\(\) => clickFinalSubmit\(page\)/,
     'direct submit must recheck the exact posting URL immediately before its click');
   const ats = source.slice(source.indexOf('async function submitViaAtsSubmissionChannel('), source.indexOf('const SECURITY_CODE_CONTINUATION_TTL_SECONDS'));
   const atsRefusal = ats.indexOf('ATS API delivery is withheld until Litos can verify and send one prebuilt request object');

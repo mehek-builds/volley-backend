@@ -129,6 +129,7 @@ const questionSchema = z.object({
   required: z.boolean(),
   portal_selector: z.string().max(2000).optional(),
   portal_input_type: z.string().max(100).optional(),
+  answer_state: z.enum(['unanswered', 'skipped', 'litos_refused']).optional(),
 });
 const reviewBodySchema = z.object({
   ats_name: z.string().min(1).max(100),

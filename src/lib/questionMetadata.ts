@@ -26,7 +26,7 @@ const QUESTION_CONTROL_TYPE = /^(?:text|textarea|select(?:-one|-multiple)?|radio
 
 type MetadataDiscoveryField = Pick<
   DiscoveredQuestion,
-  'label' | 'selector' | 'durableSelector' | 'inputType' | 'role' | 'options' | 'required'
+  'label' | 'selector' | 'durableSelector' | 'inputType' | 'role' | 'options' | 'optionsComplete' | 'required'
 >;
 
 export function questionLabelIsGenericAnswerControl(label: string): boolean {
@@ -37,6 +37,7 @@ export function discoveredQuestionsForExactOptionProbe(
   fields: readonly DiscoveredQuestion[],
 ): DiscoveredQuestion[] {
   return fields.map((field) => {
+    if (field.optionsComplete === false) return { ...field, options: null };
     const blocker = questionMetadataBlockerForDiscovered(field, {
       closedControlRequiresOptions: true,
     });
@@ -99,8 +100,9 @@ export function questionMetadataBlockerForDiscovered(
   }
   const reportedOptions = field.options?.some((option) => option.trim().length > 0) === true;
   if (CLOSED_CONTROL_TYPE.test(portalInputType)
-    && usableOptions(field.options).length === 0
-    && (options.closedControlRequiresOptions === true || reportedOptions)) {
+    && (field.optionsComplete === false
+      || (usableOptions(field.options).length === 0
+        && (options.closedControlRequiresOptions === true || reportedOptions)))) {
     return { kind: 'missing_exact_options', question, ...base };
   }
   return null;
