@@ -20,6 +20,14 @@ export const POLL_TIME_BUDGET_MS = 9 * 60_000;
 export const POLL_START_RESERVE_MS = 60_000;
 export const WORKABLE_START_INTERVAL_MS = 1_100;
 
+/**
+ * Workable applies its limit across requests, not across one scheduler invocation. Key the
+ * process-wide barrier by the clock function so production calls share Date.now while tests can
+ * use isolated deterministic clocks. Every start re-reads this map, which also coordinates
+ * overlapping invocations in the same worker process.
+ */
+const nextWorkableStartByClock = new WeakMap<() => number, number>();
+
 type PollSource = { ats_name: string };
 
 type PollQueueOptions = {
@@ -89,7 +97,6 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   const allStarted: Promise<void>[] = [];
   const startedAt = now();
   const startDeadline = startedAt + Math.max(0, timeBudgetMs - startReserveMs);
-  let nextWorkableStart = startedAt;
   const noError = Symbol('no poll error');
   let firstError: unknown = noError;
 
@@ -121,9 +128,10 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   while ((ordinary.length > 0 || workable.length > 0) && firstError === noError) {
     while (active.size < concurrency && now() < startDeadline && firstError === noError) {
       const currentTime = now();
+      const nextWorkableStart = nextWorkableStartByClock.get(now) ?? currentTime;
       if (workable.length > 0 && currentTime >= nextWorkableStart) {
         const source = workable.shift()!;
-        nextWorkableStart = currentTime + workableStartIntervalMs;
+        nextWorkableStartByClock.set(now, currentTime + workableStartIntervalMs);
         startPoll(source);
         continue;
       }
@@ -141,6 +149,7 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
     }
 
     if (ordinary.length === 0 && workable.length > 0) {
+      const nextWorkableStart = nextWorkableStartByClock.get(now) ?? now();
       const wait = Math.min(nextWorkableStart - now(), startDeadline - now());
       if (wait <= 0) continue;
       await sleep(wait);

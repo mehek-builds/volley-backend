@@ -69,6 +69,22 @@ test('spaces Workable request starts beyond the shared provider limit', async ()
   assert.equal(outcome.deferred, 0);
 });
 
+test('spaces Workable starts across consecutive scheduler invocations', async () => {
+  let clock = 10_000;
+  const starts: number[] = [];
+  const now = () => clock;
+  const sleep = async (milliseconds: number) => { clock += milliseconds; };
+  const poll = async () => {
+    starts.push(clock);
+    return starts.length;
+  };
+
+  await pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+  await pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+
+  assert.deepEqual(starts, [10_000, 10_000 + WORKABLE_START_INTERVAL_MS]);
+});
+
 test('starts paced Workable polls without waiting for an earlier Workable request to finish', async () => {
   let clock = 0;
   const starts: number[] = [];
