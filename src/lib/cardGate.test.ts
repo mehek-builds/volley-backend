@@ -257,6 +257,7 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
       assert.equal(await cardGateRouteReachable('/jobs/:id', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/resume/generate', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/postings/:jobId/questions', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/applications/managed-prepare', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), true);
     } finally {
@@ -293,6 +294,7 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
     try {
       assert.equal(await cardGateRouteReachable('/jobs', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/resume/generate', 'user-1'), false);
+      assert.equal(await cardGateRouteReachable('/applications/managed-prepare', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), false);
     } finally {

@@ -38,6 +38,7 @@ import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
 import { canonicalApplicationRoutes } from './routes/canonicalApplications';
 import { applicationFromJobRoutes } from './routes/applicationFromJob';
+import { managedPrepareRoutes } from './routes/managedPrepare';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { autopilotMatcherRoutes } from './routes/autopilotMatcher';
 import { captchaStallRoutes } from './routes/captchaStalls';
@@ -437,6 +438,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(canonicalApplicationRoutes);
   await fastify.register(applicationFromJobRoutes);
+  await fastify.register(managedPrepareRoutes);
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(autopilotMatcherRoutes);

@@ -319,7 +319,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
         // (what requestPathForCardGate actually reads) is always the registered template by the
         // time a preHandler runs, never the resolved literal path. See lib/cardGate.ts's TIER B2
         // comment for why exact-set matching depends on that.
-        for (const url of ['/jobs', '/jobs/:id', '/resume/generate', '/applications/from-job', '/applications/:id/submit-request']) {
+        for (const url of ['/jobs', '/jobs/:id', '/resume/generate', '/applications/managed-prepare', '/applications/from-job', '/applications/:id/submit-request']) {
           const request = requestFor(token, url);
           const { reply, calls } = outcome();
           await requireAuth(request, reply);
@@ -331,7 +331,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
     await t.test('...and are blocked once a real submission exists: the account has already spent its one free build (THE FINDING #1 FIX)', async () => {
       const token = await signToken('user-gated-5');
       await withMockedUser(userRow(), async () => {
-        for (const url of ['/jobs', '/resume/generate', '/applications/from-job']) {
+        for (const url of ['/jobs', '/resume/generate', '/applications/managed-prepare', '/applications/from-job']) {
           const request = requestFor(token, url);
           const { reply, calls } = outcome();
           await requireAuth(request, reply);
