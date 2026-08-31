@@ -402,6 +402,46 @@ test('a crashed create is cleared only after an expired reservation query finds 
   }
 });
 
+test('a malformed nonempty provider query cannot retire an expired creation reservation', async () => {
+  const userId = randomUUID();
+  const cleanupId = randomUUID();
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `provider-create-malformed-${userId}@example.test`,
+  });
+  await backendDb.insert(schema.browser_provider_resource_cleanups).values({
+    id: cleanupId,
+    user_id: userId,
+    provider: 'browserbase',
+    resource_type: 'session',
+    creation_expires_at: new Date('2020-01-01T00:00:00.000Z'),
+  });
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-malformed-cleanup-test-key';
+  try {
+    globalThis.fetch = (async (input) => {
+      assert.match(String(input), /\/sessions\?q=/);
+      return new Response(JSON.stringify([{}]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    await assert.rejects(
+      drainBrowserProviderResourcesBeforeAccountDeletion(userId),
+      /without an exact resource id/i,
+    );
+    const [stillPending] = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+      .where(eq(schema.browser_provider_resource_cleanups.id, cleanupId)).limit(1);
+    assert.equal(stillPending.provider_resource_id, null);
+    assert.equal(stillPending.provider_confirmed_gone_at, null);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+  }
+});
+
 test('an ambiguous recovered create atomically persists every exact remote cleanup obligation', async () => {
   const userId = randomUUID();
   const cleanupId = randomUUID();

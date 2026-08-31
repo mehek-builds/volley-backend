@@ -1148,10 +1148,11 @@ export function startManagedBrowserRequestBudget(timeoutMs: number): ManagedBrow
   });
 }
 
-function assertManagedBrowserRequestBudget(
+export function assertManagedBrowserRequestBudgetAtClock(
   budget: ManagedBrowserRequestBudget,
   providerDeadlineAt: string,
   minimumDispatchBudgetMs: number,
+  clockNowMs = Date.now(),
 ): void {
   assertManagedBrowserTimeout(budget.timeoutMs, 'Managed Stratus request');
   if (!Number.isFinite(budget.startedAtMs) || budget.startedAtMs < 0) {
@@ -1163,12 +1164,16 @@ function assertManagedBrowserRequestBudget(
     throw new Error('Managed Stratus minimum dispatch budget must fit inside the request timeout');
   }
   const providerDeadlineMs = Date.parse(providerDeadlineAt);
-  if (!Number.isFinite(providerDeadlineMs)) {
-    throw new Error('Managed Stratus provider deadline must be a valid timestamp');
+  if (!Number.isFinite(providerDeadlineMs)
+    || providerDeadlineAt !== new Date(providerDeadlineMs).toISOString()) {
+    throw new Error('Managed Stratus provider deadline must be a canonical timestamp');
+  }
+  if (!Number.isFinite(clockNowMs)) {
+    throw new Error('Managed Stratus dispatch clock must be a valid timestamp');
   }
   budget.signal.throwIfAborted();
   const remainingBudgetMs = Math.floor(budget.timeoutMs - Math.max(0, performance.now() - budget.startedAtMs));
-  const remainingAbsoluteMs = Math.floor(providerDeadlineMs - Date.now());
+  const remainingAbsoluteMs = Math.floor(providerDeadlineMs - clockNowMs);
   if (remainingBudgetMs < minimumDispatchBudgetMs || remainingAbsoluteMs < minimumDispatchBudgetMs) {
     throw new DOMException(
       'Managed Stratus continuation no longer has a safe provider dispatch window',
@@ -1278,7 +1283,7 @@ export async function continueManagedBrowser(
     if (!options.providerDeadlineAt || options.minimumDispatchBudgetMs === undefined) {
       throw new Error('Managed Stratus pre-gate request budget requires its provider deadline and minimum dispatch budget');
     }
-    assertManagedBrowserRequestBudget(
+    assertManagedBrowserRequestBudgetAtClock(
       options.requestBudget,
       options.providerDeadlineAt,
       options.minimumDispatchBudgetMs,
@@ -1296,7 +1301,7 @@ export async function continueManagedBrowser(
   const outboundActions = normalizeStratusActions(actions);
   const expectedSubmissionAttempt = managedSubmissionAttempt(options.submissionAttempt, true)!;
   if (options.requestBudget) {
-    assertManagedBrowserRequestBudget(
+    assertManagedBrowserRequestBudgetAtClock(
       options.requestBudget,
       options.providerDeadlineAt!,
       options.minimumDispatchBudgetMs!,
@@ -1606,12 +1611,32 @@ export async function browserSessionsForResourceReservation(
   provider?: Exclude<BrowserProvider, 'stratus-managed'>,
 ): Promise<SessionResponse[]> {
   const query = `user_metadata['litos_resource_reservation_id']:'${reservationId}'`;
-  const result = await request<SessionResponse[] | { sessions?: SessionResponse[] }>(
+  const result = await request<unknown>(
     `/sessions?q=${encodeURIComponent(query)}`,
     {},
     { timeoutMs: 10_000, provider },
   );
-  return Array.isArray(result) ? result : result.sessions ?? [];
+  const sessions = Array.isArray(result)
+    ? result
+    : result !== null
+      && typeof result === 'object'
+      && !Array.isArray(result)
+      && Object.prototype.hasOwnProperty.call(result, 'sessions')
+      ? (result as { sessions?: unknown }).sessions
+      : undefined;
+  if (!Array.isArray(sessions)) {
+    throw new Error('Browser provider reservation query returned an invalid session list');
+  }
+  return sessions.map((session) => {
+    if (session === null || typeof session !== 'object' || Array.isArray(session)) {
+      throw new Error('Browser provider reservation query returned an invalid session record');
+    }
+    const id = (session as { id?: unknown }).id;
+    if (typeof id !== 'string' || !id.trim() || id !== id.trim()) {
+      throw new Error('Browser provider reservation query returned a session without an exact resource id');
+    }
+    return session as SessionResponse;
+  });
 }
 
 export async function deleteBrowserContext(

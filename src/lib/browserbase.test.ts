@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   acknowledgeManagedBrowserTerminalResult,
+  assertManagedBrowserRequestBudgetAtClock,
   browserSessionBody,
   browserDeliveryRuntimeIdentity,
+  browserSessionsForResourceReservation,
   continueManagedBrowser,
   getManagedBrowserTerminalResult,
   isBrowserbaseConfigured,
@@ -22,6 +24,7 @@ import {
   ManagedBrowserProviderProgressError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
+  startManagedBrowserRequestBudget,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import {
@@ -39,6 +42,84 @@ const MANAGED_TERMINAL_RESULT_ID = 'a'.repeat(64);
 const OTHER_MANAGED_TERMINAL_RESULT_ID = 'b'.repeat(64);
 
 const managedProviderDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
+test('database-clock dispatch validation refuses a continuation without its full safe window', () => {
+  const clockNow = Date.parse('2026-08-31T10:00:00.000Z');
+  const providerDeadlineAt = '2026-08-31T10:01:10.000Z';
+  const budget = startManagedBrowserRequestBudget(70_000);
+  assert.doesNotThrow(() => assertManagedBrowserRequestBudgetAtClock(
+    budget,
+    providerDeadlineAt,
+    60_000,
+    clockNow,
+  ));
+  assert.throws(
+    () => assertManagedBrowserRequestBudgetAtClock(
+      budget,
+      providerDeadlineAt,
+      60_000,
+      clockNow + 10_001,
+    ),
+    (error: unknown) => error instanceof DOMException
+      && error.name === 'TimeoutError'
+      && /safe provider dispatch window/i.test(error.message),
+  );
+  assert.throws(
+    () => assertManagedBrowserRequestBudgetAtClock(
+      budget,
+      '2026-08-31 10:01:10Z',
+      60_000,
+      clockNow,
+    ),
+    /canonical timestamp/i,
+  );
+});
+
+test('provider reservation lookup rejects malformed nonempty results and accepts only exact ids', async () => {
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousRoot = process.env.BROWSERBASE_API_ROOT;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-query-validation-test-key';
+  process.env.BROWSERBASE_API_ROOT = 'https://browserbase.example/v1';
+  const payloads: unknown[] = [
+    {},
+    { sessions: null },
+    [{}],
+    [{ id: '' }],
+    [{ id: ' session-with-padding ' }],
+    [],
+    { sessions: [{ id: 'exact-provider-session' }] },
+  ];
+  try {
+    globalThis.fetch = (async (input) => {
+      assert.match(String(input), /^https:\/\/browserbase\.example\/v1\/sessions\?q=/);
+      return new Response(JSON.stringify(payloads.shift()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    for (let index = 0; index < 5; index += 1) {
+      await assert.rejects(
+        browserSessionsForResourceReservation('11111111-1111-4111-8111-111111111111', 'browserbase'),
+        /invalid session|exact resource id/i,
+      );
+    }
+    assert.deepEqual(
+      await browserSessionsForResourceReservation('11111111-1111-4111-8111-111111111111', 'browserbase'),
+      [],
+    );
+    assert.deepEqual(
+      await browserSessionsForResourceReservation('11111111-1111-4111-8111-111111111111', 'browserbase'),
+      [{ id: 'exact-provider-session' }],
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+    if (previousRoot === undefined) delete process.env.BROWSERBASE_API_ROOT;
+    else process.env.BROWSERBASE_API_ROOT = previousRoot;
+  }
+});
 
 test('managed terminal retrieval and acknowledgement preserve the exact attempt correlation', async () => {
   const previousKey = process.env.STRATUS_API_KEY;

@@ -41,6 +41,7 @@ import { storeFilledPreviewScreenshot, storeReceiptScreenshot } from '../lib/rec
 import {
   connectToSession,
   acknowledgeManagedBrowserTerminalResult,
+  assertManagedBrowserRequestBudgetAtClock,
   browserDeliveryRuntimeIdentity,
   continueManagedBrowser,
   getBrowserSession,
@@ -852,6 +853,56 @@ async function runManagedBrowserWithAccountFence(
     await lockSubmissionAttemptUser(tx, userId);
     await assertSubmissionAccountNotDraining(tx, userId);
     return runManagedBrowser(...args);
+  });
+}
+
+async function managedProviderFenceDatabaseNow(
+  executor: Pick<typeof db, 'execute'>,
+): Promise<Date> {
+  const result = await executor.execute(sql`select clock_timestamp() as now`);
+  const value = (result.rows[0] as { now?: Date | string } | undefined)?.now;
+  const parsed = value instanceof Date ? value : new Date(value ?? Number.NaN);
+  if (Number.isNaN(parsed.getTime())) throw new Error('Database provider-dispatch clock was unavailable');
+  return parsed;
+}
+
+/** Keep every retained-session provider POST behind the account drain until the call finishes. */
+async function continueManagedBrowserWithAccountFence(
+  userId: string,
+  continuationToken: Parameters<typeof continueManagedBrowser>[0],
+  actions: Parameters<typeof continueManagedBrowser>[1],
+  options: Parameters<typeof continueManagedBrowser>[2],
+): Promise<ManagedBrowserResult> {
+  if (options.requestBudget && options.timeoutMs !== undefined) {
+    throw new Error('Fenced managed continuation cannot carry two request budgets');
+  }
+  if (!options.requestBudget && options.timeoutMs === undefined) {
+    throw new Error('Fenced managed continuation requires one bounded request budget');
+  }
+  if (options.minimumDispatchBudgetMs === undefined) {
+    throw new Error('Fenced managed continuation requires a minimum dispatch budget');
+  }
+  const requestBudget = options.requestBudget
+    ?? startManagedBrowserRequestBudget(options.timeoutMs!);
+  const { timeoutMs, ...boundedOptions } = options;
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, userId);
+    await assertSubmissionAccountNotDraining(tx, userId);
+    const databaseNow = await managedProviderFenceDatabaseNow(tx);
+    const providerDeadlineAt = options.providerDeadlineAt
+      ?? new Date(databaseNow.getTime() + timeoutMs!).toISOString();
+    assertManagedBrowserRequestBudgetAtClock(
+      requestBudget,
+      providerDeadlineAt,
+      options.minimumDispatchBudgetMs!,
+      databaseNow.getTime(),
+    );
+    return continueManagedBrowser(continuationToken, actions, {
+      ...boundedOptions,
+      requestBudget,
+      providerDeadlineAt,
+      minimumDispatchBudgetMs: options.minimumDispatchBudgetMs!,
+    });
   });
 }
 
@@ -3121,7 +3172,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
   }
 
   try {
-    const continued = await continueManagedBrowser(continuationToken, codeActions, {
+    const continued = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {
       submissionAttempt: continuationSubmissionAttempt,
       requestBudget,
       providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
@@ -9978,12 +10029,17 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           }
           try {
             // Exactly one bounded continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowser(continuationToken, codeActions, {
-              submissionAttempt: securityCodeSubmissionAttempt,
-              requestBudget: continuationRequestBudget,
-              providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
-              minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
-            });
+            receiptResult = await continueManagedBrowserWithAccountFence(
+              row.user_id,
+              continuationToken,
+              codeActions,
+              {
+                submissionAttempt: securityCodeSubmissionAttempt,
+                requestBudget: continuationRequestBudget,
+                providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
+                minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
+              },
+            );
             securityCodeTerminalResultId = managedBrowserTerminalResultId(receiptResult);
             if (readManagedSubmitOutcome(receiptResult)?.pressed === true) {
               await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
@@ -10085,12 +10141,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         expectedApplicationUrl: applicationUrl,
         observe: async (continuationToken) => {
           receiptObservationStarted = true;
-          const observed = await continueManagedBrowser(continuationToken, [], {
+          const observed = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, [], {
             screenshot: true,
             submissionAttempt: receiptObservationSubmissionAttempt,
             // This continuation is read-only, but it still must not hold the runner or a provider
             // socket forever while the parent attempt is waiting for an exact receipt verdict.
             timeoutMs: MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,
+            minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
           });
           receiptObservationTerminalResultId = managedBrowserTerminalResultId(observed);
           return observed;

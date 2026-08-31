@@ -3281,7 +3281,7 @@ test('prepare() stops account-walled portals before it opens any browser', async
   }
 });
 
-test('every managed provider start and direct session creation stay inside the account deletion fence', async () => {
+test('every managed provider start, continuation POST, and direct session creation stay inside the account deletion fence', async () => {
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const runnerSource = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
@@ -3297,6 +3297,29 @@ test('every managed provider start and direct session creation stay inside the a
     [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
     1,
     'managed provider runs must go only through the locked account fence',
+  );
+
+  const continuationFenceStart = runnerSource.indexOf('async function continueManagedBrowserWithAccountFence(');
+  const continuationFenceEnd = runnerSource.indexOf('\n}', continuationFenceStart) + 2;
+  const continuationFence = runnerSource.slice(continuationFenceStart, continuationFenceEnd);
+  assert.ok(continuationFenceStart > 0);
+  assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+    < continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
+  assert.ok(continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
+    < continuationFence.indexOf('managedProviderFenceDatabaseNow(tx)'));
+  assert.ok(continuationFence.indexOf('managedProviderFenceDatabaseNow(tx)')
+    < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
+  assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
+    < continuationFence.indexOf('return continueManagedBrowser('));
+  assert.equal(
+    [...runnerSource.matchAll(/\bcontinueManagedBrowser\(/g)].length,
+    1,
+    'managed continuation POSTs must go only through the locked account fence',
+  );
+  assert.equal(
+    [...runnerSource.matchAll(/\bcontinueManagedBrowserWithAccountFence\(/g)].length,
+    4,
+    'all three managed continuation call sites must use the account fence',
   );
 
   const resourceSource = readFileSync(join(__dirname, '../lib/browserProviderResourceCleanup.ts'), 'utf8');
