@@ -989,6 +989,7 @@ export async function assertManagedSecurityCodeContinuationBoundaryClear(
   submissionAttempt: ManagedSubmissionAttempt,
   providerExpiresAt: string,
   continuationSecurityCode: NonNullable<ApplicationReviewState['security_code']>,
+  cleanupMarkers: readonly ManagedTerminalCleanupMarker[] = [],
 ): Promise<{ providerDeadlineAt: string }> {
   if (
     attemptBinding.source !== 'managed_browser'
@@ -1036,8 +1037,13 @@ export async function assertManagedSecurityCodeContinuationBoundaryClear(
         observedAt,
         continuationSecurityCode,
       );
+      const foldedSpec = specWithManagedTerminalFold(
+        latest!.spec,
+        refusedReview,
+        cleanupMarkers,
+      );
       const updated = await tx.update(generated_resumes).set({
-        spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(refusedReview)}::jsonb, true)`,
+        spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
       }).where(and(
         eq(generated_resumes.id, latest!.id),
         eq(generated_resumes.user_id, latest!.user_id),
@@ -1207,6 +1213,7 @@ type ManagedAuthorizedUnverifiedInput = {
   network?: NonNullable<ApplicationReviewState['unverified_submission']>['network'];
   challengeOnScreen?: boolean;
   requireContinuationResumed?: boolean;
+  cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
 };
 
 /** Every managed stop after boundary authorization remains an unresolved parent, never not-sent. */
@@ -1271,8 +1278,13 @@ export async function recordManagedAuthorizedAttemptUnverified(
     if (input.requireContinuationResumed) {
       conditions.push(sql`${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'true'`);
     }
+    const foldedSpec = specWithManagedTerminalFold(
+      latest.spec,
+      unresolved,
+      input.cleanupMarkers ?? [],
+    );
     const updated = await tx.update(generated_resumes).set({
-      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(unresolved)}::jsonb, true)`,
+      spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
     }).where(and(...conditions)).returning({ id: generated_resumes.id });
     return updated.length > 0;
   });
@@ -1287,6 +1299,7 @@ export async function recordManagedSecurityCodeContinuationUnverified(
     previewUrl?: string;
     securityCode?: ApplicationReviewState['security_code'];
     verification?: ApplicationReviewState['verification'];
+    cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
   } = {},
 ): Promise<boolean> {
   return recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
@@ -1295,6 +1308,7 @@ export async function recordManagedSecurityCodeContinuationUnverified(
     attentionCategories: ['security_code', 'unverified_submission'],
     ...(options.previewUrl ? { previewUrl: options.previewUrl } : {}),
     ...(options.securityCode ? { securityCode: options.securityCode } : {}),
+    ...(options.cleanupMarkers ? { cleanupMarkers: options.cleanupMarkers } : {}),
     verification: {
       ...options.verification,
       status: 'handoff',
@@ -1380,6 +1394,7 @@ type ManagedSubmissionConfirmedInput = {
     result: ManagedReceiptResult;
     expectedApplicationUrl: string;
   };
+  cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
   /** Test seam for proving the exact commit heals one whole-row CAS loss. */
   beforeConfirmedProjectionWrite?: (
     latest: ResumeRow,
@@ -1390,7 +1405,7 @@ type ManagedSubmissionConfirmedInput = {
 
 type VerifiedSubmissionConfirmedInput = Pick<
   ManagedSubmissionConfirmedInput,
-  'capturedAt' | 'verification' | 'securityCode' | 'receipt' | 'beforeConfirmedProjectionWrite'
+  'capturedAt' | 'verification' | 'securityCode' | 'receipt' | 'cleanupMarkers' | 'beforeConfirmedProjectionWrite'
 > & {
   factKey: string;
   evidenceCode: string;
@@ -1517,8 +1532,13 @@ async function commitVerifiedSubmissionConfirmed(
     if (canonicalTargetResolved) {
       try {
         return await tx.transaction(async (projectionTx) => {
+          const foldedSpec = specWithManagedTerminalFold(
+            latest.spec,
+            submitted,
+            input.cleanupMarkers ?? [],
+          );
           const updated = await projectionTx.update(generated_resumes).set({
-            spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(submitted)}::jsonb, true)`,
+            spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
             ...confirmedPacketPipelineProjection(new Date(receiptAt)),
           }).where(and(
             eq(generated_resumes.id, latest.id),
@@ -1567,8 +1587,13 @@ async function commitVerifiedSubmissionConfirmed(
       receipt,
       receiptAt,
     );
+    const repairSpec = specWithManagedTerminalFold(
+      latest.spec,
+      repair,
+      input.cleanupMarkers ?? [],
+    );
     await tx.update(generated_resumes).set({
-      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(repair)}::jsonb, true)`,
+      spec: sql`${JSON.stringify(repairSpec)}::jsonb`,
     }).where(and(
       eq(generated_resumes.id, latest.id),
       eq(generated_resumes.user_id, latest.user_id),
@@ -1622,6 +1647,7 @@ export async function recordManagedSubmissionConfirmed(
     evidenceCode: attemptBinding.operation === 'security_code_continuation' || acceptedSecurityCode
       ? 'managed_security_code_receipt'
       : 'managed_application_receipt',
+    ...(input.cleanupMarkers ? { cleanupMarkers: input.cleanupMarkers } : {}),
     ...(input.beforeConfirmedProjectionWrite
       ? { beforeConfirmedProjectionWrite: input.beforeConfirmedProjectionWrite }
       : {}),
@@ -1630,12 +1656,50 @@ export async function recordManagedSubmissionConfirmed(
 
 export type ManagedTerminalRecoveryOutcome = 'not_recoverable' | 'pending' | 'folded';
 
-const MANAGED_TERMINAL_CLEANUP_VERSION = 'managed-terminal-cleanup-v1' as const;
+const MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION = 'managed-terminal-cleanup-entry-v2' as const;
+const MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION = 'managed-terminal-cleanup-outbox-v2' as const;
+const MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY = '_managed_terminal_cleanup_outbox';
 const MANAGED_TERMINAL_RESULT_ID = /^[a-f0-9]{64}$/u;
 const MANAGED_SUBMISSION_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
+export function managedTerminalCleanupRetrievalDisposition(
+  state: 'pending' | 'not_found' | 'completed' | 'failed' | 'indeterminate' | 'gone',
+): 'retry' | 'acknowledge' | 'complete' {
+  if (state === 'gone') return 'complete';
+  if (state === 'completed' || state === 'failed' || state === 'indeterminate') {
+    return 'acknowledge';
+  }
+  return 'retry';
+}
+
+const MANAGED_TERMINAL_CLEANUP_FAIRNESS_WINDOW_MS = 60_000;
+
+export function managedTerminalCleanupBatchWindow(
+  totalRows: number,
+  batchSize: number,
+  nowMs = Date.now(),
+): { firstOffset: number; firstLimit: number; wrapLimit: number } {
+  if (!Number.isSafeInteger(totalRows) || totalRows <= 0
+    || !Number.isSafeInteger(batchSize) || batchSize <= 0
+    || !Number.isFinite(nowMs)) {
+    return { firstOffset: 0, firstLimit: 0, wrapLimit: 0 };
+  }
+  const boundedBatchSize = Math.min(batchSize, totalRows);
+  if (boundedBatchSize === totalRows) {
+    return { firstOffset: 0, firstLimit: totalRows, wrapLimit: 0 };
+  }
+  const cycle = Math.max(0, Math.floor(nowMs / MANAGED_TERMINAL_CLEANUP_FAIRNESS_WINDOW_MS));
+  const firstOffset = ((cycle % totalRows) * boundedBatchSize) % totalRows;
+  const firstLimit = Math.min(boundedBatchSize, totalRows - firstOffset);
+  return {
+    firstOffset,
+    firstLimit,
+    wrapLimit: boundedBatchSize - firstLimit,
+  };
+}
+
 export type ManagedTerminalCleanupMarker = {
-  version: typeof MANAGED_TERMINAL_CLEANUP_VERSION;
+  version: typeof MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION;
   attemptId: string;
   submissionAttempt: ManagedSubmissionAttempt;
   resultId: string | null;
@@ -1643,11 +1707,16 @@ export type ManagedTerminalCleanupMarker = {
 
 export type BoundManagedTerminalCleanupMarker = ManagedTerminalCleanupMarker & { resultId: string };
 
+export type ManagedTerminalCleanupOutbox = {
+  version: typeof MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION;
+  entries: Record<string, ManagedTerminalCleanupMarker>;
+};
+
 function managedTerminalCleanupMarker(value: unknown): ManagedTerminalCleanupMarker | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const marker = value as Record<string, unknown>;
   if (Object.keys(marker).sort().join(',') !== 'attemptId,resultId,submissionAttempt,version'
-    || marker.version !== MANAGED_TERMINAL_CLEANUP_VERSION
+    || marker.version !== MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION
     || typeof marker.attemptId !== 'string'
     || !MANAGED_SUBMISSION_ATTEMPT_ID.test(marker.attemptId)
     || (marker.resultId !== null
@@ -1664,7 +1733,7 @@ function managedTerminalCleanupMarker(value: unknown): ManagedTerminalCleanupMar
     || typeof submissionAttempt.executionId !== 'string'
     || !MANAGED_SUBMISSION_ATTEMPT_ID.test(submissionAttempt.executionId)) return null;
   return {
-    version: MANAGED_TERMINAL_CLEANUP_VERSION,
+    version: MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION,
     attemptId: marker.attemptId.toLowerCase(),
     submissionAttempt: {
       runId: submissionAttempt.runId.toLowerCase(),
@@ -1675,12 +1744,37 @@ function managedTerminalCleanupMarker(value: unknown): ManagedTerminalCleanupMar
   };
 }
 
-function managedTerminalCleanupMarkerFromSpec(spec: unknown): ManagedTerminalCleanupMarker | null {
-  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
-  return managedTerminalCleanupMarker((spec as Record<string, unknown>)._managed_terminal_cleanup);
+function managedTerminalCleanupEntryKey(marker: ManagedTerminalCleanupMarker): string {
+  return `${marker.submissionAttempt.executionId}:${marker.resultId ?? 'pending'}`;
 }
 
-function sameManagedTerminalCleanupAttempt(
+function managedTerminalCleanupOutbox(value: unknown): ManagedTerminalCleanupOutbox | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).sort().join(',') !== 'entries,version'
+    || candidate.version !== MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION
+    || !candidate.entries
+    || typeof candidate.entries !== 'object'
+    || Array.isArray(candidate.entries)) return null;
+  const rawEntries = candidate.entries as Record<string, unknown>;
+  if (Object.keys(rawEntries).length === 0 || Object.keys(rawEntries).length > 32) return null;
+  const entries: Record<string, ManagedTerminalCleanupMarker> = {};
+  for (const [key, value] of Object.entries(rawEntries)) {
+    const marker = managedTerminalCleanupMarker(value);
+    if (!marker || managedTerminalCleanupEntryKey(marker) !== key) return null;
+    entries[key] = marker;
+  }
+  return { version: MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION, entries };
+}
+
+function managedTerminalCleanupOutboxFromSpec(spec: unknown): ManagedTerminalCleanupOutbox | null {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return null;
+  return managedTerminalCleanupOutbox(
+    (spec as Record<string, unknown>)[MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY],
+  );
+}
+
+function sameManagedTerminalCleanupExecution(
   left: ManagedTerminalCleanupMarker,
   right: ManagedTerminalCleanupMarker,
 ): boolean {
@@ -1689,13 +1783,98 @@ function sameManagedTerminalCleanupAttempt(
     && isDeepStrictEqual(left.submissionAttempt, right.submissionAttempt);
 }
 
+/**
+ * Add cleanup obligations without collapsing distinct initial, continuation, or observation runs.
+ * The returned object is written in the same UPDATE as the terminal review fold.
+ */
+export function specWithManagedTerminalCleanupEntries(
+  spec: unknown,
+  markers: readonly ManagedTerminalCleanupMarker[],
+): Record<string, unknown> {
+  const nextSpec = spec && typeof spec === 'object' && !Array.isArray(spec)
+    ? { ...(spec as Record<string, unknown>) }
+    : {};
+  if (markers.length === 0) return nextSpec;
+  const hasRawOutbox = Object.prototype.hasOwnProperty.call(
+    nextSpec,
+    MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY,
+  );
+  const current = managedTerminalCleanupOutboxFromSpec(nextSpec);
+  if (hasRawOutbox && !current) throw new Error('Managed terminal cleanup outbox is malformed');
+  const entries = { ...(current?.entries ?? {}) };
+  for (const marker of markers) {
+    const exact = managedTerminalCleanupMarker(marker);
+    if (!exact || !isDeepStrictEqual(exact, marker)) {
+      throw new Error('Managed terminal cleanup outbox requires exact normalized entries');
+    }
+    const sameExecution = Object.entries(entries).find(([, existing]) =>
+      existing.submissionAttempt.executionId === exact.submissionAttempt.executionId);
+    if (sameExecution) {
+      const [existingKey, existing] = sameExecution;
+      if (!sameManagedTerminalCleanupExecution(existing, exact)) {
+        throw new Error('Managed terminal cleanup execution is already bound to another attempt');
+      }
+      if (existing.resultId !== null && exact.resultId === null) continue;
+      if (existing.resultId !== null && exact.resultId !== existing.resultId) {
+        throw new Error('Managed terminal cleanup execution is already bound to another result');
+      }
+      if (existing.resultId === null && exact.resultId !== null) delete entries[existingKey];
+    }
+    const key = managedTerminalCleanupEntryKey(exact);
+    const existingAtKey = entries[key];
+    if (existingAtKey && !isDeepStrictEqual(existingAtKey, exact)) {
+      throw new Error('Managed terminal cleanup key is already bound to another result');
+    }
+    entries[key] = exact;
+  }
+  nextSpec[MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY] = {
+    version: MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION,
+    entries,
+  } satisfies ManagedTerminalCleanupOutbox;
+  return nextSpec;
+}
+
+export function specWithManagedTerminalFold(
+  spec: unknown,
+  review: ApplicationReviewState,
+  markers: readonly ManagedTerminalCleanupMarker[],
+): Record<string, unknown> {
+  const folded = spec && typeof spec === 'object' && !Array.isArray(spec)
+    ? { ...(spec as Record<string, unknown>), _review: review }
+    : { _review: review };
+  return specWithManagedTerminalCleanupEntries(folded, markers);
+}
+
+function specWithoutManagedTerminalCleanupEntry(
+  spec: unknown,
+  marker: ManagedTerminalCleanupMarker,
+): Record<string, unknown> {
+  const nextSpec = specWithManagedTerminalCleanupEntries(spec, []);
+  const outbox = managedTerminalCleanupOutboxFromSpec(nextSpec);
+  if (!outbox) return nextSpec;
+  const key = managedTerminalCleanupEntryKey(marker);
+  const existing = outbox.entries[key];
+  if (!existing) return nextSpec;
+  if (!isDeepStrictEqual(existing, marker)) {
+    throw new Error('Managed terminal cleanup completion did not match its durable result');
+  }
+  const entries = { ...outbox.entries };
+  delete entries[key];
+  if (Object.keys(entries).length === 0) {
+    delete nextSpec[MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY];
+  } else {
+    nextSpec[MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY] = { ...outbox, entries };
+  }
+  return nextSpec;
+}
+
 function exactManagedTerminalCleanupMarker(input: {
   attemptBinding: SubmissionAttemptBinding;
   submissionAttempt: ManagedSubmissionAttempt;
   resultId: string;
 }): BoundManagedTerminalCleanupMarker {
   const marker = managedTerminalCleanupMarker({
-    version: MANAGED_TERMINAL_CLEANUP_VERSION,
+    version: MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION,
     attemptId: input.attemptBinding.attemptId,
     submissionAttempt: input.submissionAttempt,
     resultId: input.resultId,
@@ -1714,7 +1893,7 @@ function pendingManagedTerminalCleanupMarker(input: {
   submissionAttempt: ManagedSubmissionAttempt;
 }): ManagedTerminalCleanupMarker {
   const marker = managedTerminalCleanupMarker({
-    version: MANAGED_TERMINAL_CLEANUP_VERSION,
+    version: MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION,
     attemptId: input.attemptBinding.attemptId,
     submissionAttempt: input.submissionAttempt,
     resultId: null,
@@ -1728,7 +1907,7 @@ function pendingManagedTerminalCleanupMarker(input: {
   return marker;
 }
 
-async function persistManagedTerminalCleanupMarker(
+async function completeManagedTerminalCleanupMarker(
   row: ResumeRow,
   marker: ManagedTerminalCleanupMarker,
 ): Promise<void> {
@@ -1738,67 +1917,15 @@ async function persistManagedTerminalCleanupMarker(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, row.user_id),
     )).limit(1).for('update');
-    if (!latest) throw new Error('Managed terminal cleanup packet no longer exists');
-    const existing = managedTerminalCleanupMarkerFromSpec(latest.spec);
-    if (existing) {
-      if (!sameManagedTerminalCleanupAttempt(existing, marker)) {
-        throw new Error('Managed terminal cleanup marker is already bound to a different result');
-      }
-      if (existing.resultId !== null && marker.resultId === null) return;
-      if (existing.resultId === null && marker.resultId !== null) {
-        const updated = await tx.update(generated_resumes).set({
-          spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_managed_terminal_cleanup}', ${JSON.stringify(marker)}::jsonb, true)`,
-        }).where(and(
-          eq(generated_resumes.id, latest.id),
-          eq(generated_resumes.user_id, latest.user_id),
-          sql`${generated_resumes.spec}->'_managed_terminal_cleanup' = ${JSON.stringify(existing)}::jsonb`,
-        )).returning({ id: generated_resumes.id });
-        if (!updated[0]) throw new Error('Managed terminal cleanup result ID lost its pending marker');
-        return;
-      }
-      if (!isDeepStrictEqual(existing, marker)) {
-        throw new Error('Managed terminal cleanup marker is already bound to a different result');
-      }
-      return;
-    }
-    const rawSpec = latest.spec && typeof latest.spec === 'object' && !Array.isArray(latest.spec)
-      ? latest.spec as Record<string, unknown>
-      : {};
-    if (Object.prototype.hasOwnProperty.call(rawSpec, '_managed_terminal_cleanup')) {
-      throw new Error('Managed terminal cleanup marker is malformed');
-    }
-    const updated = await tx.update(generated_resumes).set({
-      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_managed_terminal_cleanup}', ${JSON.stringify(marker)}::jsonb, true)`,
-    }).where(and(
-      eq(generated_resumes.id, latest.id),
-      eq(generated_resumes.user_id, latest.user_id),
-    )).returning({ id: generated_resumes.id });
-    if (!updated[0]) throw new Error('Managed terminal cleanup marker could not be persisted');
-  });
-}
-
-async function completeManagedTerminalCleanupMarker(
-  row: ResumeRow,
-  marker: BoundManagedTerminalCleanupMarker,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await lockSubmissionAttemptUser(tx, row.user_id);
-    const [latest] = await tx.select().from(generated_resumes).where(and(
-      eq(generated_resumes.id, row.id),
-      eq(generated_resumes.user_id, row.user_id),
-    )).limit(1).for('update');
     if (!latest) return;
-    const existing = managedTerminalCleanupMarkerFromSpec(latest.spec);
-    if (!existing) return;
-    if (!isDeepStrictEqual(existing, marker)) {
-      throw new Error('Managed terminal cleanup completion did not match its durable result');
-    }
+    const nextSpec = specWithoutManagedTerminalCleanupEntry(latest.spec, marker);
+    if (isDeepStrictEqual(nextSpec, latest.spec)) return;
     const updated = await tx.update(generated_resumes).set({
-      spec: sql`${generated_resumes.spec} #- '{_managed_terminal_cleanup}'`,
+      spec: sql`${JSON.stringify(nextSpec)}::jsonb`,
     }).where(and(
       eq(generated_resumes.id, latest.id),
       eq(generated_resumes.user_id, latest.user_id),
-      sql`${generated_resumes.spec}->'_managed_terminal_cleanup' = ${JSON.stringify(marker)}::jsonb`,
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
     )).returning({ id: generated_resumes.id });
     if (!updated[0]) throw new Error('Managed terminal cleanup completion lost its exact marker');
   });
@@ -1820,23 +1947,28 @@ async function bindManagedTerminalCleanupResultId(
       eq(generated_resumes.user_id, row.user_id),
     )).limit(1).for('update');
     if (!latest) throw new Error('Managed terminal cleanup packet no longer exists');
-    const existing = managedTerminalCleanupMarkerFromSpec(latest.spec);
-    if (!existing) throw new Error('Managed terminal cleanup retrieval marker is missing');
-    if (existing.resultId !== null) {
-      if (!isDeepStrictEqual(existing, bound)) {
-        throw new Error('Managed terminal cleanup result ID did not match its durable marker');
+    const outbox = managedTerminalCleanupOutboxFromSpec(latest.spec);
+    if (!outbox) throw new Error('Managed terminal cleanup retrieval outbox is missing');
+    const pendingKey = managedTerminalCleanupEntryKey(marker);
+    const boundKey = managedTerminalCleanupEntryKey(bound);
+    const existingBound = outbox.entries[boundKey];
+    if (existingBound) {
+      if (!isDeepStrictEqual(existingBound, bound)) {
+        throw new Error('Managed terminal cleanup result ID did not match its durable entry');
       }
       return;
     }
-    if (!isDeepStrictEqual(existing, marker)) {
+    const existingPending = outbox.entries[pendingKey];
+    if (!isDeepStrictEqual(existingPending, marker)) {
       throw new Error('Managed terminal cleanup retrieval marker changed before result binding');
     }
+    const nextSpec = specWithManagedTerminalCleanupEntries(latest.spec, [bound]);
     const updated = await tx.update(generated_resumes).set({
-      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_managed_terminal_cleanup}', ${JSON.stringify(bound)}::jsonb, true)`,
+      spec: sql`${JSON.stringify(nextSpec)}::jsonb`,
     }).where(and(
       eq(generated_resumes.id, latest.id),
       eq(generated_resumes.user_id, latest.user_id),
-      sql`${generated_resumes.spec}->'_managed_terminal_cleanup' = ${JSON.stringify(marker)}::jsonb`,
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
     )).returning({ id: generated_resumes.id });
     if (!updated[0]) throw new Error('Managed terminal cleanup result ID lost its retrieval marker');
   });
@@ -1898,6 +2030,64 @@ async function managedAttemptHasDurableFold(
   });
 }
 
+async function ensureManagedTerminalCleanupForDurableFold(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  marker: ManagedTerminalCleanupMarker,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1).for('update');
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview) return false;
+    const exactEvents = (await submissionAttemptEventsForPacket(
+      row.user_id,
+      row.id,
+      { executor: tx },
+    )).filter((event) => event.attempt_id === attemptBinding.attemptId);
+    const continuationAttempt = managedContinuationSubmissionAttempt(
+      attemptBinding,
+      'security_code',
+    );
+    const isSecurityCodeContinuation = marker.submissionAttempt.runId === continuationAttempt.runId
+      && marker.submissionAttempt.claimId === continuationAttempt.claimId
+      && marker.submissionAttempt.executionId === continuationAttempt.executionId;
+    const durableReview = latestReview.submission_run_id === attemptBinding.submissionRunId
+      && latestReview.submission_claim_id === attemptBinding.attemptId
+      && managedRecoveryReviewFoldIsDurable({
+        kind: isSecurityCodeContinuation ? 'continuation' : 'initial',
+        hasUnverifiedResult: Boolean(latestReview.unverified_submission),
+        state: latestReview.verification ? {
+          runner: latestReview.verification.runner,
+          status: latestReview.verification.status,
+          continuationResumed: latestReview.verification.continuation_resumed,
+          continuationExecutionFingerprint:
+            latestReview.verification.continuation_execution_fingerprint,
+          continuationCallDeadlineAt: latestReview.verification.continuation_call_deadline_at,
+        } : undefined,
+        expectedExecutionFingerprint: managedContinuationExecutionFingerprint(
+          continuationAttempt,
+        ),
+      });
+    const durableFact = exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+      || event.event_kind === 'not_sent_proven');
+    if (!durableReview && !durableFact) return false;
+    const nextSpec = specWithManagedTerminalCleanupEntries(latest.spec, [marker]);
+    if (isDeepStrictEqual(nextSpec, latest.spec)) return true;
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`${JSON.stringify(nextSpec)}::jsonb`,
+    }).where(and(
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+    )).returning({ id: generated_resumes.id });
+    return updated.length > 0;
+  });
+}
+
 async function acknowledgeManagedTerminalFold(
   row: ResumeRow,
   attemptBinding: SubmissionAttemptBinding,
@@ -1907,14 +2097,19 @@ async function acknowledgeManagedTerminalFold(
 ): Promise<void> {
   if (!await managedAttemptHasDurableFold(row, attemptBinding, submissionAttempt)) return;
   const marker = exactManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt, resultId });
-  try {
-    await persistManagedTerminalCleanupMarker(row, marker);
-  } catch (error) {
+  const [latest] = await db.select({ spec: generated_resumes.spec }).from(generated_resumes).where(and(
+    eq(generated_resumes.id, row.id),
+    eq(generated_resumes.user_id, row.user_id),
+  )).limit(1);
+  const queued = latest ? managedTerminalCleanupOutboxFromSpec(latest.spec) : null;
+  const queuedMarker = queued?.entries[managedTerminalCleanupEntryKey(marker)];
+  if (!queuedMarker || !isDeepStrictEqual(queuedMarker, marker)) {
     fastify.log.error({
       applicationId: row.id,
       attemptId: attemptBinding.attemptId,
-      detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal cleanup marker failed',
-    }, 'Managed terminal result was folded but its durable cleanup marker failed');
+      executionId: submissionAttempt.executionId,
+      resultId,
+    }, 'Managed terminal fold did not contain its exact atomic cleanup entry');
     return;
   }
   try {
@@ -1929,81 +2124,110 @@ async function acknowledgeManagedTerminalFold(
   }
 }
 
+async function acknowledgeManagedTerminalCleanupMarkers(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  markers: readonly ManagedTerminalCleanupMarker[],
+  fastify: FastifyInstance,
+): Promise<void> {
+  for (const marker of markers) {
+    if (marker.resultId === null) continue;
+    await acknowledgeManagedTerminalFold(
+      row,
+      attemptBinding,
+      marker.submissionAttempt,
+      marker.resultId,
+      fastify,
+    );
+  }
+}
+
 async function retryManagedTerminalCleanupOutbox(
   fastify: FastifyInstance,
 ): Promise<{ attempted: number; completed: number }> {
-  const rows = await db.select().from(generated_resumes).where(
-    sql`${generated_resumes.spec}->'_managed_terminal_cleanup'->>'version' = ${MANAGED_TERMINAL_CLEANUP_VERSION}`,
-  ).orderBy(generated_resumes.created_at).limit(submissionBatchSize());
+  const cleanupRows = sql`${generated_resumes.spec}->'_managed_terminal_cleanup_outbox'->>'version' = ${MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION}`;
+  const [counted] = await db.select({ total: sql<number>`count(*)::int` })
+    .from(generated_resumes)
+    .where(cleanupRows);
+  const batchWindow = managedTerminalCleanupBatchWindow(
+    counted?.total ?? 0,
+    submissionBatchSize(),
+  );
+  const rows = batchWindow.firstLimit > 0
+    ? await db.select().from(generated_resumes).where(cleanupRows)
+      .orderBy(generated_resumes.created_at, generated_resumes.id)
+      .limit(batchWindow.firstLimit)
+      .offset(batchWindow.firstOffset)
+    : [];
+  if (batchWindow.wrapLimit > 0) {
+    rows.push(...await db.select().from(generated_resumes).where(cleanupRows)
+      .orderBy(generated_resumes.created_at, generated_resumes.id)
+      .limit(batchWindow.wrapLimit));
+  }
+  let attempted = 0;
   let completed = 0;
   for (const row of rows) {
-    const marker = managedTerminalCleanupMarkerFromSpec(row.spec);
-    if (!marker) {
-      fastify.log.error({ applicationId: row.id }, 'Managed terminal cleanup marker is malformed');
+    const outbox = managedTerminalCleanupOutboxFromSpec(row.spec);
+    if (!outbox) {
+      fastify.log.error({ applicationId: row.id }, 'Managed terminal cleanup outbox is malformed');
       continue;
     }
-    let deliveryMarker: BoundManagedTerminalCleanupMarker;
-    if (marker.resultId === null) {
-      try {
-        const terminal = await getManagedBrowserTerminalResult(marker.submissionAttempt);
-        if (terminal.state !== 'completed'
-          && terminal.state !== 'failed'
-          && terminal.state !== 'indeterminate') continue;
-        deliveryMarker = await bindManagedTerminalCleanupResultId(row, marker, terminal.resultId);
-      } catch (error) {
-        fastify.log.warn({
-          applicationId: row.id,
-          attemptId: marker.attemptId,
-          detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal result ID retrieval failed',
-        }, 'Managed terminal cleanup is waiting for its exact result ID');
-        continue;
+    for (const marker of Object.values(outbox.entries)) {
+      attempted += 1;
+      let deliveryMarker: BoundManagedTerminalCleanupMarker;
+      if (marker.resultId === null) {
+        try {
+          const terminal = await getManagedBrowserTerminalResult(marker.submissionAttempt);
+          const disposition = managedTerminalCleanupRetrievalDisposition(terminal.state);
+          if (disposition === 'complete') {
+            await completeManagedTerminalCleanupMarker(row, marker);
+            completed += 1;
+            continue;
+          }
+          if (disposition === 'retry') continue;
+          if (terminal.state !== 'completed'
+            && terminal.state !== 'failed'
+            && terminal.state !== 'indeterminate') {
+            throw new Error('Managed terminal cleanup disposition lost its terminal result');
+          }
+          deliveryMarker = await bindManagedTerminalCleanupResultId(row, marker, terminal.resultId);
+        } catch (error) {
+          fastify.log.warn({
+            applicationId: row.id,
+            attemptId: marker.attemptId,
+            executionId: marker.submissionAttempt.executionId,
+            detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal result ID retrieval failed',
+          }, 'Managed terminal cleanup is waiting for its exact result ID');
+          continue;
+        }
+      } else {
+        deliveryMarker = marker as BoundManagedTerminalCleanupMarker;
       }
-    } else {
-      deliveryMarker = marker as BoundManagedTerminalCleanupMarker;
+      const delivered = await retryManagedTerminalCleanupDelivery(deliveryMarker, {
+        acknowledge: acknowledgeManagedBrowserTerminalResult,
+        complete: () => completeManagedTerminalCleanupMarker(row, deliveryMarker),
+        failed: (error) => {
+          fastify.log.warn({
+            applicationId: row.id,
+            attemptId: deliveryMarker.attemptId,
+            executionId: deliveryMarker.submissionAttempt.executionId,
+            detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal acknowledgement failed',
+          }, 'Managed terminal cleanup acknowledgement remains queued');
+        },
+      });
+      if (delivered) completed += 1;
     }
-    const delivered = await retryManagedTerminalCleanupDelivery(deliveryMarker, {
-      acknowledge: acknowledgeManagedBrowserTerminalResult,
-      complete: () => completeManagedTerminalCleanupMarker(row, deliveryMarker),
-      failed: (error) => {
-        fastify.log.warn({
-          applicationId: row.id,
-          attemptId: deliveryMarker.attemptId,
-          detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal acknowledgement failed',
-        }, 'Managed terminal cleanup acknowledgement remains queued');
-      },
-    });
-    if (delivered) completed += 1;
   }
-  return { attempted: rows.length, completed };
+  return { attempted, completed };
 }
 
-async function queueManagedTerminalCleanupResultRetrieval(
+async function managedTerminalCleanupMarkerAfterRetrieval(
   row: ResumeRow,
   attemptBinding: SubmissionAttemptBinding,
   submissionAttempt: ManagedSubmissionAttempt,
   fastify: FastifyInstance,
-): Promise<void> {
-  if (!await managedAttemptHasDurableFold(row, attemptBinding, submissionAttempt)) return;
-  try {
-    await persistManagedTerminalCleanupMarker(
-      row,
-      pendingManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt }),
-    );
-  } catch (error) {
-    fastify.log.error({
-      applicationId: row.id,
-      attemptId: attemptBinding.attemptId,
-      detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal cleanup retrieval marker failed',
-    }, 'Managed terminal fold could not queue exact result ID retrieval');
-  }
-}
-
-async function acknowledgeManagedTerminalFoldAfterRetrieval(
-  row: ResumeRow,
-  attemptBinding: SubmissionAttemptBinding,
-  submissionAttempt: ManagedSubmissionAttempt,
-  fastify: FastifyInstance,
-): Promise<void> {
+): Promise<ManagedTerminalCleanupMarker | null> {
+  const pending = pendingManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt });
   let terminal;
   try {
     terminal = await getManagedBrowserTerminalResult(submissionAttempt);
@@ -2012,25 +2236,22 @@ async function acknowledgeManagedTerminalFoldAfterRetrieval(
       applicationId: row.id,
       attemptId: attemptBinding.attemptId,
       detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal result ID retrieval failed',
-    }, 'Managed terminal result could not be identified for acknowledgement');
-    await queueManagedTerminalCleanupResultRetrieval(
-      row,
-      attemptBinding,
-      submissionAttempt,
-      fastify,
-    );
-    return;
+    }, 'Managed terminal cleanup is waiting to identify the exact result ID');
+    return pending;
   }
+  const disposition = managedTerminalCleanupRetrievalDisposition(terminal.state);
+  if (disposition === 'complete') return null;
+  if (disposition === 'retry') return pending;
   if (terminal.state !== 'completed'
     && terminal.state !== 'failed'
-    && terminal.state !== 'indeterminate') return;
-  await acknowledgeManagedTerminalFold(
-    row,
+    && terminal.state !== 'indeterminate') {
+    throw new Error('Managed terminal cleanup disposition lost its terminal result');
+  }
+  return exactManagedTerminalCleanupMarker({
     attemptBinding,
     submissionAttempt,
-    terminal.resultId,
-    fastify,
-  );
+    resultId: terminal.resultId,
+  });
 }
 
 function recoveredSecurityCodeState(
@@ -2101,15 +2322,23 @@ async function foldManagedSecurityCodeContinuationResult(
   result: ManagedBrowserResult,
   capturedAt: string,
   fastify: FastifyInstance,
+  additionalCleanupMarkers: readonly ManagedTerminalCleanupMarker[] = [],
 ): Promise<ManagedTerminalRecoveryOutcome> {
+  const cleanupMarker = exactManagedTerminalCleanupMarker({
+    attemptBinding,
+    submissionAttempt,
+    resultId,
+  });
+  const cleanupMarkers = [...additionalCleanupMarkers, cleanupMarker];
   const expectedPortalUrl = attemptBinding.postingIdentity.portalUrl;
   if (!expectedPortalUrl) {
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       'The retained verification result has no immutable employer URL binding',
+      { cleanupMarkers },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
   const expectedApplicationUrl = portalApplicationUrl(
@@ -2129,9 +2358,9 @@ async function foldManagedSecurityCodeContinuationResult(
       row,
       attemptBinding,
       error instanceof Error ? error.message.slice(0, 500) : 'Recovered verification proof was incomplete',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
-    await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
 
@@ -2162,6 +2391,7 @@ async function foldManagedSecurityCodeContinuationResult(
       ...(securityCode ? { securityCode } : {}),
       receipt,
       receiptEvidence: { result, expectedApplicationUrl },
+      cleanupMarkers,
     });
     if (confirmed) {
       const screenshotUrl = await recoveredManagedPreviewUrl(row, review, result, fastify);
@@ -2174,7 +2404,7 @@ async function foldManagedSecurityCodeContinuationResult(
           receiptEvidence: { result, expectedApplicationUrl },
         });
       }
-      await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
+      await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
       return 'folded';
     }
   }
@@ -2194,9 +2424,10 @@ async function foldManagedSecurityCodeContinuationResult(
       ...(previewUrl ? { previewUrl } : {}),
       ...(securityCode ? { securityCode } : {}),
       verification,
+      cleanupMarkers,
     },
   );
-  await acknowledgeManagedTerminalFold(row, attemptBinding, submissionAttempt, resultId, fastify);
+  await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
   return 'folded';
 }
 
@@ -2212,38 +2443,57 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
   }
   const plan = managedSecurityCodeContinuationRecoveryPlan(review, attemptBinding);
   if (plan.kind === 'none') return 'not_recoverable';
+  const initialCleanupMarkers: ManagedTerminalCleanupMarker[] = [];
+  const authorization = await submissionBoundaryAuthorization(row.user_id, attemptBinding.attemptId);
+  if (authorization) {
+    try {
+      const initialSubmissionAttempt = managedInitialSubmissionAttempt(
+        attemptBinding,
+        authorization,
+      );
+      const initialCleanupMarker = await managedTerminalCleanupMarkerAfterRetrieval(
+        row,
+        attemptBinding,
+        initialSubmissionAttempt,
+        fastify,
+      );
+      if (initialCleanupMarker) initialCleanupMarkers.push(initialCleanupMarker);
+    } catch (error) {
+      fastify.log.warn({
+        applicationId: row.id,
+        attemptId: attemptBinding.attemptId,
+        detail: error instanceof Error ? error.message.slice(0, 200) : 'Initial cleanup binding failed',
+      }, 'Managed continuation recovery could not reconstruct its initial cleanup entry');
+    }
+  }
   if (plan.kind === 'invalid') {
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       `The retained verification recovery binding was invalid: ${plan.reason}`,
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers: initialCleanupMarkers },
+    );
+    await acknowledgeManagedTerminalCleanupMarkers(
+      row,
+      attemptBinding,
+      initialCleanupMarkers,
+      fastify,
     );
     return 'folded';
   }
-
-  const authorization = await submissionBoundaryAuthorization(row.user_id, attemptBinding.attemptId);
-  if (authorization) {
-    await acknowledgeManagedTerminalFoldAfterRetrieval(
-      row,
-      attemptBinding,
-      managedInitialSubmissionAttempt(attemptBinding, authorization),
-      fastify,
-    );
-  }
   if (plan.kind === 'expired') {
+    const cleanupMarker = pendingManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: plan.submissionAttempt,
+    });
+    const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       'The retained verification result stayed pending until its provider deadline expired',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
-    await acknowledgeManagedTerminalFoldAfterRetrieval(
-      row,
-      attemptBinding,
-      plan.submissionAttempt,
-      fastify,
-    );
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
 
@@ -2253,12 +2503,18 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
   } catch (error) {
     const detail = error instanceof Error ? error.message.slice(0, 500) : 'Terminal retrieval failed';
     if (/did not match its durable submission attempt/i.test(detail)) {
+      const cleanupMarker = pendingManagedTerminalCleanupMarker({
+        attemptBinding,
+        submissionAttempt: plan.submissionAttempt,
+      });
+      const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
       await recordManagedSecurityCodeContinuationUnverified(
         row,
         attemptBinding,
         detail,
-        { verification: review.verification },
+        { verification: review.verification, cleanupMarkers },
       );
+      await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
       return 'folded';
     }
     fastify.log.warn({
@@ -2267,12 +2523,18 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       detail: detail.slice(0, 200),
     }, 'Managed verification terminal result could not be retrieved yet');
     if (Date.now() < Date.parse(plan.providerDeadlineAt)) return 'pending';
+    const cleanupMarker = pendingManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: plan.submissionAttempt,
+    });
+    const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       'The retained verification result could not be retrieved before its provider deadline expired',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
   const terminalDecision = managedContinuationTerminalDecision(
@@ -2282,25 +2544,43 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
   );
   if (terminalDecision === 'pending') return 'pending';
   if (terminalDecision === 'deadline_expired') {
+    const cleanupMarker = pendingManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: plan.submissionAttempt,
+    });
+    const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       'The retained verification result stayed pending until its provider deadline expired',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
   if (terminalDecision === 'gone') {
+    const cleanupMarker = pendingManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: plan.submissionAttempt,
+    });
+    const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       'The retained verification result expired before Litos could fold it',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
   if ((terminalDecision === 'failed' || terminalDecision === 'indeterminate')
     && (terminal.state === 'failed' || terminal.state === 'indeterminate')) {
+    const cleanupMarker = exactManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: plan.submissionAttempt,
+      resultId: terminal.resultId,
+    });
+    const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
     const error = managedBrowserTerminalFailureError(terminal);
     if (error instanceof ManagedBrowserProviderProgressError
       && managedProviderProgressDisposition(error.runProgress, 'verification') === 'pressed') {
@@ -2312,24 +2592,24 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
       row,
       attemptBinding,
       error.message.slice(0, 500) || 'The retained verification run ended without a terminal receipt',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
-    await acknowledgeManagedTerminalFold(
-      row,
-      attemptBinding,
-      plan.submissionAttempt,
-      terminal.resultId,
-      fastify,
-    );
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
   if (terminal.state !== 'completed') {
+    const cleanupMarker = pendingManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: plan.submissionAttempt,
+    });
+    const cleanupMarkers = [...initialCleanupMarkers, cleanupMarker];
     await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       'The retained verification result could not be classified',
-      { verification: review.verification },
+      { verification: review.verification, cleanupMarkers },
     );
+    await acknowledgeManagedTerminalCleanupMarkers(row, attemptBinding, cleanupMarkers, fastify);
     return 'folded';
   }
   return foldManagedSecurityCodeContinuationResult(
@@ -2341,6 +2621,7 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
     terminal.run,
     terminal.completedAt,
     fastify,
+    initialCleanupMarkers,
   );
 }
 
@@ -2356,6 +2637,11 @@ async function recoverManagedInitialSecurityCodeChallenge(
   fastify: FastifyInstance,
   options: { actions?: ManagedBrowserAction[] },
 ): Promise<ManagedTerminalRecoveryOutcome> {
+  const initialCleanupMarker = exactManagedTerminalCleanupMarker({
+    attemptBinding,
+    submissionAttempt: initialSubmissionAttempt,
+    resultId: initialResultId,
+  });
   const continuationSubmissionAttempt = managedContinuationSubmissionAttempt(
     attemptBinding,
     'security_code',
@@ -2400,6 +2686,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       attentionCategories: ['security_code', 'unverified_submission'],
       securityCode,
       verification: baseVerification,
+      cleanupMarkers: [initialCleanupMarker],
     });
     await acknowledgeManagedTerminalFold(
       row,
@@ -2453,7 +2740,22 @@ async function recoverManagedInitialSecurityCodeChallenge(
       },
     },
   );
-  if (!searchingProjection) return 'folded';
+  if (!searchingProjection) {
+    if (await ensureManagedTerminalCleanupForDurableFold(
+      row,
+      attemptBinding,
+      initialCleanupMarker,
+    )) {
+      await acknowledgeManagedTerminalFold(
+        row,
+        attemptBinding,
+        initialSubmissionAttempt,
+        initialResultId,
+        fastify,
+      );
+    }
+    return 'folded';
+  }
   let prepared: Awaited<ReturnType<typeof prepareManagedEmailVerification>>;
   try {
     prepared = await prepareManagedEmailVerification({
@@ -2486,6 +2788,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       attentionCategories: ['security_code', 'unverified_submission'],
       securityCode,
       verification: baseVerification,
+      cleanupMarkers: [initialCleanupMarker],
     });
     await acknowledgeManagedTerminalFold(
       row,
@@ -2543,17 +2846,13 @@ async function recoverManagedInitialSecurityCodeChallenge(
       continuationSubmissionAttempt,
       continuationExpiresAt,
       enteredSecurityCode,
+      [initialCleanupMarker],
     );
   } catch (error) {
     if (error instanceof ManagedSecurityCodeContinuationRefusedError) {
-      await acknowledgeManagedTerminalFold(
-        row,
-        attemptBinding,
-        initialSubmissionAttempt,
-        initialResultId,
-        fastify,
+      return persistHandoff(
+        `Recovered employer verification was withheld by the continuation gate: ${error.message}`,
       );
-      return 'folded';
     }
     if (error instanceof FinalSubmissionBoundaryBlockedError
       || error instanceof FinalSubmissionBoundaryChangedError
@@ -2577,14 +2876,9 @@ async function recoverManagedInitialSecurityCodeChallenge(
         if (recovery !== 'not_recoverable') return recovery;
       }
       if (!latestReview || latestReview.verification?.status !== 'searching') {
-        await acknowledgeManagedTerminalFold(
-          row,
-          attemptBinding,
-          initialSubmissionAttempt,
-          initialResultId,
-          fastify,
+        return persistHandoff(
+          `Recovered employer verification reached a competing terminal state: ${error.message}`,
         );
-        return 'folded';
       }
       return persistHandoff(
         `Recovered employer verification was withheld by the exact boundary gate: ${error.message}`,
@@ -2615,6 +2909,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
       continued,
       new Date().toISOString(),
       fastify,
+      [initialCleanupMarker],
     );
     await acknowledgeManagedTerminalFold(
       row,
@@ -2649,7 +2944,17 @@ async function recoverManagedInitialSecurityCodeChallenge(
       row,
       attemptBinding,
       error instanceof Error ? error.message : 'Recovered managed verification continuation failed',
-      { securityCode: enteredSecurityCode, verification: baseVerification },
+      {
+        securityCode: enteredSecurityCode,
+        verification: baseVerification,
+        cleanupMarkers: [
+          initialCleanupMarker,
+          pendingManagedTerminalCleanupMarker({
+            attemptBinding,
+            submissionAttempt: continuationSubmissionAttempt,
+          }),
+        ],
+      },
     );
     await acknowledgeManagedTerminalFold(
       row,
@@ -2697,10 +3002,14 @@ export async function recoverManagedSubmissionTerminalResult(
     categories: ApplicationAttentionCategory[],
     resultId?: string,
   ) => {
+    const cleanupMarker = resultId
+      ? exactManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt, resultId })
+      : pendingManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt });
     await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
       message,
       attentionReason: 'Litos could not prove the final employer result for this exact application. Check the employer portal and record whether it was received.',
       attentionCategories: [...new Set([...categories, 'unverified_submission' as const])],
+      cleanupMarkers: [cleanupMarker],
     });
     if (resultId) {
       await acknowledgeManagedTerminalFold(
@@ -2732,12 +3041,6 @@ export async function recoverManagedSubmissionTerminalResult(
     await persistUnverified(
       'The managed result could not be retrieved before its employer-boundary authorization expired',
       [],
-    );
-    await queueManagedTerminalCleanupResultRetrieval(
-      row,
-      attemptBinding,
-      submissionAttempt,
-      fastify,
     );
     return 'folded';
   }
@@ -2836,6 +3139,11 @@ export async function recoverManagedSubmissionTerminalResult(
     );
   }
   const capturedAt = terminal.completedAt;
+  const cleanupMarker = exactManagedTerminalCleanupMarker({
+    attemptBinding,
+    submissionAttempt,
+    resultId: terminal.resultId,
+  });
   const baseReceipt: NonNullable<ApplicationReviewState['receipt']> = {
     confirmation_text: verdict.confirmationText,
     final_url: result.url,
@@ -2847,6 +3155,7 @@ export async function recoverManagedSubmissionTerminalResult(
     verification: { status: 'not_needed' },
     receipt: baseReceipt,
     receiptEvidence: { result, expectedApplicationUrl },
+    cleanupMarkers: [cleanupMarker],
   });
   if (!confirmed) {
     return persistUnverified(
@@ -9011,6 +9320,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       throw error;
     }
     const initialTerminalResultId = managedBrowserTerminalResultId(result);
+    const initialCleanupMarker = exactManagedTerminalCleanupMarker({
+      attemptBinding,
+      submissionAttempt: successfulSubmissionAttempt,
+      resultId: initialTerminalResultId,
+    });
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
     if (initialSubmitOutcome?.pressed === true) {
@@ -9033,21 +9347,96 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         attentionCategories: ['security_code', 'unverified_submission'],
         securityCode: mismatch.security_code,
         verification: mismatch.verification,
+        cleanupMarkers: [initialCleanupMarker],
       });
+      await acknowledgeManagedTerminalFold(
+        row,
+        attemptBinding,
+        successfulSubmissionAttempt,
+        initialTerminalResultId,
+        fastify,
+      );
       return;
     }
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    if (managedApplicationProofIsRequired(initialChallenge, initialSubmitOutcome)) {
-      if (atomicSubmitV4) assertManagedApplicationFinalSubmitSelected(result, applicationUrl);
-      assertManagedRequiredFieldsConfirmed(result, 'application');
-      if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl);
+    try {
+      if (managedApplicationProofIsRequired(initialChallenge, initialSubmitOutcome)) {
+        if (atomicSubmitV4) assertManagedApplicationFinalSubmitSelected(result, applicationUrl);
+        assertManagedRequiredFieldsConfirmed(result, 'application');
+        if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl);
+      }
+    } catch (error) {
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: error instanceof Error
+          ? error.message.slice(0, 500)
+          : 'Managed application proof was incomplete',
+        attentionReason: 'Litos could not prove the exact final employer action. Check the employer portal and record whether this application was received.',
+        attentionCategories: ['required_field', 'unverified_submission'],
+        cleanupMarkers: [initialCleanupMarker],
+      });
+      await acknowledgeManagedTerminalFold(
+        row,
+        attemptBinding,
+        successfulSubmissionAttempt,
+        initialTerminalResultId,
+        fastify,
+      );
+      return;
     }
     let receiptResult = result;
     let securityCodeTerminalResultId: string | undefined;
     let receiptObservationTerminalResultId: string | undefined;
+    let receiptObservationStarted = false;
+    const managedCleanupMarkers = (): ManagedTerminalCleanupMarker[] => [
+      initialCleanupMarker,
+      ...(securityCodeTerminalResultId ? [exactManagedTerminalCleanupMarker({
+        attemptBinding,
+        submissionAttempt: securityCodeSubmissionAttempt,
+        resultId: securityCodeTerminalResultId,
+      })] : []),
+      ...(receiptObservationTerminalResultId ? [exactManagedTerminalCleanupMarker({
+        attemptBinding,
+        submissionAttempt: receiptObservationSubmissionAttempt,
+        resultId: receiptObservationTerminalResultId,
+      })] : receiptObservationStarted ? [pendingManagedTerminalCleanupMarker({
+        attemptBinding,
+        submissionAttempt: receiptObservationSubmissionAttempt,
+      })] : []),
+    ];
+    const acknowledgeManagedCleanupMarkers = async () => {
+      await acknowledgeManagedTerminalCleanupMarkers(
+        row,
+        attemptBinding,
+        managedCleanupMarkers(),
+        fastify,
+      );
+    };
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
+    const foldManagedLiveTerminalUnverified = async (
+      message: string,
+      input: {
+        categories?: ApplicationAttentionCategory[];
+        securityCode?: ApplicationReviewState['security_code'];
+        verification?: ApplicationReviewState['verification'];
+        previewUrl?: string;
+      } = {},
+    ) => {
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message,
+        attentionReason: 'Litos could not prove the final employer result for this exact application. Check the employer portal and record whether it was received.',
+        attentionCategories: [...new Set([
+          ...(input.categories ?? []),
+          'unverified_submission' as const,
+        ])],
+        ...(input.securityCode ? { securityCode: input.securityCode } : {}),
+        ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
+        verification: input.verification ?? verification,
+        cleanupMarkers: managedCleanupMarkers(),
+      });
+      await acknowledgeManagedCleanupMarkers();
+    };
     const initialSecurityCodeState = initialChallenge
       ? beginSecurityCodeState({
         challenge: initialChallenge,
@@ -9129,9 +9518,14 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const continuationIsLive = typeof continuationToken === 'string'
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
-      const continuationFingerprint = continuationIsLive
-        ? managedContinuationFingerprint(continuationToken)
-        : null;
+      let continuationFingerprint: string | null = null;
+      if (continuationIsLive) {
+        try {
+          continuationFingerprint = managedContinuationFingerprint(continuationToken);
+        } catch {
+          continuationFingerprint = null;
+        }
+      }
       const continuationEvidence = continuationFingerprint
         ? {
           runner: 'stratus-managed' as const,
@@ -9150,29 +9544,59 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           {
             securityCode: initialSecurityCodeState,
             verification: {
-            status: 'searching',
-            requested_at: requestedAt,
-            retry_count: 0,
-            ...continuationEvidence,
+              status: 'searching',
+              requested_at: requestedAt,
+              retry_count: 0,
+              ...continuationEvidence,
             },
           },
         );
         // A confirmation or competing exact-state winner may have moved the parent while the
         // initial provider response was being processed. Such a loser never polls or writes.
-        if (!searchingProjection) return;
+        if (!searchingProjection) {
+          if (await ensureManagedTerminalCleanupForDurableFold(
+            row,
+            attemptBinding,
+            initialCleanupMarker,
+          )) {
+            await acknowledgeManagedTerminalFold(
+              row,
+              attemptBinding,
+              successfulSubmissionAttempt,
+              initialTerminalResultId,
+              fastify,
+            );
+          }
+          return;
+        }
         const searchingReview = searchingProjection.review;
-        const prepared = await prepareManagedEmailVerification({
-          result,
-          userId: row.user_id,
-          portalUrl: applicationUrl,
-          requestedAt: verificationRequestedAt,
-          permissionGranted: true,
-          expectedRecipient: packet.email,
-          applicationId: row.id,
-          standingChallenge: initialSubmitOutcome?.pressed === false,
-          attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
-          delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
-        });
+        let prepared: Awaited<ReturnType<typeof prepareManagedEmailVerification>>;
+        try {
+          prepared = await prepareManagedEmailVerification({
+            result,
+            userId: row.user_id,
+            portalUrl: applicationUrl,
+            requestedAt: verificationRequestedAt,
+            permissionGranted: true,
+            expectedRecipient: packet.email,
+            applicationId: row.id,
+            standingChallenge: initialSubmitOutcome?.pressed === false,
+            attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
+            delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
+          });
+        } catch (error) {
+          await foldManagedLiveTerminalUnverified(
+            error instanceof Error
+              ? `Automatic mailbox verification failed: ${error.message.slice(0, 300)}`
+              : 'Automatic mailbox verification failed',
+            {
+              categories: ['security_code'],
+              securityCode: initialSecurityCodeState,
+              verification: searchingReview.verification,
+            },
+          );
+          return;
+        }
         const codeWasAlreadyAttempted = prepared.status === 'ready'
           && Boolean(initialSecurityCodeState && findSecurityCodeAttempt(
             initialSecurityCodeState,
@@ -9215,7 +9639,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               attentionCategories: ['security_code', 'unverified_submission'],
               securityCode: blocked.security_code,
               verification: blocked.verification,
+              cleanupMarkers: managedCleanupMarkers(),
             });
+            await acknowledgeManagedCleanupMarkers();
             return;
           }
           /* THE PACKET'S OWN SUBMIT ACTION, CARRYING THE CODE, and it is one action rather than ten.
@@ -9259,15 +9685,40 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               securityCodeSubmissionAttempt,
               continuationExpiresAt,
               enteredSecurityCodeState,
+              [initialCleanupMarker],
             );
           } catch (error) {
             // A gate loser or a policy refusal never enters the stale initial-run failure handler.
             // Near-expiry and duplicate refusals already wrote the exact mutable resolution exit
             // under the user lock. A changed/replayed loser writes nothing over the winner.
-            if (error instanceof ManagedSecurityCodeContinuationRefusedError
-              || error instanceof FinalSubmissionBoundaryBlockedError
-              || error instanceof FinalSubmissionBoundaryChangedError
-              || error instanceof FinalSubmissionAuthorizationChangedError
+            if (error instanceof ManagedSecurityCodeContinuationRefusedError) {
+              await acknowledgeManagedTerminalCleanupMarkers(
+                row,
+                attemptBinding,
+                [initialCleanupMarker],
+                fastify,
+              );
+              return;
+            }
+            if (error instanceof FinalSubmissionBoundaryBlockedError
+              || error instanceof FinalSubmissionAuthorizationChangedError) {
+              await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+                message: error.message,
+                attentionReason: 'Litos could not safely continue employer verification. Check the employer portal and record whether this exact application was received.',
+                attentionCategories: ['security_code', 'unverified_submission'],
+                securityCode: enteredSecurityCodeState,
+                verification: searchingReview.verification,
+                cleanupMarkers: [initialCleanupMarker],
+              });
+              await acknowledgeManagedTerminalCleanupMarkers(
+                row,
+                attemptBinding,
+                [initialCleanupMarker],
+                fastify,
+              );
+              return;
+            }
+            if (error instanceof FinalSubmissionBoundaryChangedError
               || error instanceof FinalSubmissionBoundaryAlreadyAuthorizedError) return;
             throw error;
           }
@@ -9319,8 +9770,18 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               row,
               attemptBinding,
               error instanceof Error ? error.message : 'Managed verification continuation failed',
-              { securityCode: enteredSecurityCodeState },
+              {
+                securityCode: enteredSecurityCodeState,
+                cleanupMarkers: [
+                  ...managedCleanupMarkers(),
+                  pendingManagedTerminalCleanupMarker({
+                    attemptBinding,
+                    submissionAttempt: securityCodeSubmissionAttempt,
+                  }),
+                ],
+              },
             );
+            await acknowledgeManagedCleanupMarkers();
             return;
           }
           if (!readManagedSecurityCodeChallenge(receiptResult)) {
@@ -9369,6 +9830,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         initial: receiptResult,
         expectedApplicationUrl: applicationUrl,
         observe: async (continuationToken) => {
+          receiptObservationStarted = true;
           const observed = await continueManagedBrowser(continuationToken, [], {
             screenshot: true,
             submissionAttempt: receiptObservationSubmissionAttempt,
@@ -9448,39 +9910,32 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           result: receiptResult,
           expectedApplicationUrl: applicationUrl,
         },
+        cleanupMarkers: managedCleanupMarkers(),
       });
       if (!confirmedBeforeReceiptStorage) {
         fastify.log.warn(
           { applicationId: row.id, attemptId: attemptBinding.attemptId },
           'Managed confirmation did not match its immutable submission opening',
         );
+        let durableCleanupFold = true;
+        for (const marker of managedCleanupMarkers()) {
+          if (!await ensureManagedTerminalCleanupForDurableFold(
+            row,
+            attemptBinding,
+            marker,
+          )) durableCleanupFold = false;
+        }
+        if (durableCleanupFold) {
+          await acknowledgeManagedCleanupMarkers();
+        } else {
+          await foldManagedLiveTerminalUnverified(
+            'Managed confirmation did not match its immutable submission opening',
+            { securityCode: confirmedSecurityCode },
+          );
+        }
         return;
       }
-      await acknowledgeManagedTerminalFold(
-        row,
-        attemptBinding,
-        successfulSubmissionAttempt,
-        initialTerminalResultId,
-        fastify,
-      );
-      if (securityCodeTerminalResultId) {
-        await acknowledgeManagedTerminalFold(
-          row,
-          attemptBinding,
-          securityCodeSubmissionAttempt,
-          securityCodeTerminalResultId,
-          fastify,
-        );
-      }
-      if (receiptObservationTerminalResultId) {
-        await acknowledgeManagedTerminalFold(
-          row,
-          attemptBinding,
-          receiptObservationSubmissionAttempt,
-          receiptObservationTerminalResultId,
-          fastify,
-        );
-      }
+      await acknowledgeManagedCleanupMarkers();
     }
     if (!receiptEvidenceResult.screenshot) {
       if (typedConfirmationReceipt) {
@@ -9490,7 +9945,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         );
         return;
       }
-      throw new Error('Stratus managed browser did not return a receipt screenshot');
+      await foldManagedLiveTerminalUnverified(
+        'Stratus managed browser did not return a receipt screenshot',
+        { securityCode: enteredSecurityCodeState },
+      );
+      return;
     }
     let blob: Awaited<ReturnType<typeof storeReceiptScreenshot>>;
     try {
@@ -9499,7 +9958,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         Buffer.from(receiptEvidenceResult.screenshot, 'base64'),
       );
     } catch (error) {
-      if (!typedConfirmationReceipt) throw error;
+      if (!typedConfirmationReceipt) {
+        await foldManagedLiveTerminalUnverified(
+          error instanceof Error
+            ? `Receipt screenshot storage failed: ${error.message.slice(0, 300)}`
+            : 'Receipt screenshot storage failed',
+          { securityCode: enteredSecurityCodeState },
+        );
+        return;
+      }
       fastify.log.warn({
         applicationId: row.id,
         attemptId: attemptBinding.attemptId,
@@ -9509,7 +9976,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     if (delayedObservedChallenge) {
       const delayedChallenge = readManagedSecurityCodeChallenge(receiptResult);
-      if (!delayedChallenge) throw new Error('Delayed security-code challenge disappeared before handoff');
+      if (!delayedChallenge) {
+        await foldManagedLiveTerminalUnverified(
+          'Delayed security-code challenge disappeared before handoff',
+          { categories: ['security_code'], previewUrl: blob.url },
+        );
+        return;
+      }
       const securityCode = beginSecurityCodeState({
         challenge: delayedChallenge,
         attemptedAt: capturedAt,
@@ -9529,7 +10002,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         securityCode,
         verification,
         previewUrl: blob.url,
+        cleanupMarkers: managedCleanupMarkers(),
       });
+      await acknowledgeManagedCleanupMarkers();
       fastify.log.warn({
         applicationId: row.id,
         sentTo: securityCode.sent_to,
@@ -9582,7 +10057,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           ? claimedReview.verification ?? verification
           : verification,
         previewUrl: blob.url,
+        cleanupMarkers: managedCleanupMarkers(),
       });
+      await acknowledgeManagedCleanupMarkers();
       fastify.log.warn({
         applicationId: row.id,
         sentTo: attempted.sent_to,
@@ -9632,7 +10109,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         attentionCategories: ['unverified_submission'],
         ...(refusedSecurityCode ? { securityCode: refusedSecurityCode } : {}),
         previewUrl: blob.url,
+        cleanupMarkers: managedCleanupMarkers(),
       });
+      await acknowledgeManagedCleanupMarkers();
       return;
     }
     /* A PROVIDER LABEL IS NOT PHASE-1 PROOF. This result arrived only after the immutable employer
@@ -9655,7 +10134,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         attentionCategories: ['required_field', 'unverified_submission'],
         ...(notAttemptedSecurityCode ? { securityCode: notAttemptedSecurityCode } : {}),
         previewUrl: blob.url,
+        cleanupMarkers: managedCleanupMarkers(),
       });
+      await acknowledgeManagedCleanupMarkers();
       return;
     }
     if (verdict.kind === 'unverified') {
@@ -9698,7 +10179,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         previewUrl: blob.url,
         network: pressNetwork,
         challengeOnScreen: pressChallengeOnScreen,
+        cleanupMarkers: managedCleanupMarkers(),
       });
+      await acknowledgeManagedCleanupMarkers();
       return;
     }
     /* A CODE RUN OWES TWO PROOFS, AND "NO ERROR VISIBLE" IS NEITHER OF THEM.
@@ -9741,7 +10224,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           previewUrl: blob.url,
           network: pressNetwork,
           challengeOnScreen: pressChallengeOnScreen,
+          cleanupMarkers: managedCleanupMarkers(),
         });
+        await acknowledgeManagedCleanupMarkers();
         return;
       }
     }
@@ -9759,7 +10244,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         previewUrl: blob.url,
         network: pressNetwork,
         challengeOnScreen: pressChallengeOnScreen,
+        cleanupMarkers: managedCleanupMarkers(),
       });
+      await acknowledgeManagedCleanupMarkers();
       return;
     }
     if (verdict.kind !== 'confirmed') throw new Error('Managed receipt verdict did not reach a terminal branch');

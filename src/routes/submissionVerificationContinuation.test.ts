@@ -104,7 +104,7 @@ test('continuation acknowledgement follows either a confirmed fact or a structur
   const fold = runner.slice(foldStart, foldEnd);
   assert.match(fold, /recordManagedSubmissionConfirmed\(/);
   assert.match(fold, /recordManagedSecurityCodeContinuationUnverified\(/);
-  assert.match(fold, /acknowledgeManagedTerminalFold\(/);
+  assert.match(fold, /acknowledgeManagedTerminalCleanupMarkers\(/);
 });
 
 test('every managed acknowledgement carries the exact durable result ID returned by Stratus', async () => {
@@ -145,7 +145,7 @@ test('every managed acknowledgement carries the exact durable result ID returned
   );
 });
 
-test('an initial terminal GET failure folds after database expiry and queues exact result retrieval', async () => {
+test('an initial terminal GET failure folds after database expiry with atomic result retrieval work', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
   const end = runner.indexOf('async function claimSubmission(', start);
@@ -154,8 +154,10 @@ test('an initial terminal GET failure folds after database expiry and queues exa
   const failure = recovery.indexOf('const freshAuthorization = await submissionBoundaryAuthorization(', retrieval);
   const expiry = recovery.indexOf("if (freshAuthorization?.active) return 'pending'", failure);
   const fold = recovery.indexOf('await persistUnverified(', expiry);
-  const cleanup = recovery.indexOf('await queueManagedTerminalCleanupResultRetrieval(', fold);
-  assert.ok(retrieval >= 0 && failure > retrieval && expiry > failure && fold > expiry && cleanup > fold);
+  assert.ok(retrieval >= 0 && failure > retrieval && expiry > failure && fold > expiry);
+  assert.match(recovery, /pendingManagedTerminalCleanupMarker\(\{ attemptBinding, submissionAttempt \}\)/);
+  assert.match(recovery, /recordManagedAuthorizedAttemptUnverified\([\s\S]*cleanupMarkers: \[cleanupMarker\]/);
+  assert.doesNotMatch(recovery, /queueManagedTerminalCleanupResultRetrieval/);
 });
 
 test('terminal cleanup runs independently before the terminal application selector', async () => {
@@ -165,8 +167,58 @@ test('terminal cleanup runs independently before the terminal application select
   const cleanup = cron.indexOf('retryManagedTerminalCleanupOutbox(fastify)');
   const selection = cron.indexOf('const rows = await db');
   assert.ok(cleanup >= 0 && selection > cleanup);
-  assert.match(runner, /_managed_terminal_cleanup/);
+  assert.match(runner, /_managed_terminal_cleanup_outbox/);
+  assert.match(runner, /managed-terminal-cleanup-outbox-v2/);
+  assert.match(runner, /managedTerminalCleanupBatchWindow\([\s\S]*\.offset\(batchWindow\.firstOffset\)/);
+  assert.match(runner, /if \(batchWindow\.wrapLimit > 0\)/);
   assert.match(runner, /resultId: string \| null/);
+});
+
+test('terminal review and every cleanup obligation share one locked packet update', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recordManagedAuthorizedAttemptUnverified(');
+  const end = runner.indexOf('/** Persist exact post-call uncertainty', start);
+  const fold = runner.slice(start, end);
+  const lock = fold.indexOf('await lockSubmissionAttemptUser(tx, row.user_id)');
+  const outbox = fold.indexOf('specWithManagedTerminalFold', lock);
+  const review = fold.indexOf('unresolved,', outbox);
+  const update = fold.indexOf('await tx.update(generated_resumes)', review);
+  assert.ok(lock >= 0 && outbox > lock && review > outbox && update > review);
+  assert.equal((fold.match(/await tx\.update\(generated_resumes\)/g) ?? []).length, 1);
+  assert.doesNotMatch(fold, /persistManagedTerminalCleanupMarker|queueManagedTerminalCleanup/);
+});
+
+test('continuation recovery folds initial and continuation cleanup entries together', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(');
+  const end = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(', start);
+  const recovery = runner.slice(start, end);
+  assert.match(recovery, /const initialCleanupMarkers: ManagedTerminalCleanupMarker\[\] = \[\]/);
+  assert.match(recovery, /managedTerminalCleanupMarkerAfterRetrieval\([\s\S]*initialSubmissionAttempt/);
+  assert.match(recovery, /const cleanupMarkers = \[\.\.\.initialCleanupMarkers, cleanupMarker\]/);
+  assert.match(
+    recovery,
+    /foldManagedSecurityCodeContinuationResult\([\s\S]*fastify,[\s\S]*initialCleanupMarkers/,
+  );
+});
+
+test('live terminal branches atomically queue exact cleanup before acknowledgement', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('const initialTerminalResultId = managedBrowserTerminalResultId(result)');
+  const end = runner.indexOf("if (!claimedReview.browser_session_id)", start);
+  const managed = runner.slice(start, end);
+  assert.match(managed, /cleanupMarkers: \[initialCleanupMarker\]/);
+  assert.match(managed, /cleanupMarkers: managedCleanupMarkers\(\)/);
+  assert.match(
+    managed,
+    /receiptObservationStarted \? \[pendingManagedTerminalCleanupMarker\(\{[\s\S]*submissionAttempt: receiptObservationSubmissionAttempt/,
+  );
+  assert.match(managed, /foldManagedLiveTerminalUnverified\(/);
+  assert.match(managed, /await acknowledgeManagedCleanupMarkers\(\)/);
+  assert.doesNotMatch(
+    managed,
+    /did not return a receipt screenshot'\);|if \(!typedConfirmationReceipt\) throw error/,
+  );
 });
 
 test('managed verification resumes once by token, never by URL, then verifies the receipt', async () => {
