@@ -7,7 +7,7 @@ const source = readFileSync('src/routes/applications.ts', 'utf8');
 test('extension submission routes keep auth, ownership, quota, and claims server-side', () => {
   assert.match(source, /submission\/extension-start'[\s\S]*?preHandler: requireAuth/);
   assert.match(source, /submission\/extension-outcome'[\s\S]*?preHandler: requireAuth/);
-  assert.match(source, /pg_advisory_xact_lock\(hashtext/);
+  assert.match(source, /await lockSubmissionAttemptUser\(tx, userId\)/);
   assert.match(source, /eq\(generated_resumes\.user_id, userId\)/);
   assert.match(source, /submission_claimed_at' is null/);
   assert.match(source, /submission_claim_id' = \$\{parsed\.data\.claim_id\}/);

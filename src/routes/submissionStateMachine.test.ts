@@ -18,6 +18,8 @@ test('post-click failures retain the claimed row and become uncertain attention'
   assert.match(failureWriter, /submissionBoundaryAuthorization\(/);
   assert.match(failureWriter, /unverifiedSubmissionPatch\(latestReview/);
   assert.match(failureWriter, /sql`\$\{generated_resumes\.spec\} = \$\{JSON\.stringify\(latest\.spec\)\}::jsonb`/);
+  assert.match(runner, /await recordSubmissionRunnerFailure\(actedOnRow, cause, securityCodeAttemptFingerprint\)/);
+  assert.match(runner, /await lockSubmissionAttemptUser\(tx, row\.user_id\)[\s\S]*?const \[latest\] = await tx\.select\(\)\.from\(generated_resumes\)/);
   /* The intent, not the formatting. This asserted the exact one-line ternary and broke when a
      third stop reason (NoSubmitControlError) was added and the expression wrapped. What matters is
      that an uncertain-after-claim failure still lands on needs_attention rather than failed. */
@@ -102,7 +104,7 @@ test('a blank required answer stops the send and never the fill run', async () =
   // What remains is scoped to the ONE outcome of this route that sends with no run in between:
   // the unsupported-portal email fallback.
   assert.match(submitRequest, /const sendsWithoutAnotherRun = Boolean\(current\.portal_url\) && !isPortalSupported\(current\.portal_url!\)/);
-  assert.match(submitRequest, /if \(sendsWithoutAnotherRun && blankRequired\.length > 0\)/);
+  assert.match(submitRequest, /if \(sendsWithoutAnotherRun && questionGate\.requiredQuestionLabels\.length > 0\)/);
   assert.match(submitRequest, /Answer every required question before submitting\./);
 
   // The send gates all still refuse. Final approval, the runner's direct-send decision on both
@@ -225,7 +227,8 @@ test('final approval validates and submits refreshed known question answers', as
   assert.match(approve, /const sensitiveProfile = await loadSensitiveQuestionProfile/);
   assert.match(approve, /const approvalReview: ApplicationReviewState = \{/);
   assert.match(approve, /questions: resolvePacketAuditQuestionFixpoint\([\s\S]{0,220}sensitiveProfile/);
-  assert.match(approve, /approvalReview\.questions\.some/);
+  assert.match(approve, /const approvalQuestionGate = submissionQuestionGate\(approvalReview\)/);
+  assert.match(approve, /approvalQuestionGate\.requiredQuestionLabels\.length > 0/);
   assert.match(approve, /sensitiveQuestionFor\(\s*approvalReview\.questions, sensitiveProfile, approvalReview\.jd_text,/);
   assert.match(approve, /\.\.\.approvalReview,[\s\S]{0,120}status:\s*'submitting'/);
   assert.doesNotMatch(approve, /current\.questions\.some/);

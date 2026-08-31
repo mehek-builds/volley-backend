@@ -235,7 +235,7 @@ test('every employer-bound path names the current packet audit gate', () => {
   assert.match(extensionStart, /submission_packet_version: precheckPacketVersion!/);
   assert.match(extensionOutcome, /currentAcknowledgedPacketAudit/);
   assert.match(extensionOutcome, /current\.submission_packet_version !== outcomeAudit\.audit\.packet_version/);
-  assert.match(extensionOutcome, /JSON\.stringify\(row\.spec\)/);
+  assert.match(extensionOutcome, /JSON\.stringify\(latest\.spec\)/);
   const handoffComplete = routeSlice("'/applications/:id/submission/handoff-complete'", "'/applications/:id/submission/approve'");
   assert.match(handoffComplete, /currentAcknowledgedPacketAudit/);
   assert.match(handoffComplete, /JSON\.stringify\(row\.spec\)/);

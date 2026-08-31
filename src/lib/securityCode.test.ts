@@ -524,7 +524,9 @@ test('a list with no submit click is left alone rather than given one', () => {
  */
 test('the blank-required gate refuses without demoting a security-code packet', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const start = source.indexOf('const unansweredRequired = blankRequiredQuestionLabels(claimedReview.questions);');
+  const sharedGate = source.indexOf('const questionGate = submissionQuestionGate(claimedReview);');
+  const start = source.indexOf('const unansweredRequired = questionGate.requiredQuestionLabels;', sharedGate);
+  assert.ok(sharedGate > 0, 'the shared question gate must still be there');
   assert.ok(start > 0, 'the send gate must still be there');
   const gate = source.slice(start, source.indexOf('const claimedPortal = detectPortal', start));
   // Still a refusal: the claim is released and nothing is sent.

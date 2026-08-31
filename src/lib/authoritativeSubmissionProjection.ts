@@ -26,7 +26,6 @@ import {
   exactControlledTestReceiptRoute,
 } from './controlledTestPortal';
 import {
-  ashbyPostingFromUrl,
   genericKnownPosting,
   greenhousePostingFromUrl,
 } from './atsSubmissionChannels';
@@ -51,6 +50,7 @@ import {
   SUBMISSION_AUTHORITY_SCHEMA_VERSION,
   type SubmissionAuthorityRevision,
 } from './submissionAuthorityRevision';
+import { unsupportedEmailConfirmationEvidenceMatches } from './unsupportedEmailReceipt';
 
 export const AUTHORITATIVE_SUBMISSION_REPAIR_REASONS = [
   'ambiguous_confirmation',
@@ -193,6 +193,7 @@ const RECEIPT_SOURCES_BY_ATTEMPT_SOURCE: Partial<Record<SubmissionAttemptSource,
   managed_browser: ['managed_browser'],
   direct_browser: ['managed_browser'],
   chrome_extension: ['chrome_extension'],
+  unsupported_email: ['email_fallback'],
   ats_api: ['ats_api'],
   attended_handoff: ['attended_handoff'],
   legacy_backfill: [
@@ -635,6 +636,12 @@ function exactAttemptSequence(
       && capabilityKind !== null
       && [...providerConfirmationCodes].every((code) => code === 'attended_receipt_confirmed');
   }
+  if (opening.source === 'unsupported_email') {
+    return notSent.length === 0
+      && opening.operation === 'initial_submission'
+      && [...providerConfirmationCodes].every((code) =>
+        typeof code === 'string' && code.startsWith('unsupported_email_provider_accepted:'));
+  }
   return false;
 }
 
@@ -870,6 +877,7 @@ export function measuredPersistedReceiptMatchesOpening(
   confirmation: SubmissionAttemptEventRecord,
   finalUrl: string,
   confirmationText: string,
+  referenceId?: string,
 ): boolean {
   if (confirmation.evidence_code === 'controlled_receipt_verified') {
     return exactControlledReceiptMatchesOpening(opening, confirmation, finalUrl, confirmationText);
@@ -879,6 +887,23 @@ export function measuredPersistedReceiptMatchesOpening(
     && attendedHandoffCapabilityKind(opening) !== 'manual_handoff') return false;
   const frozenUrl = opening.portal_url;
   if (!frozenUrl) return false;
+  if (opening.source === 'unsupported_email') {
+    let exactUrl = false;
+    try {
+      const frozen = new URL(frozenUrl);
+      const final = new URL(finalUrl);
+      frozen.hash = '';
+      final.hash = '';
+      exactUrl = frozen.toString() === final.toString();
+    } catch {
+      exactUrl = false;
+    }
+    return exactUrl && unsupportedEmailConfirmationEvidenceMatches({
+      evidenceCode: confirmation.evidence_code,
+      confirmationText,
+      referenceId,
+    });
+  }
   const frozenGreenhouse = greenhousePostingFromUrl(frozenUrl);
   const finalGreenhouse = greenhousePostingFromUrl(finalUrl);
   if (frozenGreenhouse) {
@@ -888,14 +913,9 @@ export function measuredPersistedReceiptMatchesOpening(
     const final = new URL(finalUrl);
     return /\/(?:application_)?confirmation\/?$/i.test(final.pathname);
   }
-  const frozenAshby = ashbyPostingFromUrl(frozenUrl);
-  const finalAshby = ashbyPostingFromUrl(finalUrl);
-  if (frozenAshby) {
-    if (!finalAshby
-      || finalAshby.organization.toLowerCase() !== frozenAshby.organization.toLowerCase()
-      || finalAshby.jobPostingId.toLowerCase() !== frozenAshby.jobPostingId.toLowerCase()) return false;
-    return /\/application\/?$/i.test(new URL(finalUrl).pathname);
-  }
+  // Ashby's generic /application route and mutable success text do not bind a provider result.
+  // A future repair may admit Ashby only after its immutable result or content-bound receipt is
+  // stored in the attempt event. Until then this function deliberately falls through to false.
   const frozenKnown = genericKnownPosting(frozenUrl);
   const finalKnown = genericKnownPosting(finalUrl);
   if (frozenKnown?.provider === 'workable') {
@@ -1330,6 +1350,7 @@ function classifyGeneratedConfirmation(
         confirmation,
         receipt.final_url,
         receipt.confirmation_text,
+        receipt.reference_id,
       ))
       || (applicantAttestation
         && confirmation.evidence_code === 'applicant_found_submission'

@@ -92,6 +92,26 @@ function safeHttpsUrl(value: unknown): value is string {
   }
 }
 
+function receiptScreenshotMatchesAttempt(
+  value: unknown,
+  userId: string,
+  submissionRunId: string | undefined,
+): value is string {
+  if (!safeHttpsUrl(value) || !submissionRunId) return false;
+  try {
+    const segments = decodeURIComponent(new URL(value).pathname).split('/').filter(Boolean);
+    const usersAt = segments.findIndex((segment) => segment === 'users');
+    if (usersAt < 0) return false;
+    return segments[usersAt + 1] === userId
+      && segments[usersAt + 2] === 'submission-runs'
+      && segments[usersAt + 3] === submissionRunId
+      && /^receipt(?:-[A-Za-z0-9_-]+)?\.png$/u.test(segments[usersAt + 4] ?? '')
+      && usersAt + 5 === segments.length;
+  } catch {
+    return false;
+  }
+}
+
 function confirmationEvidenceCode(
   binding: SubmissionAttemptBinding,
   events: readonly SubmissionAttemptEventRecord[],
@@ -179,7 +199,11 @@ export async function repairMissingSubmissionConfirmation(input: {
       if (!receipt
         || !receipt.confirmation_text.trim()
         || !safeHttpsUrl(receipt.final_url)
-        || !safeHttpsUrl(receipt.screenshot_url)
+        || !receiptScreenshotMatchesAttempt(
+          receipt.screenshot_url,
+          input.userId,
+          review.submission_run_id,
+        )
         || !canonicalIso(receipt.captured_at)
         || review.status !== 'submitted'
         || review.submitted_at !== receipt.captured_at

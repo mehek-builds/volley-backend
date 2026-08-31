@@ -76,12 +76,18 @@ after(async () => {
 async function seedRepairCandidate(overrides: {
   screenshotUrl?: string;
   confirmationText?: string;
+  portalUrl?: string;
+  receiptUrl?: string;
+  atsName?: string;
 } = {}) {
+  const portalUrl = overrides.portalUrl ?? PORTAL_URL;
+  const receiptUrl = overrides.receiptUrl ?? RECEIPT_URL;
   const userId = randomUUID();
   const packetId = randomUUID();
   const applicationId = randomUUID();
   const artifactId = randomUUID();
   const attemptId = randomUUID();
+  const submissionRunId = randomUUID();
   const attachedAt = new Date('2026-08-31T09:00:00.000Z');
   const objectKey = `users/${userId}/resumes/${randomUUID()}.pdf`;
   const pdfBytes = new TextEncoder().encode(`repair-packet:${packetId}`);
@@ -102,23 +108,23 @@ async function seedRepairCandidate(overrides: {
   const review: ApplicationReviewState = {
     jd_text: 'Complete the exact Example Company application.',
     role: JOB_CONTEXT.role,
-    portal_url: PORTAL_URL,
+    portal_url: portalUrl,
     portal_supported: true,
-    ats_name: 'workable',
+    ats_name: overrides.atsName ?? 'workable',
     status: 'submitted',
     edited_terms: [],
     questions: [],
     skipped_reasons: [],
     updated_at: RECEIPT_AT,
     submitted_at: RECEIPT_AT,
-    submission_run_id: randomUUID(),
+    submission_run_id: submissionRunId,
     submission_claimed_at: '2026-08-31T09:55:00.000Z',
     submission_claim_id: attemptId,
     receipt: {
       confirmation_text: overrides.confirmationText ?? RECEIPT_TEXT,
-      final_url: RECEIPT_URL,
+      final_url: receiptUrl,
       ...(overrides.screenshotUrl === undefined
-        ? { screenshot_url: 'https://receipts.example/receipt.png' }
+        ? { screenshot_url: `https://receipts.example/users/${userId}/submission-runs/${submissionRunId}/receipt.png` }
         : overrides.screenshotUrl
           ? { screenshot_url: overrides.screenshotUrl }
           : {}),
@@ -195,7 +201,7 @@ async function seedRepairCandidate(overrides: {
     company_scope_key: `repair:${packetId}`,
     company_name: JOB_CONTEXT.company,
     role: JOB_CONTEXT.role,
-    portal_url: PORTAL_URL,
+    portal_url: portalUrl,
     source_surface: 'dashboard',
     tracker_state: 'applied',
     submission_state: 'submitted',
@@ -222,7 +228,7 @@ async function seedRepairCandidate(overrides: {
     parentAttemptId: null,
     source: 'managed_browser',
     operation: 'initial_submission',
-    postingIdentity: freezePostingIdentity(JOB_CONTEXT, PORTAL_URL),
+    postingIdentity: freezePostingIdentity(JOB_CONTEXT, portalUrl),
     submissionRunId: review.submission_run_id,
     submissionClaimId: attemptId,
     packetVersion: packetAudit.packet_version,
@@ -301,5 +307,58 @@ test('repair refuses an incomplete screenshot tuple without writing a fact', asy
     { status: result.status, code: result.status === 'refused' ? result.code : null },
     { status: 'refused', code: 'receipt_incomplete' },
   );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('repair refuses a screenshot path owned by another user or run', async () => {
+  const fixture = await seedRepairCandidate({
+    screenshotUrl: 'https://receipts.example/users/another-user/submission-runs/another-run/receipt.png',
+  });
+  const result = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    dryRun: false,
+  });
+  assert.deepEqual(
+    { status: result.status, code: result.status === 'refused' ? result.code : null },
+    { status: 'refused', code: 'receipt_incomplete' },
+  );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('repair refuses a generic Ashby application route and mutable success text', async () => {
+  const postingId = '4d7cc169-5a18-4a40-b9cf-dd519dbd7bcb';
+  const portalUrl = `https://jobs.ashbyhq.com/example/${postingId}`;
+  const fixture = await seedRepairCandidate({
+    portalUrl,
+    receiptUrl: `${portalUrl}/application`,
+    atsName: 'ashby',
+    confirmationText: 'Thank you for applying. Your application was submitted.',
+  });
+  const result = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    dryRun: false,
+  });
+  assert.deepEqual(
+    { status: result.status, code: result.status === 'refused' ? result.code : null },
+    { status: 'refused', code: 'receipt_not_verified' },
+  );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('repair preserves the exact Greenhouse confirmation route used by Jump', async () => {
+  const portalUrl = 'https://boards.greenhouse.io/jumptrading/jobs/7654321';
+  const fixture = await seedRepairCandidate({
+    portalUrl,
+    receiptUrl: `${portalUrl}/application_confirmation`,
+    atsName: 'greenhouse',
+    confirmationText: 'Thank you for applying to Jump Trading.',
+  });
+  const dryRun = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+  });
+  assert.equal(dryRun.status, 'eligible', JSON.stringify(dryRun));
   assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
 });

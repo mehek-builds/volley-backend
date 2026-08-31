@@ -65,13 +65,14 @@ test('the pre-click route transition is retryable and stores no attempted or sub
   assert.doesNotMatch(persisted.attention_reason!, /could not verify the employer confirmation/);
 });
 
-test('a standing code wall for another alias stays non-restartable and preserves the challenge', () => {
+test('a post-authorization code wall for another alias stays locked for exact human resolution', () => {
   const current = {
     status: 'submission_claimed',
     submission_claimed_at: '2026-08-11T12:00:00.000Z',
     submission_claim_id: 'claim-id',
     submission_authorization: { source: 'standing_consent' },
     submission_attempted_at: '2026-08-11T12:00:01.000Z',
+    portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
     security_code: { digits: 8, sent_to: 'packet@example.com', requested_at: 'stale', submit_was_authorized: true },
     verification: { status: 'searching' },
     updated_at: '2026-08-11T12:00:00.000Z',
@@ -92,12 +93,14 @@ test('a standing code wall for another alias stays non-restartable and preserves
   assert.deepEqual(persisted.unverified_submission, {
     at: '2026-08-11T12:00:03.000Z',
     cause: 'no_confirmation_state',
+    portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
   });
   assert.equal(persisted.submitted_at, undefined);
   assert.equal(persisted.receipt, undefined);
   assert.equal(persisted.verification?.status, 'verification_pending');
   assert.match(persisted.attention_reason!, /different application email/i);
   assert.match(persisted.attention_reason!, /managed employer capability was authorized/i);
+  assert.deepEqual(persisted.attention_categories, ['security_code', 'unverified_submission']);
   assert.match(persisted.attention_reason!, /check the employer portal/i);
   assert.equal(
     submitRequestDisposition(persisted.status, Boolean(persisted.submission_claimed_at)),
@@ -152,9 +155,11 @@ test('a delayed post-click code wall stays non-restartable and opens exact resul
   assert.match(persisted.attention_reason!, /authorized parent remains unresolved/i);
   assert.match(persisted.attention_reason!, /check the employer portal/i);
 
-  // Neither another submit run nor a resume edit may move this unresolved parent.
+  // Neither another submit run nor a resume edit may move this unresolved parent. The challenge
+  // stays attached so the exact employer-result resolution path has the evidence it needs.
   assert.equal(submitRequestDisposition(persisted.status, Boolean(persisted.submission_claimed_at)), 'reject');
   assert.equal(resumeEditDisposition(persisted.status, Boolean(persisted.submission_claimed_at)), 'reject');
+  assert.ok(persisted.security_code, 'human resolution retains the observed challenge');
   assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
   assert.equal(persisted.submission_claim_id, 'claim-id');
   assert.deepEqual(persisted.submission_authorization, {
@@ -166,14 +171,13 @@ test('a delayed post-click code wall stays non-restartable and opens exact resul
 for (const cause of ['authorization_revoked', 'email_route_changed', 'email_permission_revoked'] as const) {
   for (const pressed of [true, false]) {
     test(`a ${cause} race after pressed=${pressed} preserves the challenge and cannot restart`, () => {
-      const knownAttempt = undefined;
       const currentAttempt = pressed ? '2026-08-11T12:00:02.000Z' : undefined;
       const current = {
         status: 'submission_claimed',
         submission_claimed_at: '2026-08-11T12:00:00.000Z',
         submission_claim_id: 'claim-id',
         submission_authorization: { source: 'standing_consent' },
-        submission_attempted_at: knownAttempt,
+        submission_attempted_at: currentAttempt,
         updated_at: '2026-08-11T12:00:00.000Z',
       } as unknown as Parameters<typeof preClickVerificationContinuationBlockedReview>[0];
       const challenge = {
@@ -201,6 +205,7 @@ for (const cause of ['authorization_revoked', 'email_route_changed', 'email_perm
       assert.equal(persisted.verification?.status, 'verification_pending');
       assert.match(persisted.attention_reason!, /already authorized parent remains unresolved/i);
       assert.match(persisted.attention_reason!, /check the employer portal/i);
+      assert.deepEqual(persisted.attention_categories, ['security_code', 'unverified_submission']);
       assert.equal(
         submitRequestDisposition(persisted.status, Boolean(persisted.submission_claimed_at)),
         'reject',

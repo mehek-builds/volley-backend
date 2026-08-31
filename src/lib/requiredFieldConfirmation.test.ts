@@ -955,7 +955,10 @@ test('managed wire contract sends one bounded confirmation action with its durab
     claimId: '22222222-2222-4222-8222-222222222222',
     executionId: '33333333-3333-4333-8333-333333333333',
   };
-  let body: { actions?: Array<Record<string, unknown>> } = {};
+  let body: {
+    actions?: Array<Record<string, unknown>>;
+    submissionAttempt?: typeof submissionAttempt;
+  } = {};
   globalThis.fetch = (async (_input, init) => {
     body = JSON.parse(String(init?.body)) as typeof body;
     return new Response(JSON.stringify({
@@ -963,7 +966,6 @@ test('managed wire contract sends one bounded confirmation action with its durab
         title: 'Complete',
         url: 'https://portal.example/complete',
         text: 'Thank you',
-        submissionAttempt,
         requiredFieldConfirmation: {
           version: 2,
           status: 'confirmed',
@@ -990,6 +992,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
             submissionOutcome: 'clicked',
           }],
         },
+        submissionAttempt: body.submissionAttempt,
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
@@ -1086,12 +1089,14 @@ test('submission runner requires confirmation proof before any receipt can be re
   const chooser = source.indexOf('if (atomicSubmitV4) assertManagedApplicationFinalSubmitSelected(result, applicationUrl)');
   const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, 'application')", chooser);
   const consistency = source.indexOf('if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl)', barrier);
-  const receipt = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', consistency);
+  const verdict = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', consistency);
+  const receipt = source.indexOf('const confirmedBeforeReceiptStorage = await recordManagedSubmissionConfirmed', verdict);
   assert.ok(policyGate >= 0);
   assert.ok(chooser > policyGate);
   assert.ok(barrier > chooser);
   assert.ok(consistency > barrier);
-  assert.ok(receipt > consistency);
+  assert.ok(verdict > consistency);
+  assert.ok(receipt > verdict);
   const proofBlock = source.slice(
     source.lastIndexOf('if (managedApplicationProofIsRequired', chooser),
     source.indexOf('let receiptResult = result;', consistency),
@@ -1133,12 +1138,14 @@ test('no continuation may carry a code that came from outside the run', () => {
 
 test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions,');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions, {');
   const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
-  const receipt = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', continuation);
+  const verdict = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', continuationBarrier);
+  const receipt = source.indexOf('const confirmedBeforeReceiptStorage = await recordManagedSubmissionConfirmed', verdict);
   assert.ok(continuation >= 0);
   assert.ok(continuationBarrier > continuation);
-  assert.ok(receipt > continuationBarrier);
+  assert.ok(verdict > continuationBarrier);
+  assert.ok(receipt > verdict);
 });
 
 /* THE UNRESOLVED VOCABULARY, MEASURED AGAINST WHAT THE RUNNER ACTUALLY PUSHES.

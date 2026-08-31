@@ -50,10 +50,21 @@ import { applicationContextForQuestionResolution, knownAnswerLookup, sensitiveQu
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
-import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import {
+  blankRequiredQuestionLabels,
+  preparedRunCanRestart,
+  preparedRunHandoffExpired,
+  resumeEditDisposition,
+  reviewAnswerSaveDisposition,
+  submissionQuestionGate,
+  submitRequestDisposition,
+} from '../lib/submissionSafety';
 import { releasedExpiredAttendedHandoffReview } from '../lib/expiredHandoffClaimRelease';
 import { submissionClaimPatch } from '../lib/submissionStop';
-import { advanceCanonicalApplicationFromPacketSubmission } from '../lib/canonicalApplicationSync';
+import {
+  advanceCanonicalApplicationFromPacketSubmission,
+  syncCanonicalApplicationRow,
+} from '../lib/canonicalApplicationSync';
 import { extensionAuthorizationRequiresAutomaticSubmission } from '../lib/submissionAuthorization';
 import {
   detectPortal,
@@ -99,6 +110,7 @@ import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
   duplicateApplicationResponse,
   duplicateApplicationVerdict,
+  unidentifiableDuplicateApplicationResponse,
   type DuplicateApplicationVerdict,
 } from '../lib/duplicateApplication';
 import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
@@ -112,6 +124,27 @@ import { refreshResumeContactFromProfile } from '../lib/resumeContactOfRecord';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
+import { canonicalApplicationForNewPacketAttempt } from '../lib/canonicalPacketBinding';
+import {
+  appendSubmissionAttemptEvent,
+  authorizeFinalSubmissionBoundary,
+  freezePostingIdentity,
+  lockSubmissionAttemptUser,
+  submissionAttemptBindingFromEvent,
+  submissionAttemptEventId,
+  submissionAttemptEventsForPacket,
+  submissionAttemptsOpenedToday,
+  type SubmissionAttemptBinding,
+} from '../lib/submissionAttemptLedger';
+import {
+  unsupportedEmailConfirmationEvidenceCode,
+  unsupportedEmailConfirmationText,
+} from '../lib/unsupportedEmailReceipt';
+import {
+  authoritativeConfirmedProjectionMatches,
+  authoritativeSubmissionProjection,
+  measuredPersistedReceiptMatchesOpening,
+} from '../lib/authoritativeSubmissionProjection';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
@@ -596,14 +629,7 @@ async function refuseDuplicateApplication(
     jobContext: row.job_context,
     portalUrl: current.portal_url,
   });
-  if (verdict.kind === 'unidentifiable') {
-    log.warn(
-      { applicationId: row.id },
-      'duplicate guard abstained: no shared posting key with any submitted application',
-    );
-    return verdict;
-  }
-  if (verdict.kind !== 'duplicate') return verdict;
+  if (verdict.kind === 'clear') return verdict;
   const now = new Date().toISOString();
   const refused = applyReviewPatch(current, {
     status: 'needs_attention',
@@ -611,7 +637,11 @@ async function refuseDuplicateApplication(
     // Derived from the match rather than hardcoded. A refusal grounded in an UNVERIFIED twin is not
     // a duplicate_application: nobody knows yet whether there is a duplicate to be had, and filing
     // it as one would be the same false certainty the sentence itself is careful to avoid.
-    attention_categories: [verdict.match.certainty === 'unverified' ? 'unverified_submission' : 'duplicate_application'],
+    attention_categories: [verdict.kind === 'unidentifiable'
+      ? 'unverified_submission'
+      : verdict.match.certainty === 'unverified'
+        ? 'unverified_submission'
+        : 'duplicate_application'],
     submission_error: undefined,
   }, () => now);
   await db.update(generated_resumes)
@@ -621,11 +651,24 @@ async function refuseDuplicateApplication(
       eq(generated_resumes.user_id, userId),
       sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
     ));
-  log.info(
-    { applicationId: row.id, duplicateOf: verdict.match.application_id, basis: verdict.match.basis },
-    'Submission refused: this user already applied to this posting',
-  );
+  if (verdict.kind === 'unidentifiable') {
+    log.warn(
+      { applicationId: row.id, priorApplicationId: verdict.application_id },
+      'Submission refused: an earlier attempt cannot be safely distinguished from this posting',
+    );
+  } else {
+    log.info(
+      { applicationId: row.id, duplicateOf: verdict.match.application_id, basis: verdict.match.basis },
+      'Submission refused: this user already applied to this posting',
+    );
+  }
   return verdict;
+}
+
+function duplicateRiskResponse(verdict: Exclude<DuplicateApplicationVerdict, { kind: 'clear' }>) {
+  return verdict.kind === 'duplicate'
+    ? duplicateApplicationResponse(verdict)
+    : unidentifiableDuplicateApplicationResponse(verdict);
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
@@ -1285,7 +1328,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         precheckPacketQuestions = packetQuestions;
         precheckSensitiveProfile = sensitiveProfile;
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
-        if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
+        if (verdict.kind !== 'clear') return reply.status(409).send(duplicateRiskResponse(verdict));
         const resumeIssues = await preSendResumeVerificationIssues(
           userId,
           precheckRow.spec as StoredSpec,
@@ -1300,7 +1343,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       const runExtensionStartTransaction = (database: typeof db) => database.transaction(async (tx) => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
+        await lockSubmissionAttemptUser(tx, userId);
         const rows = await tx.select().from(generated_resumes).where(and(
           eq(generated_resumes.id, params.data.id),
           eq(generated_resumes.user_id, userId),
@@ -1316,13 +1359,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
         const current = readApplicationReview(row.spec);
         if (!current) return { kind: 'no_review' as const };
-        const startOfDay = new Date();
-        startOfDay.setUTCHours(0, 0, 0, 0);
-        const [countRows, consent] = await Promise.all([
-          tx.select({ total: sql<number>`count(*)::int` }).from(generated_resumes).where(and(
-            eq(generated_resumes.user_id, userId),
-            sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' >= ${startOfDay.toISOString()}`,
-          )),
+        const [openedToday, consent] = await Promise.all([
+          submissionAttemptsOpenedToday(userId, { executor: tx }),
           tx.select({
           automatic_submission_enabled: users.automatic_submission_enabled,
           automatic_submission_consented_at: users.automatic_submission_consented_at,
@@ -1371,9 +1409,32 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * Beside the sensitive-question refusal because they are the same kind of stop and must not
          * drift apart, and BEFORE the tx.update below, so the claim is never taken for a submission
          * that is not allowed to proceed. */
-        const unansweredRequired = blankRequiredQuestionLabels(refreshedQuestions);
+        const questionGate = submissionQuestionGate({
+          questions: refreshedQuestions,
+          question_metadata_blockers: current.question_metadata_blockers,
+        });
+        if (questionGate.metadataBlockerCount > 0) {
+          return { kind: 'question_metadata_incomplete' as const, count: questionGate.metadataBlockerCount };
+        }
+        const unansweredRequired = questionGate.requiredQuestionLabels;
         if (unansweredRequired.length > 0) return { kind: 'required_answer_missing' as const, questions: unansweredRequired };
-        if (!withinDailyCap(countRows[0]?.total ?? 0, dailySubmissionCap())) return { kind: 'cap' as const };
+        if (questionGate.optionalQuestionLabels.length > 0) {
+          return { kind: 'optional_decision_missing' as const, questions: questionGate.optionalQuestionLabels };
+        }
+        if (!withinDailyCap(openedToday, dailySubmissionCap())) return { kind: 'cap' as const };
+        const postingIdentity = freezePostingIdentity(row.job_context, current.portal_url);
+        const duplicate = await duplicateApplicationVerdict({
+          userId,
+          applicationId: row.id,
+          jobContext: row.job_context,
+          portalUrl: current.portal_url,
+        }, tx);
+        if (duplicate.kind !== 'clear') return { kind: 'duplicate_risk' as const, verdict: duplicate };
+        const canonicalApplication = await canonicalApplicationForNewPacketAttempt(tx, {
+          userId,
+          packetId: row.id,
+          postingIdentity,
+        });
         const now = new Date().toISOString();
         const claimId = randomUUID();
         const next = {
@@ -1410,7 +1471,36 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
           sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
         )).returning({ id: generated_resumes.id });
-        return updated.length ? { kind: 'started' as const, row, claimId, next } : { kind: 'changed' as const };
+        if (updated.length === 0) return { kind: 'changed' as const };
+        const binding: SubmissionAttemptBinding = {
+          attemptId: claimId,
+          userId,
+          packetId: row.id,
+          applicationId: canonicalApplication.id,
+          parentAttemptId: null,
+          source: 'chrome_extension',
+          operation: 'initial_submission',
+          postingIdentity,
+          submissionRunId: current.submission_run_id ?? null,
+          submissionClaimId: claimId,
+          packetVersion: precheckPacketVersion,
+        };
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(claimId, 'attempt_opened', 'reservation'),
+          eventKind: 'attempt_opened',
+          evidenceCode: 'atomic_extension_claim_reserved',
+          observedAt: new Date(now),
+        }, { executor: tx });
+        const authorization = await authorizeFinalSubmissionBoundary(binding, {
+          executor: tx,
+          factKey: 'extension-start-boundary',
+          evidenceCode: 'chrome_extension_employer_boundary_authorized',
+        });
+        if (authorization.kind !== 'fresh') {
+          throw new Error('EXTENSION_BOUNDARY_AUTHORIZATION_CONFLICT');
+        }
+        return { kind: 'started' as const, row, claimId, next };
       });
       const result = await withReadOnlyRetry(
         () => runExtensionStartTransaction(db),
@@ -1438,6 +1528,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'sensitive_question') {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${result.question.slice(0, 120)}` });
       }
+      if (result.kind === 'question_metadata_incomplete') {
+        return reply.status(422).send({
+          error: 'Litos could not read complete employer question metadata, so it did not open the Chrome send capability.',
+          code: 'QUESTION_METADATA_INCOMPLETE',
+          count: result.count,
+        });
+      }
       if (result.kind === 'required_answer_missing') {
         // Same body shape as the unsupported-portal email refusal below, so a client can handle one
         // "you still owe an answer" response rather than two that differ only in wording.
@@ -1445,6 +1542,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           error: 'Answer every required question before submitting.',
           questions: result.questions,
         });
+      }
+      if (result.kind === 'optional_decision_missing') {
+        return reply.status(422).send({
+          error: 'Choose Answer or Skip for every optional question before submitting.',
+          code: 'OPTIONAL_QUESTION_DECISION_REQUIRED',
+          questions: result.questions,
+        });
+      }
+      if (result.kind === 'duplicate_risk') {
+        return reply.status(409).send(duplicateRiskResponse(result.verdict));
       }
       if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
       if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
@@ -1497,31 +1604,137 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       })
         ? 'unknown' as const
         : parsed.data.outcome;
-      // Through applyReviewPatch, not a bare spread. extensionOutcomePatch's 'failed' arm writes
-      // attention_reason: undefined, so the spread persisted a terminal state with no stated cause
-      // in exactly the way the server runner used to.
-      const next = applyReviewPatch(current, extensionOutcomePatch(outcome, now, {
-        confirmationText: parsed.data.confirmation_text,
-        finalUrl: parsed.data.final_url,
-      }), () => now);
-      const updated = await db.update(generated_resumes).set({
-        spec: reviewSpec(next),
-        ...(outcome === 'confirmed' ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) } : {}),
-      }).where(and(
-        eq(generated_resumes.id, row.id),
-        eq(generated_resumes.user_id, request.jwtPayload!.userId),
-        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-        sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
-        sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
-      )).returning({ id: generated_resumes.id });
-      if (!updated.length) return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
-      // The canonical row learns what the packet just did, gated on the status the persisted
-      // review actually landed on rather than re-deriving it from the outcome the extension sent.
-      if (next.status === 'submitted') {
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+      const terminal = await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, request.jwtPayload!.userId);
+        const [latest] = await tx.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        )).limit(1).for('update');
+        const latestReview = latest ? readApplicationReview(latest.spec) : null;
+        if (!latest || !latestReview
+          || latestReview.status !== 'submitting'
+          || latestReview.submission_claim_id !== parsed.data.claim_id
+          || latestReview.submission_packet_version !== outcomeAudit.audit.packet_version) return null;
+        const events = (await submissionAttemptEventsForPacket(
+          latest.user_id,
+          latest.id,
+          { executor: tx },
+        )).filter((event) => event.attempt_id === parsed.data.claim_id);
+        const opening = events.find((event) => event.event_kind === 'attempt_opened');
+        if (!opening
+          || opening.source !== 'chrome_extension'
+          || opening.operation !== 'initial_submission'
+          || !events.some((event) => event.event_kind === 'boundary_authorized')) {
+          throw new Error('EXTENSION_ATTEMPT_AUTHORITY_MISSING');
+        }
+        const binding = submissionAttemptBindingFromEvent(opening);
+        const pressMayHaveOccurred = outcome !== 'cancelled';
+        if (pressMayHaveOccurred && !events.some((event) => event.event_kind === 'press_observed')) {
+          await appendSubmissionAttemptEvent({
+            ...binding,
+            eventId: submissionAttemptEventId(binding.attemptId, 'press_observed', 'extension-outcome'),
+            eventKind: 'press_observed',
+            evidenceCode: 'extension_submit_may_have_been_pressed',
+            observedAt: new Date(now),
+          }, { executor: tx });
+        }
+        const receiptIsAuthoritative = outcome === 'confirmed'
+          && measuredPersistedReceiptMatchesOpening(
+            opening,
+            {
+              ...opening,
+              event_kind: 'submission_confirmed',
+              evidence_code: 'extension_receipt_verified',
+              observed_at: new Date(now),
+              created_at: new Date(now),
+            },
+            parsed.data.final_url,
+            parsed.data.confirmation_text ?? 'Application submitted',
+          );
+        const safeOutcome = receiptIsAuthoritative ? 'confirmed' as const : 'unknown' as const;
+        const patch = safeOutcome === 'confirmed'
+          ? extensionOutcomePatch('confirmed', now, {
+            confirmationText: parsed.data.confirmation_text,
+            finalUrl: parsed.data.final_url,
+            portalUrl: latestReview.portal_url,
+            submissionRunId: latestReview.submission_run_id,
+          })
+          : pressMayHaveOccurred
+            ? extensionOutcomePatch('unknown', now, {
+              confirmationText: parsed.data.confirmation_text,
+              finalUrl: parsed.data.final_url,
+              portalUrl: latestReview.portal_url,
+              submissionRunId: latestReview.submission_run_id,
+            })
+            : {
+              status: 'needs_attention' as const,
+              submission_error: undefined,
+              attention_reason: 'The Chrome send capability was opened, but Litos did not receive proof that it stayed unused. Check the employer portal before trying again.',
+              unverified_submission: {
+                at: now,
+                cause: 'provider_error' as const,
+                ...(latestReview.portal_url ? { portal_url: latestReview.portal_url } : {}),
+                ...(latestReview.submission_run_id
+                  ? { submission_run_id: latestReview.submission_run_id }
+                  : {}),
+              },
+            };
+        const next = applyReviewPatch(latestReview, patch, () => now);
+        if (safeOutcome === 'confirmed') {
+          await appendSubmissionAttemptEvent({
+            ...binding,
+            eventId: submissionAttemptEventId(binding.attemptId, 'submission_confirmed', 'extension-receipt'),
+            eventKind: 'submission_confirmed',
+            evidenceCode: 'extension_receipt_verified',
+            observedAt: new Date(now),
+          }, { executor: tx });
+        }
+        const updated = await tx.update(generated_resumes).set({
+          spec: reviewSpec(next),
+          ...(safeOutcome === 'confirmed'
+            ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) }
+            : {}),
+        }).where(and(
+          eq(generated_resumes.id, latest.id),
+          eq(generated_resumes.user_id, latest.user_id),
+          sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+          sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
+          sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+        )).returning({ id: generated_resumes.id });
+        if (!updated.length) throw new Error('EXTENSION_OUTCOME_WRITE_CONFLICT');
+        if (safeOutcome === 'confirmed') {
+          await syncCanonicalApplicationRow({
+            attemptId: binding.attemptId,
+            packetId: latest.id,
+            userId: latest.user_id,
+            applicationId: binding.applicationId,
+            packetVersion: binding.packetVersion,
+            postingIdentity: binding.postingIdentity,
+          }, tx);
+          const canonicalId = binding.applicationId;
+          if (!canonicalId) throw new Error('EXTENSION_CANONICAL_APPLICATION_MISSING');
+          const projections = await authoritativeSubmissionProjection({
+            userId: latest.user_id,
+            packetIds: [latest.id],
+            applicationIds: [canonicalId],
+            executor: tx,
+          });
+          const exact = {
+            attemptId: binding.attemptId,
+            canonicalApplicationId: canonicalId,
+            packetId: latest.id,
+          };
+          if (!authoritativeConfirmedProjectionMatches(projections.byPacketId.get(latest.id), exact)
+            || !authoritativeConfirmedProjectionMatches(projections.byApplicationId.get(canonicalId), exact)) {
+            throw new Error('EXTENSION_CONFIRMATION_PROJECTION_INCOMPLETE');
+          }
+        }
+        return next;
+      });
+      if (!terminal) {
+        return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
       }
-      return reply.send({ application_id: row.id, review: next });
+      return reply.send({ application_id: row.id, review: terminal });
     },
   );
 
@@ -2135,8 +2348,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         request.jwtPayload!.userId,
         fastify.log,
       );
-      if (duplicateVerdict.kind === 'duplicate') {
-        return reply.status(409).send(duplicateApplicationResponse(duplicateVerdict));
+      if (duplicateVerdict.kind !== 'clear') {
+        return reply.status(409).send(duplicateRiskResponse(duplicateVerdict));
       }
       // Guarded here as well as on extension-start, and not because this route is unattended today.
       // The dashboard now refuses to send a drifted packet, but a frontend check is not an
@@ -2199,11 +2412,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * /submission/approve, and clickFinalSubmit's read of the live form - and those see the
        * questions the run discovered rather than this pre-run snapshot of them. */
       const sendsWithoutAnotherRun = Boolean(current.portal_url) && !isPortalSupported(current.portal_url!);
-      const blankRequired = blankRequiredQuestionLabels(canonicalSubmittedQuestions);
-      if (sendsWithoutAnotherRun && blankRequired.length > 0) {
+      const questionGate = submissionQuestionGate({
+        questions: canonicalSubmittedQuestions,
+        question_metadata_blockers: current.question_metadata_blockers,
+      });
+      if (sendsWithoutAnotherRun && questionGate.metadataBlockerCount > 0) {
+        return reply.status(422).send({
+          error: 'Litos could not read complete employer question metadata, so it did not email this application.',
+          code: 'QUESTION_METADATA_INCOMPLETE',
+          count: questionGate.metadataBlockerCount,
+        });
+      }
+      if (sendsWithoutAnotherRun && questionGate.requiredQuestionLabels.length > 0) {
         return reply.status(422).send({
           error: 'Answer every required question before submitting.',
-          questions: blankRequired,
+          questions: questionGate.requiredQuestionLabels,
+        });
+      }
+      if (sendsWithoutAnotherRun && questionGate.optionalQuestionLabels.length > 0) {
+        return reply.status(422).send({
+          error: 'Choose Answer or Skip for every optional question before submitting.',
+          code: 'OPTIONAL_QUESTION_DECISION_REQUIRED',
+          questions: questionGate.optionalQuestionLabels,
         });
       }
       const submitEducationIssues = packetEducationDrift(stored, submitProfileRows[0]?.parsed_json);
@@ -2269,119 +2499,328 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
         const base = freshSubmitRequestReview(current, canonicalSubmittedQuestions, submittedReviewedAt);
+        const claimId = randomUUID();
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
+          ...submissionClaimPatch(authorizedAt, claimId),
           updated_at: authorizedAt,
           submission_authorization: current.submission_authorization ?? {
             source: 'per_application_approval',
             authorized_at: authorizedAt,
           },
         };
-        const claimed = await db.update(generated_resumes)
-          .set({ spec: reviewSpec(pending) })
-          .where(and(
+        const packetRow = {
+          ...row,
+          spec: { ...(row.spec as StoredSpec), _review: pending },
+        };
+        const packet = await buildPacket(packetRow, false, canonicalSubmittedQuestions);
+        const preparedEmail = prepareUnsupportedPortalApplicationEmail({
+          application: packetRow,
+          review: pending,
+          packet,
+        });
+        const envelope = employerDeliveryEnvelope({
+          channel: 'unsupported_email',
+          destinationUrl: preparedEmail.recipient,
+          portalFamily: 'unsupported',
+          coverLetterSupported: pending.cover_letter_supported,
+          transcriptSupported: pending.transcript_supported,
+          email: preparedEmail.message,
+        });
+        await transportVerifiedBuiltPacket(
+          packet,
+          submitAudit.audit,
+          canonicalSubmittedQuestions,
+          async () => undefined,
+          'full',
+          envelope,
+        );
+        const reservation = await db.transaction(async (tx) => {
+          await lockSubmissionAttemptUser(tx, request.jwtPayload!.userId);
+          const [latest] = await tx.select().from(generated_resumes).where(and(
             eq(generated_resumes.id, row.id),
             eq(generated_resumes.user_id, request.jwtPayload!.userId),
-            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-            sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
-          ))
-          .returning();
-        if (claimed.length === 0) {
+          )).limit(1).for('update');
+          const latestReview = latest ? readApplicationReview(latest.spec) : null;
+          if (!latest || !latestReview
+            || !isDeepStrictEqual(latest.spec, row.spec)
+            || latest.resume_object_key !== row.resume_object_key
+            || !isDeepStrictEqual(latest.job_context, row.job_context)
+            || latestReview.status !== current.status) return { kind: 'changed' as const };
+          const latestQuestionGate = submissionQuestionGate({
+            questions: canonicalSubmittedQuestions,
+            question_metadata_blockers: latestReview.question_metadata_blockers,
+          });
+          if (!latestQuestionGate.clear) {
+            return { kind: 'questions_changed' as const, gate: latestQuestionGate };
+          }
+          const duplicate = await duplicateApplicationVerdict({
+            userId: latest.user_id,
+            applicationId: latest.id,
+            jobContext: latest.job_context,
+            portalUrl: latestReview.portal_url,
+          }, tx);
+          if (duplicate.kind !== 'clear') return { kind: 'duplicate_risk' as const, verdict: duplicate };
+          const openedToday = await submissionAttemptsOpenedToday(latest.user_id, { executor: tx });
+          if (!withinDailyCap(openedToday, dailySubmissionCap())) return { kind: 'cap' as const };
+          const postingIdentity = freezePostingIdentity(latest.job_context, latestReview.portal_url);
+          const canonicalApplication = await canonicalApplicationForNewPacketAttempt(tx, {
+            userId: latest.user_id,
+            packetId: latest.id,
+            postingIdentity,
+          });
+          const [claimedRow] = await tx.update(generated_resumes)
+            .set({ spec: reviewSpec(pending) })
+            .where(and(
+              eq(generated_resumes.id, latest.id),
+              eq(generated_resumes.user_id, latest.user_id),
+              sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+              sql`${generated_resumes.resume_object_key} is not distinct from ${latest.resume_object_key}`,
+              sql`${generated_resumes.job_context} is not distinct from ${JSON.stringify(latest.job_context ?? null)}::jsonb`,
+              sql`${generated_resumes.spec}->'_review'->>'status' = ${latestReview.status}`,
+              sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+            ))
+            .returning();
+          if (!claimedRow) return { kind: 'changed' as const };
+          const binding: SubmissionAttemptBinding = {
+            attemptId: claimId,
+            userId: latest.user_id,
+            packetId: latest.id,
+            applicationId: canonicalApplication.id,
+            parentAttemptId: null,
+            source: 'unsupported_email',
+            operation: 'initial_submission',
+            postingIdentity,
+            submissionRunId: pending.submission_run_id ?? null,
+            submissionClaimId: claimId,
+            packetVersion: submitAudit.audit.packet_version,
+          };
+          await appendSubmissionAttemptEvent({
+            ...binding,
+            eventId: submissionAttemptEventId(claimId, 'attempt_opened', 'reservation'),
+            eventKind: 'attempt_opened',
+            evidenceCode: 'atomic_email_claim_reserved',
+            observedAt: new Date(authorizedAt),
+          }, { executor: tx });
+          const authorization = await authorizeFinalSubmissionBoundary(binding, {
+            executor: tx,
+            factKey: 'unsupported-email-boundary',
+            evidenceCode: 'unsupported_email_employer_boundary_authorized',
+          });
+          if (authorization.kind !== 'fresh') {
+            throw new Error('UNSUPPORTED_EMAIL_BOUNDARY_AUTHORIZATION_CONFLICT');
+          }
+          return { kind: 'reserved' as const, row: claimedRow, binding };
+        });
+        if (reservation.kind === 'changed') {
           const refreshed = await ownedResume(request, reply);
           if (!refreshed) return;
-          const review = readApplicationReview(refreshed.spec);
-          return reply.status(202).send({ application_id: row.id, review: review ?? current });
+          return reply.status(202).send({
+            application_id: row.id,
+            review: readApplicationReview(refreshed.spec) ?? current,
+          });
         }
-        const claimedRow = claimed[0];
+        if (reservation.kind === 'duplicate_risk') {
+          return reply.status(409).send(duplicateRiskResponse(reservation.verdict));
+        }
+        if (reservation.kind === 'cap') {
+          return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
+        }
+        if (reservation.kind === 'questions_changed') {
+          return reply.status(422).send({
+            error: 'Application questions changed before the email capability could be opened.',
+            code: 'APPLICATION_QUESTIONS_CHANGED',
+            gate: reservation.gate,
+          });
+        }
+        await db.transaction(async (tx) => {
+          await lockSubmissionAttemptUser(tx, reservation.binding.userId);
+          const [dispatchRow] = await tx.select().from(generated_resumes).where(and(
+            eq(generated_resumes.id, reservation.binding.packetId),
+            eq(generated_resumes.user_id, reservation.binding.userId),
+          )).limit(1).for('update');
+          const dispatchReview = dispatchRow ? readApplicationReview(dispatchRow.spec) : null;
+          if (!dispatchRow
+            || !dispatchReview
+            || dispatchReview.status !== 'submitting'
+            || dispatchReview.submission_claim_id !== reservation.binding.attemptId) {
+            throw new Error('UNSUPPORTED_EMAIL_ATTEMPT_NOT_DISPATCHABLE');
+          }
+          const events = (await submissionAttemptEventsForPacket(
+            reservation.binding.userId,
+            reservation.binding.packetId,
+            { executor: tx },
+          )).filter((event) => event.attempt_id === reservation.binding.attemptId);
+          if (!events.some((event) => event.event_kind === 'attempt_opened')
+            || !events.some((event) => event.event_kind === 'boundary_authorized')
+            || events.some((event) => event.event_kind === 'press_observed'
+              || event.event_kind === 'submission_confirmed'
+              || event.event_kind === 'not_sent_proven')) {
+            throw new Error('UNSUPPORTED_EMAIL_ATTEMPT_NOT_DISPATCHABLE');
+          }
+          await appendSubmissionAttemptEvent({
+            ...reservation.binding,
+            eventId: submissionAttemptEventId(
+              reservation.binding.attemptId,
+              'press_observed',
+              'unsupported-email-dispatch',
+            ),
+            eventKind: 'press_observed',
+            evidenceCode: 'unsupported_email_dispatch_started',
+          }, { executor: tx });
+        });
         let sent: { messageId: string; recipient: string };
         try {
-          const packet = await buildPacket(claimedRow, false, canonicalSubmittedQuestions);
-          const preparedEmail = prepareUnsupportedPortalApplicationEmail({
-            application: claimedRow,
-            review: pending,
-            packet,
-          });
-          const envelope = employerDeliveryEnvelope({
-            channel: 'unsupported_email',
-            destinationUrl: preparedEmail.recipient,
-            portalFamily: 'unsupported',
-            coverLetterSupported: pending.cover_letter_supported,
-            transcriptSupported: pending.transcript_supported,
-            email: preparedEmail.message,
-          });
-          sent = await transportVerifiedBuiltPacket(
-            packet,
-            submitAudit.audit,
-            canonicalSubmittedQuestions,
-            () => sendPreparedUnsupportedPortalApplicationEmail(preparedEmail),
-            'full',
-            envelope,
-          );
+          sent = await sendPreparedUnsupportedPortalApplicationEmail(preparedEmail);
         } catch (error) {
-          request.log.warn({ error, applicationId: row.id }, 'Unsupported portal email fallback failed');
+          request.log.warn({ error, applicationId: row.id }, 'Unsupported portal email outcome is unverified');
           const failedAt = new Date().toISOString();
-          // Same reason as the extension outcome above: a terminal status written by a bare spread
-          // skips the one place that guarantees it carries a cause. This one at least has a
-          // sentence worth showing, so it names it rather than falling back to the generic.
-          const failed = applyReviewPatch(pending, {
-            status: 'failed',
-            submission_error: 'Litos could not email this application.',
-            attention_reason: 'Litos could not email this application to the company, so nothing has been sent. Try it again once outbound application email is working.',
-          }, () => failedAt);
-          await db.update(generated_resumes)
-            .set({ spec: reviewSpec(failed) })
-            .where(and(
-              eq(generated_resumes.id, row.id),
-              sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+          await db.transaction(async (tx) => {
+            await lockSubmissionAttemptUser(tx, reservation.binding.userId);
+            const [latest] = await tx.select().from(generated_resumes).where(and(
+              eq(generated_resumes.id, reservation.binding.packetId),
+              eq(generated_resumes.user_id, reservation.binding.userId),
+            )).limit(1).for('update');
+            const latestReview = latest ? readApplicationReview(latest.spec) : null;
+            if (!latest || !latestReview
+              || latestReview.submission_claim_id !== reservation.binding.attemptId) return;
+            const uncertain = applyReviewPatch(latestReview, {
+              status: 'needs_attention',
+              submission_attempted_at: failedAt,
+              submission_error: 'The email provider response was not verified.',
+              attention_reason: 'Litos started the employer email request but could not verify the provider response. Check for a receipt before deciding whether to send again.',
+              attention_categories: ['unverified_submission'],
+              unverified_submission: {
+                at: failedAt,
+                cause: 'provider_error',
+                ...(latestReview.portal_url ? { portal_url: latestReview.portal_url } : {}),
+                ...(latestReview.submission_run_id
+                  ? { submission_run_id: latestReview.submission_run_id }
+                  : {}),
+              },
+            }, () => failedAt);
+            await tx.update(generated_resumes).set({ spec: reviewSpec(uncertain) }).where(and(
+              eq(generated_resumes.id, latest.id),
+              eq(generated_resumes.user_id, latest.user_id),
+              sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
             ));
+          });
           return reply.status(503).send({
-            error: 'Litos could not email this application. Try again once outbound application email is configured.',
-            code: 'UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE',
+            error: 'The employer email result is unverified. Check for a receipt before trying again.',
+            code: 'UNSUPPORTED_PORTAL_EMAIL_OUTCOME_UNVERIFIED',
           });
         }
         const submittedAt = new Date().toISOString();
-        const next: ApplicationReviewState = {
-          ...pending,
-          status: 'submitted',
-          updated_at: submittedAt,
-          submitted_at: submittedAt,
-          submission_error: undefined,
-          receipt: {
-            confirmation_text: `This application was emailed to ${sent.recipient}. Resend message id: ${sent.messageId}`,
-            final_url: current.portal_url,
-            captured_at: submittedAt,
-            reference_id: sent.messageId,
-            source: 'email_fallback',
-          },
-        };
-        const updated = await db.update(generated_resumes)
-          .set({
-            spec: reviewSpec(next),
-            pipeline_stage: 'applied',
-            pipeline_stage_at: new Date(submittedAt),
-          })
-          .where(and(
-            eq(generated_resumes.id, row.id),
-            sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
-          ))
-          .returning({ id: generated_resumes.id });
-        if (updated.length === 0) {
-          const refreshed = await ownedResume(request, reply);
-          if (!refreshed) return;
-          const review = readApplicationReview(refreshed.spec);
-          return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        const confirmationText = unsupportedEmailConfirmationText(sent);
+        const confirmationEvidenceCode = unsupportedEmailConfirmationEvidenceCode(sent);
+        const committed = await db.transaction(async (tx) => {
+          await lockSubmissionAttemptUser(tx, reservation.binding.userId);
+          const [latest] = await tx.select().from(generated_resumes).where(and(
+            eq(generated_resumes.id, reservation.binding.packetId),
+            eq(generated_resumes.user_id, reservation.binding.userId),
+          )).limit(1).for('update');
+          const latestReview = latest ? readApplicationReview(latest.spec) : null;
+          if (!latest || !latestReview
+            || latestReview.submission_claim_id !== reservation.binding.attemptId
+            || latestReview.status !== 'submitting') return false;
+          const events = (await submissionAttemptEventsForPacket(
+            latest.user_id,
+            latest.id,
+            { executor: tx },
+          )).filter((event) => event.attempt_id === reservation.binding.attemptId);
+          if (!events.some((event) => event.event_kind === 'press_observed')) {
+            throw new Error('UNSUPPORTED_EMAIL_DISPATCH_EVIDENCE_MISSING');
+          }
+          const receiptFinalUrl = reservation.binding.postingIdentity.portalUrl;
+          if (!receiptFinalUrl) throw new Error('UNSUPPORTED_EMAIL_POSTING_URL_MISSING');
+          const next: ApplicationReviewState = {
+            ...latestReview,
+            status: 'submitted',
+            updated_at: submittedAt,
+            submitted_at: submittedAt,
+            submission_error: undefined,
+            attention_reason: undefined,
+            attention_categories: undefined,
+            unverified_submission: undefined,
+            receipt: {
+              confirmation_text: confirmationText,
+              final_url: receiptFinalUrl,
+              captured_at: submittedAt,
+              reference_id: sent.messageId,
+              source: 'email_fallback',
+            },
+          };
+          await appendSubmissionAttemptEvent({
+            ...reservation.binding,
+            eventId: submissionAttemptEventId(
+              reservation.binding.attemptId,
+              'submission_confirmed',
+              'unsupported-email-provider-result',
+            ),
+            eventKind: 'submission_confirmed',
+            evidenceCode: confirmationEvidenceCode,
+            observedAt: new Date(submittedAt),
+          }, { executor: tx });
+          const [updated] = await tx.update(generated_resumes)
+            .set({
+              spec: reviewSpec(next),
+              pipeline_stage: 'applied',
+              pipeline_stage_at: new Date(submittedAt),
+            })
+            .where(and(
+              eq(generated_resumes.id, latest.id),
+              eq(generated_resumes.user_id, latest.user_id),
+              sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+              sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${reservation.binding.attemptId}`,
+              sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+            ))
+            .returning({ id: generated_resumes.id });
+          if (!updated) throw new Error('UNSUPPORTED_EMAIL_CONFIRMATION_WRITE_CONFLICT');
+          await syncCanonicalApplicationRow({
+            attemptId: reservation.binding.attemptId,
+            packetId: latest.id,
+            userId: latest.user_id,
+            applicationId: reservation.binding.applicationId,
+            packetVersion: reservation.binding.packetVersion,
+            postingIdentity: reservation.binding.postingIdentity,
+          }, tx);
+          const canonicalId = reservation.binding.applicationId;
+          if (!canonicalId) throw new Error('UNSUPPORTED_EMAIL_CANONICAL_APPLICATION_MISSING');
+          const projections = await authoritativeSubmissionProjection({
+            userId: latest.user_id,
+            packetIds: [latest.id],
+            applicationIds: [canonicalId],
+            executor: tx,
+          });
+          const exact = {
+            attemptId: reservation.binding.attemptId,
+            canonicalApplicationId: canonicalId,
+            packetId: latest.id,
+          };
+          if (!authoritativeConfirmedProjectionMatches(projections.byPacketId.get(latest.id), exact)
+            || !authoritativeConfirmedProjectionMatches(projections.byApplicationId.get(canonicalId), exact)) {
+            throw new Error('UNSUPPORTED_EMAIL_CONFIRMATION_PROJECTION_INCOMPLETE');
+          }
+          return next;
+        });
+        if (!committed) {
+          return reply.status(409).send({
+            error: 'The application state changed after the email provider accepted it. Do not send it again.',
+            code: 'UNSUPPORTED_PORTAL_EMAIL_CONFIRMATION_CONFLICT',
+          });
         }
-        // The application left as an email; the canonical row must stop offering to send it.
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
         const [refreshed] = await db.select().from(generated_resumes).where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, request.jwtPayload!.userId),
         )).limit(1);
-        const responseRow = refreshed ?? { ...claimedRow, spec: { ...(claimedRow.spec as StoredSpec), _review: next } };
+        const responseRow = refreshed ?? {
+          ...reservation.row,
+          spec: { ...(reservation.row.spec as StoredSpec), _review: committed },
+        };
         return reply.status(202).send({
           application_id: row.id,
-          review: readApplicationReview(responseRow.spec) ?? next,
+          review: readApplicationReview(responseRow.spec) ?? committed,
           cover_letter: storedCoverLetter(responseRow),
         });
       }
@@ -2509,6 +2948,27 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
+      }
+      const handoffQuestionGate = submissionQuestionGate(current);
+      if (handoffQuestionGate.metadataBlockerCount > 0) {
+        return reply.status(422).send({
+          error: 'Litos could not read complete employer question metadata, so this handoff cannot be completed.',
+          code: 'QUESTION_METADATA_INCOMPLETE',
+          count: handoffQuestionGate.metadataBlockerCount,
+        });
+      }
+      if (handoffQuestionGate.requiredQuestionLabels.length > 0) {
+        return reply.status(422).send({
+          error: 'Answer every required question before completing this handoff.',
+          questions: handoffQuestionGate.requiredQuestionLabels,
+        });
+      }
+      if (handoffQuestionGate.optionalQuestionLabels.length > 0) {
+        return reply.status(422).send({
+          error: 'Choose Answer or Skip for every optional question before completing this handoff.',
+          code: 'OPTIONAL_QUESTION_DECISION_REQUIRED',
+          questions: handoffQuestionGate.optionalQuestionLabels,
+        });
       }
       const handoffAudit = await currentAcknowledgedPacketAudit(row, {
         // This route can observe a receipt from a form already submitted in the retained session.
@@ -2758,8 +3218,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         request.jwtPayload!.userId,
         fastify.log,
       );
-      if (approvalDuplicate.kind === 'duplicate') {
-        return reply.status(409).send(duplicateApplicationResponse(approvalDuplicate));
+      if (approvalDuplicate.kind !== 'clear') {
+        return reply.status(409).send(duplicateRiskResponse(approvalDuplicate));
       }
       const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       /* applicationContextForQuestionResolution(row, current), NOT current.jd_text bare.
@@ -2798,8 +3258,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (coverLetterIssue) approvalIssues.push(coverLetterIssue);
       approvalReview.questions = normalizeApplicationReviewQuestions(approvalReview.questions);
       approvalIssues.push(...finalApprovalFieldIssues(approvalReview, approvalReview.cover_letter_attached === true));
-      if (approvalReview.questions.some((question) => question.required && !question.answer.trim())) {
+      const approvalQuestionGate = submissionQuestionGate(approvalReview);
+      if (approvalQuestionGate.metadataBlockerCount > 0) {
+        approvalIssues.push(`${approvalQuestionGate.metadataBlockerCount} employer question controls have incomplete metadata.`);
+      }
+      if (approvalQuestionGate.requiredQuestionLabels.length > 0) {
         approvalIssues.push('A required application answer is still blank.');
+      }
+      if (approvalQuestionGate.optionalQuestionLabels.length > 0) {
+        approvalIssues.push('Choose Answer or Skip for every optional question before sending.');
       }
       const sensitive = sensitiveQuestionFor(
         approvalReview.questions, sensitiveProfile, approvalReview.jd_text,

@@ -286,7 +286,12 @@ import {
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
-import { blankRequiredQuestionLabels, directPreparationIsSafe } from '../lib/submissionSafety';
+import {
+  blankRequiredQuestionLabels,
+  directPreparationIsSafe,
+  submissionQuestionGate,
+  undecidedOptionalQuestionLabels,
+} from '../lib/submissionSafety';
 import { resolveRevision } from '../lib/buildInfo';
 import {
   autoRunShouldPrepare,
@@ -5558,17 +5563,7 @@ export function unansweredRequiredBlockerLabels(
 }
 
 /** Optional questions that still need an explicit applicant answer or skip decision. */
-export function undecidedOptionalQuestionLabels(
-  questions: readonly Pick<ApplicationReviewQuestion, 'question' | 'answer' | 'required' | 'answer_state'>[],
-): string[] {
-  return [...new Set(questions.flatMap((question) => (
-    !question.required
-    && !question.answer.trim()
-    && question.answer_state !== 'skipped'
-      ? [normalizeReviewQuestionLabel(question.question)]
-      : []
-  )).filter(Boolean))];
-}
+export { undecidedOptionalQuestionLabels };
 
 /**
  * The documents this form asked for, off both measurements a prepare has, in one place.
@@ -8271,7 +8266,24 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
    * run it again, and 'failed' would say the opposite of what happened. The claim is released for
    * the same reason - the packet is waiting on her, not in flight.
    */
-  const unansweredRequired = blankRequiredQuestionLabels(claimedReview.questions);
+  const questionGate = submissionQuestionGate(claimedReview);
+  if (questionGate.metadataBlockerCount > 0) {
+    const metadataSentence = `${questionGate.metadataBlockerCount} employer question `
+      + `${questionGate.metadataBlockerCount === 1 ? 'control has' : 'controls have'} incomplete metadata. `
+      + 'Litos did not expose or use a send capability.';
+    await writeReviewWithRunnerNotSentFact(row, nextReview(claimedReview, {
+      status: 'needs_attention',
+      attention_reason: metadataSentence,
+      attention_categories: ['evidence_gap'],
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }), attemptBinding, 'question-metadata-withheld', {
+      proofKind: 'typed_pre_click_stop',
+      evidenceCode: 'question_metadata_incomplete',
+    });
+    return;
+  }
+  const unansweredRequired = questionGate.requiredQuestionLabels;
   if (unansweredRequired.length > 0) {
     fastify.log.error(
       { applicationId: row.id, fields: unansweredRequired },
@@ -8315,7 +8327,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     });
     return;
   }
-  const undecidedOptional = undecidedOptionalQuestionLabels(claimedReview.questions);
+  const undecidedOptional = questionGate.optionalQuestionLabels;
   if (undecidedOptional.length > 0) {
     const optionalSentence = `${undecidedOptional.length} optional `
       + `${undecidedOptional.length === 1 ? 'question needs' : 'questions need'} an Answer or Skip choice before Litos can send this application: `
@@ -10069,6 +10081,7 @@ export function submissionFailureReview(
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
       confirmationUnproven,
+      fieldProofFailedBeforeSubmit,
       providerSessionFailureBeforeSubmit,
       providerSessionFailure,
       runTimedOut,

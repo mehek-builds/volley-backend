@@ -294,6 +294,8 @@ test('the centralized runner refuses stale lead evidence before every claim and 
     security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('prepareManagedEmailVerification({'),
     'recovered security-code continuation must validate before mailbox or employer work',
   );
+  assert.doesNotMatch(security, /claimSecurityCodeSubmission\(|submit\(/,
+    'the retired typed-code endpoint must not reserve or refill an employer form');
   const securityClaim = runner.slice(
     runner.indexOf('async function claimSecurityCodeSubmission('),
     runner.indexOf('async function claimPreparation('),
@@ -301,24 +303,28 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   assert.match(securityClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
 });
 
-test('unsupported-portal email claims the exact verified packet before building or sending it', () => {
+test('unsupported-portal email verifies, reserves, and records its immutable boundary before sending', () => {
   const applications = routeSource('applications.ts');
   const handler = applications.slice(
     applications.indexOf("'/applications/:id/submit-request'"),
     applications.indexOf("'/applications/:id/submission/channels'"),
   );
   const verify = handler.indexOf('preSendResumeVerificationIssues(');
-  const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`', verify);
-  const packet = handler.indexOf('buildPacket(claimedRow, false, canonicalSubmittedQuestions)', exactClaim);
+  const packet = handler.indexOf('buildPacket(packetRow, false, canonicalSubmittedQuestions)', verify);
   const verifyPacket = handler.indexOf('transportVerifiedBuiltPacket(', packet);
-  const prepareEmail = handler.indexOf('prepareUnsupportedPortalApplicationEmail', exactClaim);
-  const send = handler.indexOf('sendPreparedUnsupportedPortalApplicationEmail', exactClaim);
-  assert.ok(verify > 0 && exactClaim > verify, 'the email claim must compare against the packet that passed verification');
-  assert.ok(packet > exactClaim && prepareEmail > packet && verifyPacket > prepareEmail && send > verifyPacket,
-    'the exact claimed packet must be rebuilt, audit-verified, and only then sent to the employer');
-  assert.match(handler,
-    /transportVerifiedBuiltPacket\([\s\S]{0,220}submitAudit\.audit,[\s\S]{0,120}canonicalSubmittedQuestions,[\s\S]{0,220}sendPreparedUnsupportedPortalApplicationEmail[\s\S]{0,180}'full'/,
-    'unsupported email must transport the exact object whose applicant snapshot and questions passed the audit');
+  const prepareEmail = handler.indexOf('prepareUnsupportedPortalApplicationEmail', packet);
+  const reservation = handler.indexOf('const reservation = await db.transaction', verifyPacket);
+  const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`', reservation);
+  const opened = handler.indexOf("eventKind: 'attempt_opened'", exactClaim);
+  const boundary = handler.indexOf('authorizeFinalSubmissionBoundary(binding', opened);
+  const pressed = handler.indexOf("eventKind: 'press_observed'", boundary);
+  const send = handler.indexOf('sent = await sendPreparedUnsupportedPortalApplicationEmail', pressed);
+  assert.ok(verify > 0 && packet > verify && prepareEmail > packet && verifyPacket > prepareEmail,
+    'the exact packet must be built and audit-verified before a provider capability is reserved');
+  assert.ok(reservation > verifyPacket && exactClaim > reservation,
+    'the locked reservation must compare against the exact row that passed verification');
+  assert.ok(opened > exactClaim && boundary > opened && pressed > boundary && send > pressed,
+    'the immutable opening, boundary, and dispatch fact must precede the employer email call');
 });
 
 /**
@@ -374,7 +380,10 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(applicationsRoute, /assessAtsSubmissionChannel\(review\.portal_url\)/);
   assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(applicationsRoute, /sendPreparedUnsupportedPortalApplicationEmail/);
-  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,2600}sendPreparedUnsupportedPortalApplicationEmail/);
+  const unsupportedStart = applicationsRoute.indexOf('if (current.portal_url && !isPortalSupported(current.portal_url))');
+  const channelsStart = applicationsRoute.indexOf("'/applications/:id/submission/channels'");
+  assert.ok(unsupportedStart > 0 && channelsStart > unsupportedStart);
+  assert.match(applicationsRoute.slice(unsupportedStart, channelsStart), /sendPreparedUnsupportedPortalApplicationEmail/);
   assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
   const repairIndex = applicationsRoute.indexOf('repairReviewPortalFromMonitoredJob(row, current)');
   const guardIndex = applicationsRoute.indexOf('!isPortalSupported(current.portal_url)');
@@ -385,18 +394,15 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.ok(browserConfigIndex > guardIndex, 'unsupported portal email fallback must not require a browser provider');
   assert.match(applicationsRoute, /pipeline_stage: 'applied'/);
   assert.match(applicationsRoute, /source: 'email_fallback'/);
-  assert.match(applicationsRoute, /status: 'failed'[\s\S]{0,900}UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
-  const failureStart = applicationsRoute.indexOf("Unsupported portal email fallback failed");
+  assert.match(applicationsRoute, /UNSUPPORTED_PORTAL_EMAIL_OUTCOME_UNVERIFIED/);
+  const failureStart = applicationsRoute.indexOf('Unsupported portal email outcome is unverified');
   const failureEnd = applicationsRoute.indexOf('const submittedAt', failureStart);
   assert.ok(failureStart > guardIndex, 'email fallback failure handling must be inside the unsupported branch');
   assert.ok(failureEnd > failureStart, 'email fallback failure handling must return before the submitted write');
   const failureBlock = applicationsRoute.slice(failureStart, failureEnd);
-  /* The intent, not the formatting. This pinned the literal `status: 'failed' as const`, which was
-     part of a bare spread that built a terminal review outside applyReviewPatch and so could
-     persist a failure with no stated cause. What matters is that the row lands on 'failed' through
-     the shared merge, carrying a reason. */
-  assert.match(failureBlock, /applyReviewPatch\([\s\S]{0,200}status: 'failed'/);
-  assert.match(failureBlock, /attention_reason: 'Litos could not email this application/);
+  assert.match(failureBlock, /applyReviewPatch\([\s\S]{0,200}status: 'needs_attention'/);
+  assert.match(failureBlock, /submission_attempted_at: failedAt/);
+  assert.match(failureBlock, /unverified_submission:/);
   assert.match(failureBlock, /return reply\.status\(503\)\.send/);
   assert.doesNotMatch(failureBlock, /status: 'submitted'/);
   assert.doesNotMatch(failureBlock, /pipeline_stage: 'applied'/);
