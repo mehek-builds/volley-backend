@@ -53,6 +53,11 @@ test('the global error boundary preserves client errors and hides server interna
     statusCode: 500,
     message: 'Internal server error',
   });
+  assert.deepEqual(toPublicError({ code: '40001', message: 'database internals' }), {
+    statusCode: 503,
+    message: 'This account changed at the same time. Try the request again.',
+    retryAfterSeconds: 1,
+  });
 });
 
 const ATS_ORIGIN = 'https://job-boards.greenhouse.io';

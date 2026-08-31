@@ -161,7 +161,7 @@ async function assertCatalog(client) {
     normalizedDefinition(row.definition),
   ]));
   const functionContract = new Map([
-    ['lock_submission_authority_revision_user', /pg_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\)/u],
+    ['lock_submission_authority_revision_user', /pg_try_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*if acquired is not true.*errcode = '40001'/u],
     ['bump_submission_authority_revision', /revision = submission_authority_revisions\.revision \+ 1/u],
     ['enforce_submission_authority_revision_monotonicity', /new\.revision <= old\.revision/u],
     ['submission_authority_application_artifact_owner', /application artifact ownership mismatch/u],
@@ -305,13 +305,18 @@ async function main() {
     await client.query(`
       create or replace function lock_submission_authority_revision_user(p_user_id uuid)
       returns void language plpgsql as $function$
+      declare acquired boolean;
       begin
         if p_user_id is null then
           raise exception 'submission authority owner is missing' using errcode = '23502';
         end if;
-        perform pg_advisory_xact_lock(
+        select pg_try_advisory_xact_lock(
           hashtextextended('submission-attempt:' || p_user_id::text, 0::bigint)
-        );
+        ) into acquired;
+        if acquired is not true then
+          raise exception 'submission authority changed concurrently; retry the request'
+            using errcode = '40001';
+        end if;
       end
       $function$
     `);

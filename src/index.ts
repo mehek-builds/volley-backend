@@ -86,14 +86,21 @@ function trustProxySetting(): false | number {
   return process.env.VERCEL ? 1 : false;
 }
 
-type PublicError = { statusCode: number; message: string };
+type PublicError = { statusCode: number; message: string; retryAfterSeconds?: number };
 
 export function toPublicError(error: unknown): PublicError {
   if (typeof error !== 'object' || error === null) {
     return { statusCode: 500, message: 'Internal server error' };
   }
 
-  const candidate = error as { statusCode?: unknown; message?: unknown };
+  const candidate = error as { code?: unknown; statusCode?: unknown; message?: unknown };
+  if (candidate.code === '40001') {
+    return {
+      statusCode: 503,
+      message: 'This account changed at the same time. Try the request again.',
+      retryAfterSeconds: 1,
+    };
+  }
   const statusCode =
     typeof candidate.statusCode === 'number' && candidate.statusCode >= 400 && candidate.statusCode < 500
       ? candidate.statusCode
@@ -486,6 +493,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   fastify.setErrorHandler((error, _request, reply) => {
     fastify.log.error(error);
     const publicError = toPublicError(error);
+    if (publicError.retryAfterSeconds !== undefined) {
+      reply.header('Retry-After', String(publicError.retryAfterSeconds));
+    }
     return reply.status(publicError.statusCode).send({ error: publicError.message });
   });
 

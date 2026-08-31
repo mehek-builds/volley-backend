@@ -434,3 +434,15 @@ test('package catalog exposes the additive migration without production side eff
     'node --import tsx --test src/db/submissionAuthorityRevisionMigration.test.ts',
   );
 });
+
+test('row-first legacy writes fail fast instead of waiting on the authority lock', () => {
+  const migration = readFileSync('scripts/apply-submission-authority-revision-schema.mjs', 'utf8');
+  const lockFunction = migration.slice(
+    migration.indexOf('create or replace function lock_submission_authority_revision_user'),
+    migration.indexOf('create or replace function bump_submission_authority_revision'),
+  );
+  assert.match(lockFunction, /pg_try_advisory_xact_lock/u);
+  assert.match(lockFunction, /if acquired is not true/u);
+  assert.match(lockFunction, /errcode = '40001'/u);
+  assert.doesNotMatch(lockFunction, /perform pg_advisory_xact_lock/u);
+});
