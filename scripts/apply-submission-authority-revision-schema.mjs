@@ -7,6 +7,7 @@
  * authority rows and their cache-coherence token atomic, including on rollback.
  */
 
+import tls from 'node:tls';
 import pg from 'pg';
 
 const SCHEMA_VERSION = 'submission-authority-v1';
@@ -258,7 +259,31 @@ async function main() {
     process.exit(2);
   }
 
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  const client = new pg.Client({
+    connectionString: process.env.DATABASE_URL,
+    // Same TLS posture as scripts/check-schema-drift.mjs, for the same reason: from a GitHub
+    // runner this URL is Railway's public TCP proxy, whose PostgreSQL presents a certificate
+    // from Railway's PRIVATE root (CN=root-ca). Without the pinned root the connect dies with
+    // "self-signed certificate in certificate chain" before a single statement runs. The SAN is
+    // [localhost, postgres.railway.internal], so the identity check names the internal host, a
+    // real check only Railway's own instance can pass, not a bypass.
+    //
+    // STRICTLY ADDITIVE: without the env var, the ssl option stays absent exactly as before this
+    // change, because the other legitimate run site is INSIDE the litos-api container, where
+    // DATABASE_URL is postgres.railway.internal with no sslmode and the pre-existing client
+    // connected plaintext over the private network. Forcing `{ rejectUnauthorized: true }` there
+    // (the check-schema-drift.mjs fallback, which is right for its Neon history but new behavior
+    // here) would kill that in-container path with SELF_SIGNED_CERT_IN_CHAIN, since the container
+    // carries DATABASE_SSL_ROOT_CERT for src/db/index.ts, not this script's variable.
+    ssl: process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT?.trim()
+        && !/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL)
+      ? {
+          rejectUnauthorized: true,
+          ca: `${process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT.trim().replace(/\\n/g, '\n')}\n`,
+          checkServerIdentity: (host, cert) => tls.checkServerIdentity('postgres.railway.internal', cert),
+        }
+      : undefined,
+  });
   await client.connect();
   try {
     await client.query("set lock_timeout = '2min'");

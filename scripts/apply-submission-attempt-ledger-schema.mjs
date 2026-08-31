@@ -12,6 +12,7 @@
  * cascade so account/privacy erasure remains possible.
  */
 
+import tls from 'node:tls';
 import pg from 'pg';
 
 const REQUIRED_COLUMNS = [
@@ -145,7 +146,23 @@ async function main() {
     process.exit(2);
   }
 
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  const client = new pg.Client({
+    connectionString: process.env.DATABASE_URL,
+    // Same TLS posture as apply-submission-authority-revision-schema.mjs, documented there: from a
+    // GitHub runner this URL is Railway's public TCP proxy (private root-ca, SAN
+    // [localhost, postgres.railway.internal]), and the pinned root plus an identity check against
+    // the internal name is the strongest verification that proxy can pass. STRICTLY ADDITIVE:
+    // without the env var the ssl option stays absent exactly as before, preserving the
+    // in-container plaintext path over postgres.railway.internal.
+    ssl: process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT?.trim()
+        && !/localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL)
+      ? {
+          rejectUnauthorized: true,
+          ca: `${process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT.trim().replace(/\\n/g, '\n')}\n`,
+          checkServerIdentity: (host, cert) => tls.checkServerIdentity('postgres.railway.internal', cert),
+        }
+      : undefined,
+  });
   await client.connect();
   try {
     await client.query("set lock_timeout = '2min'");
