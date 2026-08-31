@@ -1307,10 +1307,12 @@ function claimedRunningRow(): import('./applicationReview').ApplicationReviewSta
 describe('the send path is wired to the reading, not to the scrape', () => {
   test('the verdict is consulted before any receipt is parsed', async () => {
     const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-    const verdict = source.indexOf('const verdict = managedSubmitVerdict(receiptResult);');
-    const scrape = source.indexOf('readManagedReceipt(receiptResult)', verdict);
+    const verdict = source.indexOf('const verdict = exactManagedSubmitVerdict(receiptResult, applicationUrl);');
+    const receipt = source.indexOf('const receipt = { confirmationText: verdict.confirmationText', verdict);
     assert.ok(verdict > 0, 'the managed send path must ask the run what it saw');
-    assert.ok(scrape > verdict, 'the body scrape is enrichment now, not the proof');
+    assert.ok(receipt > verdict, 'the typed verdict must precede persisted receipt construction');
+    assert.doesNotMatch(source.slice(verdict, receipt), /readManagedReceipt\(/,
+      'mutable body scraping must not stand between the typed verdict and receipt construction');
   });
 
   /* THESE TWO WERE SOURCE GREPS UNTIL THE DECISION THEY WATCH WAS EXTRACTED FROM fail().

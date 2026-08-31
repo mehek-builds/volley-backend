@@ -38,6 +38,7 @@ import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
 import { canonicalApplicationRoutes } from './routes/canonicalApplications';
 import { applicationFromJobRoutes } from './routes/applicationFromJob';
+import { managedPrepareRoutes } from './routes/managedPrepare';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { autopilotMatcherRoutes } from './routes/autopilotMatcher';
 import { captchaStallRoutes } from './routes/captchaStalls';
@@ -62,6 +63,8 @@ import { warmApplicationAliasDeliverability } from './lib/applicationEmailDelive
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
 import { objectStorageRoutes } from './routes/objectStorage';
+import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
+import { submissionAuthorityRevisionReadiness } from './lib/submissionAuthorityRevision';
 import { encryptionRekeyRoutes } from './routes/encryptionRekey';
 
 export interface BuildAppOptions {
@@ -84,14 +87,21 @@ function trustProxySetting(): false | number {
   return process.env.VERCEL ? 1 : false;
 }
 
-type PublicError = { statusCode: number; message: string };
+type PublicError = { statusCode: number; message: string; retryAfterSeconds?: number };
 
 export function toPublicError(error: unknown): PublicError {
   if (typeof error !== 'object' || error === null) {
     return { statusCode: 500, message: 'Internal server error' };
   }
 
-  const candidate = error as { statusCode?: unknown; message?: unknown };
+  const candidate = error as { code?: unknown; statusCode?: unknown; message?: unknown };
+  if (candidate.code === '40001') {
+    return {
+      statusCode: 503,
+      message: 'This account changed at the same time. Try the request again.',
+      retryAfterSeconds: 1,
+    };
+  }
   const statusCode =
     typeof candidate.statusCode === 'number' && candidate.statusCode >= 400 && candidate.statusCode < 500
       ? candidate.statusCode
@@ -324,12 +334,29 @@ export async function buildApp(options: BuildAppOptions = {}) {
      * state a monitor will be repeating during an incident costs nothing to observe. */
     const model = await cachedModelHealth(request.log);
 
-    return reply.status(healthStatusCode(database)).send({
+    /* Submission code depends on two separately applied authority schemas. A healthy database is
+     * not proof that either schema exists, so publish their bounded catalog checks independently.
+     * Keeping the reasons coarse makes this safe on a public endpoint while still preventing a
+     * release from opening the submission fence against an incomplete migration. */
+    const [attemptLedger, authorityRevision] = database.status === 'ok'
+      ? await Promise.all([
+        submissionLedgerReadiness(),
+        submissionAuthorityRevisionReadiness(),
+      ])
+      : [
+        { ready: false, reason: 'unreadable' as const },
+        { ready: false, reason: 'unreadable' as const },
+      ];
+    const submissionAuthorityReady = attemptLedger.ready && authorityRevision.ready;
+
+    return reply.status(submissionAuthorityReady ? healthStatusCode(database) : 503).send({
       /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
          dependency it cannot work without is unavailable. Every identity field below is still
          present on a 503, because DEPLOY.md reads `revision` from this response to confirm what
          shipped, and that has to keep working during an incident. */
-      status: aggregateServiceHealthStatus({ database: database.status, applicationEmail, model }),
+      status: submissionAuthorityReady
+        ? aggregateServiceHealthStatus({ database: database.status, applicationEmail, model })
+        : 'degraded',
       database: database.status,
       model: model.status,
       ...(model.status === 'unavailable' ? { model_reason: model.reason } : {}),
@@ -402,6 +429,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
         configured_channels: configuredAtsSubmissionChannels().length,
       },
       application_email: applicationEmail,
+      submission_authority: {
+        ready: submissionAuthorityReady,
+        attempt_ledger: attemptLedger,
+        revision: authorityRevision,
+      },
       // Effective state only. An invalid nonempty environment value fails closed to freeze, while
       // the value itself stays out of this unauthenticated response.
       submission_cutover: submissionCutover,
@@ -440,6 +472,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(canonicalApplicationRoutes);
   await fastify.register(applicationFromJobRoutes);
+  await fastify.register(managedPrepareRoutes);
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(autopilotMatcherRoutes);
@@ -464,6 +497,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   fastify.setErrorHandler((error, _request, reply) => {
     fastify.log.error(error);
     const publicError = toPublicError(error);
+    if (publicError.retryAfterSeconds !== undefined) {
+      reply.header('Retry-After', String(publicError.retryAfterSeconds));
+    }
     return reply.status(publicError.statusCode).send({ error: publicError.message });
   });
 

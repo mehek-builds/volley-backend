@@ -247,7 +247,8 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   assert.match(handler, /finalApprovalCoverLetterIssue\(approvalReview, Boolean\(storedCoverLetter\(row\)\)\)/);
   assert.doesNotMatch(handler, /cover_letter_supported/);
   assert.match(handler, /approvalReview\.questions = normalizeApplicationReviewQuestions\(approvalReview\.questions\)/);
-  assert.match(handler, /approvalReview\.questions\.some\(\(question\) => question\.required && !question\.answer\.trim\(\)\)/);
+  assert.match(handler, /const approvalQuestionGate = submissionQuestionGate\(approvalReview\)/);
+  assert.match(handler, /approvalQuestionGate\.requiredQuestionLabels\.length > 0/);
   assert.match(handler, /sensitiveQuestionFor\(\s*approvalReview\.questions/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.match(handler, /preSendResumeVerificationIssues\([\s\S]{0,120}request\.jwtPayload!\.userId,[\s\S]{0,80}stored,[\s\S]{0,80}applicationCompany\(row\)/);

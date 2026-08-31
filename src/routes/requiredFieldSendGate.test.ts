@@ -37,20 +37,20 @@ test('the extension send path refuses a blank required answer before it claims t
     "'/applications/:id/submission/extension-start'",
     "'/applications/:id/submission/extension-outcome'",
   );
-  assert.match(handler, /blankRequiredQuestionLabels\(refreshedQuestions\)/);
+  assert.match(handler, /const questionGate = submissionQuestionGate\(\{[\s\S]*?questions: refreshedQuestions/);
   assert.match(handler, /kind: 'required_answer_missing'/);
   assert.match(handler, /result\.kind === 'required_answer_missing'/);
   assert.match(handler, /Answer every required question before submitting\./);
   // Ordering, mirroring the sensitive-question assertion in submissionEducationGuard.regression-1:
   // a claim taken for a submission that is then refused leaves the packet stuck in 'submitting'.
   assert.ok(
-    handler.indexOf('blankRequiredQuestionLabels') < handler.indexOf('tx.update(generated_resumes)'),
+    handler.indexOf('submissionQuestionGate') < handler.indexOf('tx.update(generated_resumes)'),
     'a blank required answer must block before the submission claim is written',
   );
   // Against the REFRESHED questions, so a value the profile has since supplied counts as answered
   // and the applicant is not asked for something Litos can now fill in.
   assert.ok(
-    handler.indexOf('const refreshedQuestions =') < handler.indexOf('blankRequiredQuestionLabels'),
+    handler.indexOf('const refreshedQuestions =') < handler.indexOf('submissionQuestionGate'),
     'the check must read the refreshed answers, not the stored snapshot',
   );
 });
@@ -63,10 +63,11 @@ test('the final click refuses a blank required answer on every provider, includi
      that covers it. */
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const submit = slice(runner, 'async function submit(row: ResumeRow', '\nasync function ');
-  assert.match(submit, /const unansweredRequired = blankRequiredQuestionLabels\(claimedReview\.questions\)/);
+  assert.match(submit, /const questionGate = submissionQuestionGate\(claimedReview\)/);
+  assert.match(submit, /const unansweredRequired = questionGate\.requiredQuestionLabels/);
   assert.match(submit, /status: 'needs_attention'/);
 
-  const gate = submit.indexOf('blankRequiredQuestionLabels');
+  const gate = submit.indexOf('submissionQuestionGate');
   assert.ok(gate >= 0, 'submit() must consult the required-answer gate');
   // After the claim, so it reads the review as it stands at the moment of the click.
   assert.ok(
@@ -75,7 +76,7 @@ test('the final click refuses a blank required answer on every provider, includi
   );
   // Before every send. Each of these is a separate way to reach an employer from this function.
   for (const send of [
-    'submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions)',
+    'submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions, attemptBinding)',
     'submitViaAtsSubmissionChannel(',
     'buildManagedPortalActions(portal, packet, true, applicationUrl)',
     'clickFinalSubmit(page)',
@@ -89,7 +90,7 @@ test('the final click refuses a blank required answer on every provider, includi
 test('the unsupported-portal email fallback still refuses before it emails an employer', async () => {
   const route = await readFile('src/routes/applications.ts', 'utf8');
   const handler = slice(route, "'/applications/:id/submit-request'", "'/applications/:id/submission/channels'");
-  const gate = handler.indexOf('blankRequired.length > 0');
+  const gate = handler.indexOf('submissionQuestionGate({');
   const send = handler.indexOf('sendPreparedUnsupportedPortalApplicationEmail');
   assert.ok(gate >= 0 && send > gate, 'the blank-required refusal must precede the email send');
   // Scoped to the branch that sends. Everything else in this route books a browser, and a fill run

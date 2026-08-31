@@ -225,7 +225,7 @@ test('a cover letter Litos could not attach stops the packet being called ready'
   const runner = routeSource('submissionRunner.ts');
 
   // Managed path: the term is in the `safe` conjunction, not only in attention_reason.
-  const managedSafe = runner.match(/const safe = blockers\.length === 0[\s\S]{0,400}?;/)?.[0] ?? '';
+  const managedSafe = runner.match(/const safe = blockers\.length === 0[\s\S]{0,900}?;/)?.[0] ?? '';
   assert.ok(managedSafe, 'the managed prepare must still compute a `safe`');
   assert.match(
     managedSafe,

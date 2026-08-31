@@ -78,7 +78,18 @@ test('account export exposes only expiring wrappers for generated files', async 
 
 test('account deletion removes the complete user blob prefix before deleting the user row', async () => {
   const source = await routeSource('account.ts');
+  const deletionFence = source.indexOf('await tx.insert(managed_submission_account_deletion_drains)');
+  const managedCleanup = source.indexOf('await drainManagedTerminalCleanupBeforeAccountDeletion(userId, fastify)');
+  const providerCleanup = source.indexOf('await drainBrowserProviderResourcesBeforeAccountDeletion(userId)');
   const deleteBlobs = source.indexOf('deletedFiles = await deleteBlobsForUser(userId)');
   const deleteUser = source.indexOf('await tx.delete(users)');
-  assert.ok(deleteBlobs >= 0 && deleteUser > deleteBlobs);
+  assert.ok(deletionFence >= 0
+    && managedCleanup > deletionFence
+    && providerCleanup > managedCleanup
+    && deleteBlobs > providerCleanup
+    && deleteUser > deleteBlobs);
+  assert.match(source, /code: 'managed_submission_cleanup_pending'/);
+  assert.match(source, /code: 'browser_provider_cleanup_pending'/);
+  assert.match(source, /isNull\(browser_provider_resource_cleanups\.provider_confirmed_gone_at\)/);
+  assert.match(source, /account_preserved: true/);
 });

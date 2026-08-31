@@ -839,11 +839,6 @@ export const HUNDRED_THOUSAND_FLOOR_DISCOVERY = [
     "fresh_jobs": 112
   },
   {
-    "company_name": "Svetness Personal Training",
-    "board_token": "svetness",
-    "fresh_jobs": 112
-  },
-  {
     "company_name": "Woolpert",
     "board_token": "woolpert",
     "fresh_jobs": 112

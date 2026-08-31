@@ -39,9 +39,10 @@ const sync = readFileSync('src/lib/canonicalApplicationSync.ts', 'utf8');
 test('the canonical write is keyed by packet and owner and can only move a row forward', () => {
   assert.match(sync, /eq\(applications\.legacy_generated_resume_id, input\.packetId\)/);
   assert.match(sync, /eq\(applications\.user_id, input\.userId\)/);
-  assert.match(sync, /submission_state\} <> 'submitted'/);
-  assert.match(sync, /submission_state: confirmedSubmissionLifecycle\.submissionState/);
-  assert.match(sync, /tracker_state: confirmedSubmissionLifecycle\.trackerState/);
+  assert.match(sync, /eq\(applications\.submission_state, current\.submission_state\)/);
+  assert.match(sync, /eq\(applications\.tracker_state, current\.tracker_state\)/);
+  assert.match(sync, /submission_state: nextSubmissionState/);
+  assert.match(sync, /tracker_state: nextTrackerState/);
   assert.match(sync, /updated_at: new Date\(\)/);
 });
 
@@ -49,7 +50,10 @@ test('the canonical write is keyed by packet and owner and can only move a row f
  * growing its own copy of the statement or of the swallow contract back. */
 test('the email confirmation writer advances the canonical row through the shared wrapper', () => {
   const email = readFileSync('src/lib/applicationEmail.ts', 'utf8');
-  assert.match(email, /import \{ advanceCanonicalApplicationFromPacketSubmission \} from '\.\/canonicalApplicationSync'/);
+  assert.match(
+    email,
+    /import \{\s*advanceCanonicalApplicationFromPacketSubmission,[\s\S]*?\} from '\.\/canonicalApplicationSync'/,
+  );
   assert.doesNotMatch(email, /db\.update\(applications\)/);
 });
 
@@ -58,11 +62,14 @@ test('the email confirmation writer advances the canonical row through the share
  * what keeps a claim, a hold or a failure write from ever touching the canonical row. */
 test('every runner submit stamp advances the canonical row through writeReview', () => {
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const writeReview = runner.slice(runner.indexOf('async function writeReview'));
-  assert.match(writeReview.slice(0, 900), /review\.status === 'submitted'/);
+  const writeReview = runner.slice(
+    runner.indexOf('async function writeReview'),
+    runner.indexOf('async function standingAuthorization'),
+  );
+  assert.match(writeReview, /review\.status === 'submitted'/);
   assert.match(
-    writeReview.slice(0, 900),
-    /advanceCanonicalApplicationFromPacketSubmission\(\{ packetId: row\.id, userId: row\.user_id \}\)/,
+    writeReview,
+    /advanceCanonicalApplicationFromPacketSubmission\(\{[\s\S]*?packetId: row\.id,[\s\S]*?userId: row\.user_id,/,
   );
 });
 
@@ -85,41 +92,50 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
     '/applications/:id/submission/self-submitted',
     '/applications/:id/submission/unverified',
   ]) {
+    const route = routeSlice(path);
     assert.ok(
-      routeSlice(path).includes('advanceCanonicalApplicationFromPacketSubmission('),
+      route.includes('advanceCanonicalApplicationFromPacketSubmission(')
+        || route.includes('syncCanonicalApplicationRow('),
       `${path} does not advance the canonical row`,
     );
   }
   // On the unconditional arms the advance runs only after the route's own guarded update landed;
   // a 409'd or 202'd write must not advance anything.
   for (const path of [
-    '/applications/:id/submit-request',
     '/applications/:id/submission/handoff-complete',
     '/applications/:id/submission/self-submitted',
   ]) {
     const route = routeSlice(path);
-    const advance = route.indexOf('advanceCanonicalApplicationFromPacketSubmission(');
+    const advance = route.indexOf('syncCanonicalApplicationRow(');
     assert.ok(
-      route.lastIndexOf('.length === 0', advance) > 0,
+      advance > 0
+        && route.lastIndexOf('.returning({ id: generated_resumes.id })', advance) > 0
+        && route.lastIndexOf("if (!updated) throw new Error('", advance) > 0,
       `${path} advances the canonical row before its own write is confirmed`,
     );
+  }
+  for (const path of [
+    '/applications/:id/submission/extension-outcome',
+    '/applications/:id/submit-request',
+  ]) {
+    const route = routeSlice(path);
+    const syncAt = route.indexOf('syncCanonicalApplicationRow(');
+    assert.ok(syncAt > 0 && route.lastIndexOf("throw new Error('", syncAt) > 0,
+      `${path} must project only after its exact guarded packet write lands`);
   }
   // The outcome-shaped routes gate on the status the persisted review actually landed on, the
   // same predicate the runner's writeReview uses, never a re-derivation from request inputs.
   // Their idempotent retry arms heal an already-submitted packet, which is what makes a retry
   // the recovery path for a canonical advance that failed the first time.
-  for (const path of [
-    '/applications/:id/submission/extension-outcome',
-    '/applications/:id/submission/unverified',
-  ]) {
-    const route = routeSlice(path);
-    assert.ok(
-      route.includes("next.status === 'submitted'"),
-      `${path} does not gate the advance on the persisted status`,
-    );
-    assert.ok(
-      route.indexOf('advanceCanonicalApplicationFromPacketSubmission(') < route.indexOf("next.status === 'submitted'"),
-      `${path} does not heal the canonical row on its idempotent retry arm`,
-    );
-  }
+  const extensionOutcome = routeSlice('/applications/:id/submission/extension-outcome');
+  assert.ok(extensionOutcome.indexOf('advanceCanonicalApplicationFromPacketSubmission(')
+    < extensionOutcome.indexOf("current.submission_claim_id !== parsed.data.claim_id"),
+  'extension outcome must heal the canonical row on its idempotent retry arm');
+  const unverified = routeSlice('/applications/:id/submission/unverified');
+  const notFoundBranch = unverified.indexOf('if (!parsed.data.found)');
+  const unverifiedSync = unverified.indexOf('syncCanonicalApplicationRow(');
+  assert.ok(notFoundBranch > 0
+    && unverifiedSync > notFoundBranch
+    && unverified.lastIndexOf('.returning({ id: generated_resumes.id })', unverifiedSync) > notFoundBranch,
+  'the found arm must confirm its packet write before projecting the canonical row');
 });

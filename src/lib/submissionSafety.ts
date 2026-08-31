@@ -31,6 +31,43 @@ export function blankRequiredQuestionLabels(
     .map((question) => question.question);
 }
 
+/** Optional questions need an explicit applicant decision before any employer capability opens. */
+export function undecidedOptionalQuestionLabels(
+  questions: readonly Pick<ApplicationReviewQuestion,
+  'question' | 'answer' | 'required' | 'answer_state'>[] | undefined,
+): string[] {
+  return [...new Set((questions ?? []).flatMap((question) => {
+    if (question.required || question.answer_state === 'skipped') return [];
+    const undecidedState = question.answer_state === 'unanswered'
+      || question.answer_state === 'litos_refused';
+    return undecidedState || !question.answer.trim() ? [question.question.trim()] : [];
+  }).filter(Boolean))];
+}
+
+export type SubmissionQuestionGate = {
+  metadataBlockerCount: number;
+  requiredQuestionLabels: string[];
+  optionalQuestionLabels: string[];
+  clear: boolean;
+};
+
+/** One fail-closed question decision shared by every employer-facing send path. */
+export function submissionQuestionGate(
+  review: Pick<ApplicationReviewState, 'questions' | 'question_metadata_blockers'>,
+): SubmissionQuestionGate {
+  const metadataBlockerCount = review.question_metadata_blockers?.length ?? 0;
+  const requiredQuestionLabels = blankRequiredQuestionLabels(review.questions);
+  const optionalQuestionLabels = undecidedOptionalQuestionLabels(review.questions);
+  return {
+    metadataBlockerCount,
+    requiredQuestionLabels,
+    optionalQuestionLabels,
+    clear: metadataBlockerCount === 0
+      && requiredQuestionLabels.length === 0
+      && optionalQuestionLabels.length === 0,
+  };
+}
+
 /**
  * Whether a packet that has already been filled may be thrown away and filled again.
  *

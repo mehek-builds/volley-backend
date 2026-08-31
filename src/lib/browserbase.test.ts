@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  acknowledgeManagedBrowserTerminalResult,
+  assertManagedBrowserRequestBudgetAtClock,
   browserSessionBody,
   browserDeliveryRuntimeIdentity,
+  browserSessionsForResourceReservation,
   continueManagedBrowser,
+  getManagedBrowserTerminalResult,
   isBrowserbaseConfigured,
   MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
   MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
@@ -12,12 +16,15 @@ import {
   MANAGED_SUBMIT_CHOOSER_POLICY,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
+  managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
   managedDeterministicAssertionRefusal,
   ManagedBrowserAssertionFailureError,
   ManagedBrowserPreSubmitCrashError,
+  ManagedBrowserProviderProgressError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
+  startManagedBrowserRequestBudget,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import {
@@ -25,6 +32,474 @@ import {
   buildManagedPortalActions,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
 } from './portalSubmission';
+
+const MANAGED_SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333',
+});
+const MANAGED_TERMINAL_RESULT_ID = 'a'.repeat(64);
+const OTHER_MANAGED_TERMINAL_RESULT_ID = 'b'.repeat(64);
+
+const managedProviderDeadlineAt = () => new Date(Date.now() + 240_000).toISOString();
+
+test('database-clock dispatch validation refuses a continuation without its full safe window', () => {
+  const clockNow = Date.parse('2026-08-31T10:00:00.000Z');
+  const providerDeadlineAt = '2026-08-31T10:01:10.000Z';
+  const budget = startManagedBrowserRequestBudget(70_000);
+  assert.doesNotThrow(() => assertManagedBrowserRequestBudgetAtClock(
+    budget,
+    providerDeadlineAt,
+    60_000,
+    clockNow,
+  ));
+  assert.throws(
+    () => assertManagedBrowserRequestBudgetAtClock(
+      budget,
+      providerDeadlineAt,
+      60_000,
+      clockNow + 10_001,
+    ),
+    (error: unknown) => error instanceof DOMException
+      && error.name === 'TimeoutError'
+      && /safe provider dispatch window/i.test(error.message),
+  );
+  assert.throws(
+    () => assertManagedBrowserRequestBudgetAtClock(
+      budget,
+      '2026-08-31 10:01:10Z',
+      60_000,
+      clockNow,
+    ),
+    /canonical timestamp/i,
+  );
+});
+
+test('provider reservation lookup rejects malformed nonempty results and accepts only exact ids', async () => {
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousRoot = process.env.BROWSERBASE_API_ROOT;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-query-validation-test-key';
+  process.env.BROWSERBASE_API_ROOT = 'https://browserbase.example/v1';
+  const payloads: unknown[] = [
+    {},
+    { sessions: null },
+    [{}],
+    [{ id: '' }],
+    [{ id: ' session-with-padding ' }],
+    [],
+    { sessions: [{ id: 'exact-provider-session' }] },
+  ];
+  try {
+    globalThis.fetch = (async (input) => {
+      assert.match(String(input), /^https:\/\/browserbase\.example\/v1\/sessions\?q=/);
+      return new Response(JSON.stringify(payloads.shift()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    for (let index = 0; index < 5; index += 1) {
+      await assert.rejects(
+        browserSessionsForResourceReservation('11111111-1111-4111-8111-111111111111', 'browserbase'),
+        /invalid session|exact resource id/i,
+      );
+    }
+    assert.deepEqual(
+      await browserSessionsForResourceReservation('11111111-1111-4111-8111-111111111111', 'browserbase'),
+      [],
+    );
+    assert.deepEqual(
+      await browserSessionsForResourceReservation('11111111-1111-4111-8111-111111111111', 'browserbase'),
+      [{ id: 'exact-provider-session' }],
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+    if (previousRoot === undefined) delete process.env.BROWSERBASE_API_ROOT;
+    else process.env.BROWSERBASE_API_ROOT = previousRoot;
+  }
+});
+
+test('managed terminal retrieval and acknowledgement preserve the exact attempt correlation', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+  try {
+    globalThis.fetch = (async (input, init) => {
+      requests.push({
+        url: String(input),
+        method: init?.method ?? 'GET',
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+      });
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({
+          acknowledged: true,
+          submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+          resultId: MANAGED_TERMINAL_RESULT_ID,
+          acknowledgedAt: '2026-08-31T10:00:01.000Z',
+          cleanupState: 'completed',
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        state: 'completed',
+        resultId: MANAGED_TERMINAL_RESULT_ID,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        completedAt: '2026-08-31T10:00:00.000Z',
+        expiresAt: '2026-09-30T10:00:00.000Z',
+        run: {
+          title: 'Application submitted',
+          url: 'https://portal.example/complete',
+          text: 'Thank you',
+          submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const terminal = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
+    assert.equal(terminal.state, 'completed');
+    if (terminal.state !== 'completed') assert.fail('Expected a completed terminal result');
+    assert.equal(terminal.resultId, MANAGED_TERMINAL_RESULT_ID);
+    await acknowledgeManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT, terminal.resultId);
+    await acknowledgeManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT, terminal.resultId);
+    assert.match(requests[0]!.url,
+      /\/api\/run-results\?runId=11111111-1111-4111-8111-111111111111&claimId=22222222-2222-4222-8222-222222222222&executionId=33333333-3333-4333-8333-333333333333$/);
+    assert.deepEqual(requests[1], {
+      url: 'https://stratus.example/api/run-results/acknowledge',
+      method: 'POST',
+      body: {
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        resultId: MANAGED_TERMINAL_RESULT_ID,
+      },
+    });
+    assert.deepEqual(requests[2], requests[1], 'an idempotent retry repeats the exact result ID');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed correlated synchronous responses require a durable terminal result ID', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const responses = [
+    { terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID } },
+    {},
+    { terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID.toUpperCase() } },
+  ];
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { submissionAttempt?: unknown };
+      const response = responses.shift()!;
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application submitted',
+          url: 'https://portal.example/complete',
+          text: 'Thank you',
+          submissionAttempt: body.submissionAttempt,
+          ...response,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const options = {
+      requestContinuation: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    };
+    const run = await runManagedBrowser('https://portal.example/apply', [], options);
+    assert.equal(run.terminalResult?.resultId, MANAGED_TERMINAL_RESULT_ID);
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], options),
+      /missing its durable terminal result ID/i,
+    );
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], options),
+      /64 lowercase hexadecimal characters/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal retrieval refuses terminal records without an exact result ID', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const responses = [undefined, MANAGED_TERMINAL_RESULT_ID.toUpperCase()];
+  try {
+    globalThis.fetch = (async () => {
+      const resultId = responses.shift();
+      return new Response(JSON.stringify({
+        state: 'failed',
+        ...(resultId ? { resultId } : {}),
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        completedAt: '2026-08-31T10:00:00.000Z',
+        expiresAt: '2026-09-30T10:00:00.000Z',
+        error: { code: 'SANDBOX_RUN_FAILED', message: 'Provider response stream reset' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /terminal result ID must be 64 lowercase hexadecimal characters/i,
+    );
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /terminal result ID must be 64 lowercase hexadecimal characters/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal acknowledgement never sends a missing or mismatched result ID', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let fetches = 0;
+  try {
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response(JSON.stringify({
+        acknowledged: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        resultId: OTHER_MANAGED_TERMINAL_RESULT_ID,
+        acknowledgedAt: '2026-08-31T10:00:01.000Z',
+        cleanupState: 'completed',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await assert.rejects(
+      acknowledgeManagedBrowserTerminalResult(
+        MANAGED_SUBMISSION_ATTEMPT,
+        undefined as unknown as string,
+      ),
+      /64 lowercase hexadecimal characters/i,
+    );
+    assert.equal(fetches, 0, 'an invalid result ID is refused before any network request');
+    await assert.rejects(
+      acknowledgeManagedBrowserTerminalResult(
+        MANAGED_SUBMISSION_ATTEMPT,
+        MANAGED_TERMINAL_RESULT_ID,
+      ),
+      /did not match its durable result ID/i,
+    );
+    assert.equal(fetches, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal acknowledgement surfaces a provider wrong-result rejection', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      error: {
+        code: 'TERMINAL_RESULT_ID_MISMATCH',
+        message: 'The terminal result ID does not match the retained result',
+      },
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await assert.rejects(
+      acknowledgeManagedBrowserTerminalResult(
+        MANAGED_SUBMISSION_ATTEMPT,
+        MANAGED_TERMINAL_RESULT_ID,
+      ),
+      /does not match the retained result/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal retrieval rejects a result bound to another execution', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      state: 'completed',
+      submissionAttempt: {
+        ...MANAGED_SUBMISSION_ATTEMPT,
+        executionId: '44444444-4444-4444-8444-444444444444',
+      },
+      completedAt: '2026-08-31T10:00:00.000Z',
+      expiresAt: '2026-09-30T10:00:00.000Z',
+      run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /did not match its durable submission attempt/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal retrieval rejects progress bound to another execution', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  try {
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      state: 'indeterminate',
+      resultId: MANAGED_TERMINAL_RESULT_ID,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      completedAt: '2026-08-31T10:01:10.000Z',
+      expiresAt: '2026-09-30T10:01:10.000Z',
+      error: {
+        code: 'SUBMISSION_EXECUTION_INDETERMINATE',
+        message: 'Managed browser execution ended without a terminal employer result',
+      },
+      runProgress: {
+        version: 1,
+        phase: 0,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: 3,
+        submissionAttempt: {
+          ...MANAGED_SUBMISSION_ATTEMPT,
+          executionId: '44444444-4444-4444-8444-444444444444',
+        },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await assert.rejects(
+      getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT),
+      /did not match its durable submission attempt/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed terminal retrieval preserves pending, missing, expired, failed, and indeterminate states without relaunching', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const responses = [
+    new Response(JSON.stringify({
+      state: 'pending',
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      expiresAt: '2026-09-30T10:00:00.000Z',
+    }), { status: 202, headers: { 'Content-Type': 'application/json' } }),
+    new Response(null, { status: 404 }),
+    new Response(null, { status: 410 }),
+    new Response(JSON.stringify({
+      state: 'failed',
+      resultId: MANAGED_TERMINAL_RESULT_ID,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      completedAt: '2026-08-31T10:00:00.000Z',
+      expiresAt: '2026-09-30T10:00:00.000Z',
+      error: { code: 'SANDBOX_RUN_FAILED', message: 'Provider response stream reset' },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    new Response(JSON.stringify({
+      state: 'indeterminate',
+      resultId: OTHER_MANAGED_TERMINAL_RESULT_ID,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      completedAt: '2026-08-31T10:01:10.000Z',
+      expiresAt: '2026-09-30T10:01:10.000Z',
+      error: {
+        code: 'SUBMISSION_EXECUTION_INDETERMINATE',
+        message: 'Managed browser execution ended without a terminal employer result',
+      },
+      runProgress: {
+        version: 1,
+        phase: 1,
+        stage: 'submit_released',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        policyVersion: 3,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  ];
+  let fetches = 0;
+  try {
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return responses.shift()!;
+    }) as typeof fetch;
+    assert.equal((await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT)).state, 'pending');
+    assert.equal((await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT)).state, 'not_found');
+    assert.equal((await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT)).state, 'gone');
+    const failed = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
+    assert.equal(failed.state, 'failed');
+    if (failed.state === 'failed') {
+      assert.equal(failed.resultId, MANAGED_TERMINAL_RESULT_ID);
+      assert.deepEqual(failed.error, {
+        code: 'SANDBOX_RUN_FAILED',
+        message: 'Provider response stream reset',
+      });
+    }
+    const indeterminate = await getManagedBrowserTerminalResult(MANAGED_SUBMISSION_ATTEMPT);
+    assert.equal(indeterminate.state, 'indeterminate');
+    if (indeterminate.state === 'indeterminate') {
+      assert.equal(indeterminate.resultId, OTHER_MANAGED_TERMINAL_RESULT_ID);
+      assert.equal(indeterminate.runProgress?.verificationSubmitPressed, true);
+      const failure = managedBrowserTerminalFailureError(indeterminate);
+      assert.ok(failure instanceof ManagedBrowserProviderProgressError);
+      assert.equal(failure.code, 'SUBMISSION_EXECUTION_INDETERMINATE');
+      assert.equal(failure.runProgress.submissionAttempt?.executionId,
+        MANAGED_SUBMISSION_ATTEMPT.executionId);
+    }
+    assert.equal(fetches, 5);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
   for (const action of actions) {
@@ -189,6 +664,8 @@ test('session body disables CAPTCHA solving and restricts navigation to the port
       context: { id: 'context-1', persist: true },
       allowedDomains: ['boards.greenhouse.io'],
       solveCaptchas: false,
+      recordSession: false,
+      logSession: false,
     },
   });
 });
@@ -201,8 +678,35 @@ test('legacy project ID remains optional and compatible', () => {
       context: { id: 'context-1', persist: true },
       allowedDomains: ['jobs.lever.co'],
       solveCaptchas: false,
+      recordSession: false,
+      logSession: false,
     },
   });
+});
+
+test('a context-free session carries the durable creation reservation and disables provider recordings', () => {
+  assert.deepEqual(
+    browserSessionBody(
+      undefined,
+      'https://boards.greenhouse.io/acme/jobs/123',
+      'project-1',
+      'browserbase',
+      '11111111-1111-4111-8111-111111111111',
+    ),
+    {
+      projectId: 'project-1',
+      keepAlive: true,
+      userMetadata: {
+        litos_resource_reservation_id: '11111111-1111-4111-8111-111111111111',
+      },
+      browserSettings: {
+        allowedDomains: ['boards.greenhouse.io'],
+        solveCaptchas: false,
+        recordSession: false,
+        logSession: false,
+      },
+    },
+  );
 });
 
 test('Stratus session body preserves the browser identity and pauses on protection challenges', () => {
@@ -320,8 +824,15 @@ test('managed Stratus continuation sends an opaque token and actions without reo
   process.env.STRATUS_BASE_URL = 'https://stratus.example/';
   const requests: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (_input, init) => {
-    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push(body);
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: 'https://portal.example/complete',
+      text: 'Thank you',
+      submissionAttempt: body.submissionAttempt,
+      terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
+    } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -330,11 +841,16 @@ test('managed Stratus continuation sends an opaque token and actions without reo
   await runManagedBrowser('https://portal.example/apply', [], {
     requestContinuation: true,
     continuationTtlSeconds: 500,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    providerDeadlineAt: managedProviderDeadlineAt(),
   });
-  await continueManagedBrowser('a'.repeat(43), [{ type: 'click', selector: '#verify' }]);
+  await continueManagedBrowser('a'.repeat(43), [{ type: 'click', selector: '#verify' }], {
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    timeoutMs: 60_000,
+  });
 
   assert.equal(requests[0].requestContinuation, true);
-  assert.equal(requests[0].continuationTtlSeconds, 120);
+  assert.equal(requests[0].continuationTtlSeconds, 180);
   assert.equal(requests[1].continuationToken, 'a'.repeat(43));
   assert.equal('url' in requests[1], false);
   assert.equal('requestContinuation' in requests[1], false);
@@ -405,6 +921,8 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
               : {}),
             humanVerification: null,
             submitOutcome,
+            submissionAttempt: body.submissionAttempt,
+            terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
           },
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -423,12 +941,17 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
             message: 'Thank you for submitting your application.',
             formStillPresent: false,
           },
+          submissionAttempt: body.submissionAttempt,
+          terminalResult: { resultId: OTHER_MANAGED_TERMINAL_RESULT_ID },
         },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
 
     // The exact options a real managed application submit sends, not a hand-written approximation.
-    const initial = await runManagedBrowser(applicationUrl, [], managedApplicationSubmitOptions(120));
+    const initial = await runManagedBrowser(applicationUrl, [], {
+      ...managedApplicationSubmitOptions(120, MANAGED_SUBMISSION_ATTEMPT),
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    });
     assert.equal(initial.humanVerification, null);
     assert.equal(initial.continuationOffered, true,
       'pressedUnknown alone offers the continuation, which is what the checkpoint flag was added for');
@@ -439,7 +962,11 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
       initial,
       expectedApplicationUrl: applicationUrl,
       nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
-      observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+      observe: (continuationToken) => continueManagedBrowser(continuationToken, [], {
+        screenshot: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        timeoutMs: 60_000,
+      }),
     });
 
     assert.equal(observation.attempted, true);
@@ -467,9 +994,14 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
  * that was never going to be spent. Nothing about those outcomes needs a second look.
  */
 test('a terminal managed submit outcome offers no continuation once the checkpoint flag is gone', () => {
-  const sent = managedApplicationSubmitOptions(120) as Record<string, unknown>;
+  const sent = managedApplicationSubmitOptions(120, MANAGED_SUBMISSION_ATTEMPT) as Record<string, unknown>;
   assert.equal('continuationCheckpoint' in sent, false, 'the flag rested on a false premise');
-  assert.deepEqual(sent, { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: 120 });
+  assert.deepEqual(sent, {
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 120,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+  });
   for (const state of ['confirmed', 'rejected', 'not_attempted'] as const) {
     const pressed = state !== 'not_attempted';
     const withoutFlag = stratusContinuation(sent, { pressed, state });
@@ -597,6 +1129,7 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
     verificationSubmitPressed: false,
     submitKind: 'application',
     policyVersion: 4,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
   };
   globalThis.fetch = (async () => new Response(JSON.stringify({
     error: { code: 'SANDBOX_RUN_FAILED', message: 'Sandbox browser run failed', runProgress: progress },
@@ -606,7 +1139,11 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
   })) as typeof fetch;
 
   await assert.rejects(
-    runManagedBrowser('https://portal.example/apply', []),
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
     (error: unknown) => error instanceof ManagedBrowserPreSubmitCrashError
       && error.runProgress.stage === 'phase_started',
   );
@@ -622,7 +1159,11 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
     headers: { 'Content-Type': 'application/json' },
   })) as typeof fetch;
   await assert.rejects(
-    runManagedBrowser('https://portal.example/apply', []),
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
     (error: unknown) => error instanceof Error
       && !(error instanceof ManagedBrowserPreSubmitCrashError),
   );
@@ -649,6 +1190,7 @@ test('a deterministic assertion refusal under containment progress is typed, not
     verificationSubmitPressed: false,
     submitKind: 'application',
     policyVersion: 4,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
   };
   /* The exact live refusal, verbatim: Pony.ai application fdcf4ccb, 2026-08-28. Until this typing
    * existed it became ManagedBrowserPreSubmitCrashError, was retried once as a crash, and told the
@@ -662,7 +1204,11 @@ test('a deterministic assertion refusal under containment progress is typed, not
   })) as typeof fetch;
 
   await assert.rejects(
-    runManagedBrowser('https://portal.example/apply', []),
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
     (error: unknown) => error instanceof ManagedBrowserAssertionFailureError
       && !(error instanceof ManagedBrowserPreSubmitCrashError)
       && error.assertionLabel === 'filled_field:phone'
@@ -678,7 +1224,11 @@ test('a deterministic assertion refusal under containment progress is typed, not
     headers: { 'Content-Type': 'application/json' },
   })) as typeof fetch;
   await assert.rejects(
-    runManagedBrowser('https://portal.example/apply', []),
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
     (error: unknown) => error instanceof Error
       && !(error instanceof ManagedBrowserAssertionFailureError)
       && !(error instanceof ManagedBrowserPreSubmitCrashError),
@@ -818,7 +1368,11 @@ test('managed Stratus selector audits include the v4 form boundary without appli
       questions: [],
     }, true, applicationUrl);
     await assert.rejects(
-      runManagedBrowser(applicationUrl, actions, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, actions, {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      }),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /"applicationScopes":\[\{/);
@@ -966,7 +1520,10 @@ test('managed Stratus proves the exact employer URL before actions and before a 
   let chooserReported = true;
   let advertiseAtomicCapability = true;
   globalThis.fetch = (async (_input, init) => {
-    const body = JSON.parse(String(init?.body)) as { actions: Array<Record<string, unknown>> };
+    const body = JSON.parse(String(init?.body)) as {
+      actions: Array<Record<string, unknown>>;
+      submissionAttempt?: unknown;
+    };
     assert.deepEqual(body.actions.slice(0, 2), [
       {
         type: 'requireCapability',
@@ -1014,6 +1571,8 @@ test('managed Stratus proves the exact employer URL before actions and before a 
           bareSendCandidateCount: 0,
         } } : {}),
         submitOutcome: { pressed: true, state: 'confirmed' },
+        submissionAttempt: body.submissionAttempt,
+        terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
@@ -1026,22 +1585,27 @@ test('managed Stratus proves the exact employer URL before actions and before a 
     questions: [],
   };
   const actions = buildManagedPortalActions('workable', packet, true, expectedPageUrl);
-  await runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true });
+  const submitOptions = {
+    allowSubmit: true,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    providerDeadlineAt: managedProviderDeadlineAt(),
+  };
+  await runManagedBrowser(expectedPageUrl, actions, submitOptions);
   proofMatches = false;
   await assert.rejects(
-    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    runManagedBrowser(expectedPageUrl, actions, submitOptions),
     /did not prove the exact employer page URL boundaries/,
   );
   proofMatches = true;
   chooserReported = false;
   await assert.rejects(
-    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    runManagedBrowser(expectedPageUrl, actions, submitOptions),
     /did not prove the final-submit chooser outcome/,
   );
   chooserReported = true;
   advertiseAtomicCapability = false;
   await assert.rejects(
-    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    runManagedBrowser(expectedPageUrl, actions, submitOptions),
     /did not advertise required runner capability: atomic-submit-v4/,
   );
 
@@ -1078,9 +1642,13 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       && action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY);
     assert.ok(exactIndex >= 0);
     assert.ok(atomicIndex >= 0);
+    const invalidSubmitOptions = {
+      allowSubmit: true,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    };
     const missingExact = actions.filter((_action, index) => index !== exactIndex);
     await assert.rejects(
-      runManagedBrowser(applicationUrl, missingExact, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, missingExact, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const mismatchedBoundary = actions.map((action, index) => index === exactIndex ? {
@@ -1088,45 +1656,45 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       expectedPageUrl: 'https://apply.workable.com/example/j/OTHER/',
     } : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, mismatchedBoundary, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, mismatchedBoundary, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const optionalBoundary = actions.map((action, index) => index === exactIndex
       ? { ...action, optional: true }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, optionalBoundary, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, optionalBoundary, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const duplicateBoundary = actions.map((action) => ({ ...action }));
     duplicateBoundary.splice(exactIndex + 1, 0, { ...actions[exactIndex]! });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, duplicateBoundary, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, duplicateBoundary, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const missingAtomic = actions.filter((_action, index) => index !== atomicIndex);
     await assert.rejects(
-      runManagedBrowser(applicationUrl, missingAtomic, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, missingAtomic, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const optionalAtomic = actions.map((action, index) => index === atomicIndex
       ? { ...action, optional: true }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, optionalAtomic, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, optionalAtomic, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const missingScope = actions.map((action, index) => index === atomicIndex
       ? { type: action.type, value: action.value, optional: action.optional }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, missingScope, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, missingScope, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const duplicateAtomic = actions.map((action) => ({ ...action }));
     duplicateAtomic.splice(atomicIndex + 1, 0, { ...actions[atomicIndex]! });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, duplicateAtomic, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, duplicateAtomic, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const wrongCapability = actions.map((action, index) => index === atomicIndex
@@ -1137,7 +1705,7 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, wrongCapability, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, wrongCapability, invalidSubmitOptions),
       /application scope selector requires the atomic submit v4 capability/,
     );
     const scopeOnFill = actions.map((action) => ({ ...action }));
@@ -1147,7 +1715,7 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
     };
     await assert.rejects(
-      runManagedBrowser(applicationUrl, scopeOnFill, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, scopeOnFill, invalidSubmitOptions),
       /application scope selector requires the atomic submit v4 capability/,
     );
     const v3WithAtomicOnly = actions
@@ -1157,7 +1725,7 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
         chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
       });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, v3WithAtomicOnly, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, v3WithAtomicOnly, invalidSubmitOptions),
       /atomic submit v4 capability requires a chooser v4 submit/,
     );
     assert.equal(calls, 0);

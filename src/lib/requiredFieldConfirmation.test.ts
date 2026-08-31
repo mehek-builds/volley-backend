@@ -950,7 +950,15 @@ test('managed wire contract sends one bounded confirmation action with its durab
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example';
-  let body: { actions?: Array<Record<string, unknown>> } = {};
+  const submissionAttempt = {
+    runId: '11111111-1111-4111-8111-111111111111',
+    claimId: '22222222-2222-4222-8222-222222222222',
+    executionId: '33333333-3333-4333-8333-333333333333',
+  };
+  let body: {
+    actions?: Array<Record<string, unknown>>;
+    submissionAttempt?: typeof submissionAttempt;
+  } = {};
   globalThis.fetch = (async (_input, init) => {
     body = JSON.parse(String(init?.body)) as typeof body;
     return new Response(JSON.stringify({
@@ -984,6 +992,8 @@ test('managed wire contract sends one bounded confirmation action with its durab
             submissionOutcome: 'clicked',
           }],
         },
+        submissionAttempt: body.submissionAttempt,
+        terminalResult: { resultId: 'a'.repeat(64) },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
@@ -998,7 +1008,11 @@ test('managed wire contract sends one bounded confirmation action with its durab
       contractVersion: 2,
       submitKind: 'application',
       chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
-    }], { allowSubmit: true });
+    }], {
+      allowSubmit: true,
+      submissionAttempt,
+      providerDeadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
     assert.deepEqual(body.actions, [{
       type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
@@ -1076,12 +1090,14 @@ test('submission runner requires confirmation proof before any receipt can be re
   const chooser = source.indexOf('if (atomicSubmitV4) assertManagedApplicationFinalSubmitSelected(result, applicationUrl)');
   const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, 'application')", chooser);
   const consistency = source.indexOf('if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl)', barrier);
-  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", consistency);
+  const verdict = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', consistency);
+  const receipt = source.indexOf('const confirmedBeforeReceiptStorage = await recordManagedSubmissionConfirmed', verdict);
   assert.ok(policyGate >= 0);
   assert.ok(chooser > policyGate);
   assert.ok(barrier > chooser);
   assert.ok(consistency > barrier);
-  assert.ok(receipt > consistency);
+  assert.ok(verdict > consistency);
+  assert.ok(receipt > verdict);
   const proofBlock = source.slice(
     source.lastIndexOf('if (managedApplicationProofIsRequired', chooser),
     source.indexOf('let receiptResult = result;', consistency),
@@ -1104,10 +1120,15 @@ test('submission runner requires confirmation proof before any receipt can be re
  */
 test('no continuation may carry a code that came from outside the run', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  assert.equal((source.match(/continueManagedBrowser\(continuationToken, codeActions\)/g) ?? []).length, 1,
-    'one held verification session, one code answer: a second code call site would mean a second submit');
-  assert.equal((source.match(/continueManagedBrowser\(continuationToken, \[\], \{ screenshot: true \}\)/g) ?? []).length, 1,
+  assert.equal((source.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions, \{/g) ?? []).length, 2,
+    'live and lost-initial-response paths may each make the first continuation call, never a retry');
+  assert.equal((source.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, \[\], \{/g) ?? []).length, 1,
     'the only other continuation is a read-only receipt observation with no actions');
+  const terminalRecoveryStart = source.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(');
+  const terminalRecoveryEnd = source.indexOf('async function recoverManagedInitialSecurityCodeChallenge(', terminalRecoveryStart);
+  const terminalRecovery = source.slice(terminalRecoveryStart, terminalRecoveryEnd);
+  assert.doesNotMatch(terminalRecovery, /continueManagedBrowser|runManagedBrowser/,
+    'a persisted continuation attempt is GET-only');
   // The supplied code survives in exactly one place, and it is not an action list.
   const branch = source.indexOf('if (options.securityCode && initialChallenge) {');
   assert.ok(branch > 0, 'the supplied code is still fingerprinted, so the same dead code cannot resend');
@@ -1118,12 +1139,14 @@ test('no continuation may carry a code that came from outside the run', () => {
 
 test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {');
   const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
-  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", continuation);
+  const verdict = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', continuationBarrier);
+  const receipt = source.indexOf('const confirmedBeforeReceiptStorage = await recordManagedSubmissionConfirmed', verdict);
   assert.ok(continuation >= 0);
   assert.ok(continuationBarrier > continuation);
-  assert.ok(receipt > continuationBarrier);
+  assert.ok(verdict > continuationBarrier);
+  assert.ok(receipt > verdict);
 });
 
 /* THE UNRESOLVED VOCABULARY, MEASURED AGAINST WHAT THE RUNNER ACTUALLY PUSHES.

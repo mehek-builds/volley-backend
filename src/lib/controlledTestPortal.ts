@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 export const CONTROLLED_PORTAL_BINDING_PARAM = 'litos_qa_binding';
+export const CONTROLLED_RECEIPT_TEXT = 'Controlled test portal confirmed this exact application.';
 
 function safeEqual(left: string, right: string): boolean {
   const a = Buffer.from(left);
@@ -59,4 +60,28 @@ export function isControlledTestPortalUrl(rawUrl: string): boolean {
   const supplied = url.searchParams.get(CONTROLLED_PORTAL_BINDING_PARAM);
   if (!origin || !secret || url.origin !== origin || !supplied || !/^[a-f0-9]{64}$/.test(supplied)) return false;
   return safeEqual(supplied, controlledPortalBinding(rawUrl, secret));
+}
+
+export function exactControlledTestReceiptRoute(
+  expectedApplicationUrl: string,
+  finalUrl: string,
+): boolean {
+  if (!isControlledTestPortalUrl(expectedApplicationUrl)) return false;
+  let expected: URL;
+  let observed: URL;
+  try {
+    expected = new URL(expectedApplicationUrl);
+    observed = new URL(finalUrl);
+  } catch {
+    return false;
+  }
+  if (expected.searchParams.has('complete')
+    || observed.searchParams.getAll('complete').length !== 1
+    || observed.searchParams.get('complete') !== '1') return false;
+  observed.searchParams.delete('complete');
+  expected.hash = '';
+  observed.hash = '';
+  expected.searchParams.sort();
+  observed.searchParams.sort();
+  return expected.href === observed.href;
 }

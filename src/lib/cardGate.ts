@@ -262,6 +262,7 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/jobs/:id',
   '/resume/generate',
   '/postings/:jobId/questions',
+  '/applications/managed-prepare',
   '/applications/from-job',
   '/applications/:id/submit-request',
 ]);

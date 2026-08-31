@@ -1581,7 +1581,12 @@ export function managedResultFieldOptions(result: ManagedBrowserResult | null | 
  * label + aria-label + placeholder + name + id, so the discipline control arrives as
  * "discipline* discipline--0" and carries its own id; nothing else has to be threaded through.
  */
-export function attachManagedFieldOptions<T extends { label: string; selector?: string; options?: string[] | null }>(
+export function attachManagedFieldOptions<T extends {
+  label: string;
+  selector?: string;
+  options?: string[] | null;
+  optionsComplete?: boolean;
+}>(
   discovered: readonly T[],
   optionsByInputId: Record<string, string[]>,
 ): T[] {
@@ -1591,13 +1596,15 @@ export function attachManagedFieldOptions<T extends { label: string; selector?: 
     if (controlId) controlCounts.set(controlId, (controlCounts.get(controlId) ?? 0) + 1);
   }
   return discovered.map((field) => {
-    if (field.options && field.options.length > 0) return field;
+    if (field.optionsComplete !== false && field.options && field.options.length > 0) return field;
     const controlId = managedOptionProbeControlId(field);
     // The same durable id on two discovered fields is ambiguous. Never attach one list to both,
     // and never fall back to a label substring that can match a neighbouring question.
     if (!controlId || controlCounts.get(controlId) !== 1) return field;
     const options = optionsByInputId[controlId];
-    return options?.length ? { ...field, options } : field;
+    return options?.length
+      ? { ...field, options, optionsComplete: true }
+      : field.optionsComplete === false ? { ...field, options: null } : field;
   });
 }
 
@@ -1969,7 +1976,7 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
 /** Pack whole controls into bounded requests. No control is partially probed at a budget edge. */
 export function buildManagedDiscoveredOptionProbeBatches(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; optionsComplete?: boolean; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): ManagedBrowserAction[][] {
@@ -2007,7 +2014,7 @@ export function buildManagedDiscoveredOptionProbeBatches(
  */
 export function buildManagedDiscoveredOptionProbeActions(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; optionsComplete?: boolean; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): ManagedBrowserAction[] {
@@ -2041,7 +2048,7 @@ export type ManagedOptionProbeBatchFailure = { controlIds: string[]; reason: str
 
 export function managedOptionProbeAnalysis(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; optionsComplete?: boolean; required?: boolean }[],
   alreadyRead: Record<string, string[]>,
   results: readonly (ManagedBrowserResult | null | undefined)[],
   batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
@@ -2062,7 +2069,9 @@ export function managedOptionProbeAnalysis(
   for (const field of discovered) {
     const id = managedOptionProbeControlId(field);
     if (!id || (counts.get(id) ?? 0) !== 1 || options[id]?.length) continue;
-    const read = [...new Set((field.options ?? []).map((option) => option.trim()).filter(Boolean))];
+    const read = field.optionsComplete === false
+      ? []
+      : [...new Set((field.options ?? []).map((option) => option.trim()).filter(Boolean))];
     if (read.length > 0) options[id] = read;
   }
 

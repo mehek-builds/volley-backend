@@ -184,6 +184,8 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
   const strangerId = '9610648e-7750-4931-9a74-8aef5ebf00c0';
   const applicationId = '0b84c4eb-5c91-43d0-a5a0-62b508d8ce55';
   const eventId = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
+  const portalUrl = 'https://job-boards.greenhouse.io/example/jobs/7654321';
+  const confirmationUrl = `${portalUrl}/application_confirmation`;
   await database.exec(`
     insert into "users" ("id", "email") values
       ('${ownerId}', 'manual-owner@example.test'),
@@ -192,8 +194,8 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
       "id", "user_id", "company_scope_key", "company_name", "role", "portal_url",
       "source_surface", "application_fingerprint"
     ) values (
-      '${applicationId}', '${ownerId}', 'domain:jobs.example.com', 'Example', 'Engineer',
-      'https://jobs.example.com/apply/1', 'extension', 'manual-outcome-test'
+      '${applicationId}', '${ownerId}', 'domain:job-boards.greenhouse.io', 'Example', 'Engineer',
+      '${portalUrl}', 'extension', 'manual-outcome-test'
     );
   `);
   const ownerToken = await token(ownerId);
@@ -203,7 +205,7 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
     method: 'POST',
     url: `/applications/${applicationId}/manual-submission-outcome`,
     headers: { authorization: `Bearer ${strangerToken}` },
-    payload: { event_id: eventId, outcome: 'unknown', final_url: 'https://jobs.example.com/apply/1' },
+    payload: { event_id: eventId, outcome: 'unknown', final_url: portalUrl },
   });
   assert.equal(stranger.statusCode, 404);
 
@@ -220,7 +222,7 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
     method: 'POST',
     url: `/applications/${applicationId}/manual-submission-outcome`,
     headers: { authorization: `Bearer ${ownerToken}` },
-    payload: { event_id: eventId, outcome: 'unknown', final_url: 'https://jobs.example.com/apply/1' },
+    payload: { event_id: eventId, outcome: 'unknown', final_url: portalUrl },
   });
   assert.equal(unknown.statusCode, 200, unknown.body);
   assert.equal(unknown.json().idempotent, false);
@@ -232,7 +234,7 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
     method: 'POST',
     url: `/applications/${applicationId}/manual-submission-outcome`,
     headers: { authorization: `Bearer ${ownerToken}` },
-    payload: { event_id: eventId, outcome: 'unknown', final_url: 'https://jobs.example.com/apply/1' },
+    payload: { event_id: eventId, outcome: 'unknown', final_url: portalUrl },
   });
   assert.equal(replay.statusCode, 200, replay.body);
   assert.equal(replay.json().idempotent, true);
@@ -244,8 +246,8 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
     payload: {
       event_id: eventId,
       outcome: 'confirmed',
-      final_url: 'https://jobs.example.com/apply/receipt',
-      confirmation_text: 'Application received',
+      final_url: confirmationUrl,
+      confirmation_text: 'Thank you for applying.',
     },
   });
   assert.equal(promoted.statusCode, 200, promoted.body);
@@ -291,7 +293,7 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
     payload: {
       event_id: eventId,
       outcome: 'failed',
-      final_url: 'https://jobs.example.com/apply/failure',
+      final_url: confirmationUrl,
     },
   });
   assert.equal(flip.statusCode, 409);
@@ -306,6 +308,45 @@ test('manual outcome route is owner scoped, origin bound, idempotent, and monoto
     select "submission_state", "tracker_state" from "applications" where "id" = '${applicationId}'
   `);
   assert.deepEqual(state.rows[0], { submission_state: 'submitted', tracker_state: 'applied' });
+});
+
+test('generic same-origin success text cannot mint an authoritative manual receipt', async () => {
+  const userId = '6f4479d1-4cbb-4dd1-9dc4-1206f346ca70';
+  const applicationId = 'c119a045-75d4-48eb-aad3-7a67776dcc42';
+  const eventId = 'd8bd59f5-a7ec-4f83-b60a-5e77b73950c6';
+  await database.exec(`
+    insert into "users" ("id", "email") values ('${userId}', 'generic-receipt@example.test');
+    insert into "applications" (
+      "id", "user_id", "company_scope_key", "company_name", "role", "portal_url",
+      "source_surface", "application_fingerprint"
+    ) values (
+      '${applicationId}', '${userId}', 'domain:jobs.example.test', 'Example', 'Engineer',
+      'https://jobs.example.test/apply/1', 'extension', 'generic-manual-receipt-test'
+    );
+  `);
+  const auth = await token(userId);
+  const response = await app.inject({
+    method: 'POST',
+    url: `/applications/${applicationId}/manual-submission-outcome`,
+    headers: { authorization: `Bearer ${auth}` },
+    payload: {
+      event_id: eventId,
+      outcome: 'confirmed',
+      final_url: 'https://jobs.example.test/apply/receipt',
+      confirmation_text: 'Application received',
+    },
+  });
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'submission_receipt_not_authoritative');
+  const state = await database.query<{ submission_state: string; tracker_state: string }>(`
+    select "submission_state", "tracker_state" from "applications" where "id" = '${applicationId}'
+  `);
+  assert.deepEqual(state.rows[0], { submission_state: 'not_started', tracker_state: 'saved' });
+  const events = await database.query<{ total: number }>(`
+    select count(*)::int as "total" from "application_submission_events"
+    where "user_id" = '${userId}' and "event_id" = '${eventId}'
+  `);
+  assert.equal(events.rows[0]?.total, 0);
 });
 
 test('Free fill upgrades one canonical row to a tailored packet that cover letter resolves by canonical id', async () => {

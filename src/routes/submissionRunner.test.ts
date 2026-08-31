@@ -51,6 +51,11 @@ import {
   managedActionDiagnosticsForLog,
   stableManagedDocumentCapability,
   managedFormSnapshotWithStableCapabilities,
+  managedContinuationSubmissionAttempt,
+  managedSecurityCodeContinuationRecoveryIsHeld,
+  managedInitialSubmissionAttempt,
+  finalBoundaryAuthorizationMatches,
+  undecidedOptionalQuestionLabels,
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels } from '../lib/submissionSafety';
@@ -71,6 +76,10 @@ import {
 import { resolveProfileField } from '../lib/profileFieldResolution';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion, ApplicationReviewState } from '../lib/applicationReview';
+import type {
+  SubmissionAttemptBinding,
+  SubmissionBoundaryAuthorization,
+} from '../lib/submissionAttemptLedger';
 import type { SubmissionPacket } from '../lib/portalSubmission';
 import { createEmployerDeliveryBindings, employerDeliveryEnvelope } from '../lib/employerDeliveryIdentity';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
@@ -85,6 +94,122 @@ import {
   CONTROLLED_PORTAL_BINDING_PARAM,
   controlledPortalBinding,
 } from '../lib/controlledTestPortal';
+
+test('managed initial, security-code, and observation calls have distinct stable execution ids', () => {
+  const attemptId = '22222222-2222-4222-8222-222222222222';
+  const binding: SubmissionAttemptBinding = {
+    attemptId,
+    userId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    packetId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    applicationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    source: 'managed_browser',
+    operation: 'initial_submission',
+    postingIdentity: {
+      postingKey: 'workable:example:a1b2c3d4e5',
+      jobId: null,
+      companyRole: 'example|role',
+      company: 'Example',
+      role: 'Role',
+      portalUrl: 'https://apply.workable.com/example/j/A1B2C3D4E5/apply/',
+      portalIdentity: 'https://apply.workable.com',
+    },
+    submissionRunId: '11111111-1111-4111-8111-111111111111',
+    submissionClaimId: attemptId,
+  };
+  const authorization: SubmissionBoundaryAuthorization = {
+    leaseId: '33333333-3333-4333-8333-333333333333',
+    attemptId,
+    activationId: '44444444-4444-4444-8444-444444444444',
+    authorizedAt: '2026-08-31T10:00:00.000Z',
+    expiresAt: '2026-08-31T10:03:00.000Z',
+    serverNow: '2026-08-31T10:00:00.000Z',
+    active: true,
+  };
+  const initial = managedInitialSubmissionAttempt(binding, authorization);
+  const security = managedContinuationSubmissionAttempt(binding, 'security_code');
+  const observation = managedContinuationSubmissionAttempt(binding, 'receipt_observation');
+  assert.equal(initial.executionId, authorization.activationId);
+  assert.notEqual(security.executionId, initial.executionId);
+  assert.notEqual(observation.executionId, initial.executionId);
+  assert.notEqual(observation.executionId, security.executionId);
+  assert.deepEqual(managedContinuationSubmissionAttempt(binding, 'security_code'), security);
+});
+
+test('disable and re-enable cannot revive a standing-consent capability from an older version', () => {
+  const review = {
+    submission_authorization: {
+      source: 'standing_consent',
+      consented_at: '2026-08-31T09:00:00.000Z',
+      consent_version: 'standing-consent-v1',
+    },
+  } as ApplicationReviewState;
+  assert.equal(finalBoundaryAuthorizationMatches(review, {
+    enabled: true,
+    consentedAt: new Date('2026-08-31T10:00:00.000Z'),
+    consentVersion: 'standing-consent-v2',
+  }, true), false);
+  assert.equal(finalBoundaryAuthorizationMatches(review, {
+    enabled: true,
+    consentedAt: new Date('2026-08-31T09:00:00.000Z'),
+    consentVersion: 'standing-consent-v1',
+  }, true), true);
+});
+
+test('only durable pre-dispatch and consumed continuation states stay scheduler-held', () => {
+  const base = {
+    status: 'needs_attention',
+    submission_claimed_at: '2026-08-31T10:00:00.000Z',
+    submission_claim_id: '22222222-2222-4222-8222-222222222222',
+  } as const;
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'searching',
+      continuation_resumed: false,
+    },
+  } as ApplicationReviewState), true);
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'verification_pending',
+      continuation_resumed: true,
+    },
+  } as ApplicationReviewState), true);
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'verification_pending',
+      continuation_resumed: false,
+    },
+  } as ApplicationReviewState), false);
+  assert.equal(managedSecurityCodeContinuationRecoveryIsHeld({
+    ...base,
+    verification: {
+      runner: 'stratus-managed',
+      status: 'handoff',
+      continuation_resumed: true,
+    },
+  } as ApplicationReviewState), false);
+});
+
+test('optional unanswered or refused questions wait for Answer or Skip, while skipped can send', () => {
+  const question = {
+    question: 'Would you like to share anything else?',
+    answer: '',
+    required: false,
+  } as const;
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer_state: 'unanswered' }]), [
+    question.question,
+  ]);
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer_state: 'litos_refused' }]), [
+    question.question,
+  ]);
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer_state: 'skipped' }]), []);
+  assert.deepEqual(undecidedOptionalQuestionLabels([{ ...question, answer: 'My answer' }]), []);
+});
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -3146,7 +3271,7 @@ test('prepare() stops account-walled portals before it opens any browser', async
   assert.ok(gateAt > 0, 'prepare() must check isAccountWalledFamily');
 
   // Every way prepare() can start paying for a browser. The gate has to come before all of them.
-  for (const spend of ['prepareManaged(', 'createBrowserContext(', 'createBrowserSession(']) {
+  for (const spend of ['prepareManaged(', 'createFencedBrowserSession(']) {
     const spendAt = prepareBody.indexOf(spend);
     if (spendAt === -1) continue;
     assert.ok(
@@ -3154,6 +3279,65 @@ test('prepare() stops account-walled portals before it opens any browser', async
       `the account-walled gate must precede ${spend} - otherwise the student approves a login page`,
     );
   }
+});
+
+test('every managed provider start, continuation POST, and direct session creation stay inside the account deletion fence', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const runnerSource = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+  const fenceStart = runnerSource.indexOf('async function runManagedBrowserWithAccountFence(');
+  const fenceEnd = runnerSource.indexOf('\n}', fenceStart) + 2;
+  const fence = runnerSource.slice(fenceStart, fenceEnd);
+  assert.ok(fenceStart > 0);
+  assert.ok(fence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+    < fence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
+  assert.ok(fence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
+    < fence.indexOf('return runManagedBrowser(...args)'));
+  assert.equal(
+    [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
+    1,
+    'managed provider runs must go only through the locked account fence',
+  );
+
+  const continuationFenceStart = runnerSource.indexOf('async function continueManagedBrowserWithAccountFence(');
+  const continuationFenceEnd = runnerSource.indexOf('\n}', continuationFenceStart) + 2;
+  const continuationFence = runnerSource.slice(continuationFenceStart, continuationFenceEnd);
+  assert.ok(continuationFenceStart > 0);
+  assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+    < continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
+  assert.ok(continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
+    < continuationFence.indexOf('databaseNow(tx)'));
+  // A budget this fence owns must start after the blocking advisory lock, never before it, or the
+  // lock wait is charged to the provider window and trips the minimum-dispatch assertion.
+  assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+    < continuationFence.indexOf('startManagedBrowserRequestBudget('));
+  assert.ok(continuationFence.indexOf('databaseNow(tx)')
+    < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
+  assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
+    < continuationFence.indexOf('return continueManagedBrowser('));
+  assert.equal(
+    [...runnerSource.matchAll(/\bcontinueManagedBrowser\(/g)].length,
+    1,
+    'managed continuation POSTs must go only through the locked account fence',
+  );
+  assert.equal(
+    [...runnerSource.matchAll(/\bcontinueManagedBrowserWithAccountFence\(/g)].length,
+    4,
+    'all three managed continuation call sites must use the account fence',
+  );
+
+  const resourceSource = readFileSync(join(__dirname, '../lib/browserProviderResourceCleanup.ts'), 'utf8');
+  const createStart = resourceSource.indexOf('export async function createFencedBrowserSession(');
+  const createEnd = resourceSource.indexOf('\nasync function markResourceGone', createStart);
+  const create = resourceSource.slice(createStart, createEnd);
+  assert.ok(create.indexOf('reserveBrowserProviderResource({')
+    < create.indexOf('await lockSubmissionAttemptUser(tx, input.userId)'));
+  assert.ok(create.indexOf('await lockSubmissionAttemptUser(tx, input.userId)')
+    < create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)'));
+  assert.ok(create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)')
+    < create.indexOf('await createReservedBrowserSession('));
+  assert.ok(create.indexOf('await createReservedBrowserSession(')
+    < create.indexOf('provider_resource_id: session.id'));
 });
 
 test('unattended preparation parks unavailable monitored jobs before browser work', async () => {
@@ -3304,7 +3488,7 @@ test('export controls is surfaced but never auto-answered, and neither is any se
   assert.match(result.questionMetadataBlockers[0]?.question ?? '', /^EXPORT CONTROLS/);
 });
 
-test('an optional field Litos cannot answer is still left alone, so submission is not blocked on it', async () => {
+test('optional fields Litos cannot answer remain visible until the applicant answers or skips them', async () => {
   const result = await discoverAndResolveQuestions(
     [
       // No required marker: the employer does not need these, so inventing a required question here
@@ -3320,7 +3504,17 @@ test('an optional field Litos cannot answer is still left alone, so submission i
     'greenhouse',
   );
 
-  assert.deepEqual(result.questions.filter((question) => !question.answer.trim()), []);
+  assert.deepEqual(
+    result.questions.filter((question) => !question.answer.trim()).map((question) => ({
+      question: question.question,
+      required: question.required,
+      answerState: question.answer_state,
+    })),
+    [
+      { question: 'Website', required: false, answerState: 'unanswered' },
+      { question: 'What is your favourite bird?', required: false, answerState: 'unanswered' },
+    ],
+  );
 });
 
 test('required-ness reaches the stored question, so the dashboard and the 422 stop being inert', async () => {
@@ -4937,14 +5131,17 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   const submitStart = source.indexOf('async function submit(row: ResumeRow');
   const submitEnd = source.indexOf('\n/**\n * What a failed run tells the applicant', submitStart);
   const submitBody = source.slice(submitStart, submitEnd);
-  assert.match(submitBody, /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions\)/);
+  assert.match(
+    submitBody,
+    /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions, attemptBinding\)/,
+  );
   assert.match(submitBody, /submitViaAtsSubmissionChannel\([\s\S]{0,180}packetAudit\.audit,[\s\S]{0,80}packetAudit\.questions/);
   const managedStart = submitBody.indexOf('if (isManagedStratusProvider())');
   const directStart = submitBody.indexOf("if (!claimedReview.browser_session_id)", managedStart);
   const managed = submitBody.slice(managedStart, directStart);
   assert.ok(managed.indexOf("const packet = packetForEmployerDelivery(builtPacket, claimedReview, 'browser')") >= 0);
   assert.ok(managed.indexOf("assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope)")
-    < managed.indexOf('runManagedBrowser(applicationUrl, buildManagedCaptchaProbeActions()'),
+    < managed.indexOf('runManagedBrowserWithAccountFence('),
   'managed send must verify before its first employer request');
   assert.match(managed, /buildManagedPortalActions\(portal, packet, true, applicationUrl\)/,
     'managed submit must bind its exact posting URL into the remote atomic-click contract');
@@ -4953,11 +5150,11 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   assert.ok(direct.indexOf('assertVerifiedBuiltPacket(') < direct.indexOf('getBrowserSession('),
     'direct send must verify before it reconnects to the employer session');
   const controlled = source.slice(source.indexOf('async function submitControlled('), source.indexOf('async function submitViaAtsSubmissionChannel('));
-  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,500}'full', envelope\)/,
+  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,900}'full', envelope\)/,
     'the controlled transport must name its audit-time delivery mode');
-  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await executeAfterFinalSubmissionBoundary\([\s\S]{0,180}\(\) => clickFinalSubmit\(page\)/,
     'controlled submit must recheck the exact posting URL immediately before its click');
-  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await executeAfterFinalSubmissionBoundary\([\s\S]{0,180}\(\) => clickFinalSubmit\(page\)/,
     'direct submit must recheck the exact posting URL immediately before its click');
   const ats = source.slice(source.indexOf('async function submitViaAtsSubmissionChannel('), source.indexOf('const SECURITY_CODE_CONTINUATION_TTL_SECONDS'));
   const atsRefusal = ats.indexOf('ATS API delivery is withheld until Litos can verify and send one prebuilt request object');
