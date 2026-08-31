@@ -14,6 +14,9 @@ test('confirmation repair workflow is exact, frozen, dry-run-first, and replay v
   assert.match(workflow, /\.revision == \$revision/u);
   assert.match(workflow, /\.submission_cutover\.mode == "freeze"/u);
   assert.match(workflow, /\.submission_cutover\.config_valid == true/u);
+  assert.match(workflow, /\.submission_authority\.ready == true/u);
+  assert.match(workflow, /\.submission_authority\.attempt_ledger\.ready == true/u);
+  assert.match(workflow, /\.submission_authority\.revision\.ready == true/u);
   assert.match(workflow, /--user-id "\$REPAIR_USER_ID"/u);
   assert.match(workflow, /--application-id "\$REPAIR_APPLICATION_ID"/u);
   assert.match(workflow, /if: inputs\.apply/u);

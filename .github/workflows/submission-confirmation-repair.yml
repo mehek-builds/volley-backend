@@ -69,9 +69,12 @@ jobs:
             .revision == $revision
             and .submission_cutover.mode == "freeze"
             and .submission_cutover.config_valid == true
+            and .submission_authority.ready == true
+            and .submission_authority.attempt_ledger.ready == true
+            and .submission_authority.revision.ready == true
           ' "$health_file" >/dev/null || {
-            jq '{revision, revision_source, build, submission_cutover}' "$health_file" >&2
-            echo "The exact workflow revision must be serving in valid freeze mode before repair." >&2
+            jq '{revision, revision_source, build, submission_cutover, submission_authority}' "$health_file" >&2
+            echo "The exact workflow revision and both authority schemas must be ready in valid freeze mode before repair." >&2
             exit 4
           }
 
