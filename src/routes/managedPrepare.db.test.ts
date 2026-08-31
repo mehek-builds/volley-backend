@@ -59,6 +59,7 @@ const storedDocuments = new Map<string, Buffer>();
 let renderCalls = 0;
 let storeCalls = 0;
 let readCalls = 0;
+let deleteCalls = 0;
 let packetCalls = 0;
 let failNextPacketBuild = false;
 
@@ -117,6 +118,10 @@ const dependencies: Partial<ManagedPrepareDependencies> = {
     readCalls += 1;
     const bytes = storedDocuments.get(objectKey);
     return bytes ? Buffer.from(bytes) : null;
+  },
+  deleteResume: async (objectKey) => {
+    deleteCalls += 1;
+    storedDocuments.delete(objectKey);
   },
   buildSubmissionPacket: async (row: ResumeRow, pdfBytes: Buffer): Promise<SubmissionPacket> => {
     packetCalls += 1;
@@ -266,6 +271,7 @@ beforeEach(async () => {
   renderCalls = 0;
   storeCalls = 0;
   readCalls = 0;
+  deleteCalls = 0;
   packetCalls = 0;
   failNextPacketBuild = false;
   await seedSourceAndJob();
@@ -383,7 +389,7 @@ test('prepares one Free-plan packet with an exact canonical, artifact, and revie
   assert.deepEqual(freeState.rows[0], { plan: 'free', reservations: 0, trial_usage: 0 });
   assert.equal(renderCalls, 1);
   assert.equal(storeCalls, 1);
-  assert.equal(readCalls, 0);
+  assert.equal(readCalls, 1);
   assert.equal(packetCalls, 1);
 });
 
@@ -468,6 +474,59 @@ test('render and object storage do not hold the production one-connection pool',
   assert.equal(result.state, 'ready_for_review');
 });
 
+test('an expired takeover uses a new object key so the stale worker cannot overwrite the committed PDF', async () => {
+  await seedUser(STUDENT, 'student@example.test');
+  const { prepareManagedApplication } = await import('../lib/managedPrepare');
+  let clock = new Date('2026-08-31T12:00:00.000Z');
+  let releaseFirstRender!: () => void;
+  let reportFirstRenderEntered!: () => void;
+  const firstRenderEntered = new Promise<void>((resolve) => { reportFirstRenderEntered = resolve; });
+  const firstRenderGate = new Promise<void>((resolve) => { releaseFirstRender = resolve; });
+  const firstBytes = Buffer.from('%PDF-1.4\nstale-worker\n%%EOF\n');
+  const secondBytes = Buffer.from('%PDF-1.4\ntakeover-winner\n%%EOF\n');
+
+  const first = prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+    ...dependencies,
+    now: () => new Date(clock),
+    renderMainResume: async ({ spec }) => {
+      reportFirstRenderEntered();
+      await firstRenderGate;
+      return { buffer: firstBytes, spec };
+    },
+  });
+  await firstRenderEntered;
+  const [reservedBeforeTakeover] = (await database.query<Record<string, any>>(
+    'select "spec", "resume_object_key" from "generated_resumes" where "user_id" = $1',
+    [STUDENT],
+  )).rows;
+  const staleObjectKey = reservedBeforeTakeover?.resume_object_key as string;
+  assert.equal(reservedBeforeTakeover?.spec._managed_prepare.phase, 'reserved');
+
+  clock = new Date('2026-08-31T12:06:00.000Z');
+  const second = await prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+    ...dependencies,
+    now: () => new Date(clock),
+    renderMainResume: async ({ spec }) => ({ buffer: secondBytes, spec }),
+  });
+  const [committed] = (await database.query<Record<string, any>>(
+    'select "spec", "resume_object_key" from "generated_resumes" where "id" = $1',
+    [second.packet_id],
+  )).rows;
+  assert.equal(second.state, 'ready_for_review');
+  assert.equal(committed?.spec._managed_prepare.phase, 'stored');
+  assert.notEqual(committed?.resume_object_key, staleObjectKey);
+  assert.deepEqual(storedDocuments.get(committed?.resume_object_key), secondBytes);
+
+  releaseFirstRender();
+  await assert.rejects(
+    first,
+    (error: unknown) => (error as { code?: string }).code === 'managed_packet_changed',
+  );
+  assert.deepEqual(storedDocuments.get(committed?.resume_object_key), secondBytes);
+  assert.equal(storedDocuments.has(staleObjectKey), false);
+  assert.equal(deleteCalls, 1);
+});
+
 test('a failed external render releases only its reservation so an immediate retry can reuse the object identity', async () => {
   await seedUser(STUDENT, 'student@example.test');
   const { prepareManagedApplication } = await import('../lib/managedPrepare');
@@ -506,7 +565,7 @@ test('replays the exact committed result without rendering, storing, or building
   assert.equal(second.json().reused, true);
   assert.equal(renderCalls, 1);
   assert.equal(storeCalls, 1);
-  assert.equal(readCalls, 0);
+  assert.equal(readCalls, 1);
   assert.equal(packetCalls, 1);
 
   const counts = await database.query<Record<string, number>>(
@@ -598,7 +657,7 @@ test('recovers an interrupted preliminary packet without a second render or obje
   assert.equal(recovered.json().reused, true);
   assert.equal(renderCalls, 1);
   assert.equal(storeCalls, 1);
-  assert.equal(readCalls, 1);
+  assert.equal(readCalls, 2);
   assert.equal(packetCalls, 2);
 
   const artifact = await database.query<Record<string, any>>(

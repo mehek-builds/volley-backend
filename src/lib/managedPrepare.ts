@@ -99,6 +99,7 @@ export type ManagedPrepareDependencies = {
   renderMainResume: (input: { spec: ResumeSpec; contact: ContactHeader }) => Promise<RenderedMainResume>;
   storeResume: (requestedKey: string, bytes: Buffer) => Promise<{ pathname: string; url: string }>;
   readResume: (objectKey: string) => Promise<Buffer | null>;
+  deleteResume: (objectKey: string) => Promise<void>;
   buildSubmissionPacket: (row: ResumeRow, pdfBytes: Buffer) => Promise<SubmissionPacket>;
   browserRuntime: typeof browserDeliveryRuntimeIdentity;
   upsertCanonicalApplication: (input: {
@@ -131,6 +132,10 @@ const defaultDependencies: ManagedPrepareDependencies = {
   readResume: async (objectKey) => {
     const { readObject } = await import('./objectStorage');
     return readObject(objectKey);
+  },
+  deleteResume: async (objectKey) => {
+    const { deleteObjects } = await import('./objectStorage');
+    await deleteObjects(objectKey);
   },
   buildSubmissionPacket: async (row, pdfBytes) => {
     const { buildPacket } = await import('../routes/submissionRunner');
@@ -232,6 +237,15 @@ function managedPrepareReservation(input: {
     lease_expires_at: new Date(input.reservedAt.getTime() + MANAGED_PREPARE_RESERVATION_MS).toISOString(),
     requested_object_key: input.requestedObjectKey,
   };
+}
+
+function managedPrepareReservationObjectKey(input: {
+  userId: string;
+  jobId: string;
+  mainResumeDigest: string;
+  reservationId: string;
+}): string {
+  return `users/${input.userId}/managed-main-resumes/${input.jobId}/${input.reservationId}/${input.mainResumeDigest}.pdf`;
 }
 
 function exactManagedReview(row: ResumeRow, applicationId: string): ApplicationReviewState | null {
@@ -470,7 +484,6 @@ export async function prepareManagedApplication(
       return prepareError(409, 'managed_packet_ambiguous', 'Litos found more than one packet for this exact application and stopped safely.');
     }
 
-    const requestedKey = `users/${input.userId}/managed-main-resumes/${posting.id}/${mainResumeDigest}.pdf`;
     const existing = candidates[0];
     if (existing) {
       const metadata = managedPrepareMetadata(existing.spec);
@@ -552,8 +565,14 @@ export async function prepareManagedApplication(
       }
 
       if (reservation) {
-        if (reservation.requested_object_key !== requestedKey
-          || existing.resume_object_key !== requestedKey) {
+        const expectedReservationKey = managedPrepareReservationObjectKey({
+          userId: input.userId,
+          jobId: posting.id,
+          mainResumeDigest,
+          reservationId: reservation.reservation_id,
+        });
+        if (reservation.requested_object_key !== expectedReservationKey
+          || existing.resume_object_key !== expectedReservationKey) {
           return prepareError(409, 'managed_packet_identity_mismatch', 'The saved packet does not match this application. Nothing was opened or sent.');
         }
         const reservationNow = dependencies.now();
@@ -561,6 +580,12 @@ export async function prepareManagedApplication(
           return prepareError(409, 'managed_packet_preparing', 'Litos is already preparing this exact packet. Try again shortly.');
         }
         const reservationId = dependencies.newId();
+        const requestedKey = managedPrepareReservationObjectKey({
+          userId: input.userId,
+          jobId: posting.id,
+          mainResumeDigest,
+          reservationId,
+        });
         const nextReservation = managedPrepareReservation({
           applicationId,
           packetId: existing.id,
@@ -572,11 +597,14 @@ export async function prepareManagedApplication(
           requestedObjectKey: requestedKey,
         });
         const nextSpec = { ...currentBaseResume, _managed_prepare: nextReservation };
-        const [takenOver] = await tx.update(generated_resumes).set({ spec: nextSpec }).where(and(
+        const [takenOver] = await tx.update(generated_resumes).set({
+          spec: nextSpec,
+          resume_object_key: requestedKey,
+        }).where(and(
           eq(generated_resumes.id, existing.id),
           eq(generated_resumes.user_id, input.userId),
           sql`${generated_resumes.spec} = ${JSON.stringify(existing.spec)}::jsonb`,
-          eq(generated_resumes.resume_object_key, requestedKey),
+          eq(generated_resumes.resume_object_key, expectedReservationKey),
         )).returning();
         if (!takenOver) {
           return prepareError(409, 'managed_packet_changed', 'The packet changed while Litos was preparing it. Reload and try again.');
@@ -616,6 +644,12 @@ export async function prepareManagedApplication(
 
     const packetId = dependencies.newId();
     const reservationId = dependencies.newId();
+    const requestedKey = managedPrepareReservationObjectKey({
+      userId: input.userId,
+      jobId: posting.id,
+      mainResumeDigest,
+      reservationId,
+    });
     const reservationNow = dependencies.now();
     const reservation = managedPrepareReservation({
       applicationId,
@@ -654,6 +688,7 @@ export async function prepareManagedApplication(
 
   if (stage.reservation) {
     const reservation = stage.reservation;
+    let storedByReservation = false;
     const abandonReservation = async () => {
       await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
@@ -699,8 +734,13 @@ export async function prepareManagedApplication(
       }
       const renderedSpec = normalizeSpec(rendered.spec);
       const stored = await dependencies.storeResume(reservation.requestedKey, rendered.buffer);
+      storedByReservation = true;
       if (stored.pathname !== reservation.requestedKey || !stored.url.trim()) {
         return prepareError(500, 'main_resume_storage_failed', 'Litos could not store the exact main resume packet. Nothing was opened or sent.');
+      }
+      const storedBytes = await dependencies.readResume(stored.pathname);
+      if (!storedBytes || !storedBytes.equals(rendered.buffer)) {
+        return prepareError(500, 'main_resume_storage_failed', 'Litos could not verify the exact stored main resume packet. Nothing was opened or sent.');
       }
 
       const now = dependencies.now().toISOString();
@@ -803,6 +843,9 @@ export async function prepareManagedApplication(
         created: stage.created,
       };
     } catch (error) {
+      if (storedByReservation) {
+        await dependencies.deleteResume(reservation.requestedKey).catch(() => undefined);
+      }
       await abandonReservation().catch(() => undefined);
       throw error;
     }
