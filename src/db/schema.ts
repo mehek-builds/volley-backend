@@ -1843,6 +1843,9 @@ export const career_page_sources = pgTable('career_page_sources', {
   // transient provider failure keep a still-fresh logo visible while throttling the next retry.
   logo_last_checked_at: timestamp('logo_last_checked_at', { withTimezone: true }),
   logo_verification_error: text('logo_verification_error'),
+  // Consecutive provider-pressure responses for the current Crelate retry cycle. Three 429s move
+  // the source to the ordinary seven-day failed lane. A success or any non-429 result resets it.
+  logo_provider_429_attempts: integer('logo_provider_429_attempts').default(0).notNull(),
   enabled: boolean('enabled').default(true).notNull(),
   last_polled_at: timestamp('last_polled_at', { withTimezone: true }),
   // Unlike last_polled_at, failures never advance this. Certification can therefore require a
@@ -1889,6 +1892,25 @@ export const career_page_sources = pgTable('career_page_sources', {
       and nullif(btrim(${t.logo_verification_method}), '') is not null
       and ${t.company_logo_url} ~ '^https://[^[:space:]]+$'
     )
+  `),
+  logoProvider429AttemptsCheck: check('career_page_sources_logo_provider_429_attempts_check', sql`
+    ${t.logo_provider_429_attempts} between 0 and 3
+  `),
+}));
+
+// Durable provider-wide pressure state for logo verification. The active claim is a lease so two
+// API replicas cannot call a throttled provider at once, while a crashed process cannot wedge the
+// queue forever. A non-null future circuit_open_until is open; an elapsed value is half-open.
+export const logo_verification_provider_circuits = pgTable('logo_verification_provider_circuits', {
+  provider: text('provider').primaryKey(),
+  circuit_open_until: timestamp('circuit_open_until', { withTimezone: true }),
+  active_claim_token: text('active_claim_token'),
+  active_claim_expires_at: timestamp('active_claim_expires_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  claimPairCheck: check('logo_verification_provider_circuits_claim_pair_check', sql`
+    (${t.active_claim_token} is null) = (${t.active_claim_expires_at} is null)
   `),
 }));
 

@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
@@ -6,6 +7,7 @@ import {
   career_page_sources,
   job_board_group_projection,
   job_board_group_projection_state,
+  logo_verification_provider_circuits,
   monitored_jobs,
   profiles,
   sponsor_employers,
@@ -216,6 +218,11 @@ export const LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS = 1_100;
 export const LOGO_VERIFICATION_REQUEST_CANDIDATES = 16;
 export const LOGO_VERIFICATION_PROVIDER_CANDIDATES = 4;
 export const LOGO_VERIFICATION_WORKABLE_CANDIDATES = 2;
+export const LOGO_VERIFICATION_CRELATE_CANDIDATES = 1;
+export const LOGO_VERIFICATION_CRELATE_CONCURRENCY = 1;
+export const CRELATE_LOGO_CIRCUIT_OPEN_MS = 15 * 60 * 1000;
+export const CRELATE_LOGO_CLAIM_LEASE_MS = 5 * 60 * 1000;
+export const CRELATE_LOGO_429_EXHAUSTED_REASON = 'ats:http_429_exhausted';
 const FAILED_LOGO_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
 export const TRANSIENT_LOGO_RETRY_MS = 15 * 60 * 1000;
 const PROVISIONAL_SOURCE_LOGO_METHODS = new Set([
@@ -229,6 +236,143 @@ export function sourceLogoIdentityMode(method: string): 'provisional' | 'asserte
   return PROVISIONAL_SOURCE_LOGO_METHODS.has(method) ? 'provisional' : 'asserted';
 }
 
+export function isCrelateLogo429(reason: string): boolean {
+  return reason.split(';').some((part) => part.split(':').at(-1) === 'http_429');
+}
+
+export function crelateLogoFailureTransition(
+  currentAttempts: number,
+  previousReason: string | null,
+  reason: string,
+) {
+  if (!isCrelateLogo429(reason)) {
+    return { attempts: 0, exhausted: false, reason, opensCircuit: false } as const;
+  }
+  /* A completed seven-day exhausted cycle starts over at attempt one. During the short retry lane,
+     attempts stay consecutive and the third response becomes a durable non-transient failure. */
+  const baseline = previousReason === CRELATE_LOGO_429_EXHAUSTED_REASON
+    ? 0
+    : Math.max(0, Math.min(3, Math.trunc(currentAttempts)));
+  const attempts = Math.min(3, baseline + 1);
+  const exhausted = attempts >= 3;
+  return {
+    attempts,
+    exhausted,
+    reason: exhausted ? CRELATE_LOGO_429_EXHAUSTED_REASON : reason,
+    opensCircuit: true,
+  } as const;
+}
+
+export type CrelateLogoVerificationClaim = {
+  token: string;
+  halfOpen: boolean;
+  leaseExpiresAt: Date;
+};
+
+async function ensureCrelateLogoCircuitRow() {
+  await db.insert(logo_verification_provider_circuits)
+    .values({ provider: 'crelate' })
+    .onConflictDoNothing();
+}
+
+/** Atomically reserve the single Crelate request allowed in both closed and half-open states. */
+export async function acquireCrelateLogoVerificationClaim(
+  at = new Date(),
+  token: string = randomUUID(),
+): Promise<CrelateLogoVerificationClaim | null> {
+  await ensureCrelateLogoCircuitRow();
+  const leaseExpiresAt = new Date(at.getTime() + CRELATE_LOGO_CLAIM_LEASE_MS);
+  const [claimed] = await db.update(logo_verification_provider_circuits).set({
+    active_claim_token: token,
+    active_claim_expires_at: leaseExpiresAt,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    or(
+      isNull(logo_verification_provider_circuits.circuit_open_until),
+      lte(logo_verification_provider_circuits.circuit_open_until, at),
+    ),
+    or(
+      isNull(logo_verification_provider_circuits.active_claim_token),
+      lte(logo_verification_provider_circuits.active_claim_expires_at, at),
+    ),
+  )).returning({
+    circuitOpenUntil: logo_verification_provider_circuits.circuit_open_until,
+  });
+  return claimed ? {
+    token,
+    halfOpen: claimed.circuitOpenUntil !== null,
+    leaseExpiresAt,
+  } : null;
+}
+
+export async function releaseCrelateLogoVerificationClaim(token: string, at = new Date()) {
+  const rows = await db.update(logo_verification_provider_circuits).set({
+    active_claim_token: null,
+    active_claim_expires_at: null,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    eq(logo_verification_provider_circuits.active_claim_token, token),
+  )).returning({ provider: logo_verification_provider_circuits.provider });
+  return rows.length === 1;
+}
+
+export async function openCrelateLogoVerificationCircuit(token: string, at = new Date()) {
+  const rows = await db.update(logo_verification_provider_circuits).set({
+    circuit_open_until: new Date(at.getTime() + CRELATE_LOGO_CIRCUIT_OPEN_MS),
+    active_claim_token: null,
+    active_claim_expires_at: null,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    eq(logo_verification_provider_circuits.active_claim_token, token),
+  )).returning({ provider: logo_verification_provider_circuits.provider });
+  return rows.length === 1;
+}
+
+export async function closeCrelateLogoVerificationCircuit(token: string, at = new Date()) {
+  const rows = await db.update(logo_verification_provider_circuits).set({
+    circuit_open_until: null,
+    active_claim_token: null,
+    active_claim_expires_at: null,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    eq(logo_verification_provider_circuits.active_claim_token, token),
+  )).returning({ provider: logo_verification_provider_circuits.provider });
+  return rows.length === 1;
+}
+
+export async function readCrelateLogoVerificationBlock(at = new Date()) {
+  await ensureCrelateLogoCircuitRow();
+  const [state] = await db.select({
+    circuitOpenUntil: logo_verification_provider_circuits.circuit_open_until,
+    activeClaimExpiresAt: logo_verification_provider_circuits.active_claim_expires_at,
+  }).from(logo_verification_provider_circuits)
+    .where(eq(logo_verification_provider_circuits.provider, 'crelate'))
+    .limit(1);
+  const circuitOpenUntil = state?.circuitOpenUntil
+    && state.circuitOpenUntil.getTime() > at.getTime()
+    ? state.circuitOpenUntil
+    : null;
+  const activeClaimExpiresAt = state?.activeClaimExpiresAt
+    && state.activeClaimExpiresAt.getTime() > at.getTime()
+    ? state.activeClaimExpiresAt
+    : null;
+  const blockedUntil = circuitOpenUntil ?? activeClaimExpiresAt;
+  const halfOpen = state?.circuitOpenUntil !== null
+    && state?.circuitOpenUntil !== undefined
+    && state.circuitOpenUntil.getTime() <= at.getTime();
+  return {
+    blocked: blockedUntil !== null,
+    blockedUntil,
+    reason: circuitOpenUntil
+      ? 'open'
+      : activeClaimExpiresAt ? 'active' : halfOpen ? 'half_open' : 'closed',
+  } as const;
+}
+
 /** Keep one degraded provider inside the worker request timeout without hiding its deferred rows. */
 export function boundedLogoVerificationCandidates<T extends { ats_name: string }>(
   candidates: readonly T[],
@@ -239,7 +383,9 @@ export function boundedLogoVerificationCandidates<T extends { ats_name: string }
     if (selected.length >= LOGO_VERIFICATION_REQUEST_CANDIDATES) break;
     const providerLimit = candidate.ats_name === 'workable'
       ? LOGO_VERIFICATION_WORKABLE_CANDIDATES
-      : LOGO_VERIFICATION_PROVIDER_CANDIDATES;
+      : candidate.ats_name === 'crelate'
+        ? LOGO_VERIFICATION_CRELATE_CANDIDATES
+        : LOGO_VERIFICATION_PROVIDER_CANDIDATES;
     const providerSelected = selectedByProvider.get(candidate.ats_name) ?? 0;
     if (providerSelected >= providerLimit) continue;
     selected.push(candidate);
@@ -313,7 +459,10 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         const timestamp = now();
         const index = pending.findIndex((candidate) => {
           const providerActive = activeByProvider.get(candidate.ats_name) ?? 0;
-          const providerLimit = candidate.ats_name === 'workable' ? 1 : providerConcurrency;
+          const providerLimit = candidate.ats_name === 'workable'
+            || candidate.ats_name === 'crelate'
+            ? 1
+            : providerConcurrency;
           return providerActive < providerLimit
             && (candidate.ats_name !== 'workable' || timestamp >= nextWorkableStart);
         });
@@ -632,6 +781,8 @@ export type LogoVerificationCandidate = {
   logo_verification_method: string | null;
   logo_verified_at: Date | null;
   logo_last_checked_at: Date | null;
+  logo_provider_429_attempts: number;
+  logo_verification_error: string | null;
   portal_company_name: string | null;
   portal_name_mismatch: boolean;
 };
@@ -671,6 +822,8 @@ export async function selectProviderBalancedLogoVerificationCandidates(
     logo_verification_method: career_page_sources.logo_verification_method,
     logo_verified_at: career_page_sources.logo_verified_at,
     logo_last_checked_at: career_page_sources.logo_last_checked_at,
+    logo_provider_429_attempts: career_page_sources.logo_provider_429_attempts,
+    logo_verification_error: career_page_sources.logo_verification_error,
     portal_company_name: career_page_sources.portal_company_name,
     portal_name_mismatch: career_page_sources.portal_name_mismatch,
     created_at: career_page_sources.created_at,
@@ -695,12 +848,15 @@ export async function selectProviderBalancedLogoVerificationCandidates(
     logo_verification_method: ranked.logo_verification_method,
     logo_verified_at: ranked.logo_verified_at,
     logo_last_checked_at: ranked.logo_last_checked_at,
+    logo_provider_429_attempts: ranked.logo_provider_429_attempts,
+    logo_verification_error: ranked.logo_verification_error,
     portal_company_name: ranked.portal_company_name,
     portal_name_mismatch: ranked.portal_name_mismatch,
   })
     .from(ranked)
     .where(sql`${ranked.provider_rank} <= case
       when ${ranked.ats_name} = 'workable' then ${LOGO_VERIFICATION_WORKABLE_CANDIDATES}::bigint
+      when ${ranked.ats_name} = 'crelate' then ${LOGO_VERIFICATION_CRELATE_CANDIDATES}::bigint
       else ${LOGO_VERIFICATION_PROVIDER_CANDIDATES}::bigint
     end`)
     /* Round robin is intentional. It guarantees every non-empty provider appears before a large
@@ -3668,14 +3824,25 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         ),
       ),
     )!;
+    /* Claim before selection so a second API replica excludes Crelate while this request is in
+       flight. Open circuits return no claim. Closed and half-open states both permit exactly one
+       Crelate candidate, while every other ATS family remains independently selectable. */
+    const crelateClaim = await acquireCrelateLogoVerificationClaim(new Date(now));
+    const selectionEligible = crelateClaim
+      ? eligible
+      : and(eligible, ne(career_page_sources.ats_name, 'crelate'))!;
     /* Provider quotas are applied in SQL before the global request limit. JavaScript applies the
        same bounds again as defense in depth, but it never receives a single-provider prefix that
        could starve the other seven ATS families. */
     const selectedCandidates = await selectProviderBalancedLogoVerificationCandidates(
-      eligible,
+      selectionEligible,
       parsed.data.limit,
     );
     const candidates = boundedLogoVerificationCandidates(selectedCandidates);
+    const selectedCrelate = candidates.some((candidate) => candidate.ats_name === 'crelate');
+    if (crelateClaim && !selectedCrelate) {
+      await releaseCrelateLogoVerificationClaim(crelateClaim.token, new Date());
+    }
 
     let verified = 0;
     let failed = 0;
@@ -3683,8 +3850,21 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     let transientDeferred = 0;
     await runProviderAwareLogoQueue(candidates, async (candidate) => {
         const candidateMethod = candidate.logo_verification_method;
-        if (!candidateMethod) return;
-        const result = await retryTransientLogoVerification(async () => {
+        if (!candidateMethod) {
+          if (candidate.ats_name === 'crelate' && crelateClaim) {
+            await releaseCrelateLogoVerificationClaim(crelateClaim.token, new Date());
+          }
+          return;
+        }
+        let result: {
+          verified: true;
+          companyName: string;
+          companyLogoUrl: string;
+          method: string;
+          providerIdentity: true;
+        } | { verified: false; reason: string };
+        try {
+          result = await retryTransientLogoVerification(async () => {
           const atsResult = await verifyAtsSourceBranding({
             company_name: candidate.company_name,
             ats_name: candidate.ats_name as SupportedJobBoard,
@@ -3726,7 +3906,32 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
              the short retry interval, so dropping in-request retries does not drop the work. */
           attempts: 1,
         });
+        } catch (error) {
+          if (candidate.ats_name === 'crelate' && crelateClaim) {
+            await releaseCrelateLogoVerificationClaim(crelateClaim.token, new Date());
+          }
+          throw error;
+        }
         const checkedAt = new Date();
+        const crelateTransition = candidate.ats_name === 'crelate' && !result.verified
+          ? crelateLogoFailureTransition(
+            candidate.logo_provider_429_attempts,
+            candidate.logo_verification_error,
+            result.reason,
+          )
+          : null;
+
+        if (candidate.ats_name === 'crelate') {
+          if (!crelateClaim) {
+            throw new Error('Crelate logo verification ran without the durable provider claim');
+          }
+          const circuitUpdated = crelateTransition?.opensCircuit
+            ? await openCrelateLogoVerificationCircuit(crelateClaim.token, checkedAt)
+            : await closeCrelateLogoVerificationCircuit(crelateClaim.token, checkedAt);
+          if (!circuitUpdated) {
+            throw new Error('Crelate logo verification lost its durable provider claim');
+          }
+        }
 
         const unchanged = and(
           eq(career_page_sources.id, candidate.id),
@@ -3735,6 +3940,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           eq(career_page_sources.logo_verification_method, candidateMethod),
           sql`${career_page_sources.company_domain} is not distinct from ${candidate.company_domain}`,
           sql`${career_page_sources.logo_last_checked_at} is not distinct from ${candidate.logo_last_checked_at}`,
+          eq(career_page_sources.logo_provider_429_attempts, candidate.logo_provider_429_attempts),
+          sql`${career_page_sources.logo_verification_error} is not distinct from ${candidate.logo_verification_error}`,
         );
         if (result.verified) {
           const certificationIdentityChanged = normalizeEmployerCertificationIdentity(candidate.company_name)
@@ -3752,6 +3959,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
               logo_verified_at: checkedAt,
               logo_last_checked_at: checkedAt,
               logo_verification_error: null,
+              logo_provider_429_attempts: 0,
               sponsor_employer_id: sponsor?.id ?? null,
               portal_company_name: result.providerIdentity
                 ? result.companyName
@@ -3779,16 +3987,26 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           && candidate.logo_verified_at !== null
           && candidate.logo_verified_at.getTime()
             >= checkedAt.getTime() - VERIFIED_LOGO_EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-        const transient = isTransientLogoVerificationReason(result.reason);
+        const terminalCrelate429 = crelateTransition?.exhausted ?? false;
+        const persistedReason = crelateTransition?.reason ?? result.reason;
+        const transient = !terminalCrelate429
+          && isTransientLogoVerificationReason(persistedReason);
         const rows = await db.update(career_page_sources).set({
           /* A transient failure is not contrary brand evidence. Keep the prior proof fields, while
              the public freshness predicate independently excludes an expired proof. */
-          company_logo_url: transient || proofStillFresh ? undefined : null,
-          logo_verification_status: transient
+          company_logo_url: terminalCrelate429
+            ? null
+            : transient || proofStillFresh ? undefined : null,
+          logo_verification_status: terminalCrelate429
+            ? 'failed'
+            : transient
             ? candidate.logo_verification_status
             : proofStillFresh ? 'verified' : 'failed',
+          logo_verified_at: terminalCrelate429 ? null : undefined,
           logo_last_checked_at: checkedAt,
-          logo_verification_error: result.reason,
+          logo_verification_error: persistedReason,
+          logo_provider_429_attempts: crelateTransition?.attempts
+            ?? candidate.logo_provider_429_attempts,
         }).where(unchanged).returning({ id: career_page_sources.id });
         if (rows.length > 0) {
           failed += 1;
@@ -3803,20 +4021,42 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       isNotNull(career_page_sources.logo_last_checked_at),
       gte(career_page_sources.logo_last_checked_at, transientRetryBefore),
     )!;
+    const queueCheckedAt = new Date();
+    const crelateBlock = await readCrelateLogoVerificationBlock(queueCheckedAt);
+    const providerBlockedPending = crelateBlock.blocked
+      ? and(
+        eq(career_page_sources.ats_name, 'crelate'),
+        candidateState,
+        or(eligible, scheduledTransient),
+      )!
+      : sql<boolean>`false`;
+    const dueAfterProviderCircuit = crelateBlock.blocked
+      ? and(eligible, ne(career_page_sources.ats_name, 'crelate'))!
+      : eligible;
+    const scheduledAfterProviderCircuit = or(scheduledTransient, providerBlockedPending)!;
     const [queue] = await db.select({
-      due: sql<number>`count(*) filter (where ${eligible})::int`,
-      scheduled_transient: sql<number>`count(*) filter (where ${scheduledTransient})::int`,
+      due: sql<number>`count(*) filter (where ${dueAfterProviderCircuit})::int`,
+      scheduled_transient: sql<number>`count(*) filter (where ${scheduledAfterProviderCircuit})::int`,
+      scheduled_crelate_circuit: sql<number>`count(*) filter (where ${providerBlockedPending})::int`,
       next_transient_checked_at: sql<Date | null>`min(${career_page_sources.logo_last_checked_at})
-        filter (where ${scheduledTransient})`,
+        filter (where ${scheduledTransient} and not (${providerBlockedPending}))`,
     }).from(career_page_sources);
     const dueSources = queue?.due ?? 0;
     const scheduledTransientSources = queue?.scheduled_transient ?? 0;
+    const scheduledCrelateCircuitSources = queue?.scheduled_crelate_circuit ?? 0;
     const remainingSources = dueSources + scheduledTransientSources;
     const nextCheckedAt = queue?.next_transient_checked_at
       ? new Date(queue.next_transient_checked_at).getTime()
       : Number.NaN;
+    const nextIndividualRetryAt = Number.isFinite(nextCheckedAt)
+      ? nextCheckedAt + TRANSIENT_LOGO_RETRY_MS
+      : Number.POSITIVE_INFINITY;
+    const nextCrelateRetryAt = scheduledCrelateCircuitSources > 0 && crelateBlock.blockedUntil
+      ? crelateBlock.blockedUntil.getTime()
+      : Number.POSITIVE_INFINITY;
+    const nextRetryAt = Math.min(nextIndividualRetryAt, nextCrelateRetryAt);
     const retryAfterMs = dueSources === 0 && scheduledTransientSources > 0
-      ? Math.max(1, nextCheckedAt + TRANSIENT_LOGO_RETRY_MS - Date.now())
+      ? Math.max(1, nextRetryAt - Date.now())
       : 0;
     return reply.send({
       selected_sources: candidates.length,
@@ -3826,6 +4066,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       grace_preserved_sources: gracePreserved,
       due_sources: dueSources,
       scheduled_transient_sources: scheduledTransientSources,
+      scheduled_crelate_circuit_sources: scheduledCrelateCircuitSources,
       remaining_sources: remainingSources,
       verification_complete: remainingSources === 0,
       retry_after_ms: retryAfterMs,
@@ -3840,6 +4081,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         request_candidates: LOGO_VERIFICATION_REQUEST_CANDIDATES,
         per_provider_candidates: LOGO_VERIFICATION_PROVIDER_CANDIDATES,
         workable_candidates: LOGO_VERIFICATION_WORKABLE_CANDIDATES,
+        crelate: LOGO_VERIFICATION_CRELATE_CONCURRENCY,
+        crelate_candidates: LOGO_VERIFICATION_CRELATE_CANDIDATES,
+      },
+      crelate_circuit: {
+        state: crelateBlock.reason,
+        retry_at: crelateBlock.blockedUntil?.toISOString() ?? null,
       },
     });
   });

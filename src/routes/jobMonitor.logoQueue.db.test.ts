@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, before, beforeEach, test } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -34,6 +34,16 @@ let pool: typeof import('../db/index')['pool'];
 let schema: typeof import('../db/schema');
 let selectCandidates:
   typeof import('./jobMonitor')['selectProviderBalancedLogoVerificationCandidates'];
+let acquireCrelateClaim:
+  typeof import('./jobMonitor')['acquireCrelateLogoVerificationClaim'];
+let closeCrelateCircuit:
+  typeof import('./jobMonitor')['closeCrelateLogoVerificationCircuit'];
+let openCrelateCircuit:
+  typeof import('./jobMonitor')['openCrelateLogoVerificationCircuit'];
+let readCrelateBlock:
+  typeof import('./jobMonitor')['readCrelateLogoVerificationBlock'];
+let releaseCrelateClaim:
+  typeof import('./jobMonitor')['releaseCrelateLogoVerificationClaim'];
 
 before(async () => {
   process.env.ENCRYPTION_KEY = 'logo-queue-database-test-key';
@@ -59,7 +69,14 @@ before(async () => {
   );
   for (const statement of statements) await database.exec(statement);
 
-  ({ selectProviderBalancedLogoVerificationCandidates: selectCandidates } = await import('./jobMonitor'));
+  ({
+    acquireCrelateLogoVerificationClaim: acquireCrelateClaim,
+    closeCrelateLogoVerificationCircuit: closeCrelateCircuit,
+    openCrelateLogoVerificationCircuit: openCrelateCircuit,
+    readCrelateLogoVerificationBlock: readCrelateBlock,
+    releaseCrelateLogoVerificationClaim: releaseCrelateClaim,
+    selectProviderBalancedLogoVerificationCandidates: selectCandidates,
+  } = await import('./jobMonitor'));
 
   const sourceRows = PROVIDERS.flatMap((provider) => Array.from(
     { length: SOURCES_PER_PROVIDER },
@@ -75,6 +92,10 @@ before(async () => {
     }),
   ));
   await db.insert(schema.career_page_sources).values(sourceRows);
+});
+
+beforeEach(async () => {
+  await db.delete(schema.logo_verification_provider_circuits);
 });
 
 after(async () => {
@@ -102,8 +123,58 @@ test('provider-balanced SQL cannot starve a family behind more than 200 older du
       (selectedByProvider.get(candidate.ats_name) ?? 0) + 1,
     );
   }
-  assert.deepEqual(
-    Object.fromEntries([...selectedByProvider].sort(([left], [right]) => left.localeCompare(right))),
-    Object.fromEntries([...PROVIDERS].sort().map((provider) => [provider, 2])),
+  assert.equal(selectedByProvider.get('crelate'), 1);
+  for (const provider of PROVIDERS.filter((value) => value !== 'crelate')) {
+    assert.ok((selectedByProvider.get(provider) ?? 0) >= 2, `${provider} should retain a fair turn`);
+  }
+});
+
+test('Crelate provider state admits one active request and one half-open probe', async () => {
+  const openedAt = new Date('2026-09-01T00:00:00.000Z');
+  const first = await acquireCrelateClaim(openedAt, 'closed-claim');
+  assert.deepEqual(first, {
+    token: 'closed-claim',
+    halfOpen: false,
+    leaseExpiresAt: new Date('2026-09-01T00:05:00.000Z'),
+  });
+  assert.equal(await acquireCrelateClaim(openedAt, 'overlap-claim'), null);
+  assert.equal(await openCrelateCircuit('closed-claim', openedAt), true);
+
+  const open = await readCrelateBlock(new Date('2026-09-01T00:14:59.999Z'));
+  assert.equal(open.blocked, true);
+  assert.equal(open.reason, 'open');
+  assert.equal(open.blockedUntil?.toISOString(), '2026-09-01T00:15:00.000Z');
+  assert.equal(
+    await acquireCrelateClaim(new Date('2026-09-01T00:14:59.999Z'), 'early-half-open'),
+    null,
   );
+  assert.deepEqual(
+    await readCrelateBlock(new Date('2026-09-01T00:15:00.000Z')),
+    { blocked: false, blockedUntil: null, reason: 'half_open' },
+  );
+
+  const halfOpen = await acquireCrelateClaim(
+    new Date('2026-09-01T00:15:00.000Z'),
+    'half-open-claim',
+  );
+  assert.equal(halfOpen?.halfOpen, true);
+  assert.equal(
+    await acquireCrelateClaim(new Date('2026-09-01T00:15:00.001Z'), 'second-half-open'),
+    null,
+  );
+  assert.equal(
+    await closeCrelateCircuit('half-open-claim', new Date('2026-09-01T00:15:01.000Z')),
+    true,
+  );
+  assert.deepEqual(
+    await readCrelateBlock(new Date('2026-09-01T00:15:01.001Z')),
+    { blocked: false, blockedUntil: null, reason: 'closed' },
+  );
+
+  const afterClose = await acquireCrelateClaim(
+    new Date('2026-09-01T00:15:02.000Z'),
+    'after-close',
+  );
+  assert.equal(afterClose?.halfOpen, false);
+  assert.equal(await releaseCrelateClaim('after-close'), true);
 });

@@ -4,6 +4,9 @@ import test from 'node:test';
 import { db } from '../db/index';
 import { career_page_sources } from '../db/schema';
 import {
+  CRELATE_LOGO_429_EXHAUSTED_REASON,
+  LOGO_VERIFICATION_CRELATE_CANDIDATES,
+  LOGO_VERIFICATION_CRELATE_CONCURRENCY,
   LOGO_VERIFICATION_GLOBAL_CONCURRENCY,
   LOGO_VERIFICATION_PROVIDER_CANDIDATES,
   LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
@@ -11,6 +14,7 @@ import {
   LOGO_VERIFICATION_WORKABLE_CANDIDATES,
   LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
   boundedLogoVerificationCandidates,
+  crelateLogoFailureTransition,
   logoVerificationQueueOrder,
   pollingSourceEligibilityPredicate,
   runProviderAwareLogoQueue,
@@ -83,6 +87,7 @@ test('logo verification bounds each provider and spaces Workable starts', async 
     ...Array.from({ length: 6 }, (_, index) => ({ ats_name: 'greenhouse', index })),
     ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'lever', index })),
     ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'workable', index })),
+    ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'crelate', index })),
   ];
   let clock = 0;
   let active = 0;
@@ -113,6 +118,7 @@ test('logo verification bounds each provider and spaces Workable starts', async 
   assert.ok((maximumByProvider.get('greenhouse') ?? 0) <= LOGO_VERIFICATION_PROVIDER_CONCURRENCY);
   assert.ok((maximumByProvider.get('lever') ?? 0) <= LOGO_VERIFICATION_PROVIDER_CONCURRENCY);
   assert.equal(maximumByProvider.get('workable'), 1);
+  assert.equal(maximumByProvider.get('crelate'), LOGO_VERIFICATION_CRELATE_CONCURRENCY);
   assert.deepEqual(workableStarts, [
     0,
     LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
@@ -144,6 +150,53 @@ test('one degraded provider cannot make a logo request exceed its bounded candid
     Array.from({ length: 200 }, (_, index) => ({ ats_name: 'workable', index })),
   );
   assert.equal(workableOnly.length, LOGO_VERIFICATION_WORKABLE_CANDIDATES);
+
+  const crelateOnly = boundedLogoVerificationCandidates(
+    Array.from({ length: 200 }, (_, index) => ({ ats_name: 'crelate', index })),
+  );
+  assert.equal(crelateOnly.length, LOGO_VERIFICATION_CRELATE_CANDIDATES);
+});
+
+test('Crelate 429s open the circuit and exhaust on the third consecutive attempt', () => {
+  const first = crelateLogoFailureTransition(0, null, 'ats:http_429');
+  assert.deepEqual(first, {
+    attempts: 1,
+    exhausted: false,
+    reason: 'ats:http_429',
+    opensCircuit: true,
+  });
+  const second = crelateLogoFailureTransition(first.attempts, first.reason, 'ats:http_429');
+  assert.equal(second.attempts, 2);
+  assert.equal(second.exhausted, false);
+  const third = crelateLogoFailureTransition(second.attempts, second.reason, 'ats:http_429');
+  assert.deepEqual(third, {
+    attempts: 3,
+    exhausted: true,
+    reason: CRELATE_LOGO_429_EXHAUSTED_REASON,
+    opensCircuit: true,
+  });
+  assert.equal(
+    crelateLogoFailureTransition(0, null, 'ats:logo_missing;homepage:http_429').opensCircuit,
+    true,
+    'a 429 from any bounded Crelate branding step opens the provider circuit',
+  );
+});
+
+test('Crelate non-429 results close and reset while a weekly exhausted retry starts a new cycle', () => {
+  assert.deepEqual(
+    crelateLogoFailureTransition(2, 'ats:http_429', 'ats:logo_missing'),
+    { attempts: 0, exhausted: false, reason: 'ats:logo_missing', opensCircuit: false },
+  );
+  assert.deepEqual(
+    crelateLogoFailureTransition(3, CRELATE_LOGO_429_EXHAUSTED_REASON, 'ats:http_429'),
+    { attempts: 1, exhausted: false, reason: 'ats:http_429', opensCircuit: true },
+  );
+});
+
+test('Crelate success resets its source attempts without weakening minted logo proof', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.match(source, /logo_verification_status: 'verified',[\s\S]{0,500}logo_provider_429_attempts: 0/);
+  assert.match(source, /terminalCrelate429[\s\S]{0,500}CRELATE_LOGO_429_EXHAUSTED_REASON|persistedReason/);
 });
 
 test('scheduled transient logo failures remain in completion evidence without a due-now hot loop', () => {
@@ -152,4 +205,6 @@ test('scheduled transient logo failures remain in completion evidence without a 
   assert.match(source, /remainingSources = dueSources \+ scheduledTransientSources/);
   assert.match(source, /verification_complete: remainingSources === 0/);
   assert.match(source, /retry_after_ms: retryAfterMs/);
+  assert.match(source, /scheduled_crelate_circuit_sources: scheduledCrelateCircuitSources/);
+  assert.match(source, /nextCrelateRetryAt/);
 });
