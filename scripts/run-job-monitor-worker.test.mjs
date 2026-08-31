@@ -78,6 +78,7 @@ function testConfig(overrides = {}) {
   return {
     apiBase: 'https://litos.example',
     secret: 'test-secret',
+    deployedSha: 'railway-deployed-sha',
     retryMs: 37,
     floorBreachRetryMs: 370,
     cycleIntervalMs: 999,
@@ -333,12 +334,22 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
   const defaults = loadConfig({
     LITOS_API_BASE: 'https://litos.example',
     INTERNAL_CRON_SECRET: 'secret',
+    RAILWAY_GIT_COMMIT_SHA: 'railway-sha',
+    GIT_SHA: 'fallback-sha',
   });
   assert.equal(defaults.logoLimit, 200);
   assert.equal(defaults.maxPasses, 10_000,
     'the default must cover a full 35,000-source logo and polling drain without resetting proof');
   assert.equal(defaults.cycleIntervalMs, 2 * 60 * 60 * 1000,
     'the Railway worker replaces the prior sub-daily discovery cadence');
+  assert.equal(defaults.deployedSha, 'railway-sha');
+
+  const fallbackRevision = loadConfig({
+    LITOS_API_BASE: 'https://litos.example',
+    INTERNAL_CRON_SECRET: 'secret',
+    GIT_SHA: 'fallback-sha',
+  });
+  assert.equal(fallbackRevision.deployedSha, 'fallback-sha');
 
   const config = loadConfig({
     LITOS_API_BASE: 'https://litos.example/',
@@ -477,7 +488,11 @@ test('the worker uses a longer floor backoff and starts the next drain with an e
   const scheduled = messages.error.find((entry) => entry.event === 'inventory_floor_repoll_scheduled');
   assert.equal(scheduled.retry_ms, 370);
   assert.equal(scheduled.next_drain_uses_fresh_cursor, true);
-  assert.equal(messages.log.filter((entry) => entry.event === 'complete_drain').length, 1);
+  const completeDrains = messages.log.filter((entry) => entry.event === 'complete_drain');
+  assert.equal(completeDrains.length, 1);
+  const [completeDrain] = completeDrains;
+  assert.ok(completeDrain);
+  assert.equal(completeDrain.deployed_sha, 'railway-deployed-sha');
 });
 
 test('persistent projection timeout emits a distinct alert and never completes the drain', async () => {

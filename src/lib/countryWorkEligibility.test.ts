@@ -583,7 +583,7 @@ describe('exact-country resolver', () => {
     const resume = readFileSync('src/routes/resume.ts', 'utf8');
     assert.match(
       resume,
-      /if \(!body\.job_id && ownedCanonicalApplication\.job_id\) \{[\s\S]{0,400}?ownedHistoricalActionPostingRow\([\s\S]{0,100}?ownedCanonicalApplication\.job_id/,
+      /if \(!body\.job_id && ownedCanonicalApplication\.job_id\) \{[\s\S]{0,400}?ownedHistoricalActionPostingRow\(\s*ownedCanonicalApplication\.job_id,\s*userId,\s*\)/,
       'the canonical application\'s own posting is the fallback when the body names none',
     );
     assert.match(resume, /postingLocation = canonicalPosting\?\.location \?\? null/);

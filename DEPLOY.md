@@ -305,7 +305,8 @@ Use this order for the Railway migration:
    exactly one replica. Set the API service start command to `node dist/index.js` and its health
    check path to `/health`. The shared `railway.json` intentionally declares neither command so the
    two services cannot inherit the wrong process.
-7. Wait for the worker's `complete_drain` event and verify every certified inventory floor.
+7. Wait for the worker's `complete_drain` event and verify its deployed SHA and every certified
+   inventory floor.
 8. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
 
 The API requires `DATABASE_URL`, `JWT_SIGNING_SECRET` or `JOB_BOARD_CURSOR_SECRET`,
@@ -318,6 +319,10 @@ evidence can qualify. `BLOB_READ_WRITE_TOKEN` is only a rollback provider during
 not required by the Railway runtime. Set `STRATUS_API_KEY` when autonomous submission runs on
 Railway. Keep the Vercel-specific `VERCEL` variable unset. The API and worker secret values must
 match.
+Run the worker with exactly one replica and set `JOB_MONITOR_CYCLE_INTERVAL_MS=7200000`. Its
+`complete_drain.deployed_sha` uses
+`RAILWAY_GIT_COMMIT_SHA`, falling back to `GIT_SHA`, so retain the former Railway-provided variable
+and set the latter when the runtime does not provide it.
 
 The worker keeps one `drain_started_at` watermark while it processes bounded 400-source polling
 segments and the independent logo-proof queue. The hard certification floors are 500,000 unique

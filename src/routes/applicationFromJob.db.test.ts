@@ -143,9 +143,11 @@ async function seedAttachableWorld(overrides: {
   );
   await database.query(
     `insert into "monitored_jobs"
-       ("id", "source_id", "external_id", "company_name", "title", "description", "ingest_eligible", "apply_url", "posting_url", "is_active")
+       ("id", "source_id", "external_id", "company_name", "title", "description", "ingest_eligible",
+        "apply_url", "posting_url", "last_seen_at", "is_active")
      values ($1, $2, 'gh-1', 'Verkada', 'Backend Software Engineering Intern 2027', $3,
-             true, 'https://job-boards.greenhouse.io/verkada/jobs/1', 'https://job-boards.greenhouse.io/verkada/jobs/1', $4)`,
+             true, 'https://job-boards.greenhouse.io/verkada/jobs/1',
+             'https://job-boards.greenhouse.io/verkada/jobs/1', now(), $4)`,
     [JOB, SOURCE, DESCRIPTION, overrides.jobActive !== false],
   );
 }

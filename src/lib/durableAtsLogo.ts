@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 import type { SupportedJobBoard } from './jobMonitor';
-import { isPublicObjectReadUrlForKey, putObject } from './objectStorage';
+import { isPublicLogoObjectReadUrlForKey, putPublicLogoObject } from './objectStorage';
 
 export type DurableAtsLogoAsset = {
   provider: SupportedJobBoard;
@@ -12,10 +12,8 @@ export type DurableAtsLogoAsset = {
 
 type DurableLogoPutOptions = {
   addRandomSuffix: false;
-  allowOverwrite: true;
   contentType: string;
   cacheControlMaxAge: number;
-  publicRead: true;
 };
 
 export type DurableLogoUploader = (
@@ -38,7 +36,7 @@ function defaultUploader(
   body: Buffer,
   options: DurableLogoPutOptions,
 ): Promise<{ url: string }> {
-  return putObject(pathname, body, options);
+  return putPublicLogoObject(pathname, body, options.contentType);
 }
 
 /** Copy a proven expiring ATS image to the same durable public store used by Litos documents. */
@@ -59,10 +57,8 @@ export async function persistDurableAtsLogo(
   const pathname = `company-logos/rippling/${encodeURIComponent(token)}/${digest}.${extension}`;
   const stored = await uploader(pathname, Buffer.from(asset.bytes), {
     addRandomSuffix: false,
-    allowOverwrite: true,
     contentType,
     cacheControlMaxAge: ONE_YEAR_SECONDS,
-    publicRead: true,
   });
 
   let url: URL;
@@ -71,24 +67,7 @@ export async function persistDurableAtsLogo(
   } catch {
     throw new Error('unsafe_url');
   }
-  const vercelPath = (() => {
-    try {
-      return decodeURIComponent(url.pathname.replace(/^\/+/, ''));
-    } catch {
-      return '';
-    }
-  })();
-  const verifiedVercelUrl = url.protocol === 'https:'
-    && !url.username
-    && !url.password
-    && !url.port
-    && /^[a-z0-9-]+\.public\.blob\.vercel-storage\.com$/i.test(url.hostname)
-    && !url.search
-    && !url.hash
-    && vercelPath === pathname;
   if (url.toString().length > 4000
-    || (!verifiedVercelUrl && !isPublicObjectReadUrlForKey(url.toString(), pathname))) {
-    throw new Error('unsafe_url');
-  }
+    || !isPublicLogoObjectReadUrlForKey(url.toString(), pathname)) throw new Error('unsafe_url');
   return url.toString();
 }

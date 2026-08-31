@@ -79,7 +79,7 @@ test('relaxing never reaches the constraints, which is the whole point', () => {
   // promise ("Litos can submit here") true on the fallback row as well as the targeted one.
   assert.match(relaxedSql, /ats_name/i, 'the portal-family constraint was dropped by relaxing');
   assert.match(relaxedSql, /is_active/i, 'the active constraint was dropped by relaxing');
-  assert.match(relaxedSql, /last_seen_at/i, 'the verification window was dropped by relaxing');
+  assert.match(relaxedSql, /last_seen_at/i, 'the verified freshness window was dropped by relaxing');
   assert.match(relaxedSql, /logo_verification_status/i, 'the verified-logo constraint was dropped by relaxing');
 });
 
