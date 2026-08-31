@@ -63,6 +63,8 @@ import { warmApplicationAliasDeliverability } from './lib/applicationEmailDelive
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
 import { objectStorageRoutes } from './routes/objectStorage';
+import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
+import { submissionAuthorityRevisionReadiness } from './lib/submissionAuthorityRevision';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -322,12 +324,29 @@ export async function buildApp(options: BuildAppOptions = {}) {
      * state a monitor will be repeating during an incident costs nothing to observe. */
     const model = await cachedModelHealth(request.log);
 
-    return reply.status(healthStatusCode(database)).send({
+    /* Submission code depends on two separately applied authority schemas. A healthy database is
+     * not proof that either schema exists, so publish their bounded catalog checks independently.
+     * Keeping the reasons coarse makes this safe on a public endpoint while still preventing a
+     * release from opening the submission fence against an incomplete migration. */
+    const [attemptLedger, authorityRevision] = database.status === 'ok'
+      ? await Promise.all([
+        submissionLedgerReadiness(),
+        submissionAuthorityRevisionReadiness(),
+      ])
+      : [
+        { ready: false, reason: 'unreadable' as const },
+        { ready: false, reason: 'unreadable' as const },
+      ];
+    const submissionAuthorityReady = attemptLedger.ready && authorityRevision.ready;
+
+    return reply.status(submissionAuthorityReady ? healthStatusCode(database) : 503).send({
       /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
          dependency it cannot work without is unavailable. Every identity field below is still
          present on a 503, because DEPLOY.md reads `revision` from this response to confirm what
          shipped, and that has to keep working during an incident. */
-      status: aggregateServiceHealthStatus({ database: database.status, applicationEmail, model }),
+      status: submissionAuthorityReady
+        ? aggregateServiceHealthStatus({ database: database.status, applicationEmail, model })
+        : 'degraded',
       database: database.status,
       model: model.status,
       ...(model.status === 'unavailable' ? { model_reason: model.reason } : {}),
@@ -400,6 +419,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
         configured_channels: configuredAtsSubmissionChannels().length,
       },
       application_email: applicationEmail,
+      submission_authority: {
+        ready: submissionAuthorityReady,
+        attempt_ledger: attemptLedger,
+        revision: authorityRevision,
+      },
       // Effective state only. An invalid nonempty environment value fails closed to freeze, while
       // the value itself stays out of this unauthenticated response.
       submission_cutover: submissionCutover,

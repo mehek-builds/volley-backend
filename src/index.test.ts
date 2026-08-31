@@ -88,7 +88,11 @@ test('/health identifies the deployable service and revision contract', async ()
   // 2026-08-04 it touched nothing and answered 200 through a 75-minute outage in which every other
   // route returned 500.
   assert.ok(['ok', 'unreachable'].includes(body.database), `unexpected database ${body.database}`);
-  assert.equal(res.statusCode, body.database === 'ok' ? 200 : 503, 'status code must follow the probe');
+  assert.equal(
+    res.statusCode,
+    body.database === 'ok' && body.submission_authority.ready ? 200 : 503,
+    'status code must fail closed when the database or submission authority schema is unavailable',
+  );
   /* The aggregate follows EVERY dependency, not the database alone. This asserted
      `database === 'ok' ? 'ok' : 'degraded'` and passed only because the test DATABASE_URL is
      unreachable, so both sides read 'degraded' by coincidence. A degraded application email
@@ -113,6 +117,11 @@ test('/health identifies the deployable service and revision contract', async ()
   // `revision_source` is what makes a null revision DIAGNOSABLE. DEPLOY.md's table keys off these
   // three values, so the set is part of the contract and not an implementation detail.
   assert.ok(Object.hasOwn(body, 'revision_source'));
+  assert.equal(typeof body.submission_authority.ready, 'boolean');
+  assert.equal(typeof body.submission_authority.attempt_ledger.ready, 'boolean');
+  assert.equal(typeof body.submission_authority.attempt_ledger.reason, 'string');
+  assert.equal(typeof body.submission_authority.revision.ready, 'boolean');
+  assert.equal(typeof body.submission_authority.revision.reason, 'string');
   assert.ok(
     ['vercel-git', 'git-sha', 'none'].includes(body.revision_source),
     `unexpected revision_source ${JSON.stringify(body.revision_source)}`,

@@ -92,6 +92,8 @@
     "test:submission-attempt-ledger-migration": "node --test scripts/submission-attempt-ledger-migration-contract.test.mjs",
     "db:submission-authority-revision": "node scripts/apply-submission-authority-revision-schema.mjs",
     "test:submission-authority-revision-migration": "node --import tsx --test src/db/submissionAuthorityRevisionMigration.test.ts",
+    "test:submission-confirmation-repair-workflow": "node --test scripts/submission-confirmation-repair-workflow.test.mjs",
+    "test:submission-authority-release-workflow": "node --test scripts/submission-authority-release-workflow.test.mjs",
     "db:application-facts": "node scripts/apply-application-facts-schema.mjs",
     "db:country-work-eligibility": "node scripts/apply-country-work-eligibility-schema.mjs",
     "db:availability-window": "node scripts/apply-availability-window-schema.mjs",

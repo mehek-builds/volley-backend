@@ -1,4 +1,4 @@
-name: Submission attempt ledger migration
+name: Submission authority migrations
 
 on:
   workflow_dispatch:
@@ -37,8 +37,10 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Prove schema, backfill, and immutability contract locally
-        run: npm run test:submission-attempt-ledger-migration
+      - name: Prove both additive migration contracts locally
+        run: |
+          npm run test:submission-attempt-ledger-migration
+          npm run test:submission-authority-revision-migration
 
       - name: Require the exact frozen backend revision
         shell: bash
@@ -124,6 +126,11 @@ jobs:
           DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
         run: npm run db:submission-attempt-ledger
 
+      - name: Apply and verify production submission authority revision
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: npm run db:submission-authority-revision
+
       - name: Require freeze remained active through migration
         shell: bash
         run: |
@@ -140,20 +147,23 @@ jobs:
             .revision == $revision
             and .submission_cutover.mode == "freeze"
             and .submission_cutover.config_valid == true
+            and .submission_authority.ready == true
+            and .submission_authority.attempt_ledger.ready == true
+            and .submission_authority.revision.ready == true
           ' "$health_file" >/dev/null || {
-            jq '{revision, revision_source, build, submission_cutover}' "$health_file" >&2
-            echo "The exact frozen revision changed or the fence opened during migration." >&2
+            jq '{revision, revision_source, build, submission_cutover, submission_authority}' "$health_file" >&2
+            echo "The exact frozen revision, fence, or submission authority readiness changed during migration." >&2
             exit 8
           }
 
-      - name: Record migration-first evidence
+      - name: Record frozen migration evidence
         if: success()
         shell: bash
         run: |
           {
-            echo "## Submission attempt ledger ready"
+            echo "## Submission authority schemas ready"
             echo
-            echo "The immutable schema, deterministic backfill, constraints, indexes, and triggers were verified before backend deployment."
+            echo "The immutable attempt ledger was applied before the authority revision schema, and both catalog contracts were verified while the exact backend revision remained frozen."
             echo
             echo "Commit: $GITHUB_SHA"
           } >> "$GITHUB_STEP_SUMMARY"
