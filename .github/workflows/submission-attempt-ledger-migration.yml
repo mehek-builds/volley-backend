@@ -124,11 +124,16 @@ jobs:
       - name: Apply and verify production submission attempt ledger
         env:
           DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+          # Railway's private root, mirrored the way ci.yml's schema-drift job does since #786:
+          # the proxy chain cannot be verified from a public trust store, and without this the
+          # apply script dies on TLS before a single statement.
+          SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ${{ secrets.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT }}
         run: npm run db:submission-attempt-ledger
 
       - name: Apply and verify production submission authority revision
         env:
           DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+          SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ${{ secrets.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT }}
         run: npm run db:submission-authority-revision
 
       - name: Require freeze remained active through migration
