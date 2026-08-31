@@ -89,6 +89,7 @@ import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { recoverOwnedGeneratedDocument } from '../lib/downloadDocumentRecovery';
 import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
+import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
@@ -190,6 +191,60 @@ export function includeRequestedResumeInHistory<T extends { id: string; user_id:
     || latestRows.some((row) => row.id === requestedRow.id)
   ) return [...latestRows];
   return [requestedRow, ...latestRows];
+}
+
+/**
+ * The public submission-authority envelope a `/resume/history` packet must carry for the dashboard
+ * to authorise a first employer send, and only for a packet whose immutable submission history is
+ * genuinely empty.
+ *
+ * The dashboard derives a packet's send authority from `packet.submission_authority` alone and
+ * fail-closes when it is absent or does not parse. The exact envelope it accepts is the release's
+ * client contract. This returns that envelope ONLY when the authoritative projection is `none` and
+ * retry safety is `no_evidence`, which hold together exactly when the packet has no attempt-opened
+ * event: the one state that may become sendable, whose wire projection is the irreducible
+ * `{ state: 'none' }`. A `/resume/history` packet carries no embedded canonical row, so the gate's
+ * identity for it is the packet id itself, which is what `application_id` and `packet_id` name.
+ *
+ * Any packet with attempt history classifies non-none (a sent one is `repair_required`) and gets
+ * `undefined` here, so it stays without an envelope and as fail-closed at the gate as before: this
+ * can free a genuinely un-attempted packet but can never turn a sent one sendable.
+ */
+export function submissionAuthorityEnvelopeForUnattemptedPacket(input: {
+  packetId: string;
+  projectionState: string | undefined;
+  retrySafetyKind: string | undefined;
+  revision: string | undefined;
+}):
+  | {
+    schema_version: 'submission-authority-v1';
+    revision: string;
+    state: 'none';
+    application_id: string;
+    packet_id: string;
+    projection: { state: 'none' };
+    retry_safety: { kind: 'no_evidence' };
+  }
+  | undefined {
+  // The client validator only accepts a canonical numeric revision (digits, <= int64). Requiring
+  // the same here means a divergent revision shape returns undefined at the source instead of
+  // being emitted and silently rejected downstream, which would strand the packet with no signal.
+  const revisionIsCanonical = typeof input.revision === 'string'
+    && input.revision.length <= 19
+    && /^(?:0|[1-9][0-9]*)$/.test(input.revision)
+    && (input.revision.length < 19 || input.revision <= '9223372036854775807');
+  if (input.projectionState !== 'none'
+    || input.retrySafetyKind !== 'no_evidence'
+    || !revisionIsCanonical) return undefined;
+  return {
+    schema_version: 'submission-authority-v1',
+    revision: input.revision as string,
+    state: 'none',
+    application_id: input.packetId,
+    packet_id: input.packetId,
+    projection: { state: 'none' },
+    retry_safety: { kind: 'no_evidence' },
+  };
 }
 
 function monitoredApplicationUrlForGenerate(posting: ActionPostingRow | null): string | undefined {
@@ -1803,16 +1858,58 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       loadApplicationProfileLike(userId),
       Promise.resolve(apiBaseFor(request)),
     ]);
+    /* The public submission-authority envelope the dashboard's employer-action gate reads off each
+     * packet. That gate derives the packet's authority from `packet.submission_authority` alone, and
+     * treats an ABSENT or unparsable envelope as quarantined: it will not authorize a send. The
+     * client contract for that envelope is exact and shipped in the release, but no route ever
+     * emitted it, so every packet arrived with no envelope and every application refused with "the
+     * exact prior submission evidence needs review" - including packets that have never been
+     * submitted at all.
+     *
+     * This computes the same authoritative projection the submission path itself uses, in one
+     * batched read over this page's packets, and attaches the envelope ONLY for a packet whose
+     * immutable history is genuinely empty: projection `none` with retry safety `no_evidence`, which
+     * hold together exactly when there is not one attempt-opened event for the packet. That is the
+     * only state that may become sendable, and its wire projection is the irreducible `{ state:
+     * "none" }` with no id fields to (mis)serialise. `canonicalApplicationFromPacket` returns null
+     * for a `/resume/history` packet (it carries no embedded canonical row), so the gate's identity
+     * for the packet is the packet id itself, which is what `application_id` and `packet_id` name
+     * here.
+     *
+     * Every packet with ANY attempt history classifies non-none (a sent one is `repair_required` with
+     * `blocked_unverified` retry safety) and is deliberately left WITHOUT an envelope, so it stays
+     * exactly as fail-closed at the gate as it is today. This can only free a genuinely un-attempted
+     * packet; it can never turn a sent one sendable. On a projection read error the whole page also
+     * degrades to no envelopes, i.e. today's blocked behaviour, never to an authorised send. */
+    const submissionAuthority = await (async () => {
+      try {
+        return await authoritativeSubmissionProjection({ userId, packetIds: rows.map((row) => row.id) });
+      } catch (error) {
+        request.log.warn(
+          { err: error },
+          'submission authority projection unavailable for resume history; packets stay fail-closed at the send gate',
+        );
+        return null;
+      }
+    })();
+    const revision = submissionAuthority?.revision;
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
       const contact = ((row.spec as Record<string, unknown>)._contact ?? {}) as Record<string, unknown>;
       const job = (row.job_context ?? {}) as { role?: unknown };
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
+      const submissionAuthorityEnvelope = submissionAuthorityEnvelopeForUnattemptedPacket({
+        packetId: row.id,
+        projectionState: submissionAuthority?.byPacketId.get(row.id)?.state,
+        retrySafetyKind: submissionAuthority?.retrySafetyByPacketId.get(row.id)?.kind,
+        revision,
+      });
       return {
         ...row,
         spec: specWithoutDocumentPointers(
           refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
         ),
+        ...(submissionAuthorityEnvelope ? { submission_authority: submissionAuthorityEnvelope } : {}),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

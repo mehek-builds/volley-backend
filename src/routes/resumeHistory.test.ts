@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import {
   includeRequestedResumeInHistory,
   requestedResumeLookupId,
+  submissionAuthorityEnvelopeForUnattemptedPacket,
 } from './resume';
 
 const OWNER_ID = '11111111-1111-4111-8111-111111111111';
@@ -66,5 +67,66 @@ describe('requestedResumeLookupId', () => {
 
     assert.equal(requestedResumeLookupId(latest, OLDER_ID), OLDER_ID);
     assert.equal(requestedResumeLookupId(latest, 'not-a-uuid'), null);
+  });
+});
+
+describe('submissionAuthorityEnvelopeForUnattemptedPacket', () => {
+  const PACKET = 'c2c6c00a-71e0-4923-bbc2-123322c6d014';
+
+  it('emits the exact public envelope for a genuinely un-attempted packet', () => {
+    assert.deepEqual(
+      submissionAuthorityEnvelopeForUnattemptedPacket({
+        packetId: PACKET,
+        projectionState: 'none',
+        retrySafetyKind: 'no_evidence',
+        revision: '3',
+      }),
+      {
+        schema_version: 'submission-authority-v1',
+        revision: '3',
+        state: 'none',
+        application_id: PACKET,
+        packet_id: PACKET,
+        projection: { state: 'none' },
+        retry_safety: { kind: 'no_evidence' },
+      },
+    );
+  });
+
+  it('emits no envelope for a packet with attempt history, so it stays fail-closed', () => {
+    // A sent packet classifies repair_required / blocked_unverified.
+    assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
+      packetId: PACKET,
+      projectionState: 'repair_required',
+      retrySafetyKind: 'blocked_unverified',
+      revision: '3',
+    }), undefined);
+    // A none projection whose retry safety is anything but no_evidence is not provably empty.
+    assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
+      packetId: PACKET,
+      projectionState: 'none',
+      retrySafetyKind: 'safe_not_sent',
+      revision: '3',
+    }), undefined);
+  });
+
+  it('emits no envelope when the authority revision could not be read', () => {
+    assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
+      packetId: PACKET,
+      projectionState: 'none',
+      retrySafetyKind: 'no_evidence',
+      revision: undefined,
+    }), undefined);
+  });
+
+  it('emits no envelope for a non-canonical revision the client would reject', () => {
+    for (const revision of ['', 'abc', '01', '-1', '1.0', '99999999999999999999']) {
+      assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
+        packetId: PACKET,
+        projectionState: 'none',
+        retrySafetyKind: 'no_evidence',
+        revision,
+      }), undefined, `revision ${JSON.stringify(revision)} must be rejected`);
+    }
   });
 });
