@@ -25,11 +25,16 @@ import pg from 'pg';
  * asking the operator to compose one on a command line (where the password would land in shell
  * history). Nothing sensitive is ever printed: the one log line names host and port alone. */
 function databaseUrlFromEnvironment() {
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  /* THE PROXY WINS over the service's own DATABASE_URL. Under railway run the env carries both,
+     and the DATABASE_URL host is postgres.railway.internal, which is NXDOMAIN off Railway's
+     network: preferring it made this script fail from exactly the machine it is documented to run
+     on. A caller with only DATABASE_URL (the CI secret path) still works through the fallback. */
   const { PGUSER, PGPASSWORD, PGDATABASE, RAILWAY_TCP_PROXY_DOMAIN, RAILWAY_TCP_PROXY_PORT } = process.env;
-  if (!PGUSER || !PGPASSWORD || !PGDATABASE || !RAILWAY_TCP_PROXY_DOMAIN || !RAILWAY_TCP_PROXY_PORT) return null;
-  console.log(`Connecting through the TCP proxy at ${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT}...`);
-  return `postgresql://${encodeURIComponent(PGUSER)}:${encodeURIComponent(PGPASSWORD)}@${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT}/${encodeURIComponent(PGDATABASE)}`;
+  if (PGUSER && PGPASSWORD && PGDATABASE && RAILWAY_TCP_PROXY_DOMAIN && RAILWAY_TCP_PROXY_PORT) {
+    console.log(`Connecting through the TCP proxy at ${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT}...`);
+    return `postgresql://${encodeURIComponent(PGUSER)}:${encodeURIComponent(PGPASSWORD)}@${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT}/${encodeURIComponent(PGDATABASE)}`;
+  }
+  return process.env.DATABASE_URL ?? null;
 }
 
 async function main() {
