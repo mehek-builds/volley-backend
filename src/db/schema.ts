@@ -204,10 +204,17 @@ export const users = pgTable('users', {
   // It reads as "never asked", which leaves the board whole.
   sponsorship_required_at_onboarding: boolean('sponsorship_required_at_onboarding'),
   sponsorship_declared_at: timestamp('sponsorship_declared_at', { withTimezone: true }),
-  /* The one tailored build a new account gets before the card. Null is unused, a timestamp is
-     spent, and it is spent exactly once because the claim is a conditional UPDATE. See
-     src/lib/onboardingBuildGrant.ts. */
+  /* The free tailored builds a new account gets before the card. The stamp records when the most
+     recent one was claimed (null when none are outstanding); the counter below is what enforces
+     the limit. See src/lib/onboardingBuildGrant.ts. */
   onboarding_build_granted_at: timestamp('onboarding_build_granted_at', { withTimezone: true }),
+  /* How many setup builds this account has claimed. The limit is ONBOARDING_BUILD_LIMIT (two as of
+     Mehek's 2026-09-01 decision: the second exists so a student who goes back and re-uploads their
+     resume can rebuild), enforced in the WHERE clause of the claim's conditional UPDATE so
+     concurrent claims serialize on the row instead of racing a read. Migration:
+     scripts/apply-onboarding-build-grant-limit-migration.mjs backfills 1 wherever the old
+     single-stamp column is set. */
+  onboarding_builds_used: integer('onboarding_builds_used').notNull().default(0),
   /* Set once, at creation, for an account that started from a specific /browse-jobs posting
      rather than through the front door. Permanent even after pinned_onboarding_job_id below is
      spent and cleared: onboardingStepFrom reads THIS to keep resume ordered ahead of focus for

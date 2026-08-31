@@ -8,7 +8,7 @@ import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api';
 import * as schema from '../db/schema';
 
-/* THE ONE FREE TAILORED BUILD, and the two things that must stay true about it.
+/* THE FREE TAILORED BUILDS (two per account since 2026-09-01), and what must stay true about them.
  *
  * A DATABASE TEST BECAUSE THE RULE IS A WHERE CLAUSE. Both conditions - not already spent, and the
  * account is still in setup - live in the WHERE of a conditional UPDATE precisely so there is no
@@ -76,27 +76,33 @@ const stampOf = async () => {
   return rows.rows[0]?.onboarding_build_granted_at ?? null;
 };
 
-test('a student still in setup gets it, once, and never twice', async () => {
+test('a student still in setup gets two, and never a third', async () => {
   await seed({ completed: false });
 
   assert.equal(await claimOnboardingBuildGrant(STUDENT), true, 'the first build was refused the grant');
   assert.ok(await stampOf(), 'the grant was allowed without being recorded');
 
-  // The whole point. A second build is an ordinary paid request.
-  assert.equal(await claimOnboardingBuildGrant(STUDENT), false, 'the grant was handed out twice');
+  /* The second is the point of the 2026-09-01 change: a student who goes back and uploads a
+     better resume gets the rebuild free instead of hitting the paywall three screens in. */
+  assert.equal(await claimOnboardingBuildGrant(STUDENT), true, 'the rebuild was refused the grant');
+
+  // And a third is an ordinary paid request: the grant funds seeing it work, not a free tier.
+  assert.equal(await claimOnboardingBuildGrant(STUDENT), false, 'the grant was handed out a third time');
 });
 
-test('concurrent builds cannot both take the same grant', async () => {
+test('concurrent builds cannot take more than the limit between them', async () => {
   await seed({ completed: false });
 
-  /* The race the WHERE clause exists for. A read-then-write would let both of these see an unspent
-     grant and both proceed, which is two free generations for an account entitled to one. */
-  const [first, second] = await Promise.all([
+  /* The race the WHERE clause exists for. A read-then-write would let all three see claims left
+     and all three proceed, which is three free generations for an account entitled to two. The
+     conditional UPDATE serializes on the row, so exactly two of these can win. */
+  const outcomes = await Promise.all([
+    claimOnboardingBuildGrant(STUDENT),
     claimOnboardingBuildGrant(STUDENT),
     claimOnboardingBuildGrant(STUDENT),
   ]);
 
-  assert.equal([first, second].filter(Boolean).length, 1, `both concurrent claims succeeded: ${first} ${second}`);
+  assert.equal(outcomes.filter(Boolean).length, 2, `the concurrent claims took ${outcomes.filter(Boolean).length} grants: ${outcomes.join(' ')}`);
 });
 
 test('a finished account is refused, because the grant is for setup and not a free tier', async () => {
@@ -115,6 +121,23 @@ test('a build that produced nothing gives the grant back', async () => {
 
   // And it is genuinely usable again, which is the point of releasing rather than just clearing.
   assert.equal(await claimOnboardingBuildGrant(STUDENT), true, 'the released grant could not be reclaimed');
+});
+
+test('releasing one of two claims keeps the stamp, because a free build is still outstanding', async () => {
+  await seed({ completed: false });
+  assert.equal(await claimOnboardingBuildGrant(STUDENT), true);
+  assert.equal(await claimOnboardingBuildGrant(STUDENT), true);
+
+  await releaseOnboardingBuildGrant(STUDENT);
+
+  /* One claim remains spent, so the stamp must survive: it reads "when was a free build last
+     outstanding", and one still is. Clearing it here would make the old column lie to whatever
+     reads it next. */
+  assert.ok(await stampOf(), 'releasing the second claim erased the record of the first');
+
+  // And the released claim is genuinely usable again.
+  assert.equal(await claimOnboardingBuildGrant(STUDENT), true, 'the released claim could not be retaken');
+  assert.equal(await claimOnboardingBuildGrant(STUDENT), false, 'the limit stopped holding after a release');
 });
 
 test('the release cannot refund a build an account already finished setup on', async () => {
