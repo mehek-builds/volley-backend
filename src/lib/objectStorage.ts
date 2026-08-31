@@ -17,6 +17,7 @@ export type StoredObject = {
 export type PutObjectOptions = {
   contentType: string;
   addRandomSuffix?: boolean;
+  allowOverwrite?: boolean;
 };
 
 function railwayConfigured(): boolean {
@@ -125,6 +126,7 @@ export async function putObject(
       access: 'public',
       contentType: options.contentType,
       ...(options.addRandomSuffix === undefined ? {} : { addRandomSuffix: options.addRandomSuffix }),
+      ...(options.allowOverwrite === undefined ? {} : { allowOverwrite: options.allowOverwrite }),
     });
     return { url: blob.url, pathname: blob.pathname };
   }
