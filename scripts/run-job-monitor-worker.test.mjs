@@ -462,8 +462,8 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
   assert.equal(defaults.cycleIntervalMs, 2 * 60 * 60 * 1000,
     'the Railway worker replaces the prior sub-daily discovery cadence');
   assert.equal(defaults.deployedSha, 'railway-sha');
-  assert.equal(defaults.requestTimeoutMs, 14 * 60_000,
-    'the client must outlive the bounded nine-minute poll and post-poll metrics');
+  assert.equal(defaults.requestTimeoutMs, 15 * 60_000,
+    'the client must include margin beyond the bounded fourteen-minute route budget');
   assert.equal(defaults.resumeDrainStartedAt, null);
 
   const fallbackRevision = loadConfig({
@@ -530,7 +530,7 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
     () => loadConfig({
       LITOS_API_BASE: 'https://litos.example',
       INTERNAL_CRON_SECRET: 'secret',
-      JOB_MONITOR_REQUEST_TIMEOUT_MS: '839999',
+      JOB_MONITOR_REQUEST_TIMEOUT_MS: '899999',
     }),
     /JOB_MONITOR_REQUEST_TIMEOUT_MS/,
   );

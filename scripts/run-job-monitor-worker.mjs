@@ -14,7 +14,7 @@
 import { pathToFileURL } from 'node:url';
 
 const MAX_TIMER_MS = 2_147_483_647;
-const DEFAULT_REQUEST_TIMEOUT_MS = 14 * 60_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15 * 60_000;
 const MINIMUM_REQUEST_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
 
 export const INVENTORY_FLOOR_FIELDS = Object.freeze([

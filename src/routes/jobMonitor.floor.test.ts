@@ -129,8 +129,11 @@ test('source 401 completes on the second pass of the same drain run', () => {
   assert.deepEqual(pollingQueueStatus(0), { deferredSources: 0, pollingComplete: true });
 
   const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
-  assert.match(workflow, /drain_started_at=""/);
+  assert.match(workflow, /drain_started_at="\$\(date -u/);
   assert.match(workflow, /\?drain_started_at=\$\{drain_started_at\}/);
+  assert.match(workflow, /initialize_drain=true/);
+  assert.match(workflow, /--max-time 900/);
+  assert.match(workflow, /retrying the same cursor/);
 });
 
 test('a client-owned cursor can initialize discovery exactly for the first logical drain call', () => {

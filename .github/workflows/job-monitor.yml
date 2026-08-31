@@ -3,16 +3,20 @@
 # The recurring owner is the single-replica Railway worker. This workflow has no schedule so it
 # cannot advance source timestamps during that worker's current-drain certification cycle.
 #
-# The endpoint stops starting polls after three minutes and keeps another 30 seconds for the final
-# batch, leaving at least one minute before Vercel's hard limit. If the
-# source queue is larger than one bounded pass can finish, this fallback calls it again. Every pass
-# selects sources by oldest last_polled_at first, so it resumes the deferred tail automatically.
+# The endpoint owns a nine-minute start budget and reserves time for active polls, metrics, and its
+# response. The client allows fifteen minutes per request. If the source queue is larger than one
+# bounded pass can finish, this fallback calls it again with the same client-owned drain cursor.
 name: job-monitor
 
 on:
   # Railway's single-replica worker owns the recurring drain. Keep this only as an operator-run
   # diagnostic so a second scheduler cannot advance source timestamps during certification.
   workflow_dispatch:
+    inputs:
+      drain_started_at:
+        description: Optional RFC 3339 cursor for explicitly resuming an existing drain
+        required: false
+        type: string
 
 concurrency:
   group: job-monitor
@@ -21,12 +25,13 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 120
     steps:
       - name: Drain the bounded polling queue
         env:
           INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
           API_BASE: ${{ vars.LITOS_API_BASE }}
+          JOB_MONITOR_DRAIN_STARTED_AT: ${{ inputs.drain_started_at }}
         run: |
           set -euo pipefail
 
@@ -38,53 +43,80 @@ jobs:
           completed=false
           final_status=unknown
           total_failed=0
-          drain_started_at=""
+          initialize_drain=true
+          if [ -n "${JOB_MONITOR_DRAIN_STARTED_AT}" ]; then
+            drain_started_at="$(DRAIN_CURSOR_INPUT="${JOB_MONITOR_DRAIN_STARTED_AT}" node -e '
+              const value = process.env.DRAIN_CURSOR_INPUT.trim();
+              const pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+              const timestamp = Date.parse(value);
+              if (!pattern.test(value) || !Number.isFinite(timestamp)) process.exit(1);
+              process.stdout.write(new Date(timestamp).toISOString());
+            ')" || {
+              echo "::error::drain_started_at must be an RFC 3339 timestamp with an explicit timezone."
+              exit 1
+            }
+          else
+            drain_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+          fi
+          echo "Drain cursor: ${drain_started_at}"
+
           for pass in 1 2 3 4 5; do
             response_file="response-${pass}.json"
-            http_status=409
-            for lock_attempt in $(seq 1 20); do
-              monitor_url="${API_BASE}/internal/job-monitor"
-              if [ -n "${drain_started_at}" ]; then
-                monitor_url="${monitor_url}?drain_started_at=${drain_started_at}"
+            request_ready=false
+            for request_attempt in 1 2 3; do
+              http_status=409
+              curl_exit=0
+              for lock_attempt in $(seq 1 20); do
+                monitor_url="${API_BASE}/internal/job-monitor?drain_started_at=${drain_started_at}"
+                if [ "${initialize_drain}" = true ]; then
+                  monitor_url="${monitor_url}&initialize_drain=true"
+                fi
+                set +e
+                http_status=$(curl -sS \
+                  --connect-timeout 30 \
+                  --max-time 900 \
+                  -o "${response_file}" \
+                  -w '%{http_code}' \
+                  -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+                  "${monitor_url}")
+                curl_exit=$?
+                set -e
+                if [ "${curl_exit}" -ne 0 ] || [ "${http_status}" != 409 ]; then
+                  break
+                fi
+                if [ "${lock_attempt}" -lt 20 ]; then
+                  echo "Another monitor run holds the polling lock; retrying in 15 seconds (${lock_attempt}/20)."
+                  sleep 15
+                fi
+              done
+
+              structured_monitor_response=false
+              if [ "${curl_exit}" -eq 0 ] && jq -e --arg cursor "${drain_started_at}" '
+                (.polling_complete | type) == "boolean"
+                and .drain_started_at == $cursor
+                and (.results | type) == "array"
+                and (.minimum_surfaced_jobs | type) == "number"
+              ' "${response_file}" > /dev/null 2>&1; then
+                structured_monitor_response=true
               fi
-              http_status=$(curl -sS \
-                --max-time 300 \
-                -o "${response_file}" \
-                -w '%{http_code}' \
-                -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
-                "${monitor_url}")
-              if [ "${http_status}" != 409 ]; then
+              if { [ "${http_status}" = 200 ] || [ "${http_status}" = 500 ]; } \
+                && [ "${structured_monitor_response}" = true ]; then
+                request_ready=true
+                initialize_drain=false
                 break
               fi
-              if [ "${lock_attempt}" -lt 20 ]; then
-                echo "Another monitor run holds the polling lock; retrying in 15 seconds (${lock_attempt}/20)."
-                sleep 15
+
+              if [ "${request_attempt}" -lt 3 ]; then
+                echo "::warning::Job-monitor request did not return a valid response; retrying the same cursor (${request_attempt}/3)."
               fi
             done
-            final_status="${http_status}"
-            if [ -z "${drain_started_at}" ]; then
-              drain_started_at=$(jq -r '.drain_started_at // empty' "${response_file}")
-            fi
 
-            # A 500 can be the structured board-floor alarm after a successful polling pass. Keep
-            # draining only that response. A timeout or unexpected server error has no monitor
-            # payload and must fail immediately instead of repeating expensive polling five times.
-            structured_monitor_response=false
-            if jq -e '
-              (.polling_complete | type) == "boolean"
-              and (.drain_started_at | type) == "string"
-              and (.results | type) == "array"
-              and (.minimum_surfaced_jobs | type) == "number"
-            ' "${response_file}" > /dev/null 2>&1; then
-              structured_monitor_response=true
-            fi
-            if [ "${http_status}" != 200 ] && {
-              [ "${http_status}" != 500 ] || [ "${structured_monitor_response}" != true ];
-            }; then
-              echo "::error::Job-monitor request returned HTTP ${http_status}."
-              cat "${response_file}"
+            if [ "${request_ready}" != true ]; then
+              echo "::error::Job-monitor request did not return a valid structured response for ${drain_started_at}."
+              if [ -f "${response_file}" ]; then cat "${response_file}"; fi
               exit 1
             fi
+            final_status="${http_status}"
 
             echo "pass=${pass}"
             cat "${response_file}"
