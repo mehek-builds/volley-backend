@@ -269,6 +269,16 @@ export const submission_authority_revisions = pgTable('submission_authority_revi
   `),
 }));
 
+/* Durable account-deletion fence for managed employer capabilities. The row is created under the
+ * same per-user authority lock used by attempt opening and final boundary authorization. It stays
+ * attached to the account while provider cleanup is pending, then cascades with the user only
+ * after every exact remote execution is acknowledged or confirmed gone.
+ */
+export const managed_submission_account_deletion_drains = pgTable('managed_submission_account_deletion_drains', {
+  user_id: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  requested_at: timestamp('requested_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 /* ---- tables live in prod that main does not otherwise use ----
  *
  * All three were created by codex/regional-pricing's apply script before that branch merged, and

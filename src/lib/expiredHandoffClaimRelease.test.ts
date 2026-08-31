@@ -189,11 +189,17 @@ test('submit-request repairs the expired handoff claim before submitRequestDispo
   assert.ok(gate > repair, 'the release must run before the disposition reads the row');
 });
 
-test('the repair persists with an exact-spec CAS and asks the shared evidence rule, not a local copy', () => {
+test('the repair is ledger-aware, owner-locked, and persists with an exact-spec CAS', () => {
   const helper = routeSlice('async function repairExpiredAttendedHandoffClaim', 'function editableResumeSpec');
-  assert.match(helper, /releasedExpiredAttendedHandoffReview\(row\.id, userId, current\)/);
-  assert.match(helper, /JSON\.stringify\(row\.spec\)/);
+  assert.match(helper, /await lockSubmissionAttemptUser\(tx, userId\)/);
+  assert.match(helper, /\.limit\(1\)\.for\('update'\)/);
+  assert.match(helper, /submissionAttemptEventsForPacket\(userId, locked\.id, \{ executor: tx \}\)/);
+  assert.match(helper, /expiredAlternateSubmissionReview\(current, events, databaseNow\)/);
+  assert.match(helper, /expiredAttendedHandoffClaimIsReleasable\(current, databaseNow\.getTime\(\)\)/);
+  assert.match(helper, /eq\(applications\.legacy_generated_resume_id, locked\.id\)/);
+  assert.match(helper, /if \(canonicalEvent\) return null;/);
+  assert.match(helper, /JSON\.stringify\(locked\.spec\)/);
   // Null on a CAS miss: a concurrent writer wins and the stored gates keep refusing, which is the
   // failure direction that cannot cost a duplicate application.
-  assert.match(helper, /if \(updated\.length === 0\) return null;/);
+  assert.match(helper, /if \(!updated\) return null;/);
 });

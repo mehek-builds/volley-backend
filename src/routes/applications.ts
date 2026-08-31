@@ -1210,14 +1210,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
         const current = readApplicationReview(locked.spec);
         if (!current) return { kind: 'no_review' as const };
-        if ((current.status === 'filling' || current.status === 'needs_attention')
-          && current.browser_session_id) {
-          return {
-            kind: 'live_session' as const,
-            sessionId: current.browser_session_id,
-          };
+        if (current.status === 'filling' && current.browser_session_id) {
+          return { kind: 'active_fill' as const };
         }
-        const url = verifiedDashboardHandoffUrl({
+        const retainedSessionId = current.status === 'needs_attention'
+          ? current.browser_session_id
+          : undefined;
+        const url = retainedSessionId ? undefined : verifiedDashboardHandoffUrl({
           applicationId: locked.id,
           userId: locked.user_id,
           frozenUrl: current.portal_url,
@@ -1235,7 +1234,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           receipt: current.receipt,
           unverifiedSubmission: current.unverified_submission,
         });
-        if (!url) return { kind: 'unavailable' as const };
+        if (!retainedSessionId && !url) return { kind: 'unavailable' as const };
         const postingIdentity = freezePostingIdentity(locked.job_context, current.portal_url);
         const duplicate = await duplicateApplicationVerdict({
           userId,
@@ -1294,33 +1293,59 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           evidenceCode: 'attended_handoff_employer_boundary_authorized',
         });
         if (authorization.kind !== 'fresh') throw new Error('MANUAL_HANDOFF_BOUNDARY_CONFLICT');
+        let retainedSessionUrl: string | undefined;
+        if (retainedSessionId) {
+          try {
+            retainedSessionUrl = await getLiveViewUrl(retainedSessionId);
+          } catch {
+            throw new Error('MANUAL_HANDOFF_RETAINED_SESSION_UNAVAILABLE');
+          }
+        }
         return {
           kind: 'authorized' as const,
           url,
+          retainedSessionId,
+          retainedSessionUrl,
           next,
           claimId,
           authorization: authorization.authorization,
         };
-      });
-      if (result.kind === 'live_session') {
-        try {
-          const url = await getLiveViewUrl(result.sessionId);
-          return reply.send({
-            manual_handoff: {
-              mode: 'retained_session',
-              url,
-              audit_digest: audit.audit.audit_digest,
-              packet_version: audit.audit.packet_version,
-              pdf_sha256: audit.audit.bindings.pdf.sha256,
-              size_bytes: audit.audit.bindings.pdf.sizeBytes,
-            },
-          });
-        } catch {
-          return reply.status(409).send({
-            error: 'The retained company session is no longer available. Reload this application before continuing.',
-            code: 'MANUAL_HANDOFF_STALE',
-          });
+      }).catch((error: unknown) => {
+        if (error instanceof Error
+          && error.message === 'MANUAL_HANDOFF_RETAINED_SESSION_UNAVAILABLE') {
+          return { kind: 'retained_session_unavailable' as const };
         }
+        throw error;
+      });
+      if (result.kind === 'active_fill') {
+        return reply.status(409).send({
+          error: 'Litos is still filling this company form. Wait for the dashboard to finish before opening it.',
+          code: 'MANUAL_HANDOFF_FILL_ACTIVE',
+        });
+      }
+      if (result.kind === 'retained_session_unavailable') {
+        return reply.status(409).send({
+          error: 'The retained company session is no longer available. Reload this application before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+      if (result.kind === 'authorized' && result.retainedSessionId) {
+        return reply.send({
+          manual_handoff: {
+            mode: 'retained_session',
+            url: result.retainedSessionUrl,
+            claim_id: result.claimId,
+            activation_contract: 'server-lease-v1',
+            activation_id: result.authorization.activationId,
+            activation_lease_id: result.authorization.leaseId,
+            activation_expires_at: result.authorization.expiresAt,
+            activation_server_now: result.authorization.serverNow,
+            audit_digest: audit.audit.audit_digest,
+            packet_version: audit.audit.packet_version,
+            pdf_sha256: audit.audit.bindings.pdf.sha256,
+            size_bytes: audit.audit.bindings.pdf.sizeBytes,
+          },
+        });
       }
       if (result.kind === 'changed') {
         return reply.status(409).send({
@@ -1349,6 +1374,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           activation_id: result.authorization.activationId,
           activation_lease_id: result.authorization.leaseId,
           activation_expires_at: result.authorization.expiresAt,
+          activation_server_now: result.authorization.serverNow,
           audit_digest: audit.audit.audit_digest,
           packet_version: audit.audit.packet_version,
           pdf_sha256: audit.audit.bindings.pdf.sha256,
@@ -1766,6 +1792,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           activationId: authorization.authorization.activationId,
           activationLeaseId: authorization.authorization.leaseId,
           activationExpiresAt: authorization.authorization.expiresAt,
+          activationServerNow: authorization.authorization.serverNow,
         };
       });
       const result = await withReadOnlyRetry(
@@ -1834,6 +1861,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         activation_id: result.activationId,
         activation_lease_id: result.activationLeaseId,
         activation_expires_at: result.activationExpiresAt,
+        activation_server_now: result.activationServerNow,
         review: result.next,
       });
     },
@@ -3215,7 +3243,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       return reply.send({
         application_id: row.id,
         review: reviewWithoutPassiveHandoffUrl(review),
-        manual_handoff_available: manualHandoffAvailable(review),
+        manual_handoff_available: handoff_packet_valid && manualHandoffAvailable(review),
         cover_letter: storedCoverLetter(row),
         // Keyed by kind, and built by the one reader that strips object_key. The spec holds the
         // Blob pointer because the packet builder needs it; this envelope must never carry it,

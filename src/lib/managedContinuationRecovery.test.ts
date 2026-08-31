@@ -48,7 +48,7 @@ test('a wrong execution tuple is refused before terminal retrieval', () => {
     bindingMatches: true,
     submissionAttempt: wrongSubmissionAttempt,
     nowMs: Date.parse('2026-08-31T10:00:30.000Z'),
-  }), { kind: 'invalid', reason: 'execution_mismatch' });
+  }), { kind: 'invalid', reason: 'execution_mismatch', submissionAttempt: wrongSubmissionAttempt });
 });
 
 test('a wrong immutable application binding is refused before terminal retrieval', () => {
@@ -57,7 +57,7 @@ test('a wrong immutable application binding is refused before terminal retrieval
     bindingMatches: false,
     submissionAttempt,
     nowMs: Date.parse('2026-08-31T10:00:30.000Z'),
-  }), { kind: 'invalid', reason: 'binding_mismatch' });
+  }), { kind: 'invalid', reason: 'binding_mismatch', submissionAttempt });
 });
 
 test('a malformed durable deadline is refused before terminal retrieval', () => {
@@ -66,7 +66,7 @@ test('a malformed durable deadline is refused before terminal retrieval', () => 
     bindingMatches: true,
     submissionAttempt,
     nowMs: Date.parse('2026-08-31T10:00:30.000Z'),
-  }), { kind: 'invalid', reason: 'deadline_invalid' });
+  }), { kind: 'invalid', reason: 'deadline_invalid', submissionAttempt });
 });
 
 test('a search persisted before dispatch does not pretend a continuation was consumed', () => {

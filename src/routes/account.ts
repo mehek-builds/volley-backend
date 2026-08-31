@@ -21,6 +21,7 @@ import {
   artifacts,
   billing_subscriptions,
   billing_account_deletion_tombstones,
+  managed_submission_account_deletion_drains,
   entitlement_usage_reservations,
   monetization_events,
   pending_premium_actions,
@@ -51,6 +52,8 @@ import {
   billingSubscriptionTombstoneHash,
   cancelBillingBeforeAccountDeletion,
 } from '../lib/accountDeletionBilling';
+import { drainManagedTerminalCleanupBeforeAccountDeletion } from './submissionRunner';
+import { lockSubmissionAttemptUser } from '../lib/submissionAttemptLedger';
 
 type AccountTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -310,6 +313,24 @@ export async function accountRoutes(fastify: FastifyInstance) {
         account_preserved: true,
       });
     }
+    try {
+      await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [ownedAccount] = await tx.select({ id: users.id }).from(users)
+          .where(eq(users.id, userId)).limit(1);
+        if (!ownedAccount) throw new Error('Account disappeared before deletion could be fenced');
+        await tx.insert(managed_submission_account_deletion_drains).values({
+          user_id: userId,
+        }).onConflictDoNothing();
+      });
+    } catch (err) {
+      fastify.log.error({ err, userId }, 'account deletion aborted: could not establish managed cleanup fence');
+      return reply.status(503).send({
+        error: 'Litos could not safely pause employer submissions, so your account and files were not deleted. Please retry.',
+        code: 'managed_submission_cleanup_fence_failed',
+        account_preserved: true,
+      });
+    }
     const tombstoneHashes = billingPlan.stripeSubscriptionIds.map((subscriptionId) =>
       billingSubscriptionTombstoneHash('stripe', subscriptionId));
     try {
@@ -338,6 +359,24 @@ export async function accountRoutes(fastify: FastifyInstance) {
       return reply.status(502).send({
         error: 'Could not cancel recurring billing, so your account and files were not deleted. Please retry.',
         code: 'billing_cancellation_failed',
+        account_preserved: true,
+      });
+    }
+
+    try {
+      const managedCleanup = await drainManagedTerminalCleanupBeforeAccountDeletion(userId, fastify);
+      if (!managedCleanup.ready) {
+        return reply.status(409).send({
+          error: 'Litos is still removing an active employer-session copy of your application data. Your account and files remain intact. Retry shortly.',
+          code: 'managed_submission_cleanup_pending',
+          account_preserved: true,
+        });
+      }
+    } catch (err) {
+      fastify.log.error({ err, userId }, 'account deletion aborted: managed submission cleanup failed');
+      return reply.status(503).send({
+        error: 'Litos could not verify employer-session cleanup, so your account and files were not deleted. Please retry.',
+        code: 'managed_submission_cleanup_failed',
         account_preserved: true,
       });
     }

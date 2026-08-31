@@ -188,27 +188,30 @@ test('manual dashboard navigation comes only from an action-time current acknowl
   const route = routeSlice("'/applications/:id/submission/manual-handoff'", "'/applications/:id/submission/extension-packet'");
   const ownership = route.indexOf('ownedResume(request, reply)');
   const audit = route.indexOf('currentAcknowledgedPacketAudit(row');
-  const refresh = route.indexOf('const refreshed = await ownedResume(request, reply)', audit);
-  const binding = route.indexOf('verifiedDashboardHandoffUrl({');
+  const transaction = route.indexOf('const result = await db.transaction', audit);
+  const lock = route.indexOf('await lockSubmissionAttemptUser(tx, userId)', transaction);
+  const binding = route.indexOf('verifiedDashboardHandoffUrl({', lock);
   const response = route.indexOf('manual_handoff:');
-  assert.ok(ownership >= 0 && audit > ownership && refresh > audit && binding > refresh && response > binding);
+  assert.ok(ownership >= 0 && audit > ownership && transaction > audit && lock > transaction
+    && binding > lock && response > binding);
   assert.match(route, /const auditedRow = audit\.row/,
     'a retention restore must replace the pre-audit row before the handoff CAS');
-  assert.match(route, /refreshed\.resume_object_key !== auditedRow\.resume_object_key/);
-  assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, auditedRow\.spec\)/);
-  assert.match(route, /frozenUrl: refreshedReview\.portal_url/);
-  assert.match(route, /frozenHandoffUrl: refreshedReview\.extension_handoff_url/);
-  assert.match(route, /frozenAtsName: refreshedReview\.ats_name/);
-  assert.match(route, /status: refreshedReview\.status/);
-  assert.match(route, /attentionReason: refreshedReview\.attention_reason/);
-  assert.match(route, /attentionCategories: refreshedReview\.attention_categories/);
-  assert.match(route, /submissionClaimedAt: refreshedReview\.submission_claimed_at/);
-  assert.match(route, /submissionClaimId: refreshedReview\.submission_claim_id/);
-  assert.match(route, /submissionPacketVersion: refreshedReview\.submission_packet_version/);
-  assert.match(route, /submissionAttemptedAt: refreshedReview\.submission_attempted_at/);
-  assert.match(route, /submittedAt: refreshedReview\.submitted_at/);
-  assert.match(route, /receipt: refreshedReview\.receipt/);
-  assert.match(route, /unverifiedSubmission: refreshedReview\.unverified_submission/);
+  assert.match(route, /locked\.resume_object_key !== auditedRow\.resume_object_key/);
+  assert.match(route, /!isDeepStrictEqual\(locked\.job_context, auditedRow\.job_context\)/);
+  assert.match(route, /!sameApplicationPacketSpec\(locked\.spec, auditedRow\.spec\)/);
+  assert.match(route, /frozenUrl: current\.portal_url/);
+  assert.match(route, /frozenHandoffUrl: current\.extension_handoff_url/);
+  assert.match(route, /frozenAtsName: current\.ats_name/);
+  assert.match(route, /status: current\.status/);
+  assert.match(route, /attentionReason: current\.attention_reason/);
+  assert.match(route, /attentionCategories: current\.attention_categories/);
+  assert.match(route, /submissionClaimedAt: current\.submission_claimed_at/);
+  assert.match(route, /submissionClaimId: current\.submission_claim_id/);
+  assert.match(route, /submissionPacketVersion: current\.submission_packet_version/);
+  assert.match(route, /submissionAttemptedAt: current\.submission_attempted_at/);
+  assert.match(route, /submittedAt: current\.submitted_at/);
+  assert.match(route, /receipt: current\.receipt/);
+  assert.match(route, /unverifiedSubmission: current\.unverified_submission/);
   assert.match(route, /audit_digest: audit\.audit\.audit_digest/);
   assert.match(route, /packet_version: audit\.audit\.packet_version/);
   assert.match(route, /pdf_sha256: audit\.audit\.bindings\.pdf\.sha256/);
@@ -238,7 +241,7 @@ test('every employer-bound path names the current packet audit gate', () => {
   assert.match(extensionOutcome, /JSON\.stringify\(latest\.spec\)/);
   const handoffComplete = routeSlice("'/applications/:id/submission/handoff-complete'", "'/applications/:id/submission/approve'");
   assert.match(handoffComplete, /currentAcknowledgedPacketAudit/);
-  assert.match(handoffComplete, /JSON\.stringify\(row\.spec\)/);
+  assert.match(handoffComplete, /JSON\.stringify\(locked\.spec\)/);
   const securityCode = routeSlice("'/applications/:id/security-code'", "'/applications/:id/status'");
   assert.match(securityCode, /currentAcknowledgedPacketAudit/);
   const runnerSubmit = runner.slice(runner.indexOf('async function submit('), runner.indexOf('export async function finishSecurityCodeSubmission'));
@@ -279,13 +282,16 @@ test('reviewed per-application approval stays free while unattended submission r
   assert.match(approve, /submission_authorization:[\s\S]*source: 'per_application_approval'/);
 
   const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  assert.match(extensionStart, /requireFeature\([\s\S]*?'automatic_submission'/);
+  assert.match(extensionStart, /parsed\.data\.authorization === 'standing_consent'/);
+  assert.match(extensionStart, /await getEntitlementSnapshot\(userId, new Date\(\), tx\)/);
+  assert.match(extensionStart, /!entitlement\.features\.automatic_submission/);
+  assert.doesNotMatch(extensionStart, /requireFeature\(/);
 });
 
 test('submission polling hides a retained handoff when the current packet identity is no longer valid', () => {
   assert.match(applications, /review\.status === 'filling' \|\| review\.status === 'needs_attention'[\s\S]*currentAcknowledgedPacketAudit\(row[,)]/);
   assert.match(applications, /handoff_packet_valid = audit\.valid/);
-  assert.match(applications, /if \(audit\.valid\)[\s\S]*getLiveViewUrl/);
+  assert.match(applications, /manual_handoff_available: handoff_packet_valid && manualHandoffAvailable\(review\)/);
 });
 
 test('resume edits refuse a stale personal email before rendering or storing a replacement PDF', () => {

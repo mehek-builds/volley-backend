@@ -200,6 +200,10 @@ test('continuation recovery folds initial and continuation cleanup entries toget
     recovery,
     /foldManagedSecurityCodeContinuationResult\([\s\S]*fastify,[\s\S]*initialCleanupMarkers/,
   );
+  assert.match(recovery, /if \(plan\.kind === 'invalid'\)[\s\S]*pendingManagedTerminalCleanupMarker/);
+  assert.match(recovery, /exactManagedTerminalCleanupQuarantine/);
+  assert.match(recovery, /cleanupMarkers: \[\.\.\.initialCleanupMarkers, \.\.\.continuationCleanupMarkers\]/);
+  assert.match(recovery, /cleanupQuarantines/);
 });
 
 test('live terminal branches atomically queue exact cleanup before acknowledgement', async () => {

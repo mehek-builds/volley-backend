@@ -50,7 +50,10 @@ test('the canonical write is keyed by packet and owner and can only move a row f
  * growing its own copy of the statement or of the swallow contract back. */
 test('the email confirmation writer advances the canonical row through the shared wrapper', () => {
   const email = readFileSync('src/lib/applicationEmail.ts', 'utf8');
-  assert.match(email, /import \{ advanceCanonicalApplicationFromPacketSubmission \} from '\.\/canonicalApplicationSync'/);
+  assert.match(
+    email,
+    /import \{\s*advanceCanonicalApplicationFromPacketSubmission,[\s\S]*?\} from '\.\/canonicalApplicationSync'/,
+  );
   assert.doesNotMatch(email, /db\.update\(applications\)/);
 });
 
@@ -103,9 +106,11 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
     '/applications/:id/submission/self-submitted',
   ]) {
     const route = routeSlice(path);
-    const advance = route.indexOf('advanceCanonicalApplicationFromPacketSubmission(');
+    const advance = route.indexOf('syncCanonicalApplicationRow(');
     assert.ok(
-      route.lastIndexOf('.length === 0', advance) > 0,
+      advance > 0
+        && route.lastIndexOf('.returning({ id: generated_resumes.id })', advance) > 0
+        && route.lastIndexOf("if (!updated) throw new Error('", advance) > 0,
       `${path} advances the canonical row before its own write is confirmed`,
     );
   }
@@ -127,5 +132,10 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
     < extensionOutcome.indexOf("current.submission_claim_id !== parsed.data.claim_id"),
   'extension outcome must heal the canonical row on its idempotent retry arm');
   const unverified = routeSlice('/applications/:id/submission/unverified');
-  assert.match(unverified, /next\.status === 'submitted'/);
+  const notFoundBranch = unverified.indexOf('if (!parsed.data.found)');
+  const unverifiedSync = unverified.indexOf('syncCanonicalApplicationRow(');
+  assert.ok(notFoundBranch > 0
+    && unverifiedSync > notFoundBranch
+    && unverified.lastIndexOf('.returning({ id: generated_resumes.id })', unverifiedSync) > notFoundBranch,
+  'the found arm must confirm its packet write before projecting the canonical row');
 });

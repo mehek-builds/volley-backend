@@ -47,6 +47,8 @@ test('standing-consent extension authority is revalidated under lock and returns
   assert.match(route, /activation_id: result\.activationId/);
   assert.match(route, /activation_lease_id: result\.activationLeaseId/);
   assert.match(route, /activation_expires_at: result\.activationExpiresAt/);
+  assert.match(transaction, /activationServerNow: authorization\.authorization\.serverNow/);
+  assert.match(route, /activation_server_now: result\.activationServerNow/);
   assert.match(route, /activation_contract: 'server-lease-v1'/);
 });
 

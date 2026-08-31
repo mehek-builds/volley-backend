@@ -80,6 +80,47 @@ test('extension activation schemas fail closed for clients that do not enforce t
   }).success, true);
 });
 
+test('every alternate activation response includes the authoritative server clock', () => {
+  const manual = routeSlice(
+    "'/applications/:id/submission/manual-handoff'",
+    "'/applications/:id/submission/extension-packet'",
+  );
+  const extension = routeSlice(
+    "'/applications/:id/submission/extension-start'",
+    "'/applications/:id/submission/extension-outcome'",
+  );
+  assert.match(manual, /activation_server_now: result\.authorization\.serverNow/);
+  assert.match(extension, /activationServerNow: authorization\.authorization\.serverNow/);
+  assert.match(extension, /activation_server_now: result\.activationServerNow/);
+});
+
+test('a retained session is exposed only after a fresh exact manual boundary and never during filling', () => {
+  const manual = routeSlice(
+    "'/applications/:id/submission/manual-handoff'",
+    "'/applications/:id/submission/extension-packet'",
+  );
+  ordered(manual, [
+    'await lockSubmissionAttemptUser(tx, userId)',
+    "current.status === 'filling' && current.browser_session_id",
+    'duplicateApplicationVerdict({',
+    'canonicalApplicationForNewPacketAttempt(tx, {',
+    'tx.update(generated_resumes)',
+    "eventKind: 'attempt_opened'",
+    'authorizeFinalSubmissionBoundary(binding',
+    'retainedSessionUrl = await getLiveViewUrl(retainedSessionId)',
+    "kind: 'authorized' as const",
+    "result.kind === 'authorized' && result.retainedSessionId",
+  ]);
+  assert.match(manual, /code: 'MANUAL_HANDOFF_FILL_ACTIVE'/);
+  assert.doesNotMatch(
+    manual.slice(
+      manual.indexOf('const result = await db.transaction'),
+      manual.indexOf('authorizeFinalSubmissionBoundary(binding'),
+    ),
+    /getLiveViewUrl\(/,
+  );
+});
+
 test('passive reviews never disclose employer handoff URLs', () => {
   const review = {
     jd_text: 'Role',

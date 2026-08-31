@@ -313,6 +313,7 @@ import { duplicateApplicationVerdict, type DuplicateApplicationVerdict } from '.
 import {
   authorizeFinalSubmissionBoundary,
   appendSubmissionAttemptEvent,
+  assertSubmissionAccountNotDraining,
   freezePostingIdentity,
   lockSubmissionAttemptUser,
   submissionAttemptBindingFromEvent,
@@ -320,6 +321,7 @@ import {
   submissionAttemptEventId,
   submissionAttemptEventsForPacket,
   submissionAttemptsOpenedToday,
+  SubmissionAccountDeletionDrainError,
   type SubmissionBoundaryAuthorization,
   type SubmissionAttemptBinding,
   type SubmissionAttemptEventKind,
@@ -777,6 +779,7 @@ export async function assertFinalRunnerBoundaryClear(
 ): Promise<SubmissionBoundaryAuthorization> {
   const result = await db.transaction(async (tx) => {
     await lockSubmissionAttemptUser(tx, row.user_id);
+    await assertSubmissionAccountNotDraining(tx, row.user_id);
     const [latest] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, row.user_id),
@@ -913,7 +916,11 @@ export function managedContinuationExecutionFingerprint(
 
 export type ManagedSecurityCodeContinuationRecoveryPlan =
   | { kind: 'none' }
-  | { kind: 'invalid'; reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid' }
+  | {
+      kind: 'invalid';
+      reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid';
+      submissionAttempt: ManagedSubmissionAttempt | null;
+    }
   | { kind: 'expired'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string }
   | { kind: 'poll'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string };
 
@@ -938,7 +945,7 @@ export function managedSecurityCodeContinuationRecoveryPlan(
     if (verification?.runner === 'stratus-managed'
       && verification.status === 'verification_pending'
       && verification.continuation_resumed === true) {
-      return { kind: 'invalid', reason: 'binding_mismatch' };
+      return { kind: 'invalid', reason: 'binding_mismatch', submissionAttempt: null };
     }
     return { kind: 'none' };
   }
@@ -1009,6 +1016,7 @@ export async function assertManagedSecurityCodeContinuationBoundaryClear(
 
   const result = await db.transaction(async (tx) => {
     await lockSubmissionAttemptUser(tx, row.user_id);
+    await assertSubmissionAccountNotDraining(tx, row.user_id);
     const [latest] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, row.user_id),
@@ -1213,7 +1221,9 @@ type ManagedAuthorizedUnverifiedInput = {
   network?: NonNullable<ApplicationReviewState['unverified_submission']>['network'];
   challengeOnScreen?: boolean;
   requireContinuationResumed?: boolean;
+  allowInvalidContinuationBinding?: boolean;
   cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
+  cleanupQuarantines?: readonly ManagedTerminalCleanupQuarantine[];
 };
 
 /** Every managed stop after boundary authorization remains an unresolved parent, never not-sent. */
@@ -1229,13 +1239,15 @@ export async function recordManagedAuthorizedAttemptUnverified(
       eq(generated_resumes.user_id, row.user_id),
     )).limit(1);
     const latestReview = latest ? readApplicationReview(latest.spec) : null;
-    if (!latest || !latestReview
-      || latestReview.submission_claim_id !== attemptBinding.attemptId
-      || latestReview.submission_run_id !== attemptBinding.submissionRunId) return false;
+    if (!latest || !latestReview) return false;
+    if (input.allowInvalidContinuationBinding
+      && !isDeepStrictEqual(latest.spec, row.spec)) return false;
+    if (!input.allowInvalidContinuationBinding
+      && (latestReview.submission_claim_id !== attemptBinding.attemptId
+        || latestReview.submission_run_id !== attemptBinding.submissionRunId)) return false;
     if (input.requireContinuationResumed && (
       latestReview.verification?.runner !== 'stratus-managed'
       || latestReview.verification.continuation_resumed !== true
-      || !latestReview.verification.continuation_call_deadline_at
     )) return false;
     const authorization = await submissionBoundaryAuthorization(
       row.user_id,
@@ -1273,8 +1285,10 @@ export async function recordManagedAuthorizedAttemptUnverified(
       eq(generated_resumes.id, latest.id),
       eq(generated_resumes.user_id, latest.user_id),
       sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
-      sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${attemptBinding.attemptId}`,
     ];
+    if (!input.allowInvalidContinuationBinding) {
+      conditions.push(sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${attemptBinding.attemptId}`);
+    }
     if (input.requireContinuationResumed) {
       conditions.push(sql`${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'true'`);
     }
@@ -1282,6 +1296,7 @@ export async function recordManagedAuthorizedAttemptUnverified(
       latest.spec,
       unresolved,
       input.cleanupMarkers ?? [],
+      input.cleanupQuarantines ?? [],
     );
     const updated = await tx.update(generated_resumes).set({
       spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
@@ -1300,6 +1315,8 @@ export async function recordManagedSecurityCodeContinuationUnverified(
     securityCode?: ApplicationReviewState['security_code'];
     verification?: ApplicationReviewState['verification'];
     cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
+    cleanupQuarantines?: readonly ManagedTerminalCleanupQuarantine[];
+    allowInvalidContinuationBinding?: boolean;
   } = {},
 ): Promise<boolean> {
   return recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
@@ -1309,6 +1326,10 @@ export async function recordManagedSecurityCodeContinuationUnverified(
     ...(options.previewUrl ? { previewUrl: options.previewUrl } : {}),
     ...(options.securityCode ? { securityCode: options.securityCode } : {}),
     ...(options.cleanupMarkers ? { cleanupMarkers: options.cleanupMarkers } : {}),
+    ...(options.cleanupQuarantines ? { cleanupQuarantines: options.cleanupQuarantines } : {}),
+    ...(options.allowInvalidContinuationBinding
+      ? { allowInvalidContinuationBinding: true }
+      : {}),
     verification: {
       ...options.verification,
       status: 'handoff',
@@ -1659,6 +1680,8 @@ export type ManagedTerminalRecoveryOutcome = 'not_recoverable' | 'pending' | 'fo
 const MANAGED_TERMINAL_CLEANUP_ENTRY_VERSION = 'managed-terminal-cleanup-entry-v2' as const;
 const MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION = 'managed-terminal-cleanup-outbox-v2' as const;
 const MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY = '_managed_terminal_cleanup_outbox';
+const MANAGED_TERMINAL_CLEANUP_QUARANTINE_VERSION = 'managed-terminal-cleanup-quarantine-v1' as const;
+const MANAGED_TERMINAL_CLEANUP_QUARANTINE_KEY = '_managed_terminal_cleanup_quarantine';
 const MANAGED_TERMINAL_RESULT_ID = /^[a-f0-9]{64}$/u;
 const MANAGED_SUBMISSION_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -1711,6 +1734,80 @@ export type ManagedTerminalCleanupOutbox = {
   version: typeof MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION;
   entries: Record<string, ManagedTerminalCleanupMarker>;
 };
+
+export type ManagedTerminalCleanupQuarantine = {
+  version: typeof MANAGED_TERMINAL_CLEANUP_QUARANTINE_VERSION;
+  attemptId: string;
+  reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid';
+  continuationExecutionFingerprint: string | null;
+};
+
+function managedTerminalCleanupQuarantineKey(entry: ManagedTerminalCleanupQuarantine): string {
+  return `${entry.attemptId}:${entry.reason}:${entry.continuationExecutionFingerprint ?? 'unreconstructible'}`;
+}
+
+function exactManagedTerminalCleanupQuarantine(input: {
+  attemptId: string;
+  reason: ManagedTerminalCleanupQuarantine['reason'];
+  continuationExecutionFingerprint?: string | null;
+}): ManagedTerminalCleanupQuarantine {
+  const attemptId = input.attemptId.toLowerCase();
+  if (!MANAGED_SUBMISSION_ATTEMPT_ID.test(attemptId)) {
+    throw new Error('Managed terminal cleanup quarantine requires an exact attempt ID');
+  }
+  const fingerprint = input.continuationExecutionFingerprint?.trim().toLowerCase() ?? null;
+  if (fingerprint !== null && !MANAGED_TERMINAL_RESULT_ID.test(fingerprint)) {
+    throw new Error('Managed terminal cleanup quarantine requires an exact execution fingerprint');
+  }
+  return {
+    version: MANAGED_TERMINAL_CLEANUP_QUARANTINE_VERSION,
+    attemptId,
+    reason: input.reason,
+    continuationExecutionFingerprint: fingerprint,
+  };
+}
+
+export function specWithManagedTerminalCleanupQuarantines(
+  spec: unknown,
+  quarantines: readonly ManagedTerminalCleanupQuarantine[],
+): Record<string, unknown> {
+  const nextSpec = spec && typeof spec === 'object' && !Array.isArray(spec)
+    ? { ...(spec as Record<string, unknown>) }
+    : {};
+  if (quarantines.length === 0) return nextSpec;
+  const raw = nextSpec[MANAGED_TERMINAL_CLEANUP_QUARANTINE_KEY];
+  const current = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : null;
+  if (raw !== undefined && (!current
+    || current.version !== MANAGED_TERMINAL_CLEANUP_QUARANTINE_VERSION
+    || !current.entries
+    || typeof current.entries !== 'object'
+    || Array.isArray(current.entries))) {
+    throw new Error('Managed terminal cleanup quarantine is malformed');
+  }
+  const entries = { ...((current?.entries as Record<string, unknown> | undefined) ?? {}) };
+  for (const quarantine of quarantines) {
+    const exact = exactManagedTerminalCleanupQuarantine(quarantine);
+    if (!isDeepStrictEqual(exact, quarantine)) {
+      throw new Error('Managed terminal cleanup quarantine requires exact normalized entries');
+    }
+    const key = managedTerminalCleanupQuarantineKey(exact);
+    const existing = entries[key];
+    if (existing && !isDeepStrictEqual(existing, exact)) {
+      throw new Error('Managed terminal cleanup quarantine key is already bound');
+    }
+    entries[key] = exact;
+  }
+  if (Object.keys(entries).length > 32) {
+    throw new Error('Managed terminal cleanup quarantine exceeds its bounded capacity');
+  }
+  nextSpec[MANAGED_TERMINAL_CLEANUP_QUARANTINE_KEY] = {
+    version: MANAGED_TERMINAL_CLEANUP_QUARANTINE_VERSION,
+    entries,
+  };
+  return nextSpec;
+}
 
 function managedTerminalCleanupMarker(value: unknown): ManagedTerminalCleanupMarker | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -1838,11 +1935,15 @@ export function specWithManagedTerminalFold(
   spec: unknown,
   review: ApplicationReviewState,
   markers: readonly ManagedTerminalCleanupMarker[],
+  quarantines: readonly ManagedTerminalCleanupQuarantine[] = [],
 ): Record<string, unknown> {
   const folded = spec && typeof spec === 'object' && !Array.isArray(spec)
     ? { ...(spec as Record<string, unknown>), _review: review }
     : { _review: review };
-  return specWithManagedTerminalCleanupEntries(folded, markers);
+  return specWithManagedTerminalCleanupQuarantines(
+    specWithManagedTerminalCleanupEntries(folded, markers),
+    quarantines,
+  );
 }
 
 function specWithoutManagedTerminalCleanupEntry(
@@ -1991,6 +2092,60 @@ export async function retryManagedTerminalCleanupDelivery(
     dependencies.failed?.(error);
     return false;
   }
+}
+
+type ManagedTerminalCleanupRetrieval =
+  | { state: 'pending' | 'not_found' | 'gone' }
+  | { state: 'completed' | 'failed' | 'indeterminate'; resultId: string };
+
+export async function drainManagedTerminalCleanupEntries(
+  markers: readonly ManagedTerminalCleanupMarker[],
+  dependencies: {
+    retrieve: (marker: ManagedTerminalCleanupMarker) => Promise<ManagedTerminalCleanupRetrieval>;
+    bind: (
+      marker: ManagedTerminalCleanupMarker,
+      resultId: string,
+    ) => Promise<BoundManagedTerminalCleanupMarker>;
+    acknowledge: (marker: BoundManagedTerminalCleanupMarker) => Promise<unknown>;
+    complete: (marker: ManagedTerminalCleanupMarker) => Promise<unknown>;
+    failed?: (marker: ManagedTerminalCleanupMarker, error: unknown) => void;
+  },
+): Promise<{ attempted: number; completed: number; pending: number }> {
+  let completed = 0;
+  let pending = 0;
+  for (const marker of markers) {
+    try {
+      let deliveryMarker: BoundManagedTerminalCleanupMarker;
+      if (marker.resultId === null) {
+        const terminal = await dependencies.retrieve(marker);
+        const disposition = managedTerminalCleanupRetrievalDisposition(terminal.state);
+        if (disposition === 'complete') {
+          await dependencies.complete(marker);
+          completed += 1;
+          continue;
+        }
+        if (disposition === 'retry') {
+          pending += 1;
+          continue;
+        }
+        if (terminal.state !== 'completed'
+          && terminal.state !== 'failed'
+          && terminal.state !== 'indeterminate') {
+          throw new Error('Managed terminal cleanup disposition lost its terminal result');
+        }
+        deliveryMarker = await dependencies.bind(marker, terminal.resultId);
+      } else {
+        deliveryMarker = marker as BoundManagedTerminalCleanupMarker;
+      }
+      await dependencies.acknowledge(deliveryMarker);
+      await dependencies.complete(deliveryMarker);
+      completed += 1;
+    } catch (error) {
+      pending += 1;
+      dependencies.failed?.(marker, error);
+    }
+  }
+  return { attempted: markers.length, completed, pending };
 }
 
 async function managedAttemptHasDurableFold(
@@ -2142,83 +2297,114 @@ async function acknowledgeManagedTerminalCleanupMarkers(
   }
 }
 
-async function retryManagedTerminalCleanupOutbox(
+export async function retryManagedTerminalCleanupOutbox(
   fastify: FastifyInstance,
-): Promise<{ attempted: number; completed: number }> {
+  options: { userId?: string } = {},
+): Promise<{ attempted: number; completed: number; pending: number }> {
   const cleanupRows = sql`${generated_resumes.spec}->'_managed_terminal_cleanup_outbox'->>'version' = ${MANAGED_TERMINAL_CLEANUP_OUTBOX_VERSION}`;
+  const cleanupRowsForScope = options.userId
+    ? and(cleanupRows, eq(generated_resumes.user_id, options.userId))
+    : cleanupRows;
   const [counted] = await db.select({ total: sql<number>`count(*)::int` })
     .from(generated_resumes)
-    .where(cleanupRows);
+    .where(cleanupRowsForScope);
   const batchWindow = managedTerminalCleanupBatchWindow(
     counted?.total ?? 0,
-    submissionBatchSize(),
+    options.userId ? Math.max(1, counted?.total ?? 0) : submissionBatchSize(),
   );
   const rows = batchWindow.firstLimit > 0
-    ? await db.select().from(generated_resumes).where(cleanupRows)
+    ? await db.select().from(generated_resumes).where(cleanupRowsForScope)
       .orderBy(generated_resumes.created_at, generated_resumes.id)
       .limit(batchWindow.firstLimit)
       .offset(batchWindow.firstOffset)
     : [];
   if (batchWindow.wrapLimit > 0) {
-    rows.push(...await db.select().from(generated_resumes).where(cleanupRows)
+    rows.push(...await db.select().from(generated_resumes).where(cleanupRowsForScope)
       .orderBy(generated_resumes.created_at, generated_resumes.id)
       .limit(batchWindow.wrapLimit));
   }
   let attempted = 0;
   let completed = 0;
+  let pending = 0;
   for (const row of rows) {
     const outbox = managedTerminalCleanupOutboxFromSpec(row.spec);
     if (!outbox) {
       fastify.log.error({ applicationId: row.id }, 'Managed terminal cleanup outbox is malformed');
+      pending += 1;
       continue;
     }
-    for (const marker of Object.values(outbox.entries)) {
-      attempted += 1;
-      let deliveryMarker: BoundManagedTerminalCleanupMarker;
-      if (marker.resultId === null) {
-        try {
-          const terminal = await getManagedBrowserTerminalResult(marker.submissionAttempt);
-          const disposition = managedTerminalCleanupRetrievalDisposition(terminal.state);
-          if (disposition === 'complete') {
-            await completeManagedTerminalCleanupMarker(row, marker);
-            completed += 1;
-            continue;
-          }
-          if (disposition === 'retry') continue;
-          if (terminal.state !== 'completed'
-            && terminal.state !== 'failed'
-            && terminal.state !== 'indeterminate') {
-            throw new Error('Managed terminal cleanup disposition lost its terminal result');
-          }
-          deliveryMarker = await bindManagedTerminalCleanupResultId(row, marker, terminal.resultId);
-        } catch (error) {
-          fastify.log.warn({
-            applicationId: row.id,
-            attemptId: marker.attemptId,
-            executionId: marker.submissionAttempt.executionId,
-            detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal result ID retrieval failed',
-          }, 'Managed terminal cleanup is waiting for its exact result ID');
-          continue;
-        }
-      } else {
-        deliveryMarker = marker as BoundManagedTerminalCleanupMarker;
-      }
-      const delivered = await retryManagedTerminalCleanupDelivery(deliveryMarker, {
-        acknowledge: acknowledgeManagedBrowserTerminalResult,
-        complete: () => completeManagedTerminalCleanupMarker(row, deliveryMarker),
-        failed: (error) => {
-          fastify.log.warn({
-            applicationId: row.id,
-            attemptId: deliveryMarker.attemptId,
-            executionId: deliveryMarker.submissionAttempt.executionId,
-            detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal acknowledgement failed',
-          }, 'Managed terminal cleanup acknowledgement remains queued');
-        },
-      });
-      if (delivered) completed += 1;
+    const drained = await drainManagedTerminalCleanupEntries(Object.values(outbox.entries), {
+      retrieve: (marker) => getManagedBrowserTerminalResult(marker.submissionAttempt),
+      bind: (marker, resultId) => bindManagedTerminalCleanupResultId(row, marker, resultId),
+      acknowledge: (marker) => acknowledgeManagedBrowserTerminalResult(
+        marker.submissionAttempt,
+        marker.resultId,
+      ),
+      complete: (marker) => completeManagedTerminalCleanupMarker(row, marker),
+      failed: (marker, error) => {
+        fastify.log.warn({
+          applicationId: row.id,
+          attemptId: marker.attemptId,
+          executionId: marker.submissionAttempt.executionId,
+          detail: error instanceof Error ? error.message.slice(0, 200) : 'Terminal cleanup failed',
+        }, 'Managed terminal cleanup remains queued');
+      },
+    });
+    attempted += drained.attempted;
+    completed += drained.completed;
+    pending += drained.pending;
+  }
+  return { attempted, completed, pending };
+}
+
+export async function drainManagedTerminalCleanupBeforeAccountDeletion(
+  userId: string,
+  fastify: FastifyInstance,
+): Promise<{
+  ready: boolean;
+  attempted: number;
+  completed: number;
+  pending: number;
+  blockedPackets: number;
+}> {
+  const drained = await retryManagedTerminalCleanupOutbox(fastify, { userId });
+  const rows = await db.select({ id: generated_resumes.id, spec: generated_resumes.spec })
+    .from(generated_resumes)
+    .where(eq(generated_resumes.user_id, userId));
+  let blockedPackets = 0;
+  for (const row of rows) {
+    const spec = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
+      ? row.spec as Record<string, unknown>
+      : {};
+    const review = readApplicationReview(row.spec);
+    const hasCleanupOutbox = Object.prototype.hasOwnProperty.call(
+      spec,
+      MANAGED_TERMINAL_CLEANUP_OUTBOX_KEY,
+    );
+    const hasCleanupQuarantine = Object.prototype.hasOwnProperty.call(
+      spec,
+      MANAGED_TERMINAL_CLEANUP_QUARANTINE_KEY,
+    );
+    const managedExecutionMayStillExist = Boolean(
+      review?.submission_claim_id
+      && (
+        review.status === 'submitting'
+        || review.status === 'submission_claimed'
+        || review.status === 'awaiting_security_code'
+        || (review.verification?.runner === 'stratus-managed'
+          && (review.verification.status === 'searching'
+            || review.verification.status === 'verification_pending'))
+      ),
+    );
+    if (hasCleanupOutbox || hasCleanupQuarantine || managedExecutionMayStillExist) {
+      blockedPackets += 1;
     }
   }
-  return { attempted, completed };
+  return {
+    ready: blockedPackets === 0,
+    ...drained,
+    blockedPackets,
+  };
 }
 
 async function managedTerminalCleanupMarkerAfterRetrieval(
@@ -2467,12 +2653,39 @@ export async function recoverManagedSecurityCodeContinuationTerminalResult(
     }
   }
   if (plan.kind === 'invalid') {
-    await recordManagedSecurityCodeContinuationUnverified(
+    const continuationCleanupMarkers = plan.submissionAttempt
+      ? [pendingManagedTerminalCleanupMarker({
+          attemptBinding,
+          submissionAttempt: plan.submissionAttempt,
+        })]
+      : [];
+    const cleanupQuarantines = plan.submissionAttempt
+      ? []
+      : [exactManagedTerminalCleanupQuarantine({
+          attemptId: attemptBinding.attemptId,
+          reason: plan.reason,
+          continuationExecutionFingerprint:
+            review.verification?.continuation_execution_fingerprint,
+        })];
+    const retained = await recordManagedSecurityCodeContinuationUnverified(
       row,
       attemptBinding,
       `The retained verification recovery binding was invalid: ${plan.reason}`,
-      { verification: review.verification, cleanupMarkers: initialCleanupMarkers },
+      {
+        verification: review.verification,
+        cleanupMarkers: [...initialCleanupMarkers, ...continuationCleanupMarkers],
+        cleanupQuarantines,
+        allowInvalidContinuationBinding: true,
+      },
     );
+    if (!retained) {
+      fastify.log.error({
+        applicationId: row.id,
+        attemptId: attemptBinding.attemptId,
+        reason: plan.reason,
+      }, 'Managed continuation cleanup could not be retained for invalid recovery state');
+      return 'pending';
+    }
     await acknowledgeManagedTerminalCleanupMarkers(
       row,
       attemptBinding,
@@ -2852,6 +3065,11 @@ async function recoverManagedInitialSecurityCodeChallenge(
     if (error instanceof ManagedSecurityCodeContinuationRefusedError) {
       return persistHandoff(
         `Recovered employer verification was withheld by the continuation gate: ${error.message}`,
+      );
+    }
+    if (error instanceof SubmissionAccountDeletionDrainError) {
+      return persistHandoff(
+        'Account deletion stopped the recovered employer verification continuation',
       );
     }
     if (error instanceof FinalSubmissionBoundaryBlockedError
@@ -9701,7 +9919,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               return;
             }
             if (error instanceof FinalSubmissionBoundaryBlockedError
-              || error instanceof FinalSubmissionAuthorizationChangedError) {
+              || error instanceof FinalSubmissionAuthorizationChangedError
+              || error instanceof SubmissionAccountDeletionDrainError) {
               await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
                 message: error.message,
                 attentionReason: 'Litos could not safely continue employer verification. Check the employer portal and record whether this exact application was received.',
@@ -10910,6 +11129,15 @@ export function submissionFailureReview(
       ...preClickNoSubmitReleasePatch(),
       submission_error: error.message,
       attention_reason: 'This submission changed after its employer attempt was reserved, so Litos stopped before sending anything. Reload the application before trying again.',
+      attention_categories: ['evidence_gap'],
+    });
+  }
+  if (error instanceof SubmissionAccountDeletionDrainError) {
+    return nextReview(current, {
+      status: 'needs_attention',
+      ...preClickNoSubmitReleasePatch(),
+      submission_error: error.message,
+      attention_reason: 'Account deletion paused this submission before Litos contacted the employer.',
       attention_categories: ['evidence_gap'],
     });
   }

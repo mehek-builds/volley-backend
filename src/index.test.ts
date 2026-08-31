@@ -75,7 +75,7 @@ test('/v1/meta publishes the cacheable Litos client contract', async () => {
   const body = res.json();
   assert.equal(body.product.name, 'Litos');
   assert.equal(body.api.version, '1');
-  assert.equal(body.api.compatibility.extension.minimum, '0.4.4');
+  assert.equal(body.api.compatibility.extension.minimum, '0.6.5');
 });
 
 test('/health identifies the deployable service and revision contract', async () => {

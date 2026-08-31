@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -79,8 +79,19 @@ async function assertNextRevisions(
 }
 
 async function minimalAuthoritySchema(database: PGlite): Promise<void> {
-  await database.exec(`
-    create table users (id uuid primary key);
+  await database.exec(MINIMAL_AUTHORITY_SCHEMA);
+}
+
+const MINIMAL_AUTHORITY_SCHEMA = `
+    create table users (
+      id uuid primary key,
+      automatic_submission_enabled boolean not null default false
+    );
+    create table billing_subscriptions (
+      id uuid primary key,
+      user_id uuid not null references users(id) on delete cascade,
+      status text not null
+    );
     create table generated_resumes (
       id uuid primary key,
       user_id uuid not null references users(id) on delete cascade,
@@ -124,10 +135,18 @@ async function minimalAuthoritySchema(database: PGlite): Promise<void> {
     );
     insert into users (id) values
       ('${USER_A}'), ('${USER_B}');
-  `);
+  `;
+
+function executableIsAvailable(command: string): boolean {
+  const probe = spawnSync(command, ['--version'], { stdio: 'ignore' });
+  return probe.status === 0 && !probe.error;
 }
 
-test('submission authority revision migration is atomic, owner-safe, and idempotent', { timeout: 30_000 }, async () => {
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+test('submission authority revision migration is atomic, owner-safe, and idempotent', { timeout: 60_000 }, async () => {
   const socketDir = mkdtempSync(join(tmpdir(), 'submission-authority-revision-'));
   const database = await PGlite.create();
   let server: PGLiteSocketServer | null = null;
@@ -158,9 +177,25 @@ test('submission authority revision migration is atomic, owner-safe, and idempot
     assert.equal(await revision(database, USER_A), 0n);
     assert.equal(await revision(database, USER_B), 0n);
 
+    await assertNextRevision(database, USER_A, () => database.exec(`
+      update users set automatic_submission_enabled = true where id = '${USER_A}'
+    `));
+    await assertNextRevision(database, USER_A, () => database.exec(`
+      insert into billing_subscriptions (id, user_id, status)
+      values ('99999999-9999-4999-8999-999999999991', '${USER_A}', 'active')
+    `));
+    await assertNextRevision(database, USER_A, () => database.exec(`
+      update billing_subscriptions set status = 'canceled'
+      where id = '99999999-9999-4999-8999-999999999991'
+    `));
+    const beforeSecondMigration = await revision(database, USER_A);
     const second = await runMigration(databaseUrl);
     assert.match(second.stdout, /submission-authority-v1/);
-    assert.equal(await revision(database, USER_A), 0n, 'an idempotent rerun does not invent a write');
+    assert.equal(
+      await revision(database, USER_A),
+      beforeSecondMigration,
+      'an idempotent rerun does not invent a write',
+    );
 
     await assertNextRevision(database, USER_A, () => database.exec(`
       insert into generated_resumes (id, user_id, payload)
@@ -347,6 +382,10 @@ test('submission authority revision migration is atomic, owner-safe, and idempot
       values ('cascade@example.test', '${USER_C}', 'cascade-alias');
     `);
     assert.notEqual(await revision(database, USER_C), null);
+    await assertNextRevision(database, USER_C, () => database.exec(`
+      insert into managed_submission_account_deletion_drains (user_id)
+      values ('${USER_C}')
+    `));
     await database.exec(`delete from users where id = '${USER_C}'`);
     assert.equal(await revision(database, USER_C), null, 'account deletion cascades without recreating revision state');
 
@@ -397,7 +436,7 @@ test('submission authority revision migration is atomic, owner-safe, and idempot
       USER_D,
       tx as unknown as SubmissionAuthorityRevisionExecutor,
     ));
-    assert.equal(initial, '0');
+    assert.equal(initial, '1');
     await database.exec(`
       update submission_authority_revisions
       set revision = 9007199254740993
@@ -418,6 +457,174 @@ test('submission authority revision migration is atomic, owner-safe, and idempot
     if (server) await server.stop().catch(() => undefined);
     await database.close().catch(() => undefined);
     rmSync(socketDir, { recursive: true, force: true });
+  }
+});
+
+test('real PostgreSQL serializes consent-off, subscription cancellation, and boundary creation', { timeout: 45_000 }, async (context) => {
+  if (!executableIsAvailable('initdb') || !executableIsAvailable('postgres')) {
+    context.skip('local PostgreSQL binaries are unavailable');
+    return;
+  }
+
+  const postgresRoot = mkdtempSync(join('/tmp', 'submission-authority-postgres-'));
+  const dataDir = join(postgresRoot, 'data');
+  const socketDir = join(postgresRoot, 'socket');
+  mkdirSync(socketDir);
+  const initialized = spawnSync('initdb', [
+    '-D', dataDir,
+    '--auth-local=trust',
+    '--auth-host=trust',
+    '--encoding=UTF8',
+    '--no-locale',
+    '--username=postgres',
+  ], { encoding: 'utf8' });
+  assert.equal(
+    initialized.status,
+    0,
+    `initdb failed: ${initialized.stderr || initialized.stdout}`,
+  );
+
+  const postgresServer = spawn('postgres', [
+    '-D', dataDir,
+    '-k', socketDir,
+    '-h', '',
+    '-p', '5432',
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let serverOutput = '';
+  postgresServer.stdout.setEncoding('utf8').on('data', (chunk) => { serverOutput += chunk; });
+  postgresServer.stderr.setEncoding('utf8').on('data', (chunk) => { serverOutput += chunk; });
+
+  const databaseUrl = `postgresql://postgres@localhost/postgres?host=${encodeURIComponent(socketDir)}`;
+  const clients: pg.Client[] = [];
+  let admin: pg.Client | null = null;
+  try {
+    for (let attempt = 0; attempt < 100 && !admin; attempt += 1) {
+      const candidate = new pg.Client({ connectionString: databaseUrl });
+      try {
+        await candidate.connect();
+        admin = candidate;
+        clients.push(candidate);
+      } catch {
+        await candidate.end().catch(() => undefined);
+        await delay(25);
+      }
+    }
+    assert.ok(admin, `PostgreSQL did not start: ${serverOutput}`);
+    await admin.query(MINIMAL_AUTHORITY_SCHEMA);
+    await runMigration(databaseUrl);
+
+    const boundaryClient = new pg.Client({ connectionString: databaseUrl });
+    const mutationClient = new pg.Client({ connectionString: databaseUrl });
+    await boundaryClient.connect();
+    await mutationClient.connect();
+    clients.push(boundaryClient, mutationClient);
+    await admin.query(`
+      update users set automatic_submission_enabled = true where id = $1
+    `, [USER_A]);
+    await admin.query(`
+      insert into billing_subscriptions (id, user_id, status)
+      values ('99999999-9999-4999-8999-999999999992', $1, 'active')
+    `, [USER_A]);
+
+    const lockSql = `
+      select pg_advisory_xact_lock(
+        hashtextextended('submission-attempt:' || $1::uuid::text, 0::bigint)
+      )
+    `;
+    const isSerializationFailure = (error: unknown) => (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === '40001'
+    );
+
+    await boundaryClient.query('begin');
+    await boundaryClient.query(lockSql, [USER_A]);
+    const firstSnapshot = await boundaryClient.query<{ automatic_submission_enabled: boolean }>(`
+      select automatic_submission_enabled from users where id = $1
+    `, [USER_A]);
+    assert.equal(firstSnapshot.rows[0]?.automatic_submission_enabled, true);
+    await boundaryClient.query(`
+      insert into application_submission_attempt_events (id, user_id, payload)
+      values ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2', $1, 'boundary-authorized')
+    `, [USER_A]);
+    await assert.rejects(
+      mutationClient.query(`
+        update users set automatic_submission_enabled = false where id = $1
+      `, [USER_A]),
+      isSerializationFailure,
+      'consent-off cannot interleave after the boundary authority snapshot',
+    );
+    await boundaryClient.query('commit');
+    await mutationClient.query(`
+      update users set automatic_submission_enabled = false where id = $1
+    `, [USER_A]);
+
+    await admin.query(`update users set automatic_submission_enabled = true where id = $1`, [USER_A]);
+    await boundaryClient.query('begin');
+    await boundaryClient.query(lockSql, [USER_A]);
+    const subscriptionSnapshot = await boundaryClient.query<{ status: string }>(`
+      select status from billing_subscriptions where user_id = $1
+    `, [USER_A]);
+    assert.equal(subscriptionSnapshot.rows[0]?.status, 'active');
+    await boundaryClient.query(`
+      insert into application_submission_attempt_events (id, user_id, payload)
+      values ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee3', $1, 'boundary-authorized')
+    `, [USER_A]);
+    await assert.rejects(
+      mutationClient.query(`
+        update billing_subscriptions set status = 'canceled' where user_id = $1
+      `, [USER_A]),
+      isSerializationFailure,
+      'subscription cancellation cannot interleave after the boundary authority snapshot',
+    );
+    await boundaryClient.query('commit');
+    await mutationClient.query(`
+      update billing_subscriptions set status = 'canceled' where user_id = $1
+    `, [USER_A]);
+
+    await admin.query(`
+      update users set automatic_submission_enabled = true where id = $1
+    `, [USER_A]);
+    await admin.query(`
+      update billing_subscriptions set status = 'active' where user_id = $1
+    `, [USER_A]);
+    await mutationClient.query('begin');
+    await mutationClient.query(`
+      update users set automatic_submission_enabled = false where id = $1
+    `, [USER_A]);
+    await boundaryClient.query('begin');
+    let boundaryLockAcquired = false;
+    const pendingBoundaryLock = boundaryClient.query(lockSql, [USER_A]).then(() => {
+      boundaryLockAcquired = true;
+    });
+    await delay(100);
+    assert.equal(boundaryLockAcquired, false, 'boundary creation waits behind an authority-lowering mutation');
+    await mutationClient.query('commit');
+    await pendingBoundaryLock;
+    const loweredSnapshot = await boundaryClient.query<{ automatic_submission_enabled: boolean }>(`
+      select automatic_submission_enabled from users where id = $1
+    `, [USER_A]);
+    assert.equal(loweredSnapshot.rows[0]?.automatic_submission_enabled, false);
+    await boundaryClient.query('rollback');
+
+    const boundaryCount = await admin.query<{ count: string }>(`
+      select count(*)::text as count
+      from application_submission_attempt_events
+      where user_id = $1 and payload = 'boundary-authorized'
+    `, [USER_A]);
+    assert.equal(boundaryCount.rows[0]?.count, '2', 'the lowered snapshot cannot create a third boundary');
+  } finally {
+    for (const client of clients.reverse()) await client.end().catch(() => undefined);
+    if (postgresServer.exitCode === null) {
+      postgresServer.kill('SIGTERM');
+      await Promise.race([
+        new Promise<void>((resolve) => postgresServer.once('close', () => resolve())),
+        delay(5_000),
+      ]);
+    }
+    if (postgresServer.exitCode === null) postgresServer.kill('SIGKILL');
+    rmSync(postgresRoot, { recursive: true, force: true });
   }
 });
 

@@ -11,7 +11,11 @@ export type ManagedContinuationRecoveryState = {
 
 export type ManagedContinuationRecoveryPlan =
   | { kind: 'none' }
-  | { kind: 'invalid'; reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid' }
+  | {
+      kind: 'invalid';
+      reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid';
+      submissionAttempt: ManagedSubmissionAttempt;
+    }
   | { kind: 'expired'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string }
   | { kind: 'poll'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string };
 
@@ -33,17 +37,19 @@ export function planManagedContinuationRecovery(input: {
   if (state?.runner !== 'stratus-managed'
     || state.status !== 'verification_pending'
     || state.continuationResumed !== true) return { kind: 'none' };
-  if (!input.bindingMatches) return { kind: 'invalid', reason: 'binding_mismatch' };
+  if (!input.bindingMatches) {
+    return { kind: 'invalid', reason: 'binding_mismatch', submissionAttempt: input.submissionAttempt };
+  }
   if (state.continuationExecutionFingerprint
     !== managedContinuationAttemptFingerprint(input.submissionAttempt)) {
-    return { kind: 'invalid', reason: 'execution_mismatch' };
+    return { kind: 'invalid', reason: 'execution_mismatch', submissionAttempt: input.submissionAttempt };
   }
   const providerDeadlineAt = state.continuationCallDeadlineAt;
   const providerDeadlineMs = providerDeadlineAt ? Date.parse(providerDeadlineAt) : Number.NaN;
   if (!providerDeadlineAt
     || !Number.isFinite(providerDeadlineMs)
     || providerDeadlineAt !== new Date(providerDeadlineMs).toISOString()) {
-    return { kind: 'invalid', reason: 'deadline_invalid' };
+    return { kind: 'invalid', reason: 'deadline_invalid', submissionAttempt: input.submissionAttempt };
   }
   return providerDeadlineMs <= input.nowMs
     ? { kind: 'expired', submissionAttempt: input.submissionAttempt, providerDeadlineAt }

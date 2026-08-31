@@ -13,6 +13,7 @@ const SCHEMA_VERSION = 'submission-authority-v1';
 const MIGRATION_LOCK = [1414090051, 20260828];
 
 const DIRECT_OWNER_TABLES = [
+  'managed_submission_account_deletion_drains',
   'application_submission_attempt_events',
   'application_submission_events',
   'generated_resumes',
@@ -22,6 +23,8 @@ const DIRECT_OWNER_TABLES = [
 ];
 
 const DERIVED_OWNER_TABLES = [
+  ['users', 'user_self'],
+  ['billing_subscriptions', 'direct'],
   ['artifact_versions', 'artifact_version'],
   ['application_artifacts', 'application_artifact'],
 ];
@@ -45,9 +48,9 @@ async function assertPrerequisiteTables(client) {
     from information_schema.tables
     where table_schema = current_schema()
       and table_name = any($1::text[])
-  `, [COVERED_TABLES.map(([table]) => table).concat('users')]);
+  `, [[...new Set(COVERED_TABLES.map(([table]) => table).concat('users'))]]);
   const present = new Set(result.rows.map((row) => row.table_name));
-  const missing = COVERED_TABLES.map(([table]) => table).concat('users')
+  const missing = [...new Set(COVERED_TABLES.map(([table]) => table).concat('users'))]
     .filter((table) => !present.has(table));
   if (missing.length) {
     throw new Error(`Submission authority revision prerequisites are missing: ${missing.join(', ')}`);
@@ -165,7 +168,7 @@ async function assertCatalog(client) {
     ['bump_submission_authority_revision', /revision = submission_authority_revisions\.revision \+ 1/u],
     ['enforce_submission_authority_revision_monotonicity', /new\.revision <= old\.revision/u],
     ['submission_authority_application_artifact_owner', /application artifact ownership mismatch/u],
-    ['submission_authority_revision_row_trigger', /tg_op = 'delete'.*pg_trigger_depth\(\) > 1.*action_mode = 'lock'.*action_mode = 'bump'/u],
+    ['submission_authority_revision_row_trigger', /tg_op = 'delete'.*pg_trigger_depth\(\) > 1.*owner_mode = 'user_self'.*action_mode = 'lock'.*action_mode = 'bump'/u],
   ]);
   for (const [name, pattern] of functionContract) {
     const definition = functionByName.get(name);
@@ -189,6 +192,12 @@ async function main() {
     await client.query("set statement_timeout = '2min'");
     await client.query('begin');
     await client.query('select pg_advisory_xact_lock($1, $2)', MIGRATION_LOCK);
+    await client.query(`
+      create table if not exists managed_submission_account_deletion_drains (
+        user_id uuid primary key references users(id) on delete cascade,
+        requested_at timestamptz not null default now()
+      )
+    `);
     await assertPrerequisiteTables(client);
 
     const lockedTables = COVERED_TABLES.map(([table]) => quotedIdentifier(table)).join(', ');
@@ -398,6 +407,9 @@ async function main() {
         if owner_mode = 'direct' then
           if old_payload is not null then old_owner := nullif(old_payload->>'user_id', '')::uuid; end if;
           if new_payload is not null then new_owner := nullif(new_payload->>'user_id', '')::uuid; end if;
+        elsif owner_mode = 'user_self' then
+          if old_payload is not null then old_owner := nullif(old_payload->>'id', '')::uuid; end if;
+          if new_payload is not null then new_owner := nullif(new_payload->>'id', '')::uuid; end if;
         elsif owner_mode = 'artifact_version' then
           if old_payload is not null then
             select user_id into old_owner from artifacts

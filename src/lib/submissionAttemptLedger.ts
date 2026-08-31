@@ -4,6 +4,7 @@ import { db } from '../db';
 import {
   application_submission_attempt_events,
   application_submission_attempt_ledger_cutovers,
+  managed_submission_account_deletion_drains,
 } from '../db/schema';
 import {
   ashbyPostingFromUrl,
@@ -428,6 +429,29 @@ export class SubmissionAttemptBindingConflictError extends Error {
   }
 }
 
+export class SubmissionAccountDeletionDrainError extends Error {
+  readonly code = 'SUBMISSION_ACCOUNT_DELETION_DRAINING';
+
+  constructor() {
+    super('Account deletion is draining managed employer capabilities');
+    this.name = 'SubmissionAccountDeletionDrainError';
+  }
+}
+
+/** Refuse any new employer capability after account deletion has fenced the user. */
+export async function assertSubmissionAccountNotDraining(
+  executor: Pick<SubmissionAttemptLedgerExecutor, 'select'>,
+  userId: string,
+): Promise<void> {
+  const [drain] = await executor.select({
+    userId: managed_submission_account_deletion_drains.user_id,
+  }).from(managed_submission_account_deletion_drains).where(eq(
+    managed_submission_account_deletion_drains.user_id,
+    userId,
+  )).limit(1);
+  if (drain) throw new SubmissionAccountDeletionDrainError();
+}
+
 /** Insert one fact, or return the identical fact when an idempotent request is replayed. */
 export async function appendSubmissionAttemptEvent(
   input: AppendSubmissionAttemptEventInput,
@@ -441,6 +465,9 @@ export async function appendSubmissionAttemptEvent(
   // Every authority fact shares the user advisory transaction lock. Callers supplying an executor
   // must supply their active write transaction; the lock is reentrant when the sink already owns it.
   await lockSubmissionAttemptUser(executor, input.userId);
+  if (input.eventKind === 'attempt_opened' || input.eventKind === 'boundary_authorized') {
+    await assertSubmissionAccountNotDraining(executor, input.userId);
+  }
   const existingAttempt = await executor.select().from(application_submission_attempt_events).where(and(
     eq(application_submission_attempt_events.user_id, input.userId),
     eq(application_submission_attempt_events.attempt_id, input.attemptId),
@@ -534,6 +561,7 @@ export async function authorizeFinalSubmissionBoundary(
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > 5 * 60 * 1000) {
     throw new Error('Submission boundary authorization TTL must be between 1 ms and 5 minutes');
   }
+  await assertSubmissionAccountNotDraining(options.executor, binding.userId);
   const events = await options.executor.select().from(application_submission_attempt_events).where(and(
     eq(application_submission_attempt_events.user_id, binding.userId),
     eq(application_submission_attempt_events.attempt_id, binding.attemptId),

@@ -474,27 +474,29 @@ test('render and object storage do not hold the production one-connection pool',
   assert.equal(result.state, 'ready_for_review');
 });
 
-test('an expired takeover uses a new object key so the stale worker cannot overwrite the committed PDF', async () => {
+test('a crash-after-upload takeover retains one referenced object key instead of orphaning a PII PDF', async () => {
   await seedUser(STUDENT, 'student@example.test');
   const { prepareManagedApplication } = await import('../lib/managedPrepare');
   let clock = new Date('2026-08-31T12:00:00.000Z');
-  let releaseFirstRender!: () => void;
-  let reportFirstRenderEntered!: () => void;
-  const firstRenderEntered = new Promise<void>((resolve) => { reportFirstRenderEntered = resolve; });
-  const firstRenderGate = new Promise<void>((resolve) => { releaseFirstRender = resolve; });
+  let releaseFirstUpload!: () => void;
+  let reportFirstUploadCompleted!: () => void;
+  const firstUploadCompleted = new Promise<void>((resolve) => { reportFirstUploadCompleted = resolve; });
+  const firstUploadCrashGate = new Promise<void>((resolve) => { releaseFirstUpload = resolve; });
   const firstBytes = Buffer.from('%PDF-1.4\nstale-worker\n%%EOF\n');
   const secondBytes = Buffer.from('%PDF-1.4\ntakeover-winner\n%%EOF\n');
 
   const first = prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
     ...dependencies,
     now: () => new Date(clock),
-    renderMainResume: async ({ spec }) => {
-      reportFirstRenderEntered();
-      await firstRenderGate;
-      return { buffer: firstBytes, spec };
+    renderMainResume: async ({ spec }) => ({ buffer: firstBytes, spec }),
+    storeResume: async (requestedKey, bytes) => {
+      const stored = await dependencies.storeResume!(requestedKey, bytes);
+      reportFirstUploadCompleted();
+      await firstUploadCrashGate;
+      return stored;
     },
   });
-  await firstRenderEntered;
+  await firstUploadCompleted;
   const [reservedBeforeTakeover] = (await database.query<Record<string, any>>(
     'select "spec", "resume_object_key" from "generated_resumes" where "user_id" = $1',
     [STUDENT],
@@ -514,17 +516,23 @@ test('an expired takeover uses a new object key so the stale worker cannot overw
   )).rows;
   assert.equal(second.state, 'ready_for_review');
   assert.equal(committed?.spec._managed_prepare.phase, 'stored');
-  assert.notEqual(committed?.resume_object_key, staleObjectKey);
+  assert.equal(committed?.resume_object_key, staleObjectKey);
   assert.deepEqual(storedDocuments.get(committed?.resume_object_key), secondBytes);
 
-  releaseFirstRender();
+  releaseFirstUpload();
   await assert.rejects(
     first,
-    (error: unknown) => (error as { code?: string }).code === 'managed_packet_changed',
+    (error: unknown) => (error as { code?: string }).code === 'main_resume_storage_failed',
   );
-  assert.deepEqual(storedDocuments.get(committed?.resume_object_key), secondBytes);
-  assert.equal(storedDocuments.has(staleObjectKey), false);
-  assert.equal(deleteCalls, 1);
+  const storedKeys = [...storedDocuments.keys()];
+  const referencedKeys = (await database.query<{ resume_object_key: string }>(
+    'select "resume_object_key" from "generated_resumes" where "user_id" = $1',
+    [STUDENT],
+  )).rows.map((row) => row.resume_object_key);
+  assert.deepEqual(storedKeys, [staleObjectKey]);
+  assert.deepEqual(referencedKeys, [staleObjectKey]);
+  assert.deepEqual(storedDocuments.get(staleObjectKey), secondBytes);
+  assert.equal(deleteCalls, 0, 'a stale worker must not delete the stable key owned by its takeover');
 });
 
 test('a failed external render releases only its reservation so an immediate retry can reuse the object identity', async () => {

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   managedTerminalCleanupBatchWindow,
+  drainManagedTerminalCleanupEntries,
   managedTerminalCleanupRetrievalDisposition,
   retryManagedTerminalCleanupDelivery,
   specWithManagedTerminalCleanupEntries,
+  specWithManagedTerminalCleanupQuarantines,
   specWithManagedTerminalFold,
   type BoundManagedTerminalCleanupMarker,
   type ManagedTerminalCleanupMarker,
@@ -155,4 +157,92 @@ test('a pending cleanup execution binds once to its exact result and rejects a d
     }]),
     /already bound to another result/,
   );
+});
+
+test('account cleanup keeps pending executions durable and completes only provider-confirmed gone', async () => {
+  const completed: ManagedTerminalCleanupMarker[] = [];
+  const pending = { ...marker, resultId: null };
+  const first = await drainManagedTerminalCleanupEntries([pending], {
+    retrieve: async () => ({ state: 'pending' }),
+    bind: async () => { throw new Error('pending results cannot bind'); },
+    acknowledge: async () => { throw new Error('pending results cannot acknowledge'); },
+    complete: async (entry) => { completed.push(entry); },
+  });
+  assert.deepEqual(first, { attempted: 1, completed: 0, pending: 1 });
+  assert.equal(completed.length, 0);
+
+  const gone = await drainManagedTerminalCleanupEntries([pending], {
+    retrieve: async () => ({ state: 'gone' }),
+    bind: async () => { throw new Error('gone results cannot bind'); },
+    acknowledge: async () => { throw new Error('gone results cannot acknowledge'); },
+    complete: async (entry) => { completed.push(entry); },
+  });
+  assert.deepEqual(gone, { attempted: 1, completed: 1, pending: 0 });
+  assert.deepEqual(completed, [pending]);
+});
+
+test('provider failure preserves cleanup and a retry binds then acknowledges the exact result', async () => {
+  const pending = { ...marker, resultId: null };
+  let providerAvailable = false;
+  const acknowledged: BoundManagedTerminalCleanupMarker[] = [];
+  const completed: ManagedTerminalCleanupMarker[] = [];
+  const dependencies = {
+    retrieve: async () => {
+      if (!providerAvailable) throw new Error('provider unavailable');
+      return { state: 'completed' as const, resultId: marker.resultId };
+    },
+    bind: async (_entry: ManagedTerminalCleanupMarker, resultId: string) => ({
+      ...pending,
+      resultId,
+    }) as BoundManagedTerminalCleanupMarker,
+    acknowledge: async (entry: BoundManagedTerminalCleanupMarker) => { acknowledged.push(entry); },
+    complete: async (entry: ManagedTerminalCleanupMarker) => { completed.push(entry); },
+  };
+  assert.deepEqual(
+    await drainManagedTerminalCleanupEntries([pending], dependencies),
+    { attempted: 1, completed: 0, pending: 1 },
+  );
+  providerAvailable = true;
+  assert.deepEqual(
+    await drainManagedTerminalCleanupEntries([pending], dependencies),
+    { attempted: 1, completed: 1, pending: 0 },
+  );
+  assert.deepEqual(acknowledged, [marker]);
+  assert.deepEqual(completed, [marker]);
+});
+
+test('initial and continuation cleanup drain independently without dropping a failed sibling', async () => {
+  const failedExecutionId = marker.submissionAttempt.executionId;
+  const completed: string[] = [];
+  const result = await drainManagedTerminalCleanupEntries([marker, continuationMarker], {
+    retrieve: async () => { throw new Error('bound entries do not retrieve'); },
+    bind: async () => { throw new Error('bound entries do not bind'); },
+    acknowledge: async (entry) => {
+      if (entry.submissionAttempt.executionId === failedExecutionId) {
+        throw new Error('controlled provider failure');
+      }
+    },
+    complete: async (entry) => { completed.push(entry.submissionAttempt.executionId); },
+  });
+  assert.deepEqual(result, { attempted: 2, completed: 1, pending: 1 });
+  assert.deepEqual(completed, [continuationMarker.submissionAttempt.executionId]);
+});
+
+test('an unreconstructible continuation cleanup is durably quarantined', () => {
+  const quarantine = {
+    version: 'managed-terminal-cleanup-quarantine-v1' as const,
+    attemptId: marker.attemptId,
+    reason: 'binding_mismatch' as const,
+    continuationExecutionFingerprint: null,
+  };
+  const spec = specWithManagedTerminalCleanupQuarantines({ packet: 'kept' }, [quarantine]);
+  assert.deepEqual(spec, {
+    packet: 'kept',
+    _managed_terminal_cleanup_quarantine: {
+      version: 'managed-terminal-cleanup-quarantine-v1',
+      entries: {
+        [`${marker.attemptId}:binding_mismatch:unreconstructible`]: quarantine,
+      },
+    },
+  });
 });

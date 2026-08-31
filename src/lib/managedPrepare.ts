@@ -248,6 +248,20 @@ function managedPrepareReservationObjectKey(input: {
   return `users/${input.userId}/managed-main-resumes/${input.jobId}/${input.reservationId}/${input.mainResumeDigest}.pdf`;
 }
 
+function managedPrepareReservationObjectKeyMatches(input: {
+  userId: string;
+  jobId: string;
+  mainResumeDigest: string;
+  objectKey: string;
+}): boolean {
+  const prefix = `users/${input.userId}/managed-main-resumes/${input.jobId}/`;
+  if (!input.objectKey.startsWith(prefix)) return false;
+  const suffix = `/${input.mainResumeDigest}.pdf`;
+  const reservationId = input.objectKey.slice(prefix.length, -suffix.length);
+  return input.objectKey.endsWith(suffix)
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(reservationId);
+}
+
 function exactManagedReview(row: ResumeRow, applicationId: string): ApplicationReviewState | null {
   const metadata = managedPrepareMetadata(row.spec);
   const review = readApplicationReview(row.spec);
@@ -565,14 +579,13 @@ export async function prepareManagedApplication(
       }
 
       if (reservation) {
-        const expectedReservationKey = managedPrepareReservationObjectKey({
+        const expectedReservationKey = reservation.requested_object_key;
+        if (!managedPrepareReservationObjectKeyMatches({
           userId: input.userId,
           jobId: posting.id,
           mainResumeDigest,
-          reservationId: reservation.reservation_id,
-        });
-        if (reservation.requested_object_key !== expectedReservationKey
-          || existing.resume_object_key !== expectedReservationKey) {
+          objectKey: expectedReservationKey,
+        }) || existing.resume_object_key !== expectedReservationKey) {
           return prepareError(409, 'managed_packet_identity_mismatch', 'The saved packet does not match this application. Nothing was opened or sent.');
         }
         const reservationNow = dependencies.now();
@@ -580,12 +593,10 @@ export async function prepareManagedApplication(
           return prepareError(409, 'managed_packet_preparing', 'Litos is already preparing this exact packet. Try again shortly.');
         }
         const reservationId = dependencies.newId();
-        const requestedKey = managedPrepareReservationObjectKey({
-          userId: input.userId,
-          jobId: posting.id,
-          mainResumeDigest,
-          reservationId,
-        });
+        // The object identity stays stable across lease takeovers. A worker that uploads and then
+        // crashes can therefore leave only the key still referenced by this exact packet, never an
+        // unreferenced PII object under an expired reservation ID.
+        const requestedKey = expectedReservationKey;
         const nextReservation = managedPrepareReservation({
           applicationId,
           packetId: existing.id,
@@ -689,11 +700,10 @@ export async function prepareManagedApplication(
   if (stage.reservation) {
     const reservation = stage.reservation;
     let storedByReservation = false;
-    const abandonReservation = async () => {
-      await db.transaction(async (tx) => {
+    const abandonReservation = async (): Promise<boolean> => db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`managed-prepare:${input.userId}:${posting.id}`}, 0::bigint))`);
-        await tx.delete(generated_resumes).where(and(
+        const deleted = await tx.delete(generated_resumes).where(and(
           eq(generated_resumes.id, stage.row.id),
           eq(generated_resumes.user_id, input.userId),
           sql`${generated_resumes.spec}->'_managed_prepare'->>'phase' = 'reserved'`,
@@ -702,9 +712,9 @@ export async function prepareManagedApplication(
             select 1 from ${artifacts}
              where ${artifacts.legacy_generated_resume_id} = ${generated_resumes.id}
           )`,
-        ));
+        )).returning({ id: generated_resumes.id });
+        return deleted.length > 0;
       });
-    };
 
     try {
       const resumeEmail = resumeEmailForUpload(reservation.parsedProfile, reservation.accountEmail);
@@ -843,10 +853,10 @@ export async function prepareManagedApplication(
         created: stage.created,
       };
     } catch (error) {
-      if (storedByReservation) {
+      const abandoned = await abandonReservation().catch(() => false);
+      if (storedByReservation && abandoned) {
         await dependencies.deleteResume(reservation.requestedKey).catch(() => undefined);
       }
-      await abandonReservation().catch(() => undefined);
       throw error;
     }
   }

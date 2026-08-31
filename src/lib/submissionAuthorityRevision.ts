@@ -82,6 +82,7 @@ export async function bumpSubmissionAuthorityRevision(
 }
 
 const DIRECT_OWNER_TABLES = [
+  'managed_submission_account_deletion_drains',
   'application_submission_attempt_events',
   'application_submission_events',
   'generated_resumes',
@@ -91,6 +92,8 @@ const DIRECT_OWNER_TABLES = [
 ] as const;
 
 const DERIVED_OWNER_TABLES = [
+  ['users', 'user_self'],
+  ['billing_subscriptions', 'direct'],
   ['artifact_versions', 'artifact_version'],
   ['application_artifacts', 'application_artifact'],
 ] as const;
@@ -127,7 +130,7 @@ function catalogRowsAreReady(rows: readonly { kind: unknown; name: unknown; defi
     ['bump_submission_authority_revision', /revision = submission_authority_revisions\.revision \+ 1/u],
     ['enforce_submission_authority_revision_monotonicity', /new\.revision <= old\.revision/u],
     ['submission_authority_application_artifact_owner', /application artifact ownership mismatch/u],
-    ['submission_authority_revision_row_trigger', /tg_op = 'delete'.*pg_trigger_depth\(\) > 1.*action_mode = 'lock'.*action_mode = 'bump'/u],
+    ['submission_authority_revision_row_trigger', /tg_op = 'delete'.*pg_trigger_depth\(\) > 1.*owner_mode = 'user_self'.*action_mode = 'lock'.*action_mode = 'bump'/u],
   ]);
   for (const [name, pattern] of functionContract) {
     if (!pattern.test(catalog.get(`function:${name}`) ?? '')) return false;
