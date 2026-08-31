@@ -154,6 +154,10 @@ jobs:
       - name: Check schema drift against the database
         env:
           DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+          # Railway's private root certificate, mirrored from litos-api's DATABASE_SSL_ROOT_CERT.
+          # Without it the runner cannot verify the proxy's TLS chain and the check dies with
+          # "self-signed certificate in certificate chain" before comparing anything.
+          SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ${{ secrets.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT }}
         run: |
           if [ -z "$DATABASE_URL" ]; then
             echo "::warning title=Schema drift NOT checked::SCHEMA_CHECK_DATABASE_URL is not set, so this PR was not compared against the database. Set the secret to enable the guard."
