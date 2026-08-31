@@ -422,7 +422,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
    * The grant is claimed BEFORE generation, because the claim is what decides whether generation is
    * allowed to start at all and a read-then-write would let two concurrent builds each see it
    * unspent. That ordering means a model timeout, a render failure or any of this handler's many
-   * early returns would otherwise cost a student their one free build for something that produced
+   * early returns would otherwise cost a student a free build for something that produced
    * no resume.
    *
    * onSend rather than a try/catch around the generation: this handler answers from a dozen places
@@ -487,14 +487,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // precedes posting reads, quotas, reservations, profile decryption, model calls, and rendering.
     // An explicit click during a trial still checks only ai_resume_tailoring below.
     let tailoringVerdict: Awaited<ReturnType<typeof requireFeature>> | undefined;
-    /* THE ONE FREE BUILD A NEW ACCOUNT GETS, and it is claimed here rather than granted anywhere
-       else, because this is the only place that knows a tailoring request was refused.
+    /* THE FREE BUILDS A NEW ACCOUNT GETS (two since 2026-09-01, so going back to re-upload a
+       resume does not paywall the rebuild), claimed here rather than granted anywhere else,
+       because this is the only place that knows a tailoring request was refused.
      *
        Onboarding builds a real application at step 3 and takes the card at step 10; tailoring is a
        Litos+ feature and a new account has no trial, so without this the flow stopped dead at step
-       3 for everybody (measured on production 2026-08-19). The grant is one per account and only
-       while the account is still IN setup - both conditions are in the WHERE clause of the claim,
-       so it cannot be taken twice or taken by a finished account. See lib/onboardingBuildGrant.ts.
+       3 for everybody (measured on production 2026-08-19). The grant is limited per account and
+       only while the account is still IN setup - both conditions are in the WHERE clause of the
+       claim, so it cannot be overdrawn or taken by a finished account. See
+       lib/onboardingBuildGrant.ts.
      *
        It is claimed only on a DENIAL. An entitled account never touches it, which is what keeps a
        paying student's build from silently consuming a grant they did not need. */

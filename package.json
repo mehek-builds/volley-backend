@@ -77,6 +77,7 @@
     "test:logo-provider-circuit-migration": "node --test scripts/apply-logo-provider-circuit-schema.test.mjs",
     "schema:apply-automation-consent": "node scripts/apply-automation-consent-schema.mjs",
     "db:onboarding-build-grant": "node scripts/apply-onboarding-build-grant-migration.mjs",
+    "db:onboarding-build-grant-limit": "node scripts/apply-onboarding-build-grant-limit-migration.mjs",
     "db:job-first-entry": "node scripts/apply-job-first-entry-migration.mjs",
     "db:automatic-verification": "node scripts/apply-automatic-verification-migration.mjs",
     "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
