@@ -40,14 +40,21 @@ async function main() {
      the same still-in-setup guard applies, so it can never turn a finished account into a free
      tier. --refund stays the narrow repair: one claim back, only at the limit. */
   const resetFlag = process.argv.indexOf('--reset');
-  if (refundFlag !== -1 && resetFlag !== -1) {
-    console.error('Pick one of --refund or --reset.');
+  const grantFlag = process.argv.indexOf('--grant');
+  if ([refundFlag, resetFlag, grantFlag].filter((flag) => flag !== -1).length > 1) {
+    console.error('Pick one of --refund, --reset, or --grant.');
     process.exit(2);
   }
-  const mode = refundFlag !== -1 ? 'refund' : resetFlag !== -1 ? 'reset' : 'list';
-  const email = mode === 'refund' ? process.argv[refundFlag + 1] : mode === 'reset' ? process.argv[resetFlag + 1] : null;
+  const mode = refundFlag !== -1 ? 'refund' : resetFlag !== -1 ? 'reset' : grantFlag !== -1 ? 'grant' : 'list';
+  const flagAt = mode === 'refund' ? refundFlag : mode === 'reset' ? resetFlag : grantFlag;
+  const email = mode === 'list' ? null : process.argv[flagAt + 1];
+  const grantCount = mode === 'grant' ? Number.parseInt(process.argv[flagAt + 2] ?? '', 10) : null;
   if (mode !== 'list' && !email) {
-    console.error('Usage: refund-onboarding-build-claim.mjs [--refund <email> | --reset <email>]');
+    console.error('Usage: refund-onboarding-build-claim.mjs [--refund <email> | --reset <email> | --grant <email> <n>]');
+    process.exit(2);
+  }
+  if (mode === 'grant' && (!Number.isInteger(grantCount) || grantCount < 1 || grantCount > 20)) {
+    console.error('--grant needs a build count between 1 and 20.');
     process.exit(2);
   }
 
@@ -63,6 +70,27 @@ async function main() {
     const identity = await client.query('select current_database() as db, inet_server_addr()::text as addr');
     console.log(`Connected to "${identity.rows[0].db}" at ${identity.rows[0].addr ?? 'local socket'}.`);
     await client.query("set statement_timeout = '30s'");
+
+    if (mode === 'grant') {
+      /* Test-account budget: N builds available means the counter sits at LIMIT - N, and a
+         negative counter is the deliberate trick that lets an operator account claim past the
+         product limit without touching ONBOARDING_BUILD_LIMIT for everyone. Guarded to accounts
+         still in setup, like everything else here. */
+      const updated = await client.query(
+        `update "users"
+            set "onboarding_builds_used" = $2
+          where "email" = $1
+            and "onboarding_completed_at" is null
+          returning "email", "onboarding_builds_used"`,
+        [email, LIMIT - grantCount],
+      );
+      if (updated.rowCount === 0) {
+        console.log(`Nothing granted: "${email}" was not found still in setup.`);
+        return;
+      }
+      console.log(`Granted: ${updated.rows[0].email} can claim ${grantCount} build(s) (counter at ${updated.rows[0].onboarding_builds_used}, limit ${LIMIT}).`);
+      return;
+    }
 
     if (mode === 'reset') {
       const updated = await client.query(
