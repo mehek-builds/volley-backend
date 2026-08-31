@@ -13,6 +13,7 @@ import {
 import { purgeExpiredEntitledUsageResults } from '../lib/entitlements';
 import { purgeExpiredNetworkImportPreviews } from '../lib/networkPreviewRetention';
 import { objectStorageConfigured } from '../lib/objectStorage';
+import { retryAllManagedPrepareObjectCleanup } from '../lib/managedPrepare';
 
 // The breakdown fields are optional because they describe a sweep's own bookkeeping, not the
 // contract a caller depends on: the production implementation always fills them, and a test
@@ -35,6 +36,7 @@ export type ResumeRetentionDependencies = {
   clearLegacyPointers: (userIds: string[]) => Promise<void>;
   purgeExpiredUsageResults: () => Promise<number>;
   purgeExpiredNetworkPreviews: () => Promise<number>;
+  sweepManagedPrepareObjectCleanup: () => Promise<number>;
 };
 
 type ResumeRetentionRouteOptions = FastifyPluginOptions & {
@@ -45,6 +47,7 @@ const productionDependencies: ResumeRetentionDependencies = {
   sweepExpiredResumeBlobs,
   purgeExpiredUsageResults: purgeExpiredEntitledUsageResults,
   purgeExpiredNetworkPreviews: purgeExpiredNetworkImportPreviews,
+  sweepManagedPrepareObjectCleanup: retryAllManagedPrepareObjectCleanup,
   // Scoped to the owners whose legacy original was actually deleted on this run. It was
   // previously an unscoped `db.update(profiles).set({...: null})` with no WHERE, which nulled both
   // columns for EVERY profile on every successful sweep, including the zero-deletion nights that
@@ -117,6 +120,7 @@ async function handleSweep(
     await dependencies.clearLegacyPointers(legacyOriginalOwnerIds(deletedPathnames));
     const expiredUsageReceipts = await dependencies.purgeExpiredUsageResults();
     const expiredNetworkPreviews = await dependencies.purgeExpiredNetworkPreviews();
+    const supersededManagedPrepareObjects = await dependencies.sweepManagedPrepareObjectCleanup();
     // A key shape no retention rule recognises is kept, because deleting an artifact nobody has
     // classified is the worse mistake - but it is never kept SILENTLY. Form previews sat
     // unswept for the life of the feature because a new prefix simply fell through the old
@@ -139,6 +143,7 @@ async function handleSweep(
         previewRetentionDays: SUBMISSION_PREVIEW_RETENTION_DAYS,
         expiredUsageReceipts,
         expiredNetworkPreviews,
+        supersededManagedPrepareObjects,
       },
       'resume retention sweep complete',
     );
@@ -148,6 +153,7 @@ async function handleSweep(
       deleted_by_category: deletedByCategory,
       unclassified,
       retention_days: RESUME_RETENTION_DAYS,
+      superseded_managed_prepare_objects: supersededManagedPrepareObjects,
       preview_retention_days: SUBMISSION_PREVIEW_RETENTION_DAYS,
       expired_usage_receipts: expiredUsageReceipts,
       expired_network_previews: expiredNetworkPreviews,

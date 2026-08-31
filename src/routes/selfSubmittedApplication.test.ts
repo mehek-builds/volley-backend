@@ -20,6 +20,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync('src/routes/applications.ts', 'utf8');
+const projection = readFileSync('src/lib/authoritativeSubmissionProjection.ts', 'utf8');
 const route = source.slice(
   source.indexOf("'/applications/:id/submission/self-submitted'"),
   source.indexOf("'/applications/:id/submission/approve'"),
@@ -30,7 +31,8 @@ test('the exit is authenticated and owner-scoped, like every other route in this
      preHandler is silently public - and this one writes a terminal status. */
   assert.match(route, /preHandler: requireAuth/);
   assert.match(route, /const row = await ownedResume\(request, reply\)/);
-  assert.match(route, /eq\(generated_resumes\.user_id, request\.jwtPayload!\.userId\)/);
+  assert.match(route, /const userId = request\.jwtPayload!\.userId/);
+  assert.match(route, /eq\(generated_resumes\.user_id, userId\)/);
 });
 
 test('it answers only for a packet that is genuinely stranded', () => {
@@ -43,15 +45,18 @@ test('it answers only for a packet that is genuinely stranded', () => {
   assert.match(route, /Litos can still finish this one/);
   // And the write is conditional on the status it answered for, so a send that started somewhere
   // else in the meantime is not overwritten by an answer about the screen before it.
-  assert.match(route, /'_review'->>'status' = 'ready_for_final_approval'/);
-  assert.match(route, /submitted\.length === 0[\s\S]{0,300}status\(202\)/);
+  assert.match(route, /latest\.status !== 'ready_for_final_approval'/);
+  assert.match(route, /sameApplicationPacketSpec\(locked\.spec, audit\.row\.spec\)/);
+  assert.match(route, /JSON\.stringify\(locked\.spec\)/);
+  assert.match(route, /if \(!updated\) throw new Error\('SELF_SUBMIT_WRITE_CONFLICT'\)/);
+  assert.match(route, /result\.kind === 'changed'[\s\S]{0,300}status\(202\)/);
 });
 
 test('it writes an existing state through the shared merge, and never invents one', () => {
   /* applyReviewPatch rather than a spread: the shared merge is where withTerminalCause enforces that
      a terminal state carries a cause, and three production rows reached 'failed' with no stated
      reason when a route built its own review object. */
-  assert.match(route, /applyReviewPatch\(current, \{/);
+  assert.match(route, /applyReviewPatch\(latest, \{/);
   assert.match(route, /status: 'submitted'/);
   assert.match(route, /pipeline_stage: 'applied'/);
   assert.doesNotMatch(route, /status: '(?!submitted')/, 'no new status belongs to this answer');
@@ -62,6 +67,7 @@ test('the receipt names her as the witness rather than claiming Litos watched it
      confirmation it never saw. 'attended_handoff' is the source the two existing "a person saw this"
      answers already use, so the tracker and the receipt screen need no new case. */
   assert.match(route, /source: 'attended_handoff'/);
-  assert.match(route, /confirmation_text: 'Confirmed by you/);
-  assert.match(route, /you sent this application yourself/);
+  assert.match(route, /confirmation_text: selfSubmittedSubmissionReceiptText\(\)/);
+  assert.match(projection, /const SELF_SUBMITTED_RECEIPT_TEXT =\s*'Confirmed by you:/);
+  assert.match(projection, /you sent this application yourself/);
 });

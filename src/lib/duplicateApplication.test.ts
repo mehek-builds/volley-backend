@@ -194,7 +194,10 @@ describe('the verdict over a set of already-submitted applications', () => {
 
   test('a packet that shares no key with anything submitted says so', () => {
     const verdict = duplicateAmong({}, undefined, [submitted()]);
-    assert.deepEqual(verdict, { kind: 'unidentifiable' });
+    assert.equal(verdict.kind, 'unidentifiable');
+    if (verdict.kind !== 'unidentifiable') return;
+    assert.equal(verdict.prior_packet_id, 'd26aca4c-db65-4f07-a69e-811d85c52cf9');
+    assert.equal(verdict.reason.includes('cannot be safely compared'), true);
   });
 
   test('the refusal names the employer, the role and the day', () => {
@@ -227,6 +230,7 @@ describe('the verdict over a set of already-submitted applications', () => {
       code: 'DUPLICATE_APPLICATION',
       duplicate_of: 'd26aca4c-db65-4f07-a69e-811d85c52cf9',
       matched_on: 'ats_posting',
+      duplicate_certainty: 'submitted',
     });
   });
 });
@@ -353,12 +357,16 @@ describe('every path that can write status submitted is behind the guard', () =>
        submitRequestDisposition as re-runnable. So the refusal stands and the status it lands in
        depends on the packet. What this test exists to protect is unchanged and still checked: the
        write goes through the shared merge, and it carries duplicate.reason. */
-    const gateAt = runner.indexOf("if (duplicate.kind === 'duplicate')");
+    const submitAt = runner.indexOf('async function submit(row: ResumeRow');
+    const gateAt = runner.indexOf("if (duplicate.kind !== 'clear')", submitAt);
     assert.ok(gateAt > 0, 'the duplicate gate must still be in the runner');
-    const gate = runner.slice(gateAt, runner.indexOf('const claimedRow = await claimSubmission(row);', gateAt));
+    const gate = runner.slice(
+      gateAt,
+      runner.indexOf('const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);', gateAt),
+    );
     assert.match(gate, /nextReview\(current, \{/);
     assert.match(gate, /duplicate\.reason/);
-    assert.match(gate, /attention_categories:[\s\S]{0,120}'duplicate_application'/);
+    assert.match(gate, /attention_categories:[\s\S]{0,300}'duplicate_application'/);
     assert.match(gate, /'needs_attention'/);
   });
 });

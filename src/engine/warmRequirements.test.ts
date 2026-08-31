@@ -130,8 +130,9 @@ describe('a packet is tailored and scored against the WHOLE posting', () => {
   test('generate resolves the full description from job_id', () => {
     // The resolution moved into the shared, scoped helper; generate now delegates rather than
     // carrying its own copy of both the query and the predicate.
-    assert.match(generate, /const row = await postingRow\(body\.job_id\);/);
-    assert.match(generate, /jdText = resolveJdText\(jdText, row\?\.description\);/);
+    assert.match(generate, /const effectiveJobId = body\.job_id \?\? ownedCanonicalApplication\?\.job_id/);
+    assert.match(generate, /resolvedPosting = await actionPostingRowForUser\(effectiveJobId, userId\);/);
+    assert.match(generate, /jdText = resolveJdText\(jdText, resolvedPosting\.description\);/);
     assert.match(requirements, /left\(\$\{monitored_jobs\.description\}, 60000\)/);
   });
 
@@ -207,24 +208,31 @@ describe('the posting read is scoped, and the paid route is metered', () => {
      true when it started returning the DESCRIPTION, which /jd-match/requirements hands back clause
      by clause: any posting the board refuses to serve was readable by uuid alone. */
 
-  test('postingRow requires an enabled source and an allowed portal family', () => {
-    assert.match(routes, /eq\(career_page_sources\.enabled, true\)/);
-    assert.match(routes, /inArray\(career_page_sources\.ats_name, \[\.\.\.AUTONOMOUS_PORTAL_FAMILIES\]\)/);
+  test('raw job ids use the exact verified current-board predicate', () => {
+    const helper = routes.slice(
+      routes.indexOf('export async function currentActionPostingRow'),
+      routes.indexOf('export async function ownedHistoricalActionPostingRow'),
+    );
+    assert.match(helper, /\.innerJoin\(career_page_sources/);
+    assert.match(helper, /\.\.\.boardConditions\(\{ sponsorOnly, requireVerifiedEvidence: true \}\)/);
   });
 
-  test('it deliberately does NOT require is_active', () => {
-    /* The one place this differs from GET /jobs/:id, and it is load-bearing: a packet is often held
-       for a posting that has since closed, and refusing there would break the repair path for every
-       packet that stored the 600-character preview. Closure is a fact about the job; the source and
-       portal-family checks are the permission boundary. */
-    const helper = routes.slice(routes.indexOf('export async function postingRow'), routes.indexOf('export function resolveJdText'));
+  test('the closed-job fallback requires an owned application or packet', () => {
+    const helper = routes.slice(
+      routes.indexOf('export async function ownedHistoricalActionPostingRow'),
+      routes.indexOf('export async function actionPostingRowForUser'),
+    );
     assert.doesNotMatch(helper, /is_active/);
+    assert.match(helper, /\$\{applications\.user_id\} = \$\{userId\}/);
+    assert.match(helper, /\$\{applications\.job_id\} = \$\{monitored_jobs\.id\}/);
+    assert.match(helper, /\$\{generated_resumes\.user_id\} = \$\{userId\}/);
+    assert.match(helper, /job_context}->>'job_id'/);
   });
 
   test('generate reads the posting through that same helper, not its own query', () => {
     // A second inline query is a second place to forget the scoping, and a second predicate that
     // can drift from the one the review screen uses.
-    assert.match(generate, /const row = await postingRow\(body\.job_id\);/);
+    assert.match(generate, /resolvedPosting = await actionPostingRowForUser\(effectiveJobId, userId\);/);
     const handler = generate.slice(
       generate.indexOf("fastify.post('/resume/generate'"),
       generate.indexOf("fastify.get('/resume/download'"),

@@ -68,11 +68,20 @@ test('greenhouse wrapper canonicalization trusts the gh_jid URL convention and r
 test('monitored Greenhouse sources canonicalize company wrappers with source board tokens', () => {
   assert.equal(
     canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse', 'nuro'),
-    'https://job-boards.greenhouse.io/embed/job_app?for=nuro&token=4512345',
+    undefined,
   );
   assert.equal(
     canonicalMonitoredPortalUrl('https://www.jumptrading.com/hr/job?gh_jid=8052281', 'greenhouse', 'jumptrading'),
     'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8052281',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://databricks.com/company/careers/open-positions/job?gh_jid=6883068002',
+      'greenhouse',
+      'databricks',
+      '6883068002',
+    ),
+    'https://job-boards.greenhouse.io/embed/job_app?for=databricks&token=6883068002',
   );
   assert.equal(
     canonicalMonitoredPortalUrl('https://boards.greenhouse.io/embed/job_app?token=7351061', 'greenhouse', 'nuro'),
@@ -86,8 +95,110 @@ test('monitored Greenhouse sources canonicalize company wrappers with source boa
     canonicalMonitoredPortalUrl('https://job-boards.eu.greenhouse.io/imc/jobs/4829785101', 'greenhouse', 'imc'),
     'https://job-boards.eu.greenhouse.io/embed/job_app?for=imc&token=4829785101',
   );
+  assert.equal(
+    canonicalMonitoredPortalUrl('https://boards.greenhouse.io/embed/job_app?token=7351061', 'lever', 'acme'),
+    undefined,
+  );
   assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=4512345', 'greenhouse'), undefined);
   assert.equal(canonicalMonitoredPortalUrl('https://nuro.ai/careers?gh_jid=abc', 'greenhouse', 'nuro'), undefined);
+});
+
+test('monitored application URLs are bound to their exact provider, tenant, and posting', () => {
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://jobs.lever.co/acme/lever-job-1',
+      'lever',
+      'acme',
+      'lever-job-1',
+    ),
+    'https://jobs.lever.co/acme/lever-job-1/apply',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://jobs.ashbyhq.com/acme/ashby-job-1',
+      'ashby',
+      'acme',
+      'ashby-job-1',
+    ),
+    'https://jobs.ashbyhq.com/acme/ashby-job-1/application',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://apply.workable.com/j/A1B2C3',
+      'workable',
+      'acme',
+      'A1B2C3',
+    ),
+    'https://apply.workable.com/acme/j/A1B2C3/apply',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://apply.workable.com/acme/j/A1B2C3/apply',
+      'workable',
+      'acme',
+      'A1B2C3',
+    ),
+    'https://apply.workable.com/acme/j/A1B2C3/apply',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://ats.rippling.com/acme/jobs/rippling-job-1',
+      'rippling',
+      'acme',
+      'rippling-job-1',
+    ),
+    'https://ats.rippling.com/acme/jobs/rippling-job-1/apply',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://acme.breezy.hr/p/breezy-job-1-software-engineer',
+      'breezy',
+      'acme',
+      'breezy-job-1',
+    ),
+    'https://acme.breezy.hr/p/breezy-job-1-software-engineer/apply',
+  );
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      'https://acme.recruitee.com/o/software-engineer',
+      'recruitee',
+      'acme',
+      '12345',
+      'https://acme.recruitee.com/o/software-engineer',
+    ),
+    'https://acme.recruitee.com/o/software-engineer/c/new',
+  );
+  const crelateJob = 'rz89zks8z4rxa3rksi7ftm4h1y';
+  assert.equal(
+    canonicalMonitoredPortalUrl(
+      `https://jobs.crelate.com/portal/acme/job/${crelateJob}`,
+      'crelate',
+      'acme',
+      crelateJob,
+    ),
+    `https://jobs.crelate.com/portal/acme/job/apply/${crelateJob}`,
+  );
+
+  for (const rejected of [
+    canonicalMonitoredPortalUrl('https://jobs.ashbyhq.com/evil/job-1/application', 'lever', 'acme', 'job-1'),
+    canonicalMonitoredPortalUrl('https://job-boards.greenhouse.io/evil/jobs/7351061', 'greenhouse', 'acme', '7351061'),
+    canonicalMonitoredPortalUrl('https://boards.greenhouse.io/embed/job_app?for=evil&token=7351061', 'greenhouse', 'acme', '7351061'),
+    canonicalMonitoredPortalUrl('https://www.jumptrading.com/hr/job?gh_jid=8052281', 'greenhouse', 'evil', '8052281'),
+    canonicalMonitoredPortalUrl('https://jobs.lever.co/evil/job-1', 'lever', 'acme', 'job-1'),
+    canonicalMonitoredPortalUrl('https://apply.workable.com/evil/j/A1B2C3/apply', 'workable', 'acme', 'A1B2C3'),
+    canonicalMonitoredPortalUrl('https://ats.rippling.com/evil/jobs/job-1', 'rippling', 'acme', 'job-1'),
+    canonicalMonitoredPortalUrl('https://acme.breezy.hr/p/job-2-title', 'breezy', 'acme', 'job-1'),
+    canonicalMonitoredPortalUrl(
+      'https://acme.recruitee.com/o/evil-role/c/new',
+      'recruitee',
+      'acme',
+      '12345',
+      'https://acme.recruitee.com/o/software-engineer',
+    ),
+    canonicalMonitoredPortalUrl('https://jobs.crelate.com/portal/evil/job/rz89zks8z4rxa3rksi7ftm4h1y', 'crelate', 'acme', 'rz89zks8z4rxa3rksi7ftm4h1y'),
+    canonicalMonitoredPortalUrl('https://jobs.lever.co/acme/job-1', 'lever', 'acme/path', 'job-1'),
+    canonicalMonitoredPortalUrl('https://apply.workable.com/j/A1B2C3', 'workable', 'acme?redirect=evil', 'A1B2C3'),
+  ]) assert.equal(rejected, undefined);
 });
 
 test('bare Greenhouse embed links are supported but still need monitored board-token repair', () => {
@@ -271,7 +382,7 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   for (const channel of [
     'submitControlled(row',
     'submitViaAtsSubmissionChannel(',
-    'runManagedBrowser(',
+    'runManagedBrowserWithAccountFence(',
     'clickFinalSubmit(',
   ]) {
     assert.ok(submit.indexOf(channel) > submitGate, `${channel} must remain behind the lead citation gate`);
@@ -287,13 +398,15 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   );
 
   const security = runner.slice(
-    runner.indexOf('export async function finishSecurityCodeSubmission'),
-    runner.indexOf('export async function processSubmissionApplication'),
+    runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge'),
+    runner.indexOf('export async function recoverManagedSubmissionTerminalResult'),
   );
   assert.ok(
-    security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('claimSecurityCodeSubmission(row, current)'),
-    'security-code continuation must validate before reserving or refilling the employer form',
+    security.indexOf('runnerLeadAlignmentIssues(row)') < security.indexOf('prepareManagedEmailVerification({'),
+    'recovered security-code continuation must validate before mailbox or employer work',
   );
+  assert.doesNotMatch(security, /claimSecurityCodeSubmission\(|submit\(/,
+    'the retired typed-code endpoint must not reserve or refill an employer form');
   const securityClaim = runner.slice(
     runner.indexOf('async function claimSecurityCodeSubmission('),
     runner.indexOf('async function claimPreparation('),
@@ -301,24 +414,28 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   assert.match(securityClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
 });
 
-test('unsupported-portal email claims the exact verified packet before building or sending it', () => {
+test('unsupported-portal email verifies, reserves, and records its immutable boundary before sending', () => {
   const applications = routeSource('applications.ts');
   const handler = applications.slice(
     applications.indexOf("'/applications/:id/submit-request'"),
     applications.indexOf("'/applications/:id/submission/channels'"),
   );
   const verify = handler.indexOf('preSendResumeVerificationIssues(');
-  const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`', verify);
-  const packet = handler.indexOf('buildPacket(claimedRow, false, canonicalSubmittedQuestions)', exactClaim);
+  const packet = handler.indexOf('buildPacket(packetRow, false, canonicalSubmittedQuestions)', verify);
   const verifyPacket = handler.indexOf('transportVerifiedBuiltPacket(', packet);
-  const prepareEmail = handler.indexOf('prepareUnsupportedPortalApplicationEmail', exactClaim);
-  const send = handler.indexOf('sendPreparedUnsupportedPortalApplicationEmail', exactClaim);
-  assert.ok(verify > 0 && exactClaim > verify, 'the email claim must compare against the packet that passed verification');
-  assert.ok(packet > exactClaim && prepareEmail > packet && verifyPacket > prepareEmail && send > verifyPacket,
-    'the exact claimed packet must be rebuilt, audit-verified, and only then sent to the employer');
-  assert.match(handler,
-    /transportVerifiedBuiltPacket\([\s\S]{0,220}submitAudit\.audit,[\s\S]{0,120}canonicalSubmittedQuestions,[\s\S]{0,220}sendPreparedUnsupportedPortalApplicationEmail[\s\S]{0,180}'full'/,
-    'unsupported email must transport the exact object whose applicant snapshot and questions passed the audit');
+  const prepareEmail = handler.indexOf('prepareUnsupportedPortalApplicationEmail', packet);
+  const reservation = handler.indexOf('const reservation = await db.transaction', verifyPacket);
+  const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`', reservation);
+  const opened = handler.indexOf("eventKind: 'attempt_opened'", exactClaim);
+  const boundary = handler.indexOf('authorizeFinalSubmissionBoundary(binding', opened);
+  const pressed = handler.indexOf("eventKind: 'press_observed'", boundary);
+  const send = handler.indexOf('sent = await sendPreparedUnsupportedPortalApplicationEmail', pressed);
+  assert.ok(verify > 0 && packet > verify && prepareEmail > packet && verifyPacket > prepareEmail,
+    'the exact packet must be built and audit-verified before a provider capability is reserved');
+  assert.ok(reservation > verifyPacket && exactClaim > reservation,
+    'the locked reservation must compare against the exact row that passed verification');
+  assert.ok(opened > exactClaim && boundary > opened && pressed > boundary && send > pressed,
+    'the immutable opening, boundary, and dispatch fact must precede the employer email call');
 });
 
 /**
@@ -331,13 +448,17 @@ test('unsupported-portal email claims the exact verified packet before building 
 test('portal support is written at packet creation and unsupported portals use email fallback', () => {
   const resumeRoute = routeSource('resume.ts');
   assert.match(resumeRoute, /import \{[^}]*isPortalSupported[^}]*\} from '\.\.\/lib\/portalSubmission'/);
-  assert.match(resumeRoute, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
+  assert.match(resumeRoute, /import \{[^}]*repairReviewPortalFromMonitoredJob[^}]*\} from '\.\.\/lib\/applicationPortalRepair'/);
   // Set on the review at creation, from the URL the caller just handed us.
-  assert.match(resumeRoute, /async function monitoredApplicationUrlForGenerate\(body: ResumeGenerateBody\)/);
-  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
-  assert.match(resumeRoute, /const monitoredApplicationUrl = await monitoredApplicationUrlForGenerate\(body\)/);
-  assert.match(resumeRoute, /const canonicalApplicationPortalUrl = body\.application[\s\S]{0,300}monitoredApplicationUrl \?\? canonicalSupportedPortalUrl\(body\.application\.portal_url, body\.application\.ats_name\)/);
-  assert.match(resumeRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
+  assert.match(resumeRoute, /function monitoredApplicationUrlForGenerate\([\s\S]{0,160}posting: ActionPostingRow \| null/);
+  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\([\s\S]{0,180}job\.external_id/);
+  assert.match(resumeRoute, /const effectiveJobId = body\.job_id \?\? ownedCanonicalApplication\?\.job_id/);
+  assert.match(resumeRoute, /const canonicalApplicationPortalUrl = body\.application[\s\S]{0,180}effectiveJobId[\s\S]{0,180}monitoredApplicationUrl/);
+  assert.match(resumeRoute, /effectiveJobId && !monitoredApplicationUrl[\s\S]{0,180}code: 'job_not_available'/);
+  assert.match(resumeRoute, /: canonicalSupportedPortalUrl\(body\.application\.portal_url, body\.application\.ats_name\)[\s\S]{0,100}\?\? body\.application\.portal_url/);
+  assert.doesNotMatch(resumeRoute, /monitoredApplicationUrlForGenerate\(resolvedPosting\)\s*\?\?/);
+  const jdMatchRoute = routeSource('jdMatch.ts');
+  assert.match(jdMatchRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,120}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(resumeRoute, /portal_url: canonicalApplicationPortalUrl/);
   assert.match(resumeRoute, /applicationReview = await repairReviewPortalFromMonitoredJob\(/);
   assert.match(resumeRoute, /const canonicalApplicationPortalSupported = isPortalSupported\(canonicalApplicationPortalUrl\)/);
@@ -345,9 +466,9 @@ test('portal support is written at packet creation and unsupported portals use e
   // And repaired on history reads so the dashboard does not keep hiding the send path for old
   // monitored-job packets whose review URL is stale or company-owned.
   assert.match(resumeRoute, /function repairedHistorySpec/);
-  assert.match(resumeRoute, /canonicalSupportedPortalUrl\(review\.portal_url, review\.ats_name\)/);
+  assert.match(resumeRoute, /repairHistoryReviewPortalFromMonitoredJob\(row, review, monitoredJobs\)/);
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
-  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
+  assert.match(resumeRoute, /canonicalMonitoredPortalUrl\([\s\S]{0,180}job\.external_id/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
   // The composition is now wrapped by specWithoutDocumentPointers, which strips the Blob pointers a
   // fifty-row spec payload was carrying (routes/documentResponseContract.test.ts owns that half).
@@ -363,10 +484,11 @@ test('portal support is written at packet creation and unsupported portals use e
   // packet unsupported, submit-request must first repair from the canonical monitored job apply_url.
   assert.match(applicationsRoute, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
   assert.match(repairSource, /export async function repairReviewPortalFromMonitoredJob/);
+  assert.match(repairSource, /const jobId = jobContextJobId\(row\)[\s\S]{0,300}if \(!jobId\) return repairManualPortal\(current\)/);
   assert.match(repairSource, /const currentCanonicalUrl = canonicalSupportedPortalUrl\(current\.portal_url, current\.ats_name\)[\s\S]{0,250}currentCanonicalUrl !== current\.portal_url/);
   assert.match(repairSource, /greenhousePortalUrlNeedsBoardToken\(current\.portal_url\)/);
   assert.match(repairSource, /monitored_jobs\.apply_url/);
-  assert.match(repairSource, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
+  assert.match(repairSource, /canonicalMonitoredPortalUrl\([\s\S]{0,180}job\.external_id/);
   assert.match(repairSource, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
@@ -374,7 +496,10 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(applicationsRoute, /assessAtsSubmissionChannel\(review\.portal_url\)/);
   assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(applicationsRoute, /sendPreparedUnsupportedPortalApplicationEmail/);
-  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,2600}sendPreparedUnsupportedPortalApplicationEmail/);
+  const unsupportedStart = applicationsRoute.indexOf('if (current.portal_url && !isPortalSupported(current.portal_url))');
+  const channelsStart = applicationsRoute.indexOf("'/applications/:id/submission/channels'");
+  assert.ok(unsupportedStart > 0 && channelsStart > unsupportedStart);
+  assert.match(applicationsRoute.slice(unsupportedStart, channelsStart), /sendPreparedUnsupportedPortalApplicationEmail/);
   assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
   const repairIndex = applicationsRoute.indexOf('repairReviewPortalFromMonitoredJob(row, current)');
   const guardIndex = applicationsRoute.indexOf('!isPortalSupported(current.portal_url)');
@@ -385,18 +510,15 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.ok(browserConfigIndex > guardIndex, 'unsupported portal email fallback must not require a browser provider');
   assert.match(applicationsRoute, /pipeline_stage: 'applied'/);
   assert.match(applicationsRoute, /source: 'email_fallback'/);
-  assert.match(applicationsRoute, /status: 'failed'[\s\S]{0,900}UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
-  const failureStart = applicationsRoute.indexOf("Unsupported portal email fallback failed");
+  assert.match(applicationsRoute, /UNSUPPORTED_PORTAL_EMAIL_OUTCOME_UNVERIFIED/);
+  const failureStart = applicationsRoute.indexOf('Unsupported portal email outcome is unverified');
   const failureEnd = applicationsRoute.indexOf('const submittedAt', failureStart);
   assert.ok(failureStart > guardIndex, 'email fallback failure handling must be inside the unsupported branch');
   assert.ok(failureEnd > failureStart, 'email fallback failure handling must return before the submitted write');
   const failureBlock = applicationsRoute.slice(failureStart, failureEnd);
-  /* The intent, not the formatting. This pinned the literal `status: 'failed' as const`, which was
-     part of a bare spread that built a terminal review outside applyReviewPatch and so could
-     persist a failure with no stated cause. What matters is that the row lands on 'failed' through
-     the shared merge, carrying a reason. */
-  assert.match(failureBlock, /applyReviewPatch\([\s\S]{0,200}status: 'failed'/);
-  assert.match(failureBlock, /attention_reason: 'Litos could not email this application/);
+  assert.match(failureBlock, /applyReviewPatch\([\s\S]{0,200}status: 'needs_attention'/);
+  assert.match(failureBlock, /submission_attempted_at: failedAt/);
+  assert.match(failureBlock, /unverified_submission:/);
   assert.match(failureBlock, /return reply\.status\(503\)\.send/);
   assert.doesNotMatch(failureBlock, /status: 'submitted'/);
   assert.doesNotMatch(failureBlock, /pipeline_stage: 'applied'/);

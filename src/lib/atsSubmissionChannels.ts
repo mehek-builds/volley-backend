@@ -246,6 +246,51 @@ export function genericKnownPosting(rawUrl: string | undefined): PostingRef | nu
   return null;
 }
 
+/** Keep only public provider fields needed to reproduce one posting identity. */
+export function canonicalPublicPostingUrl(rawUrl: string | undefined): string | null {
+  if (!rawUrl) return null;
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) return null;
+  const greenhouse = greenhousePostingFromUrl(rawUrl);
+  if (greenhouse) {
+    return `https://boards.greenhouse.io/${encodeURIComponent(greenhouse.boardToken)}/jobs/${greenhouse.jobId}`;
+  }
+  const posting = genericKnownPosting(rawUrl);
+  const allowedQueryNames = (() => {
+    if (!posting) return [] as string[];
+    if (posting.provider === 'oracle_taleo') return ['job'];
+    if (posting.provider === 'sap_successfactors') {
+      const jobKey = ['jobId', 'career_job_req_id', 'job_application']
+        .find((key) => url.searchParams.has(key));
+      return [...(jobKey ? [jobKey] : []), 'company'];
+    }
+    if (posting.provider === 'adp') {
+      if (url.hostname.toLowerCase() === 'myjobs.adp.com') return ['reqId'];
+      return ['jobId', url.searchParams.has('cid') ? 'cid' : 'company'];
+    }
+    if (posting.provider === 'ukg') {
+      return url.hostname.toLowerCase() === 'recruiting.ultipro.com'
+        ? ['opportunityId']
+        : ['jobId'];
+    }
+    if (posting.provider === 'indeed') return ['jk'];
+    if (posting.provider === 'ziprecruiter') return ['jid'];
+    return [] as string[];
+  })();
+  const retained = allowedQueryNames
+    .map((name) => [name, url.searchParams.get(name)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== null);
+  url.search = '';
+  for (const [name, value] of retained) url.searchParams.set(name, value);
+  url.hash = '';
+  return url.toString();
+}
+
 export function configuredAtsSubmissionChannels(env: NodeJS.ProcessEnv = process.env): ConfiguredChannel[] {
   const raw = env[CHANNEL_CONFIG_ENV];
   if (!raw?.trim()) return [];

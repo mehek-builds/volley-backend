@@ -8,6 +8,8 @@ dist/
 *.env.local
 drizzle/meta/
 *.js.map
+__pycache__/
+*.pyc
 .vercel
 .env*
 QA-SHIMS-README.md

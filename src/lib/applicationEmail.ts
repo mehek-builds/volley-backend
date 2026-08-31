@@ -3,7 +3,10 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
-import { advanceCanonicalApplicationFromPacketSubmission } from './canonicalApplicationSync';
+import {
+  advanceCanonicalApplicationFromPacketSubmission,
+  syncCanonicalApplicationRow,
+} from './canonicalApplicationSync';
 import { applyReviewPatch } from './applicationStall';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
@@ -19,6 +22,18 @@ import {
 import { emailSender, sendEmail, type OutboundEmail } from './email';
 import { applicationEmailRouteSelection, type ApplicationEmailRouteMode } from './applicationEmailRoute';
 import { resendReceivingApiKey } from './resendReceiving';
+import {
+  appendSubmissionAttemptEvent,
+  lockSubmissionAttemptUser,
+  submissionAttemptBindingFromEvent,
+  submissionAttemptEventId,
+  submissionAttemptEventsForPacket,
+} from './submissionAttemptLedger';
+import {
+  authoritativeConfirmedProjectionMatches,
+  authoritativeSubmissionProjection,
+  employerEmailConfirmationEvidenceCode,
+} from './authoritativeSubmissionProjection';
 
 export type ApplicationEmailIdentity = {
   alias: string;
@@ -168,10 +183,11 @@ export async function ensureApplicationEmailAlias(input: {
 export async function applicationForwardingAddress(
   userId: string,
   accountEmail?: string | null,
+  executor: Pick<typeof db, 'select'> = db,
 ): Promise<string | null> {
   const fallback = accountEmail?.trim().toLowerCase() || null;
   try {
-    const rows = await db
+    const rows = await executor
       .select({ preferred: users.application_email_forward_to, account: users.email })
       .from(users)
       .where(eq(users.id, userId))
@@ -757,7 +773,8 @@ export type SubmissionConfirmationOutcome =
   | { resolved: true; review: ApplicationReviewState }
   | {
     resolved: false;
-    reason: 'packet_not_found' | 'review_missing' | 'already_submitted' | 'stale_confirmation';
+    reason: 'packet_not_found' | 'review_missing' | 'already_submitted' | 'stale_confirmation'
+      | 'confirmation_evidence_missing';
   };
 
 /* A RECEIPT MAY ONLY MOVE A PACKET FORWARD, never backwards over something newer.
@@ -791,6 +808,7 @@ export function confirmationIsStale(current: ApplicationReviewState, receivedAt:
 }
 
 export type SubmissionConfirmationDeps = {
+  commitConfirmation?: (input: SubmissionConfirmationInput) => Promise<SubmissionConfirmationOutcome>;
   loadReview?: (input: { applicationId: string; userId: string }) => Promise<PacketReviewLookup>;
   saveReview?: (input: {
     applicationId: string;
@@ -802,6 +820,15 @@ export type SubmissionConfirmationDeps = {
     packetId: string;
     userId: string;
   }) => Promise<void>;
+};
+
+export type SubmissionConfirmationInput = {
+  applicationId: string;
+  userId: string;
+  alias: string;
+  messageId?: string;
+  subject?: string;
+  receivedAt: Date;
 };
 
 /* Scoped by OWNER as well as by id, on both the read and the write.
@@ -843,17 +870,130 @@ async function savePacketReview(input: {
   ));
 }
 
+async function commitPacketConfirmationAtomically(
+  input: SubmissionConfirmationInput,
+): Promise<SubmissionConfirmationOutcome> {
+  if (!input.messageId) return { resolved: false, reason: 'confirmation_evidence_missing' };
+  const messageId = input.messageId;
+  return db.transaction(async (tx): Promise<SubmissionConfirmationOutcome> => {
+    await lockSubmissionAttemptUser(tx, input.userId);
+    const [packet] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, input.applicationId),
+      eq(generated_resumes.user_id, input.userId),
+    )).limit(1).for('update');
+    if (!packet) return { resolved: false, reason: 'packet_not_found' };
+    const current = readApplicationReview(packet.spec);
+    if (!current) return { resolved: false, reason: 'review_missing' };
+    if (current.status === 'submitted') {
+      return { resolved: false, reason: 'already_submitted' };
+    }
+
+    const [message] = await tx.select().from(application_email_messages).where(and(
+      eq(application_email_messages.id, messageId),
+      eq(application_email_messages.user_id, input.userId),
+      eq(application_email_messages.generated_resume_id, input.applicationId),
+      eq(application_email_messages.alias, input.alias.trim().toLowerCase()),
+      eq(application_email_messages.classification, 'submission_confirmation'),
+      sql`${application_email_messages.direction} <> 'outbound'`,
+    )).limit(1).for('update');
+    if (!message) return { resolved: false, reason: 'confirmation_evidence_missing' };
+    const receivedAt = message.received_at ?? message.created_at;
+    if (confirmationIsStale(current, receivedAt)) {
+      return { resolved: false, reason: 'stale_confirmation' };
+    }
+
+    const attemptId = current.submission_claim_id;
+    if (!attemptId) return { resolved: false, reason: 'confirmation_evidence_missing' };
+    const events = (await submissionAttemptEventsForPacket(input.userId, input.applicationId, {
+      executor: tx,
+    })).filter((event) => event.attempt_id === attemptId);
+    const opening = events.find((event) => event.event_kind === 'attempt_opened');
+    const boundary = events.find((event) => event.event_kind === 'boundary_authorized');
+    if (!opening
+      || !opening.application_id
+      || opening.submission_claim_id !== attemptId
+      || !boundary
+      || boundary.observed_at.getTime() > receivedAt.getTime()
+      || events.some((event) => event.event_kind === 'submission_confirmed')) {
+      return { resolved: false, reason: 'confirmation_evidence_missing' };
+    }
+
+    const subject = message.subject?.trim() || `Application confirmation received at ${message.alias}`;
+    const next = reviewFromSubmissionConfirmation(current, {
+      alias: message.alias,
+      subject,
+      receivedAt,
+    });
+    const receipt = next.receipt;
+    if (!receipt) return { resolved: false, reason: 'confirmation_evidence_missing' };
+    const binding = submissionAttemptBindingFromEvent(opening);
+    const evidenceCode = employerEmailConfirmationEvidenceCode({
+      attemptId,
+      userId: input.userId,
+      packetId: input.applicationId,
+      messageId: message.id,
+      alias: message.alias,
+      confirmationText: receipt.confirmation_text,
+      finalUrl: receipt.final_url,
+      receivedAt,
+    });
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionAttemptEventId(attemptId, 'submission_confirmed', `employer-email:${message.id}`),
+      eventKind: 'submission_confirmed',
+      evidenceCode,
+      observedAt: receivedAt,
+      createdAt: receivedAt,
+    }, { executor: tx });
+    const [updated] = await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(next)}::jsonb, true)`,
+      pipeline_stage: 'applied',
+      pipeline_stage_at: receivedAt,
+    }).where(and(
+      eq(generated_resumes.id, input.applicationId),
+      eq(generated_resumes.user_id, input.userId),
+      sql`${generated_resumes.spec} = ${JSON.stringify(packet.spec)}::jsonb`,
+    )).returning({ id: generated_resumes.id });
+    if (!updated) throw new Error('EMAIL_CONFIRMATION_PACKET_WRITE_CONFLICT');
+    await syncCanonicalApplicationRow({
+      attemptId,
+      packetId: input.applicationId,
+      userId: input.userId,
+      applicationId: opening.application_id,
+      packetVersion: opening.packet_version,
+      postingIdentity: binding.postingIdentity,
+    }, tx);
+    const projection = await authoritativeSubmissionProjection({
+      userId: input.userId,
+      packetIds: [input.applicationId],
+      applicationIds: [opening.application_id],
+      executor: tx,
+    });
+    const expected = {
+      attemptId,
+      canonicalApplicationId: opening.application_id,
+      packetId: input.applicationId,
+    };
+    if (!authoritativeConfirmedProjectionMatches(projection.byPacketId.get(input.applicationId), expected)
+      || !authoritativeConfirmedProjectionMatches(projection.byApplicationId.get(opening.application_id), expected)) {
+      throw new Error('EMAIL_CONFIRMATION_AUTHORITY_PROJECTION_FAILED');
+    }
+    return { resolved: true, review: next };
+  });
+}
+
 /**
  * Resolve one packet from one employer confirmation. Idempotent: a packet already submitted is left
  * exactly as it is, and reports why.
  */
-export async function resolvePacketFromConfirmation(input: {
-  applicationId: string;
-  userId: string;
-  alias: string;
-  subject?: string;
-  receivedAt: Date;
-}, deps: SubmissionConfirmationDeps = {}): Promise<SubmissionConfirmationOutcome> {
+export async function resolvePacketFromConfirmation(
+  input: SubmissionConfirmationInput,
+  deps: SubmissionConfirmationDeps = {},
+): Promise<SubmissionConfirmationOutcome> {
+  if (deps.commitConfirmation) return deps.commitConfirmation(input);
+  if (!deps.loadReview && !deps.saveReview && !deps.syncCanonicalApplication) {
+    return commitPacketConfirmationAtomically(input);
+  }
   const lookup = await (deps.loadReview ?? loadPacketReview)({
     applicationId: input.applicationId,
     userId: input.userId,
@@ -999,6 +1139,7 @@ export type StoredEmployerMessageDeps = {
     applicationId: string;
     userId: string;
     alias: string;
+    messageId: string;
     subject?: string;
     receivedAt: Date;
   }) => Promise<SubmissionConfirmationOutcome>;
@@ -1090,6 +1231,7 @@ export async function handleStoredEmployerMessage(input: {
         applicationId: aliasRow.generated_resume_id,
         userId: aliasRow.user_id,
         alias: aliasRow.alias,
+        messageId: message.id,
         subject: message.subject ?? undefined,
         receivedAt: message.received_at ?? receivedAt,
       });
@@ -1306,6 +1448,7 @@ export async function reconcileSubmissionConfirmations(
   input: { userId?: string; limit?: number } = {},
   deps: {
     listConfirmations?: (query: { userId?: string; limit: number }) => Promise<Array<{
+      messageId: string;
       applicationId: string;
       userId: string;
       alias: string;
@@ -1333,6 +1476,7 @@ export async function reconcileSubmissionConfirmations(
     let outcome: SubmissionConfirmationOutcome;
     try {
       outcome = await (deps.resolve ?? resolvePacketFromConfirmation)({
+        messageId: row.messageId,
         applicationId: row.applicationId,
         userId: row.userId,
         alias: row.alias,
@@ -1357,6 +1501,7 @@ export async function reconcileSubmissionConfirmations(
 async function listStoredConfirmations(query: { userId?: string; limit: number }) {
   const rows = await db
     .select({
+      messageId: application_email_messages.id,
       applicationId: application_email_messages.generated_resume_id,
       userId: application_email_messages.user_id,
       alias: application_email_messages.alias,
@@ -1376,6 +1521,7 @@ async function listStoredConfirmations(query: { userId?: string; limit: number }
     .orderBy(desc(sql`coalesce(${application_email_messages.received_at}, ${application_email_messages.created_at})`))
     .limit(query.limit);
   return rows.map((row) => ({
+    messageId: row.messageId,
     applicationId: row.applicationId as string,
     userId: row.userId,
     alias: row.alias,

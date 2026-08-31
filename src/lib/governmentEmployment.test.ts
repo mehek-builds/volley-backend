@@ -2191,13 +2191,13 @@ describe('the bank actually reaches the resolver', () => {
 
   test('loadApplicationProfileLike reads the bank the one sanctioned way', () => {
     assert.match(source, /import \{ readExperienceBankOrSeedFromBaseResume \} from '\.\.\/db\/experienceBank'/);
-    assert.match(source, /readExperienceBankOrSeedFromBaseResume\(userId\)/);
+    assert.match(source, /readExperienceBankOrSeedFromBaseResume\(userId, executor\)/);
   });
 
   test('an unreadable bank degrades to an empty one rather than throwing', () => {
     // Empty is the case the resolver refuses on, which is the honest outcome; a throw here would
     // stall every submission over a question that is allowed to be left blank.
-    assert.match(source, /readExperienceBankOrSeedFromBaseResume\(userId\)\.catch\(\(\) => \[\]\)/);
+    assert.match(source, /readExperienceBankOrSeedFromBaseResume\(userId, executor\)\.catch\(\(\) => \[\]\)/);
   });
 
   test('the loaded profile carries experience_bank', () => {

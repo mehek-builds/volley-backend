@@ -14,13 +14,14 @@ import { buildFunnel } from '../engine/funnel';
 import { deriveStage, isStage, STAGES, BOARD_LIMIT } from '../engine/pipeline';
 import { buildInterviewPrep } from '../engine/interviewPrep';
 import { extractJdTerms } from '../engine/jdMatch';
-import { generated_resumes, autofill_events, monitored_jobs, career_page_sources } from '../db/schema';
+import { applications, generated_resumes, autofill_events, monitored_jobs, career_page_sources } from '../db/schema';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { resolveRevision } from '../lib/buildInfo';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { requireFeature } from '../lib/entitlements';
+import { accountRequiresSponsor, boardConditions } from './jobMonitor';
 
 /**
  * POST /jd-match
@@ -168,27 +169,6 @@ const requirementsSchema = z.object({
 });
 
 /**
- * The offices of the posting a saved packet was built for, or null when we cannot tell.
- *
- * Null is the ordinary answer for every packet that has no job_id: applications started from the
- * extension or from a hand-typed link point at no monitored posting, and there is nothing to look
- * up. Those score exactly as they did before, with the geography still in, which is the honest
- * outcome rather than a guess at where the employer sits.
- *
- * SCOPED LIKE GET /jobs/:id, and it was not always. This helper began as a location lookup, and
- * the comment here used to say scoping was unnecessary because "one nullable location column
- * discloses nothing". That stopped being true the moment it started returning the DESCRIPTION:
- * /jd-match/requirements hands the text back clause by clause, so an unscoped read let any caller
- * pull the full posting of anything the board deliberately refuses to serve - a disabled source, a
- * demoted ATS family - by uuid alone. Found in retrospective review 2026-08-04.
- *
- * `is_active` is deliberately NOT required, and that is the one place this differs from
- * GET /jobs/:id. A packet is often held for a posting that has since closed, and its review screen
- * must still score: refusing there would break the repair path for every packet that stored the
- * 600-character preview. Closure is a fact about the job, not a permission boundary; the source
- * and portal-family checks are the permission boundary and both are enforced.
- */
-/**
  * HOW MUCH OF THE POSTING THE SCORE IS ACTUALLY DRAWN OVER.
  *
  * `term_count` is a count of what the extractor RECOGNISED, and it was being read as a count of what
@@ -247,24 +227,103 @@ export function requirementLineCoverage(
   return { read, unread };
 }
 
-export async function postingRow(
+/**
+ * Posting reads have two authorization levels. A caller-supplied UUID must still name a row on the
+ * current verified board. A closed row can be read only when an application or generated packet
+ * already binds that row to the signed-in account. This keeps historical review usable without
+ * treating knowledge of a UUID as permission to read an unsurfaced description.
+ */
+export type ActionPostingRow = {
+  external_id: string;
+  company_name: string | null;
+  location: string | null;
+  portal_country: string | null;
+  job_country: string | null;
+  description: string | null;
+  apply_url: string;
+  posting_url: string;
+  ats_name: string;
+  board_token: string;
+};
+
+const actionPostingSelection = {
+  external_id: monitored_jobs.external_id,
+  company_name: career_page_sources.company_name,
+  location: monitored_jobs.location,
+  // Bounded ATS metadata persisted in monitored_jobs.raw_json. Null on rows created before the
+  // preservation path shipped, and filled by the next ordinary poll without a migration.
+  portal_country: sql<string | null>`${monitored_jobs.raw_json}->>'portal_country'`,
+  job_country: monitored_jobs.job_country,
+  // Capped at the same 60k the request schema allows, so a posting cannot arrive here longer
+  // than the engine's own bound just because it skipped the schema on its way in.
+  description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+  apply_url: monitored_jobs.apply_url,
+  posting_url: monitored_jobs.posting_url,
+  ats_name: career_page_sources.ats_name,
+  board_token: career_page_sources.board_token,
+} as const;
+
+function normalizeActionPostingRow(row: {
+  external_id: string;
+  company_name: string;
+  location: string | null;
+  portal_country: string | null;
+  job_country: string;
+  description: string;
+  apply_url: string;
+  posting_url: string;
+  ats_name: string;
+  board_token: string;
+}): ActionPostingRow {
+  return {
+    external_id: row.external_id,
+    company_name: row.company_name,
+    location: row.location,
+    portal_country: row.portal_country,
+    job_country: row.job_country,
+    description: row.description,
+    apply_url: row.apply_url,
+    posting_url: row.posting_url,
+    ats_name: row.ats_name,
+    board_token: row.board_token,
+  };
+}
+
+/**
+ * A raw job id supplied by a caller has no authority of its own. It may resolve only through the
+ * exact strict predicate that defines verified current board inventory.
+ */
+export async function currentActionPostingRow(
   jobId: string | null | undefined,
-): Promise<{ company_name: string | null; location: string | null; portal_country: string | null; description: string | null } | null> {
+  sponsorOnly = false,
+): Promise<ActionPostingRow | null> {
   if (!jobId) return null;
   const [row] = await db
-    .select({
-      /* The employer's own name, so selfReferenceTokens can delete it. It lives on the source row
-         this query already joins, so it costs no extra join. See the backfill at the scoreJdMatch
-         call below for why a caller that omits it gets the company scored as a requirement. */
-      company_name: career_page_sources.company_name,
-      location: monitored_jobs.location,
-      // Bounded ATS metadata persisted in monitored_jobs.raw_json. Null on rows created before the
-      // preservation path shipped, and filled by the next ordinary poll without a migration.
-      portal_country: sql<string | null>`${monitored_jobs.raw_json}->>'portal_country'`,
-      // Capped at the same 60k the request schema allows, so a posting cannot arrive here longer
-      // than the engine's own bound just because it skipped the schema on its way in.
-      description: sql<string>`left(${monitored_jobs.description}, 60000)`,
-    })
+    .select(actionPostingSelection)
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(
+      and(
+        eq(monitored_jobs.id, jobId),
+        ...boardConditions({ sponsorOnly, requireVerifiedEvidence: true }),
+      ),
+    )
+    .limit(1);
+  return row ? normalizeActionPostingRow(row) : null;
+}
+
+/**
+ * Closed postings remain useful evidence for a packet the account already owns. This weaker read
+ * is impossible to reach through possession of a job UUID alone: either applications.job_id or an
+ * owned generated packet's job_context must already bind the user to the row.
+ */
+export async function ownedHistoricalActionPostingRow(
+  jobId: string | null | undefined,
+  userId: string,
+): Promise<ActionPostingRow | null> {
+  if (!jobId) return null;
+  const [row] = await db
+    .select(actionPostingSelection)
     .from(monitored_jobs)
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
     .where(
@@ -272,15 +331,33 @@ export async function postingRow(
         eq(monitored_jobs.id, jobId),
         eq(career_page_sources.enabled, true),
         inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+        sql`(
+          exists (
+            select 1 from ${applications}
+            where ${applications.user_id} = ${userId}
+              and ${applications.job_id} = ${monitored_jobs.id}
+          )
+          or exists (
+            select 1 from ${generated_resumes}
+            where ${generated_resumes.user_id} = ${userId}
+              and ${generated_resumes.job_context}->>'job_id' = ${monitored_jobs.id}::text
+          )
+        )`,
       ),
     )
     .limit(1);
-  return row ? {
-    company_name: row.company_name ?? null,
-    location: row.location ?? null,
-    portal_country: row.portal_country ?? null,
-    description: row.description ?? null,
-  } : null;
+  return row ? normalizeActionPostingRow(row) : null;
+}
+
+/** Strict current inventory first, with a user-owned historical fallback for closed packets. */
+export async function actionPostingRowForUser(
+  jobId: string | null | undefined,
+  userId: string,
+): Promise<ActionPostingRow | null> {
+  if (!jobId) return null;
+  const sponsorOnly = await accountRequiresSponsor(userId);
+  return (await currentActionPostingRow(jobId, sponsorOnly))
+    ?? ownedHistoricalActionPostingRow(jobId, userId);
 }
 
 /**
@@ -357,7 +434,14 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const spec = (parsed.data.spec as ResumeSpec | undefined) ?? stored;
     if (!spec) return reply.status(404).send({ error: 'No main resume yet' });
 
-    const posting = await postingRow(parsed.data.job_context?.job_id);
+    const requestedJobId = parsed.data.job_context?.job_id;
+    const posting = await actionPostingRowForUser(requestedJobId, userId);
+    if (requestedJobId && !posting) {
+      return reply.status(409).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
     /* THE LONGER OF THE TWO, not simply the caller's.
      *
      * Every packet built before 2026-08-04 stored `left(description, 600)` in _review.jd_text,
@@ -462,7 +546,14 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       storedResumeText = resumeSpecText(spec);
     }
 
-    const posting = await postingRow(body.job_context?.job_id);
+    const requestedJobId = body.job_context?.job_id;
+    const posting = await actionPostingRowForUser(requestedJobId, userId);
+    if (requestedJobId && !posting) {
+      return reply.status(409).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
 
     /* The caller's text wins when it has one. See the jd_text note on bodySchema: the review screen
        holds the JD the packet was tailored against, which is the text its number has to be about. */
@@ -783,6 +874,15 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       spec = stored;
     }
 
+    const requestedJobId = parsed.data.job_context?.job_id;
+    const posting = await actionPostingRowForUser(requestedJobId, userId);
+    if (requestedJobId && !posting) {
+      return reply.status(409).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
+
     // extractJdTerms directly, not scoreJdMatch('', jd) with an empty resume. That call read as if
     // it merged two meaningful sets when `matched` is structurally always empty against an empty
     // resume, and it dragged the scorer's user-facing copy along with it into a panel that is not
@@ -798,7 +898,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
           ...parsed.data.job_context,
           location:
             parsed.data.job_context?.location ??
-            (await postingRow(parsed.data.job_context?.job_id))?.location ??
+            posting?.location ??
             null,
         },
         { groupChoices: false },

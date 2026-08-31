@@ -37,6 +37,7 @@ export type PacketApplicantEmailDeps = {
   deliverability?: () => Promise<AliasDeliverability>;
   forwardingAddress?: (userId: string, accountEmail?: string | null) => Promise<string | null>;
   aliasFor?: (userId: string, applicationId: string) => string | null;
+  executor?: Parameters<typeof applicationForwardingAddress>[2];
 };
 
 export type PacketApplicantEmailPlan = {
@@ -133,7 +134,10 @@ export async function planPacketApplicantEmail(input: {
   if (!alias) return fallback('alias_not_configured');
 
   // The stored preference, not whichever address this request happened to carry.
-  const forwardTo = await (deps.forwardingAddress ?? applicationForwardingAddress)(input.userId, contactEmail)
+  const forwardingAddress = deps.forwardingAddress
+    ?? ((userId: string, accountEmail?: string | null) =>
+      applicationForwardingAddress(userId, accountEmail, deps.executor));
+  const forwardTo = await forwardingAddress(input.userId, contactEmail)
     .catch(() => null);
   const normalizedForwardTo = forwardTo?.trim().toLowerCase();
   if (!normalizedForwardTo) return fallback('no_forwarding_address');

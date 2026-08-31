@@ -1,0 +1,116 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { verifyCatalogSourceLogo, VERIFIED_HOMEPAGE_LOGO_METHOD } from './jobSourceLogoVerification';
+
+const publicDns = async () => ['93.184.216.34'];
+const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+test('verifies matching homepage identity plus a real icon image', async () => {
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Acme Careers</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme, Inc.', company_domain: 'acme.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.deepEqual(result, {
+    verified: true,
+    company_logo_url: 'https://acme.example/favicon.png',
+    method: VERIFIED_HOMEPAGE_LOGO_METHOD,
+  });
+});
+
+test('rejects a reachable lookalike whose homepage identity disagrees', async () => {
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      resolveHost: publicDns,
+      fetcher: async () => new Response('<title>Another Company</title>') as never,
+    },
+  );
+  assert.deepEqual(result, { verified: false, reason: 'identity_mismatch' });
+});
+
+test('rejects prefix lookalikes such as Ramp on rampart.com', async () => {
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Ramp', company_domain: 'rampart.com' },
+    {
+      resolveHost: publicDns,
+      fetcher: async () => new Response('<title>Rampart</title>') as never,
+    },
+  );
+  assert.deepEqual(result, { verified: false, reason: 'identity_mismatch' });
+});
+
+test('rejects private DNS before making a request', async () => {
+  let fetches = 0;
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      resolveHost: async () => ['127.0.0.1'],
+      fetcher: async () => { fetches += 1; return new Response('<title>Acme</title>') as never; },
+    },
+  );
+  assert.equal(fetches, 0);
+  assert.deepEqual(result, { verified: false, reason: 'homepage_unreachable' });
+});
+
+test('rejects HTML masquerading as the favicon', async () => {
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('favicon.ico')) return new Response('<html>not an image</html>', { headers: { 'content-type': 'text/html' } });
+    return new Response('<title>Acme</title>');
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.deepEqual(result, { verified: false, reason: 'logo_missing' });
+});
+
+test('preserves transient homepage and icon status reasons for the retry lane', async () => {
+  const homepagePressure = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      resolveHost: publicDns,
+      fetcher: async () => new Response(null, { status: 429 }),
+    },
+  );
+  assert.deepEqual(homepagePressure, { verified: false, reason: 'http_429' });
+
+  const iconPressure = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      resolveHost: publicDns,
+      fetcher: async (input) => String(input).endsWith('favicon.ico')
+        ? new Response(null, { status: 503 })
+        : new Response('<title>Acme</title>'),
+    },
+  );
+  assert.deepEqual(iconPressure, { verified: false, reason: 'http_503' });
+});
+
+test('an aggregate verifier deadline stops a DNS lookup that never resolves', async () => {
+  const controller = new AbortController();
+  let lookupStarted = false;
+  const verification = verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      signal: controller.signal,
+      resolveHost: async () => {
+        lookupStarted = true;
+        return new Promise<string[]>(() => undefined);
+      },
+    },
+  );
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort(new DOMException('request budget elapsed', 'TimeoutError'));
+
+  assert.equal(lookupStarted, true);
+  assert.deepEqual(await verification, { verified: false, reason: 'timeout' });
+});

@@ -23,6 +23,7 @@
  * when she gets there, and what Litos will do with either answer.
  */
 import type { ApplicationReviewState } from './applicationReview';
+import type { Page } from 'playwright-core';
 import {
   exactFinalSubmitChooserPolicy,
   type FinalSubmitChooserPolicy,
@@ -362,7 +363,7 @@ export function managedSubmitVerdict(result: MaybeOutcome | null | undefined): M
   return { kind: 'unverified', cause: 'no_confirmation_state' };
 }
 
-type ManagedReceiptResult = MaybeOutcome & {
+export type ManagedReceiptResult = MaybeOutcome & {
   url?: unknown;
   screenshot?: string | null;
   continuationOffered?: unknown;
@@ -372,6 +373,8 @@ type ManagedReceiptResult = MaybeOutcome & {
 };
 
 type ManagedAtsFamily = 'ashby' | 'greenhouse' | 'workable';
+
+export const EXACT_WORKABLE_RECEIPT_TEXT = 'Your application has been submitted successfully.';
 
 type ManagedAtsBinding = {
   family: ManagedAtsFamily;
@@ -514,6 +517,7 @@ function exactAtsReceipt(
       || observed.jobToken !== expected.jobToken
       || observed.shape !== expected.shape
       || typeof result.url !== 'string') return false;
+  if (outcome.state === 'confirmed' && outcome.formStillPresent !== false) return false;
   const url = new URL(result.url);
   if (expected.family === 'ashby' && outcome.source === 'ats_state') {
     if (outcome.state === 'confirmed') return outcome.evidence === '.ashby-application-form-success-container';
@@ -530,6 +534,7 @@ function exactAtsReceipt(
       && outcome.state === 'confirmed'
       && outcome.source === 'ats_state'
       && outcome.evidence === '[data-ui="successful-submit"]'
+      && outcome.message?.replace(/\s+/g, ' ').trim() === EXACT_WORKABLE_RECEIPT_TEXT
       && outcome.formStillPresent === false;
   }
   const greenhousePath = /\/(?:application_)?confirmation\/?$/.test(url.pathname);
@@ -538,6 +543,137 @@ function exactAtsReceipt(
     && outcome.state === 'confirmed'
     && outcome.source === 'ats_route'
     && outcome.evidence === `greenhouse:${url.pathname}`;
+}
+
+/**
+ * Verify a terminal managed-browser result against the immutable application URL that the server
+ * sent to Stratus. This is the only public confirmation predicate for initial results, delayed
+ * observations, and server-retained sessions. Whole-page prose and caller labels never enter it.
+ */
+export function exactManagedAtsReceipt(input: {
+  result: ManagedReceiptResult;
+  expectedApplicationUrl: string;
+}): boolean {
+  const outcome = readManagedSubmitOutcome(input.result);
+  if (!outcome || outcome.pressed !== true || outcome.state !== 'confirmed') return false;
+  const expectedBinding = managedAtsBinding({ url: input.expectedApplicationUrl });
+  if (!expectedBinding) return false;
+  const observedLanding = managedAtsBinding(input.result);
+  const receiptBinding = expectedBinding.family === 'workable'
+    ? heldAtsBinding(observedLanding, expectedBinding)
+    : expectedBinding;
+  return Boolean(receiptBinding && exactAtsReceipt(input.result, outcome, receiptBinding));
+}
+
+/** A managed confirmation verdict is usable only when its portal-specific receipt is exact. */
+export function exactManagedSubmitVerdict(
+  result: ManagedReceiptResult | null | undefined,
+  expectedApplicationUrl: string,
+): ManagedSubmitVerdict {
+  const verdict = managedSubmitVerdict(result);
+  if (verdict.kind !== 'confirmed') return verdict;
+  return result && exactManagedAtsReceipt({ result, expectedApplicationUrl })
+    ? verdict
+    : { kind: 'unverified', cause: 'no_confirmation_state' };
+}
+
+export type ExactManagedPageReceipt = {
+  confirmationText: string;
+  finalUrl: string;
+  result: ManagedReceiptResult;
+};
+
+const EXACT_RECEIPT_FORM_SELECTORS: Record<ManagedAtsFamily, string> = {
+  ashby: '.ashby-application-form-container, input[name="_systemfield_email"], input#_systemfield_resume',
+  greenhouse: 'form#application_form, input[name="job_application[first_name]"], input[name="first_name"], input[name="email"], input[name="resume"]',
+  workable: '[data-ui="application-form"], input[type="file"][data-ui="resume"], input[name="firstname"]',
+};
+
+async function locatorHasVisibleMatch(locator: ReturnType<Page['locator']>): Promise<boolean> {
+  const count = Math.min(await locator.count().catch(() => 0), 20);
+  for (let index = 0; index < count; index += 1) {
+    if (await locator.nth(index).isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
+/**
+ * Read only measured portal-specific terminal state from a trusted server-held Page. It never reads
+ * body prose. Unknown families, live forms, missing selectors, and posting mismatches remain null.
+ */
+export async function readExactManagedPageReceipt(
+  page: Pick<Page, 'url' | 'locator' | 'waitForTimeout'>,
+  expectedApplicationUrl: string,
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<ExactManagedPageReceipt | null> {
+  const expectedBinding = managedAtsBinding({ url: expectedApplicationUrl });
+  if (!expectedBinding) return null;
+  const timeoutMs = Math.max(0, Math.min(options.timeoutMs ?? 30_000, 30_000));
+  const pollMs = Math.max(10, Math.min(options.pollMs ?? 500, 1_000));
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const finalUrl = page.url();
+    const formStillPresent = await locatorHasVisibleMatch(
+      page.locator(EXACT_RECEIPT_FORM_SELECTORS[expectedBinding.family]),
+    );
+    let source: ManagedSubmitOutcome['source'] = null;
+    let evidence: string | null = null;
+    let confirmationText = '';
+    if (!formStillPresent && expectedBinding.family === 'ashby') {
+      const success = page.locator('.ashby-application-form-success-container');
+      if (await locatorHasVisibleMatch(success)) {
+        confirmationText = (await success.first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+        source = 'ats_state';
+        evidence = '.ashby-application-form-success-container';
+      }
+    } else if (!formStillPresent && expectedBinding.family === 'greenhouse') {
+      try {
+        const url = new URL(finalUrl);
+        if (/\/(?:application_)?confirmation\/?$/.test(url.pathname)) {
+          const confirmation = page.locator('.confirmation > .confirmation__content');
+          if (await locatorHasVisibleMatch(confirmation)) {
+            confirmationText = (await confirmation.first().innerText().catch(() => ''))
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 1_000);
+            if (confirmationText) {
+              source = 'ats_route';
+              evidence = `greenhouse:${url.pathname}`;
+            }
+          }
+        }
+      } catch {
+        // Invalid browser URLs fail closed below.
+      }
+    } else if (!formStillPresent && expectedBinding.family === 'workable') {
+      const success = page.locator('[data-ui="successful-submit"]');
+      if (await locatorHasVisibleMatch(success)) {
+        confirmationText = (await success.first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+        if (confirmationText === EXACT_WORKABLE_RECEIPT_TEXT) {
+          source = 'ats_state';
+          evidence = '[data-ui="successful-submit"]';
+        }
+      }
+    }
+    if (confirmationText && source && evidence) {
+      const result: ManagedReceiptResult = {
+        url: finalUrl,
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source,
+          evidence,
+          message: confirmationText,
+          formStillPresent,
+        },
+      };
+      if (exactManagedAtsReceipt({ result, expectedApplicationUrl })) {
+        return { confirmationText, finalUrl, result };
+      }
+    }
+    if (Date.now() >= deadline) return null;
+    await page.waitForTimeout(pollMs).catch(() => undefined);
+  } while (true);
 }
 
 export type ManagedReceiptObservation<T extends ManagedReceiptResult> = {

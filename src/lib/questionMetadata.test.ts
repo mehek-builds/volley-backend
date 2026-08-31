@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  discoveredQuestionsForExactOptionProbe,
+  questionMetadataBlockerForDiscovered,
   reopenUnfitClosedChoiceQuestions,
   storedAnswerMatchesNoExactOption,
 } from './questionMetadata';
@@ -175,4 +177,25 @@ test('a draft already present is kept in preference to a later machine refill', 
     '3.89/4.00 (US 4.0 scale)',
     'her original words survive a refresh-refill/re-open cycle instead of being replaced by the resolver value',
   );
+});
+
+test('a partial discovered option list is a blocker and is never treated as an exact list', () => {
+  const field = {
+    label: 'Which office do you prefer?',
+    selector: '#office',
+    durableSelector: '#office',
+    inputType: 'select-one',
+    role: null,
+    maxLength: null,
+    required: false,
+    options: ['Dubai', 'London'],
+    optionsComplete: false,
+  };
+  const blocker = questionMetadataBlockerForDiscovered(field);
+  assert.equal(blocker?.kind, 'missing_exact_options');
+  assert.equal(blocker?.question, field.label);
+  assert.equal(blocker?.required, false);
+  assert.equal(blocker?.portal_input_type, field.inputType);
+  assert.equal(discoveredQuestionsForExactOptionProbe([field])[0]?.options, null,
+    'the next probe must re-read the control instead of resolving against a partial list');
 });

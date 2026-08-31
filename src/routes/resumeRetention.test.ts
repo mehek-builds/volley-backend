@@ -58,6 +58,7 @@ function dependencyHarness(overrides: Partial<ResumeRetentionDependencies> = {})
     clear: 0,
     purgeUsage: 0,
     purgeNetworkPreviews: 0,
+    sweepManagedPrepareObjects: 0,
     clearedUserIds: null as string[] | null,
   };
   const dependencies: ResumeRetentionDependencies = {
@@ -80,6 +81,10 @@ function dependencyHarness(overrides: Partial<ResumeRetentionDependencies> = {})
     purgeExpiredNetworkPreviews: async () => {
       calls.purgeNetworkPreviews += 1;
       return 2;
+    },
+    sweepManagedPrepareObjectCleanup: async () => {
+      calls.sweepManagedPrepareObjects += 1;
+      return 1;
     },
     ...overrides,
   };
@@ -123,11 +128,13 @@ test('the daily sweep runs unconditionally and reports what it deleted', async (
       preview_retention_days: 7,
       expired_usage_receipts: 3,
       expired_network_previews: 2,
+      superseded_managed_prepare_objects: 1,
     });
     assert.equal(harness.calls.sweep, 1);
     assert.equal(harness.calls.clear, 1);
     assert.equal(harness.calls.purgeUsage, 1);
     assert.equal(harness.calls.purgeNetworkPreviews, 1);
+    assert.equal(harness.calls.sweepManagedPrepareObjects, 1);
   });
 });
 
@@ -263,6 +270,7 @@ test('a sweep that deletes no legacy original clears no pointers', async () => {
       preview_retention_days: 7,
       expired_usage_receipts: 3,
       expired_network_previews: 2,
+      superseded_managed_prepare_objects: 1,
     });
     assert.deepEqual(harness.calls.clearedUserIds, [], 'no profile pointer is implicated');
   });

@@ -53,6 +53,11 @@ test('the global error boundary preserves client errors and hides server interna
     statusCode: 500,
     message: 'Internal server error',
   });
+  assert.deepEqual(toPublicError({ code: '40001', message: 'database internals' }), {
+    statusCode: 503,
+    message: 'This account changed at the same time. Try the request again.',
+    retryAfterSeconds: 1,
+  });
 });
 
 const ATS_ORIGIN = 'https://job-boards.greenhouse.io';
@@ -70,7 +75,7 @@ test('/v1/meta publishes the cacheable Litos client contract', async () => {
   const body = res.json();
   assert.equal(body.product.name, 'Litos');
   assert.equal(body.api.version, '1');
-  assert.equal(body.api.compatibility.extension.minimum, '0.4.4');
+  assert.equal(body.api.compatibility.extension.minimum, '0.6.5');
 });
 
 test('/health identifies the deployable service and revision contract', async () => {
@@ -88,7 +93,11 @@ test('/health identifies the deployable service and revision contract', async ()
   // 2026-08-04 it touched nothing and answered 200 through a 75-minute outage in which every other
   // route returned 500.
   assert.ok(['ok', 'unreachable'].includes(body.database), `unexpected database ${body.database}`);
-  assert.equal(res.statusCode, body.database === 'ok' ? 200 : 503, 'status code must follow the probe');
+  assert.equal(
+    res.statusCode,
+    body.database === 'ok' && body.submission_authority.ready ? 200 : 503,
+    'status code must fail closed when the database or submission authority schema is unavailable',
+  );
   /* The aggregate follows EVERY dependency, not the database alone. This asserted
      `database === 'ok' ? 'ok' : 'degraded'` and passed only because the test DATABASE_URL is
      unreachable, so both sides read 'degraded' by coincidence. A degraded application email
@@ -113,6 +122,11 @@ test('/health identifies the deployable service and revision contract', async ()
   // `revision_source` is what makes a null revision DIAGNOSABLE. DEPLOY.md's table keys off these
   // three values, so the set is part of the contract and not an implementation detail.
   assert.ok(Object.hasOwn(body, 'revision_source'));
+  assert.equal(typeof body.submission_authority.ready, 'boolean');
+  assert.equal(typeof body.submission_authority.attempt_ledger.ready, 'boolean');
+  assert.equal(typeof body.submission_authority.attempt_ledger.reason, 'string');
+  assert.equal(typeof body.submission_authority.revision.ready, 'boolean');
+  assert.equal(typeof body.submission_authority.revision.reason, 'string');
   assert.ok(
     ['vercel-git', 'git-sha', 'none'].includes(body.revision_source),
     `unexpected revision_source ${JSON.stringify(body.revision_source)}`,
@@ -654,6 +668,18 @@ test('/privacy redirects to the canonical trylitos.com policy', async () => {
 
   assert.equal(res.statusCode, 301);
   assert.equal(res.headers.location, 'https://trylitos.com/privacy');
+});
+
+test('public logo routing accepts the poller contract maximum 128-character tenant token', async () => {
+  const app = await getApp();
+  const tenant = `a${'b'.repeat(126)}z`;
+  const response = await app.inject({
+    method: 'GET',
+    url: `/storage/logo/rippling/${tenant}/${'a'.repeat(63)}.png`,
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), { error: 'Object not found' });
 });
 
 test('account export and deletion require auth', async () => {

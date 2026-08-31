@@ -20,7 +20,8 @@ import { boardConditions } from './jobMonitor';
 const dialect = new PgDialect();
 
 /* The conditions present with no filters at all: active, source enabled, an autonomous portal
-   family, and the freshness window. Everything a relaxed request must still carry. */
+   family, the verification window, and verified logo evidence. Everything a relaxed request must
+   still carry. */
 const BASELINE = boardConditions({});
 
 const targeting = normalizeTargeting({
@@ -50,7 +51,7 @@ test('relaxing drops every preference predicate and leaves exactly the baseline'
   assert.equal(render(relaxed), render(BASELINE));
 });
 
-test('the four relaxed predicates are the stated preferences and nothing else', () => {
+test('the relaxed predicates are the stated preferences and nothing else', () => {
   const targetedSql = render(boardConditions({ targeting }));
   const relaxedSql = render(boardConditions({ targeting: undefined }));
 
@@ -79,6 +80,7 @@ test('relaxing never reaches the constraints, which is the whole point', () => {
   assert.match(relaxedSql, /ats_name/i, 'the portal-family constraint was dropped by relaxing');
   assert.match(relaxedSql, /is_active/i, 'the active constraint was dropped by relaxing');
   assert.match(relaxedSql, /last_seen_at/i, 'the verified freshness window was dropped by relaxing');
+  assert.match(relaxedSql, /logo_verification_status/i, 'the verified-logo constraint was dropped by relaxing');
 });
 
 test('sponsor_only survives relaxing, because it is eligibility and not preference', () => {

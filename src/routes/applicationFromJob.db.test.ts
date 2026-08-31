@@ -112,7 +112,7 @@ after(async () => {
   Object.assign(process.env, savedEnv);
 });
 
-const DESCRIPTION = 'Build backend services for cloud-managed physical security systems at scale.';
+const DESCRIPTION = 'Build backend services for cloud-managed physical security systems at scale, own production systems, collaborate across teams, and meet the stated engineering requirements and qualifications.'.repeat(2);
 
 async function seedAttachableWorld(overrides: {
   jobActive?: boolean;
@@ -132,15 +132,22 @@ async function seedAttachableWorld(overrides: {
     ]);
   }
   await database.query(
-    `insert into "career_page_sources" ("id", "company_name", "ats_name", "board_token", "career_url", "enabled")
-     values ($1, 'Verkada', $2, 'verkada', 'https://job-boards.greenhouse.io/verkada', $3)`,
+    `insert into "career_page_sources"
+       ("id", "company_name", "ats_name", "board_token", "career_url", "enabled",
+        "portal_company_name", "portal_name_mismatch", "company_logo_url",
+        "logo_verification_status", "logo_verification_method", "logo_verified_at")
+     values ($1, 'Verkada', $2, 'verkada', 'https://job-boards.greenhouse.io/verkada', $3,
+             'Verkada', false, 'https://assets.example/verkada-logo.png',
+             'verified', 'first_party_ats_employer_logo', now())`,
     [SOURCE, overrides.atsName ?? 'greenhouse', overrides.sourceEnabled !== false],
   );
   await database.query(
     `insert into "monitored_jobs"
-       ("id", "source_id", "external_id", "company_name", "title", "description", "apply_url", "posting_url", "is_active")
+       ("id", "source_id", "external_id", "company_name", "title", "description", "ingest_eligible",
+        "apply_url", "posting_url", "last_seen_at", "is_active")
      values ($1, $2, 'gh-1', 'Verkada', 'Backend Software Engineering Intern 2027', $3,
-             'https://job-boards.greenhouse.io/verkada/jobs/1', 'https://job-boards.greenhouse.io/verkada/jobs/1', $4)`,
+             true, 'https://job-boards.greenhouse.io/verkada/jobs/1',
+             'https://job-boards.greenhouse.io/verkada/jobs/1', now(), $4)`,
     [JOB, SOURCE, DESCRIPTION, overrides.jobActive !== false],
   );
 }

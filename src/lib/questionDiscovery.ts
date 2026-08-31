@@ -6294,6 +6294,8 @@ export type DiscoveredQuestion = {
    * back to a ranked alias ladder in that case.
    */
   options?: string[] | null;
+  /** False means the reported list is partial and may not be used for exact resolution. */
+  optionsComplete?: boolean;
   /**
    * Whether the employer marks this field as required.
    *

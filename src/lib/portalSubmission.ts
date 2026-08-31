@@ -63,6 +63,7 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
+import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 import {
   postingCountryCodeFromJobContext,
   postingCountryFromJobContext,
@@ -1580,7 +1581,12 @@ export function managedResultFieldOptions(result: ManagedBrowserResult | null | 
  * label + aria-label + placeholder + name + id, so the discipline control arrives as
  * "discipline* discipline--0" and carries its own id; nothing else has to be threaded through.
  */
-export function attachManagedFieldOptions<T extends { label: string; selector?: string; options?: string[] | null }>(
+export function attachManagedFieldOptions<T extends {
+  label: string;
+  selector?: string;
+  options?: string[] | null;
+  optionsComplete?: boolean;
+}>(
   discovered: readonly T[],
   optionsByInputId: Record<string, string[]>,
 ): T[] {
@@ -1590,13 +1596,15 @@ export function attachManagedFieldOptions<T extends { label: string; selector?: 
     if (controlId) controlCounts.set(controlId, (controlCounts.get(controlId) ?? 0) + 1);
   }
   return discovered.map((field) => {
-    if (field.options && field.options.length > 0) return field;
+    if (field.optionsComplete !== false && field.options && field.options.length > 0) return field;
     const controlId = managedOptionProbeControlId(field);
     // The same durable id on two discovered fields is ambiguous. Never attach one list to both,
     // and never fall back to a label substring that can match a neighbouring question.
     if (!controlId || controlCounts.get(controlId) !== 1) return field;
     const options = optionsByInputId[controlId];
-    return options?.length ? { ...field, options } : field;
+    return options?.length
+      ? { ...field, options, optionsComplete: true }
+      : field.optionsComplete === false ? { ...field, options: null } : field;
   });
 }
 
@@ -1968,7 +1976,7 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
 /** Pack whole controls into bounded requests. No control is partially probed at a budget edge. */
 export function buildManagedDiscoveredOptionProbeBatches(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; optionsComplete?: boolean; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): ManagedBrowserAction[][] {
@@ -2006,7 +2014,7 @@ export function buildManagedDiscoveredOptionProbeBatches(
  */
 export function buildManagedDiscoveredOptionProbeActions(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; optionsComplete?: boolean; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): ManagedBrowserAction[] {
@@ -2040,7 +2048,7 @@ export type ManagedOptionProbeBatchFailure = { controlIds: string[]; reason: str
 
 export function managedOptionProbeAnalysis(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; optionsComplete?: boolean; required?: boolean }[],
   alreadyRead: Record<string, string[]>,
   results: readonly (ManagedBrowserResult | null | undefined)[],
   batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
@@ -2061,7 +2069,9 @@ export function managedOptionProbeAnalysis(
   for (const field of discovered) {
     const id = managedOptionProbeControlId(field);
     if (!id || (counts.get(id) ?? 0) !== 1 || options[id]?.length) continue;
-    const read = [...new Set((field.options ?? []).map((option) => option.trim()).filter(Boolean))];
+    const read = field.optionsComplete === false
+      ? []
+      : [...new Set((field.options ?? []).map((option) => option.trim()).filter(Boolean))];
     if (read.length > 0) options[id] = read;
   }
 
@@ -8961,28 +8971,188 @@ export function canonicalMonitoredPortalUrl(
   rawUrl: string | undefined,
   atsName?: string | null,
   boardToken?: string | null,
+  externalId?: string | null,
+  trustedPostingUrl?: string | null,
 ): string | undefined {
   if (!rawUrl) return undefined;
-  const token = boardToken?.trim();
-  if (atsName?.trim().toLowerCase() === 'greenhouse' && token) {
+  const expectedFamily = atsName?.trim().toLowerCase();
+  if (!expectedFamily || !isAutonomousPortalFamily(expectedFamily)) return undefined;
+  const token = normalizeExecutableAtsBoardToken(expectedFamily, boardToken);
+  if (!token) return undefined;
+  if (expectedFamily === 'greenhouse') {
     try {
       const url = new URL(rawUrl);
-      if (url.protocol !== 'https:') return undefined;
-      const pathJobId = url.pathname.match(/^\/[^/]+\/jobs\/(\d+)/)?.[1] ?? '';
-      const greenhouseJobId = url.searchParams.get('gh_jid') ?? url.searchParams.get('token') ?? pathJobId;
-      if (/^\d+$/.test(greenhouseJobId)) {
-        const embedHost = url.hostname.toLowerCase() === 'job-boards.eu.greenhouse.io'
-          ? 'job-boards.eu.greenhouse.io'
-          : 'job-boards.greenhouse.io';
-        return `https://${embedHost}/embed/job_app?for=${encodeURIComponent(token)}&token=${greenhouseJobId}`;
+      if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return undefined;
+      const host = url.hostname.toLowerCase();
+      const nativeHosts = new Set([
+        'boards.greenhouse.io',
+        'job-boards.greenhouse.io',
+        'job-boards.eu.greenhouse.io',
+      ]);
+      let greenhouseJobId = '';
+      if (nativeHosts.has(host)) {
+        const jobPath = url.pathname.match(/^\/([^/]+)\/jobs\/(\d+)\/?$/i);
+        if (jobPath) {
+          if (jobPath[1].toLowerCase() !== token) return undefined;
+          greenhouseJobId = jobPath[2];
+        } else if (url.pathname === '/embed/job_app') {
+          const declaredTenant = url.searchParams.get('for') ?? url.searchParams.get('b');
+          if (declaredTenant && declaredTenant.toLowerCase() !== token) return undefined;
+          greenhouseJobId = url.searchParams.get('token') ?? '';
+        } else {
+          return undefined;
+        }
+      } else {
+        const embedded = embeddedGreenhouseApplicationUrl(url);
+        if (embedded) {
+          const embeddedUrl = new URL(embedded);
+          if ((embeddedUrl.searchParams.get('for') ?? '').toLowerCase() !== token) return undefined;
+          greenhouseJobId = embeddedUrl.searchParams.get('token') ?? '';
+        } else {
+          greenhouseJobId = databricksGreenhouseJobId(url) ?? '';
+        }
       }
+      if (!/^\d+$/.test(greenhouseJobId)
+        || (externalId && greenhouseJobId !== externalId)) return undefined;
+      const embedHost = host === 'job-boards.eu.greenhouse.io'
+        ? 'job-boards.eu.greenhouse.io'
+        : 'job-boards.greenhouse.io';
+      return `https://${embedHost}/embed/job_app?for=${encodeURIComponent(token)}&token=${greenhouseJobId}`;
     } catch {
       return undefined;
     }
   }
-  const canonical = canonicalSupportedPortalUrl(rawUrl, atsName);
-  if (canonical && !greenhousePortalUrlNeedsBoardToken(canonical)) return canonical;
-  return undefined;
+
+  let raw: URL;
+  try {
+    raw = new URL(rawUrl);
+  } catch {
+    return undefined;
+  }
+  if (raw.protocol !== 'https:' || raw.username || raw.password || raw.port || raw.search || raw.hash) {
+    return undefined;
+  }
+  const canonical = canonicalSupportedPortalUrl(rawUrl, expectedFamily);
+  if (!canonical || greenhousePortalUrlNeedsBoardToken(canonical)) return undefined;
+
+  let portal: SupportedPortal;
+  let url: URL;
+  try {
+    portal = detectPortal(canonical);
+    url = new URL(canonical);
+  } catch {
+    return undefined;
+  }
+  /* Monitored rows are stricter than caller-supplied links. The stored provider is authority, so a
+     valid URL from a different supported family must not become an action target. Controlled test
+     portals and manual aliases are excluded here for the same reason. */
+  if (portal !== expectedFamily) return undefined;
+
+  const rawSegments = url.pathname.split('/').filter(Boolean);
+  const segments: string[] = [];
+  for (const rawSegment of rawSegments) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSegment);
+    } catch {
+      return undefined;
+    }
+    if (!decoded || decoded === '.' || decoded === '..'
+      || /[/\\\u0000-\u001f\u007f]/.test(decoded)) return undefined;
+    segments.push(decoded);
+  }
+  const expectedId = externalId?.trim();
+  const tokenMatches = (value: string | undefined) => value?.toLowerCase() === token.toLowerCase();
+  const idMatches = (value: string | undefined) => Boolean(value)
+    && (!expectedId || value === expectedId);
+
+  switch (expectedFamily) {
+    case 'lever': {
+      if (!['jobs.lever.co', 'jobs.eu.lever.co'].includes(url.hostname.toLowerCase())
+        || !tokenMatches(segments[0]) || !idMatches(segments[1])
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'apply'))) {
+        return undefined;
+      }
+      return `https://${url.hostname.toLowerCase()}/${encodeURIComponent(segments[0])}/${encodeURIComponent(segments[1])}/apply`;
+    }
+    case 'ashby': {
+      if (url.hostname.toLowerCase() !== 'jobs.ashbyhq.com'
+        || !tokenMatches(segments[0]) || !idMatches(segments[1])
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'application'))) {
+        return undefined;
+      }
+      return `https://jobs.ashbyhq.com/${encodeURIComponent(segments[0])}/${encodeURIComponent(segments[1])}/application`;
+    }
+    case 'workable': {
+      const hasTenant = segments[0]?.toLowerCase() !== 'j';
+      const tenant = hasTenant ? segments[0] : token;
+      const jIndex = hasTenant ? 1 : 0;
+      const idIndex = jIndex + 1;
+      const suffixIndex = idIndex + 1;
+      if (url.hostname.toLowerCase() !== 'apply.workable.com'
+        || !tokenMatches(tenant) || segments[jIndex]?.toLowerCase() !== 'j'
+        || !idMatches(segments[idIndex])
+        || (segments.length !== suffixIndex
+          && !(segments.length === suffixIndex + 1 && segments[suffixIndex] === 'apply'))) {
+        return undefined;
+      }
+      return `https://apply.workable.com/${encodeURIComponent(token)}/j/${encodeURIComponent(segments[idIndex])}/apply`;
+    }
+    case 'rippling': {
+      if (url.hostname.toLowerCase() !== 'ats.rippling.com'
+        || !tokenMatches(segments[0]) || segments[1]?.toLowerCase() !== 'jobs'
+        || !idMatches(segments[2])
+        || (segments.length !== 3 && !(segments.length === 4 && segments[3] === 'apply'))) {
+        return undefined;
+      }
+      return `https://ats.rippling.com/${encodeURIComponent(segments[0])}/jobs/${encodeURIComponent(segments[2])}/apply`;
+    }
+    case 'breezy': {
+      if (url.hostname.toLowerCase() !== `${token.toLowerCase()}.breezy.hr`
+        || segments[0]?.toLowerCase() !== 'p' || !segments[1]
+        || (expectedId && segments[1] !== expectedId && !segments[1].startsWith(`${expectedId}-`))
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'apply'))) {
+        return undefined;
+      }
+      return `https://${token.toLowerCase()}.breezy.hr/p/${encodeURIComponent(segments[1])}/apply`;
+    }
+    case 'recruitee': {
+      let trustedSlug = '';
+      try {
+        if (!trustedPostingUrl) return undefined;
+        const posting = new URL(trustedPostingUrl);
+        const postingSegments = posting.pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
+        if (posting.protocol !== 'https:' || posting.username || posting.password || posting.port
+          || posting.search || posting.hash
+          || posting.hostname.toLowerCase() !== `${token.toLowerCase()}.recruitee.com`
+          || postingSegments.length !== 2 || postingSegments[0]?.toLowerCase() !== 'o'
+          || !postingSegments[1] || /[/\\\u0000-\u001f\u007f]/.test(postingSegments[1])) return undefined;
+        trustedSlug = postingSegments[1];
+      } catch {
+        return undefined;
+      }
+      if (url.hostname.toLowerCase() !== `${token.toLowerCase()}.recruitee.com`
+        || segments[0]?.toLowerCase() !== 'o' || segments[1] !== trustedSlug
+        || (segments.length !== 2
+          && !(segments.length === 4 && segments[2]?.toLowerCase() === 'c'
+            && segments[3]?.toLowerCase() === 'new'))) {
+        return undefined;
+      }
+      return `https://${token.toLowerCase()}.recruitee.com/o/${encodeURIComponent(trustedSlug)}/c/new`;
+    }
+    case 'crelate': {
+      const postingId = segments[3]?.toLowerCase() === 'apply' ? segments[4] : segments[3];
+      if (url.hostname.toLowerCase() !== 'jobs.crelate.com'
+        || segments[0]?.toLowerCase() !== 'portal' || !tokenMatches(segments[1])
+        || segments[2]?.toLowerCase() !== 'job' || !idMatches(postingId)
+        || (segments.length !== 4 && !(segments.length === 5 && segments[3]?.toLowerCase() === 'apply'))) {
+        return undefined;
+      }
+      return `https://jobs.crelate.com/portal/${encodeURIComponent(segments[1])}/job/apply/${encodeURIComponent(postingId!)}`;
+    }
+    default:
+      return undefined;
+  }
 }
 
 export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): boolean {

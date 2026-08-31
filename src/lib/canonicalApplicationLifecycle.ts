@@ -14,10 +14,47 @@ export const confirmedSubmissionLifecycle = {
   trackerState: 'applied',
 } as const;
 
-export function manualSubmissionTransition(currentState: string, outcome: ManualSubmissionOutcome) {
-  if (currentState === 'submitted') return confirmedSubmissionLifecycle;
-  if (outcome === 'confirmed') return confirmedSubmissionLifecycle;
+export function isAppliedOrLaterTrackerState(value: string): boolean {
+  return value === 'applied' || value === 'interview' || value === 'offer' || value === 'closed';
+}
+
+/**
+ * Receipt projection may arrive after the applicant has already advanced the packet in their
+ * tracker. Keep every applied-or-later stage and its original timestamp, otherwise advance the
+ * packet exactly once to applied at the receipt observation time.
+ */
+export function confirmedPacketPipelineProjection(observedAt: Date) {
+  const alreadyAppliedOrLater = sql`${generated_resumes.pipeline_stage} in ('applied', 'interview', 'offer', 'closed')`;
+  return {
+    pipeline_stage: sql`case when ${alreadyAppliedOrLater} then ${generated_resumes.pipeline_stage} else 'applied' end`,
+    pipeline_stage_at: sql`case
+      when ${generated_resumes.pipeline_stage} in ('interview', 'offer', 'closed')
+        then ${generated_resumes.pipeline_stage_at}
+      when ${generated_resumes.pipeline_stage} = 'applied'
+        and ${generated_resumes.pipeline_stage_at} is not null
+        then ${generated_resumes.pipeline_stage_at}
+      else ${observedAt}
+    end`,
+  };
+}
+
+export function manualSubmissionTransition(
+  currentState: string,
+  outcome: ManualSubmissionOutcome,
+  currentTrackerState = 'saved',
+) {
+  const confirmedTrackerState = ['interview', 'offer', 'closed'].includes(currentTrackerState)
+    ? currentTrackerState
+    : confirmedSubmissionLifecycle.trackerState;
+  if (currentState === 'submitted') {
+    return { ...confirmedSubmissionLifecycle, trackerState: confirmedTrackerState };
+  }
+  if (outcome === 'confirmed') {
+    return { ...confirmedSubmissionLifecycle, trackerState: confirmedTrackerState };
+  }
   if (currentState === 'failed') return { submissionState: 'failed', trackerState: 'applying' } as const;
   if (outcome === 'failed') return { submissionState: 'failed', trackerState: 'applying' } as const;
   return { submissionState: 'needs_attention', trackerState: 'applying' } as const;
 }
+import { sql } from 'drizzle-orm';
+import { generated_resumes } from '../db/schema';

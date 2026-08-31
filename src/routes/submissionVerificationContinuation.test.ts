@@ -6,15 +6,223 @@ test('managed submission records a typed verification handoff before receipt par
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
   const verificationGate = runner.indexOf('managedResultNeedsEmailVerification(result)', firstSubmit);
-  const receiptRead = runner.indexOf('readManagedReceipt(receiptResult)', firstSubmit);
+  const receiptRead = runner.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', firstSubmit);
   assert.ok(firstSubmit > 0);
   assert.ok(verificationGate > firstSubmit && verificationGate < receiptRead);
   const handoff = runner.slice(verificationGate, receiptRead);
-  assert.match(handoff, /status: 'needs_attention'/);
+  assert.match(handoff, /recordManagedSecurityCodeContinuationSearch/);
+  assert.match(handoff, /recordManagedSecurityCodeContinuationUnverified/);
   assert.match(handoff, /status: 'verification_pending'/);
   assert.match(handoff, /requested_at: requestedAt/);
   assert.match(handoff, /retry_count: 0/);
   assert.doesNotMatch(handoff, /runManagedBrowser\(result\.url/);
+});
+
+test('a held managed claim retrieves its exact terminal result before any relaunch and acknowledges only after a durable fold', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const processStart = runner.indexOf('export async function processSubmissionApplication(');
+  const prepareStart = runner.indexOf("if (review?.status === 'submit_requested')", processStart);
+  const heldClaimPath = runner.slice(processStart, prepareStart);
+  assert.match(
+    heldClaimPath,
+    /if \(submissionClaimIsHeld\(review\) \|\| managedSecurityCodeContinuationRecoveryIsHeld\(review\)\)/,
+  );
+  assert.match(heldClaimPath, /recoverManagedSubmissionTerminalResult\(/);
+  assert.match(heldClaimPath, /if \(recovery !== 'not_recoverable'\)/);
+
+  const recoveryStart = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
+  const claimStart = runner.indexOf('async function claimSubmission(', recoveryStart);
+  const recovery = runner.slice(recoveryStart, claimStart);
+  const retrieval = recovery.indexOf('getManagedBrowserTerminalResult(submissionAttempt');
+  const durableFold = recovery.indexOf('recordManagedSubmissionConfirmed(row, attemptBinding');
+  const acknowledgement = recovery.lastIndexOf('acknowledgeManagedTerminalFold(');
+  assert.ok(retrieval >= 0 && durableFold > retrieval && acknowledgement > durableFold);
+  assert.doesNotMatch(recovery, /runManagedBrowser\(|continueManagedBrowser(?:WithAccountFence)?\(/);
+});
+
+test('a lost initial challenge response enters the durable continuation state before acknowledgement', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(');
+  const end = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(', start);
+  const recovery = runner.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(recovery, /beginSecurityCodeState\(\{/);
+  assert.match(recovery, /continuation_execution_fingerprint: continuationExecutionFingerprint/);
+  assert.match(recovery, /continuation_resumed: false/);
+  assert.match(recovery, /recordManagedSecurityCodeContinuationSearch\(/);
+  const handoff = recovery.slice(
+    recovery.indexOf('const persistHandoff = async'),
+    recovery.indexOf('const expectedRecipient'),
+  );
+  assert.ok(
+    handoff.indexOf('recordManagedAuthorizedAttemptUnverified')
+      < handoff.indexOf('acknowledgeManagedTerminalFold'),
+    'the exact challenge handoff must commit before the initial result is acknowledged',
+  );
+});
+
+test('a crash after continuation search stays scheduler-visible and reuses the same initial result', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const searchStart = runner.indexOf('export async function recordManagedSecurityCodeContinuationSearch(');
+  const searchEnd = runner.indexOf('type ManagedSubmissionConfirmedInput', searchStart);
+  const search = runner.slice(searchStart, searchEnd);
+  assert.match(search, /const sameSearch =/);
+  assert.match(search, /continuation_execution_fingerprint/);
+  assert.match(search, /return sameSearch \? \{ row: latest, review: latestReview \} : null/);
+
+  const cronStart = runner.indexOf("fastify.get('/internal/application-submission-runner'");
+  const cron = runner.slice(cronStart);
+  assert.match(cron, /verification'->>'status' = 'searching'/);
+  assert.match(cron, /verification'->>'continuation_resumed' = 'false'/);
+  assert.match(cron, /managedSecurityCodeContinuationRecoveryIsHeld\(queuedReview\)/);
+});
+
+test('continuation recovery is GET-only across pending, success, and deadline handoff', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(');
+  const end = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(', start);
+  const recovery = runner.slice(start, end);
+  assert.match(recovery, /managedSecurityCodeContinuationRecoveryPlan\(review, attemptBinding\)/);
+  assert.match(recovery, /getManagedBrowserTerminalResult\(plan\.submissionAttempt\)/);
+  assert.match(recovery, /if \(terminalDecision === 'pending'\) return 'pending'/);
+  assert.match(recovery, /terminalDecision === 'deadline_expired'/);
+  assert.match(recovery, /foldManagedSecurityCodeContinuationResult\(/);
+  assert.doesNotMatch(recovery, /continueManagedBrowser(?:WithAccountFence)?\(|runManagedBrowser\(|portalApplicationUrl\(/);
+});
+
+test('continuation acknowledgement follows either a confirmed fact or a structured handoff', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('async function acknowledgeManagedTerminalFold(');
+  const end = runner.indexOf('function recoveredSecurityCodeState(', start);
+  const acknowledgement = runner.slice(start, end);
+  assert.ok(
+    acknowledgement.indexOf('managedAttemptHasDurableFold')
+      < acknowledgement.indexOf('acknowledgeManagedBrowserTerminalResult'),
+  );
+  const foldStart = runner.indexOf('async function foldManagedSecurityCodeContinuationResult(');
+  const foldEnd = runner.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(', foldStart);
+  const fold = runner.slice(foldStart, foldEnd);
+  assert.match(fold, /recordManagedSubmissionConfirmed\(/);
+  assert.match(fold, /recordManagedSecurityCodeContinuationUnverified\(/);
+  assert.match(fold, /acknowledgeManagedTerminalCleanupMarkers\(/);
+});
+
+test('every managed acknowledgement carries the exact durable result ID returned by Stratus', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const acknowledgementStart = runner.indexOf('async function acknowledgeManagedTerminalFold(');
+  const acknowledgementEnd = runner.indexOf('function recoveredSecurityCodeState(', acknowledgementStart);
+  const acknowledgement = runner.slice(acknowledgementStart, acknowledgementEnd);
+  assert.match(acknowledgement, /resultId: string/);
+  assert.match(
+    acknowledgement,
+    /acknowledgeManagedBrowserTerminalResult\(submissionAttempt, resultId\)/,
+  );
+
+  const recoveryStart = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
+  const recoveryEnd = runner.indexOf('async function claimSubmission(', recoveryStart);
+  const recovery = runner.slice(recoveryStart, recoveryEnd);
+  assert.match(recovery, /terminal\.resultId/);
+  assert.match(
+    recovery,
+    /recoverManagedInitialSecurityCodeChallenge\([\s\S]*submissionAttempt,[\s\S]*terminal\.resultId,[\s\S]*result/,
+  );
+
+  const managedStart = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
+  const managedEnd = runner.indexOf("if (!claimedReview.browser_session_id)", managedStart);
+  const managed = runner.slice(managedStart, managedEnd);
+  assert.match(managed, /const initialTerminalResultId = managedBrowserTerminalResultId\(result\)/);
+  assert.match(
+    managed,
+    /securityCodeTerminalResultId = managedBrowserTerminalResultId\(receiptResult\)/,
+  );
+  assert.match(
+    managed,
+    /receiptObservationTerminalResultId = managedBrowserTerminalResultId\(observed\)/,
+  );
+  assert.match(
+    managed,
+    /successfulSubmissionAttempt,[\s\S]*initialTerminalResultId,[\s\S]*fastify/,
+  );
+});
+
+test('an initial terminal GET failure folds after database expiry with atomic result retrieval work', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
+  const end = runner.indexOf('async function claimSubmission(', start);
+  const recovery = runner.slice(start, end);
+  const retrieval = recovery.indexOf('terminal = await getManagedBrowserTerminalResult(submissionAttempt');
+  const failure = recovery.indexOf('const freshAuthorization = await submissionBoundaryAuthorization(', retrieval);
+  const expiry = recovery.indexOf("if (freshAuthorization?.active) return 'pending'", failure);
+  const fold = recovery.indexOf('await persistUnverified(', expiry);
+  assert.ok(retrieval >= 0 && failure > retrieval && expiry > failure && fold > expiry);
+  assert.match(recovery, /pendingManagedTerminalCleanupMarker\(\{ attemptBinding, submissionAttempt \}\)/);
+  assert.match(recovery, /recordManagedAuthorizedAttemptUnverified\([\s\S]*cleanupMarkers: \[cleanupMarker\]/);
+  assert.doesNotMatch(recovery, /queueManagedTerminalCleanupResultRetrieval/);
+});
+
+test('terminal cleanup runs independently before the terminal application selector', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf("fastify.get('/internal/application-submission-runner'");
+  const cron = runner.slice(start);
+  const cleanup = cron.indexOf('retryManagedTerminalCleanupOutbox(fastify)');
+  const selection = cron.indexOf('const rows = await db');
+  assert.ok(cleanup >= 0 && selection > cleanup);
+  assert.match(runner, /_managed_terminal_cleanup_outbox/);
+  assert.match(runner, /managed-terminal-cleanup-outbox-v2/);
+  assert.match(runner, /managedTerminalCleanupBatchWindow\([\s\S]*\.offset\(batchWindow\.firstOffset\)/);
+  assert.match(runner, /if \(batchWindow\.wrapLimit > 0\)/);
+  assert.match(runner, /resultId: string \| null/);
+});
+
+test('terminal review and every cleanup obligation share one locked packet update', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recordManagedAuthorizedAttemptUnverified(');
+  const end = runner.indexOf('/** Persist exact post-call uncertainty', start);
+  const fold = runner.slice(start, end);
+  const lock = fold.indexOf('await lockSubmissionAttemptUser(tx, row.user_id)');
+  const outbox = fold.indexOf('specWithManagedTerminalFold', lock);
+  const review = fold.indexOf('unresolved,', outbox);
+  const update = fold.indexOf('await tx.update(generated_resumes)', review);
+  assert.ok(lock >= 0 && outbox > lock && review > outbox && update > review);
+  assert.equal((fold.match(/await tx\.update\(generated_resumes\)/g) ?? []).length, 1);
+  assert.doesNotMatch(fold, /persistManagedTerminalCleanupMarker|queueManagedTerminalCleanup/);
+});
+
+test('continuation recovery folds initial and continuation cleanup entries together', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(');
+  const end = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(', start);
+  const recovery = runner.slice(start, end);
+  assert.match(recovery, /const initialCleanupMarkers: ManagedTerminalCleanupMarker\[\] = \[\]/);
+  assert.match(recovery, /managedTerminalCleanupMarkerAfterRetrieval\([\s\S]*initialSubmissionAttempt/);
+  assert.match(recovery, /const cleanupMarkers = \[\.\.\.initialCleanupMarkers, cleanupMarker\]/);
+  assert.match(
+    recovery,
+    /foldManagedSecurityCodeContinuationResult\([\s\S]*fastify,[\s\S]*initialCleanupMarkers/,
+  );
+  assert.match(recovery, /if \(plan\.kind === 'invalid'\)[\s\S]*pendingManagedTerminalCleanupMarker/);
+  assert.match(recovery, /exactManagedTerminalCleanupQuarantine/);
+  assert.match(recovery, /cleanupMarkers: \[\.\.\.initialCleanupMarkers, \.\.\.continuationCleanupMarkers\]/);
+  assert.match(recovery, /cleanupQuarantines/);
+});
+
+test('live terminal branches atomically queue exact cleanup before acknowledgement', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('const initialTerminalResultId = managedBrowserTerminalResultId(result)');
+  const end = runner.indexOf("if (!claimedReview.browser_session_id)", start);
+  const managed = runner.slice(start, end);
+  assert.match(managed, /cleanupMarkers: \[initialCleanupMarker\]/);
+  assert.match(managed, /cleanupMarkers: managedCleanupMarkers\(\)/);
+  assert.match(
+    managed,
+    /receiptObservationStarted \? \[pendingManagedTerminalCleanupMarker\(\{[\s\S]*submissionAttempt: receiptObservationSubmissionAttempt/,
+  );
+  assert.match(managed, /foldManagedLiveTerminalUnverified\(/);
+  assert.match(managed, /await acknowledgeManagedCleanupMarkers\(\)/);
+  assert.doesNotMatch(
+    managed,
+    /did not return a receipt screenshot'\);|if \(!typedConfirmationReceipt\) throw error/,
+  );
 });
 
 test('managed verification resumes once by token, never by URL, then verifies the receipt', async () => {
@@ -26,7 +234,10 @@ test('managed verification resumes once by token, never by URL, then verifies th
   // No continuationCheckpoint: Stratus already offers a continuation on a pressed-unknown receipt,
   // and setting the flag also made continuationOffered true on confirmed, rejected and not_attempted
   // outcomes, which kept the sandbox alive after every successful submission.
-  assert.match(managed, /managedApplicationSubmitOptions\(SECURITY_CODE_CONTINUATION_TTL_SECONDS\)/);
+  assert.match(
+    managed,
+    /managedApplicationSubmitOptions\(\s*SECURITY_CODE_CONTINUATION_TTL_SECONDS,\s*successfulSubmissionAttempt,?\s*\)/,
+  );
   assert.doesNotMatch(managed, /continuationCheckpoint: true/);
   assert.match(managed, /readManagedSecurityCodeChallenge\(receiptResult\)/);
   assert.match(managed, /securityCodeChallengeMatchesRecipient\(initialChallengeCandidate, packet\.email\)/);
@@ -41,16 +252,18 @@ test('managed verification resumes once by token, never by URL, then verifies th
      one mailbox on a live Cresta application on 2026-08-09. A second continuation now exists only
      for a zero-action receipt observation after an unknown verdict. The action shapes, rather than
      the raw call count, prove that no second submit has crept back in. */
-  assert.equal((managed.match(/continueManagedBrowser\(/g) ?? []).length, 2);
-  assert.equal((managed.match(/continueManagedBrowser\(continuationToken, codeActions\)/g) ?? []).length, 1);
-  assert.equal((managed.match(/continueManagedBrowser\(continuationToken, \[\], \{ screenshot: true \}\)/g) ?? []).length, 1);
+  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(/g) ?? []).length, 2);
+  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions,/g) ?? []).length, 1);
+  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, \[\], \{/g) ?? []).length, 1);
+  assert.match(managed, /submissionAttempt: securityCodeSubmissionAttempt/);
+  assert.match(managed, /submissionAttempt: receiptObservationSubmissionAttempt/);
   // The supplied code is fingerprinted as superseded and never handed to an action list.
   assert.match(managed, /outcome: 'superseded'/);
   assert.doesNotMatch(managed, /securityCodeContinuationActions\([^)]*options\.securityCode/);
   assert.match(managed, /if \(initialChallenge && managedResultNeedsEmailVerification\(result\)\) \{/);
   assert.doesNotMatch(managed, /runManagedBrowser\(result\.url/);
-  assert.match(managed, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
-  assert.match(managed, /readManagedReceipt\(receiptResult\)/);
+  assert.match(managed, /receiptResult = await continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions,/);
+  assert.match(managed, /exactManagedSubmitVerdict\(receiptResult, applicationUrl\)/);
   const terminalVerification = managed.slice(managed.indexOf("verification = {\n        status: 'completed'"));
   assert.doesNotMatch(terminalVerification, /continuation_token:/);
 });
@@ -71,15 +284,15 @@ test('managed alias permission is independent from connected-inbox consent and p
 test('a retained Greenhouse wall may read the exact older alias code once but never spend it twice', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const firstSubmit = runner.indexOf('const initialSubmitOutcome = readManagedSubmitOutcome(result)');
-  const continuation = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)', firstSubmit);
+  const continuation = runner.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions,', firstSubmit);
   assert.ok(firstSubmit > 0 && continuation > firstSubmit);
   const managed = runner.slice(firstSubmit, continuation);
   assert.match(managed, /standingChallenge: initialSubmitOutcome\?\.pressed === false/);
   assert.match(managed, /const codeWasAlreadyAttempted = prepared\.status === 'ready'/);
   assert.match(managed, /findSecurityCodeAttempt\([\s\S]*securityCodeFingerprint\(row\.id, prepared\.code\)/);
   assert.match(managed, /prepared\.status === 'ready' && !codeWasAlreadyAttempted/);
-  assert.match(managed, /await writeReview\(row, nextReview\(claimedReview, \{ security_code: enteredSecurityCodeState \}\)\)/);
-  const durableFingerprintWrite = runner.indexOf('security_code: enteredSecurityCodeState', firstSubmit);
+  assert.match(managed, /assertManagedSecurityCodeContinuationBoundaryClear\([\s\S]*enteredSecurityCodeState/);
+  const durableFingerprintWrite = runner.indexOf('assertManagedSecurityCodeContinuationBoundaryClear(', firstSubmit);
   assert.ok(
     durableFingerprintWrite > firstSubmit && durableFingerprintWrite < continuation,
     'the fingerprint must be durable before the one-shot continuation is called',
@@ -101,7 +314,7 @@ test('consent and the exact email route are revalidated after polling and before
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const ready = runner.indexOf("if (prepared.status === 'ready' && !codeWasAlreadyAttempted");
   const entered = runner.indexOf('enteredCode = prepared.code', ready);
-  const continuation = runner.indexOf('continueManagedBrowser(continuationToken, codeActions)', entered);
+  const continuation = runner.indexOf('continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions,', entered);
   const actionGate = runner.slice(ready, entered);
   assert.ok(ready > 0 && entered > ready && continuation > entered);
   assert.match(actionGate, /await authorizationValidAtClick\(row, claimedReview\)/);
@@ -112,14 +325,29 @@ test('consent and the exact email route are revalidated after polling and before
   assert.doesNotMatch(actionGate, /securityCodeFingerprint\(row\.id, prepared\.code\)|continueManagedBrowser/);
 });
 
+test('the locked continuation CAS rechecks consent version and entitlement immediately before resume', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function assertManagedSecurityCodeContinuationBoundaryClear(');
+  const end = runner.indexOf('function mergeManagedSecurityCodeEvidence(', start);
+  const boundary = runner.slice(start, end);
+  const lock = boundary.indexOf('await lockSubmissionAttemptUser(tx, row.user_id)');
+  const user = boundary.indexOf('consentVersion: users.automatic_submission_consent_version');
+  const entitlement = boundary.indexOf('await getEntitlementSnapshot(', user);
+  const authorization = boundary.indexOf('if (!finalBoundaryAuthorizationMatches(', entitlement);
+  const resume = boundary.indexOf('continuation_resumed: true', authorization);
+  const write = boundary.indexOf('await tx.update(generated_resumes)', resume);
+  assert.ok(lock >= 0 && user > lock && entitlement > user && authorization > entitlement
+    && resume > authorization && write > resume);
+});
+
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const call = runner.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)');
+  const call = runner.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions,');
   const receiptObservation = runner.indexOf('let receiptEvidenceResult = receiptResult', call);
   const continuation = runner.slice(call, receiptObservation);
   assert.match(continuation, /catch \(error\)/);
-  assert.match(continuation, /could not prove the final result/);
-  assert.equal((continuation.match(/continueManagedBrowser\(/g) ?? []).length, 1);
+  assert.match(continuation, /recordManagedSecurityCodeContinuationUnverified/);
+  assert.equal((continuation.match(/continueManagedBrowserWithAccountFence\(/g) ?? []).length, 1);
   assert.doesNotMatch(continuation, /result\.url/);
   assert.doesNotMatch(continuation, /runManagedBrowser\(/);
 });
@@ -131,13 +359,16 @@ test('unknown receipt observation is one empty-action continuation with no URL o
   const end = runner.indexOf("if (!receiptEvidenceResult.screenshot)", start);
   assert.ok(firstSubmit > 0 && start > firstSubmit && end > start);
   const initialRun = runner.slice(firstSubmit, start);
-  assert.match(initialRun, /managedApplicationSubmitOptions\(SECURITY_CODE_CONTINUATION_TTL_SECONDS\)/);
+  assert.match(
+    initialRun,
+    /managedApplicationSubmitOptions\(\s*SECURITY_CODE_CONTINUATION_TTL_SECONDS,\s*successfulSubmissionAttempt,?\s*\)/,
+  );
   assert.doesNotMatch(initialRun, /continuationCheckpoint: true/);
   const observation = runner.slice(start, end);
   assert.match(observation, /if \(!initialChallenge\)/);
-  assert.equal((observation.match(/continueManagedBrowser\(/g) ?? []).length, 1);
+  assert.equal((observation.match(/continueManagedBrowserWithAccountFence\(/g) ?? []).length, 1);
   assert.match(observation, /expectedApplicationUrl: applicationUrl/);
-  assert.match(observation, /continueManagedBrowser\(continuationToken, \[\], \{ screenshot: true \}\)/);
+  assert.match(observation, /continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, \[\], \{[\s\S]*screenshot: true,[\s\S]*submissionAttempt: receiptObservationSubmissionAttempt/);
   assert.doesNotMatch(observation, /runManagedBrowser|result\.url|codeActions|confirmAndSubmit|type: 'click'/);
 });
 
@@ -146,7 +377,7 @@ test('a delayed typed code wall fails closed after its one observation capabilit
   const start = runner.indexOf('let receiptEvidenceResult = receiptResult');
   const handoff = runner.indexOf('if (delayedObservedChallenge)', start);
   const handoffEnd = runner.indexOf('/* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE', handoff);
-  const unverified = runner.indexOf('const verdict = managedSubmitVerdict(receiptResult)', handoff);
+  const unverified = runner.indexOf('const verdict = exactManagedSubmitVerdict(receiptResult, applicationUrl)', handoff);
   assert.ok(start > 0 && handoff > start && handoffEnd > handoff && unverified > handoffEnd);
   const observation = runner.slice(start, handoff);
   assert.match(observation, /readManagedSecurityCodeChallenge\(observation\.observedResult\)/);

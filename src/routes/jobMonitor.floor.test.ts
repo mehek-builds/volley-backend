@@ -1,12 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { DATABASE_CONNECTION_TIMEOUT_MS } from '../db';
 import {
   CLOSED_POSTING_RETENTION_DAYS,
   PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS,
   VERIFIED_ACTIVE_WINDOW_DAYS,
   MINIMUM_SPONSOR_SURFACED_JOBS,
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
+  MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS,
+  POLL_SOURCE_LOCK_TIMEOUT_MS,
+  POLL_SOURCE_PERSISTENCE_ATTEMPTS,
+  POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS,
+  POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS,
+  POLL_SOURCE_STATEMENT_TIMEOUT_MS,
+  PURGE_POSTINGS_DELETE_TIMEOUT_MS,
+  PURGE_POSTINGS_LOCK_TIMEOUT_MS,
+  PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS,
+  PURGE_POSTINGS_VACUUM_TIMEOUT_MS,
   TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
@@ -18,13 +29,25 @@ import {
   TARGET_SURFACED_POSTINGS,
   boardHealth,
   boardIsBelowFloor,
+  completedPollFields,
+  detailCursorFromLastError,
+  detailCursorKeyFromLastError,
+  detailRefreshStatus,
   groupedRoleAlertTriggered,
   inventoryTargetMet,
+  jobMonitorDrainShouldInitialize,
+  jobMonitorDrainStartedAtAllowed,
   pollingQueueStatus,
+  publicVerifiedEvidenceGateEnabled,
   mergeJobSources,
+  mergeCurrentDrainPollFailures,
+  monitorQuerySchema,
   shouldKeepPostingsOnEmptyFetch,
   targetRoleCoverageMetrics,
+  groupedSponsorshipFor,
+  sponsorOnlyPredicate,
   sponsorshipCountryCodeFor,
+  withVerifiedCompanyLogo,
 } from './jobMonitor';
 import type { JobSourceInput } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
@@ -43,10 +66,13 @@ test('the board has independent five-hundred-thousand posting and fifty-thousand
   assert.equal(boardIsBelowFloor(0), true, 'an empty board is the case this exists for');
 });
 
-test('the scheduled cron summary always reports postings and grouped roles', () => {
+test('the manual monitor fallback summary always reports postings and grouped roles', () => {
   const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
   assert.match(workflow, /surfaced_postings/);
   assert.match(workflow, /surfaced_grouped_roles/);
+  assert.match(workflow, /certified_unique_jobs/);
+  assert.match(workflow, /certified_unique_grouped_roles/);
+  assert.match(workflow, /certified_unique_sponsor_jobs/);
   assert.match(workflow, /target_surfaced_postings/);
   assert.match(workflow, /target_surfaced_grouped_roles/);
   assert.match(workflow, /inventory_target_met/);
@@ -73,9 +99,27 @@ test('the scheduled catalog includes reviewed sources and deduplicated operator 
     { company_name: 'Kept', ats_name: 'greenhouse', board_token: 'kept', career_url: 'https://example.com/kept' },
   ];
   const configured: JobSourceInput[] = [
-    { company_name: 'Override', ats_name: 'workable', board_token: 'same', career_url: 'https://example.com/override', enabled: false },
+    { company_name: 'Override', ats_name: 'workable', board_token: 'SAME', career_url: 'https://example.com/override', enabled: false },
   ];
-  assert.deepEqual(mergeJobSources(reviewed, configured), [configured[0], reviewed[1]]);
+  assert.deepEqual(mergeJobSources(reviewed, configured), [
+    { ...configured[0], board_token: 'same' },
+    reviewed[1],
+  ]);
+});
+
+test('source identity normalization uses the provider executable-token contract', () => {
+  assert.equal(mergeJobSources([], [{
+    company_name: 'Encoded',
+    ats_name: 'greenhouse',
+    board_token: 'Acme%2DJobs',
+    career_url: 'https://example.com/jobs',
+  }])[0]?.board_token, 'acme-jobs');
+  assert.throws(() => mergeJobSources([], [{
+    company_name: 'Unsafe',
+    ats_name: 'breezy',
+    board_token: 'tenant.example',
+    career_url: 'https://example.com/jobs',
+  }]), /Invalid breezy board token/);
 });
 
 test('the monitor never retires the persisted source fleet from a smaller static catalog', () => {
@@ -92,14 +136,194 @@ test('post-poll metric statements leave time for the cron to answer', () => {
   assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 14 * 60_000 - POLL_TIME_BUDGET_MS);
 });
 
+test('every pollSource database unit installs bounded lock and statement timeouts first', () => {
+  assert.equal(POLL_SOURCE_LOCK_TIMEOUT_MS, 5_000);
+  assert.equal(POLL_SOURCE_STATEMENT_TIMEOUT_MS, 120_000);
+  assert.ok(POLL_SOURCE_STATEMENT_TIMEOUT_MS < 15 * 60_000);
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const poll = source.slice(
+    source.indexOf('export async function pollSource'),
+    source.indexOf('/* The board\'s filter set'),
+  );
+  const emptyGuard = poll.slice(
+    poll.indexOf('if (listedCount === 0)'),
+    poll.indexOf('/* CURRENTNESS IS ESTABLISHED AT INGEST'),
+  );
+  const atomicWrite = poll.slice(
+    poll.indexOf('const detailStatus = detailRefreshStatus'),
+    poll.indexOf('/* WHO DOES THE PORTAL SAY THIS BOARD BELONG TO?'),
+  );
+  const failureWrite = poll.slice(poll.lastIndexOf('} catch (error)'));
+
+  const assertTimeoutsPrecede = (unit: string, firstWork: string, label: string) => {
+    const lockTimeout = unit.indexOf('set local lock_timeout');
+    const statementTimeout = unit.indexOf('set local statement_timeout');
+    const mutation = unit.indexOf(firstWork);
+    assert.ok(lockTimeout >= 0, `${label} must set a local lock timeout`);
+    assert.ok(statementTimeout > lockTimeout, `${label} must set statement timeout after lock timeout`);
+    assert.ok(mutation > statementTimeout, `${label} must install both timeouts before database work`);
+  };
+
+  assertTimeoutsPrecede(emptyGuard, '.select({ active:', 'empty-board guard');
+  assertTimeoutsPrecede(atomicWrite, 'tx.update(monitored_jobs)', 'atomic source and job write');
+  assertTimeoutsPrecede(failureWrite, 'tx.update(career_page_sources)', 'failure-state write');
+  assert.ok(
+    atomicWrite.indexOf('for update') < atomicWrite.indexOf('tx.update(monitored_jobs)'),
+    'the atomic poll write must lock its source row before mutating monitored jobs',
+  );
+  assert.equal(poll.match(/set local lock_timeout/g)?.length, 3);
+  assert.equal(poll.match(/set local statement_timeout/g)?.length, 3);
+});
+
+test('terminal poll failures stay visible without keeping a source in the drain queue', () => {
+  assert.equal(POLL_SOURCE_PERSISTENCE_ATTEMPTS, 3);
+  assert.equal(POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS, 250);
+  assert.equal(POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS, 35_000);
+  assert.ok(
+    POLL_SOURCE_PERSISTENCE_ATTEMPTS * POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS
+      + POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS
+        * POLL_SOURCE_PERSISTENCE_ATTEMPTS
+        * (POLL_SOURCE_PERSISTENCE_ATTEMPTS - 1) / 2
+      < POLL_SOURCE_STATEMENT_TIMEOUT_MS,
+    'all bounded retries together must fit inside the former single-attempt ceiling',
+  );
+
+  const poison = {
+    source_id: 'poison-source',
+    company: 'Poison Source',
+    jobs: 0 as const,
+    ok: false as const,
+    error: 'constraint failed next_detail_cursor=400',
+  };
+  const merged = mergeCurrentDrainPollFailures([{
+    source_id: 'healthy-source',
+    company: 'Healthy Source',
+    jobs: 1,
+    ok: true as const,
+  }], [poison]);
+  assert.deepEqual(merged, [{
+    source_id: 'healthy-source',
+    company: 'Healthy Source',
+    jobs: 1,
+    ok: true,
+  }, poison]);
+  assert.equal(merged.filter((result) => !result.ok).length, 1);
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const poll = source.slice(
+    source.indexOf('export async function pollSource'),
+    source.indexOf('export type CurrentDrainPollFailure'),
+  );
+  assert.match(poll, /retryTransient\(\(\) => db\.transaction/);
+  assert.match(poll, /attempts: POLL_SOURCE_PERSISTENCE_ATTEMPTS/);
+  assert.match(poll, /statement_timeout = '\$\{POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS\}ms'/);
+  assert.match(poll, /keepInCurrentDrainOnError = false;\s*throw error;/,
+    'exhausted persistence retries must terminally advance last_polled_at');
+  assert.match(poll, /last_error: message/,
+    'the terminal attempt must retain the exact error and cursor markers');
+
+  const handler = source.slice(source.indexOf("fastify.get('/internal/job-monitor'"));
+  assert.match(handler, /currentDrainPollFailures\(drainStartedAt\)/);
+  assert.match(handler, /mergeCurrentDrainPollFailures\(pollRun\.results, persistedFailures\)/);
+  assert.doesNotMatch(handler, /persistedFailures[\s\S]{0,500}reply\.status\(500\)/,
+    'completed-but-failed sources must not hot-loop the same drain');
+
+  const worker = readFileSync('scripts/run-job-monitor-worker.mjs', 'utf8');
+  const completeProof = worker.slice(
+    worker.indexOf('export function certifiedDrainProofComplete'),
+    worker.indexOf('export async function runCompleteDrain'),
+  );
+  assert.match(completeProof, /nonnegativeCount\(result\.poll_failed_sources\)/);
+  assert.doesNotMatch(completeProof, /poll_failed_sources\s*===\s*0/,
+    'complete_drain must retain explicit terminal failures without reopening the drained queue');
+  assert.match(worker, /poll_failed_sources: monitor\.body\.failed/);
+  assert.match(worker, /poll_failure_summaries: pollFailureSummaries\(monitor\.body\)/);
+});
+
+test('post-poll purge and vacuum are bounded below the worker request timeout', () => {
+  assert.equal(PURGE_POSTINGS_LOCK_TIMEOUT_MS, 5_000);
+  assert.equal(PURGE_POSTINGS_DELETE_TIMEOUT_MS, 60_000);
+  assert.equal(PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS, 5_000);
+  assert.equal(PURGE_POSTINGS_VACUUM_TIMEOUT_MS, 60_000);
+  assert.ok(
+    POLL_TIME_BUDGET_MS
+      + DATABASE_CONNECTION_TIMEOUT_MS
+      + PURGE_POSTINGS_DELETE_TIMEOUT_MS
+      + PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS
+      + PURGE_POSTINGS_VACUUM_TIMEOUT_MS
+      + MONITOR_METRICS_STATEMENT_TIMEOUT_MS
+      < 15 * 60_000,
+    'polling, maintenance and monitoring must leave time for a response',
+  );
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const purge = source.slice(
+    source.indexOf('export async function purgeExpiredPostings'),
+    source.indexOf('/** The floor rule as a predicate'),
+  );
+  const deleteStatement = purge.indexOf('return tx.delete(monitored_jobs)');
+  assert.ok(purge.indexOf('set local lock_timeout') < deleteStatement);
+  assert.ok(purge.indexOf('set local statement_timeout') < deleteStatement);
+  assert.match(purge, /const client = await connectPurgeVacuumClient\(\)/);
+  assert.ok(purge.indexOf("set_config('lock_timeout'") < purge.indexOf("client.query('vacuum monitored_jobs')"));
+  assert.ok(purge.indexOf("set_config('statement_timeout'") < purge.indexOf("client.query('vacuum monitored_jobs')"));
+  assert.match(purge, /reset lock_timeout[\s\S]*reset statement_timeout[\s\S]*client\.release/);
+
+  const handler = source.slice(source.indexOf("fastify.get('/internal/job-monitor'"));
+  assert.match(handler, /catch \(error\) \{[\s\S]*JobBoardPurgeTimeoutError[\s\S]*metrics_stage: error\.stage/);
+  assert.match(handler, /\} finally \{\s*await releaseMonitorLock\(\);/,
+    'purge timeout responses must still release the shared advisory lock');
+});
+
 test('source 401 completes on the second pass of the same drain run', () => {
   assert.deepEqual(pollingQueueStatus(401), { deferredSources: 401, pollingComplete: false });
   assert.deepEqual(pollingQueueStatus(1), { deferredSources: 1, pollingComplete: false });
   assert.deepEqual(pollingQueueStatus(0), { deferredSources: 0, pollingComplete: true });
 
   const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
-  assert.match(workflow, /drain_started_at=""/);
+  assert.match(workflow, /drain_started_at="\$\(date -u/);
   assert.match(workflow, /\?drain_started_at=\$\{drain_started_at\}/);
+  assert.match(workflow, /initialize_drain=true/);
+  assert.match(workflow, /--max-time 900/);
+  assert.match(workflow, /retrying the same cursor/);
+});
+
+test('a client-owned cursor can initialize discovery exactly for the first logical drain call', () => {
+  const drainStartedAt = '2026-08-30T10:15:00.000Z';
+  assert.equal(jobMonitorDrainShouldInitialize(undefined, false), true,
+    'the manual no-cursor path remains a fresh drain');
+  assert.equal(jobMonitorDrainShouldInitialize(drainStartedAt, true), true,
+    'the worker can initialize discovery while supplying its own cursor');
+  assert.equal(jobMonitorDrainShouldInitialize(drainStartedAt, false), false,
+    'subsequent segments skip discovery for the same cursor');
+  assert.equal(monitorQuerySchema.safeParse({
+    drain_started_at: drainStartedAt,
+    initialize_drain: 'true',
+  }).success, true);
+  assert.equal(monitorQuerySchema.safeParse({
+    drain_started_at: drainStartedAt,
+    initialize_drain: 'false',
+  }).success, false, 'only the explicit true initialization signal is accepted');
+
+  const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.match(route, /if \(initializeDrain\) \{/);
+  assert.match(route, /const brandedSources = initializeDrain/);
+});
+
+test('route cursor validation tolerates small clock skew but rejects a clearly future drain', () => {
+  const now = new Date('2026-08-30T10:16:00.000Z');
+  assert.equal(MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS, 30_000);
+  assert.equal(jobMonitorDrainStartedAtAllowed('2026-08-30T10:16:30.000Z', now), true);
+  assert.equal(jobMonitorDrainStartedAtAllowed('2026-08-30T10:16:30.001Z', now), false);
+  assert.equal(jobMonitorDrainStartedAtAllowed(undefined, now), true);
+
+  const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const handler = route.slice(route.indexOf("fastify.get('/internal/job-monitor'"));
+  assert.ok(
+    handler.indexOf('jobMonitorDrainStartedAtAllowed') < handler.indexOf('tryAcquireJobMonitorLock'),
+    'future cursors must fail before the route acquires the advisory lock or touches monitor state',
+  );
 });
 
 test('target-role database aggregates are shaped without exposing literal role text', async () => {
@@ -130,6 +354,125 @@ test('an empty poll response never deactivates a board that currently has postin
   // A non-empty response is always allowed to replace what is there, including a shrink.
   assert.equal(shouldKeepPostingsOnEmptyFetch(5, 600), false, 'a real shrink is still honoured');
   assert.equal(shouldKeepPostingsOnEmptyFetch(600, 600), false);
+});
+
+test('multi-request provider cursor progress survives between source polls', () => {
+  const status = detailRefreshStatus({
+    cursor: 0,
+    total: 900,
+    attempted: 600,
+    succeeded: 597,
+    failed: 3,
+    remaining_in_cycle: 300,
+    next_cursor: 600,
+    cycle_complete: false,
+    deadline_reached: false,
+  });
+  assert.match(status ?? '', /next_detail_cursor=600/);
+  assert.equal(detailCursorFromLastError(status), 600);
+  assert.equal(detailCursorFromLastError('unrelated provider error'), 0);
+  assert.equal(detailRefreshStatus({
+    cursor: 600,
+    total: 900,
+    attempted: 300,
+    succeeded: 300,
+    failed: 0,
+    remaining_in_cycle: 0,
+    next_cursor: 0,
+    cycle_complete: true,
+    deadline_reached: false,
+  }), null);
+});
+
+test('keyset detail progress survives diagnostics without exposing the raw provider id', () => {
+  const status = detailRefreshStatus({
+    cursor: 0,
+    cursor_key: null,
+    total: 900,
+    attempted: 600,
+    succeeded: 600,
+    failed: 0,
+    remaining_in_cycle: 300,
+    next_cursor: 600,
+    next_cursor_key: 'provider/job id 600',
+    cycle_complete: false,
+    deadline_reached: false,
+  });
+  assert.doesNotMatch(status ?? '', /provider\/job id 600/);
+  assert.equal(detailCursorKeyFromLastError(status), 'provider/job id 600');
+  assert.equal(detailCursorKeyFromLastError('next_detail_cursor_key=%%%'), undefined);
+});
+
+test('a partial detail window remains eligible in the same drain', () => {
+  const completedAt = new Date('2026-08-30T00:00:00.000Z');
+  assert.deepEqual(completedPollFields({
+    cursor: 0,
+    total: 900,
+    attempted: 600,
+    succeeded: 600,
+    failed: 0,
+    remaining_in_cycle: 300,
+    next_cursor: 600,
+    cycle_complete: false,
+    deadline_reached: false,
+  }, completedAt), {});
+  assert.deepEqual(completedPollFields(undefined, completedAt), {
+    last_polled_at: completedAt,
+    last_successful_poll_at: completedAt,
+  });
+  assert.deepEqual(completedPollFields({
+    cursor: 600,
+    total: 900,
+    attempted: 300,
+    succeeded: 300,
+    failed: 0,
+    remaining_in_cycle: 0,
+    next_cursor: 0,
+    cycle_complete: true,
+    deadline_reached: false,
+  }, completedAt), {
+    last_polled_at: completedAt,
+    last_successful_poll_at: completedAt,
+  });
+});
+
+test('list-confirmed IDs with failed details are reactivated before successful upserts', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const poll = source.slice(source.indexOf('export async function pollSource'), source.indexOf('/* The board\'s filter set'));
+  assert.match(poll, /fetched\.preserve_external_ids/);
+  assert.match(poll, /set\(\{ is_active: true \}\)/);
+  assert.doesNotMatch(poll, /set\(\{ is_active: true, last_seen_at:/,
+    'a list-only observation must not refresh detail evidence');
+  assert.match(poll, /inArray\(monitored_jobs\.external_id, ids\)/);
+  assert.match(poll, /detailCursorFromLastError\(source\.last_error\)/);
+  assert.match(poll, /tx\.update\(career_page_sources\)/,
+    'job writes and cursor advancement must share one transaction');
+});
+
+test('a completed cursor cycle cannot certify detail failures preserved by an earlier window', () => {
+  const completedAt = new Date('2026-08-30T00:00:00.000Z');
+  assert.deepEqual(completedPollFields({
+    cursor: 600,
+    total: 900,
+    attempted: 300,
+    succeeded: 300,
+    failed: 0,
+    remaining_in_cycle: 0,
+    next_cursor: 0,
+    cycle_complete: true,
+    deadline_reached: false,
+  }, completedAt), {
+    last_polled_at: completedAt,
+    last_successful_poll_at: completedAt,
+  });
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const metrics = source.slice(
+    source.indexOf('export async function boardInventoryMetrics'),
+    source.indexOf('export async function boardMonitoringSnapshot'),
+  );
+  assert.match(metrics, /gte\(monitored_jobs\.last_seen_at, certifiedSince\)/,
+    'only a successful detail upsert may provide current-drain certification');
 });
 
 test('the floor and the autonomy rule are enforced against the same set of portals', () => {
@@ -281,10 +624,26 @@ test('internship supply is never grown by loosening what counts as an internship
 test('country-aware sponsorship evidence names the jurisdiction', () => {
   assert.equal(sponsorshipCountryCodeFor({
     sponsorship_status: 'offers',
+    sponsorship_scope: 'job_country',
     employer_sponsors: false,
     raw_json: { portal_country: 'Germany' },
     location: 'Berlin',
   }), 'DE');
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'offers',
+    sponsorship_scope: 'us_h1b',
+    employer_sponsors: false,
+    job_country: 'non_us',
+    raw_json: { portal_country: 'Germany' },
+    location: 'Berlin',
+  }), null, 'an H-1B clause is not German work-permit sponsorship');
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'offers',
+    sponsorship_scope: 'us_h1b',
+    employer_sponsors: false,
+    job_country: 'us',
+    location: 'New York, NY',
+  }), 'US');
   assert.equal(sponsorshipCountryCodeFor({
     sponsorship_status: 'unstated',
     employer_sponsors: true,
@@ -295,6 +654,163 @@ test('country-aware sponsorship evidence names the jurisdiction', () => {
     employer_sponsors: true,
     location: 'New York, NY',
   }), null);
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'unstated',
+    employer_sponsors: true,
+    job_country: 'non_us',
+    location: 'Berlin, Germany',
+  }), null, 'US filing history is not evidence for a German posting');
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'unstated',
+    employer_sponsors: true,
+    job_country: 'us',
+    portal_name_mismatch: true,
+    location: 'New York, NY',
+  }), null, 'a mismatched portal identity cannot carry employer-level evidence');
+});
+
+test('grouped sponsorship keeps every offer attached to its own country', () => {
+  assert.deepEqual(groupedSponsorshipFor({
+    postingOffers: [
+      {
+        sponsorship_scope: 'job_country',
+        job_country: 'us',
+        location: 'New York, NY',
+      },
+      {
+        sponsorship_scope: 'us_h1b',
+        job_country: 'non_us',
+        raw_json: { portal_country: 'Germany' },
+        location: 'Berlin',
+      },
+    ],
+    employerFilesH1b: false,
+  }), {
+    evidence: 'posting_offers',
+    countryCodes: ['US'],
+  }, 'Berlin cannot inherit the US offer, and its H-1B-only clause contributes no German code');
+
+  assert.deepEqual(groupedSponsorshipFor({
+    postingOffers: [{
+      sponsorship_scope: 'job_country',
+      job_country: 'non_us',
+      raw_json: { portal_country: 'Germany' },
+      location: 'Berlin',
+    }],
+    employerFilesH1b: true,
+  }), {
+    evidence: 'posting_offers',
+    countryCodes: ['DE'],
+  }, 'a generic Berlin offer falls back to the posting country and outranks US filing history');
+});
+
+test('the SQL sponsorship gate makes H-1B offers US-only', async () => {
+  const { PgDialect } = await import('drizzle-orm/pg-core');
+  const query = new PgDialect().sqlToQuery(sponsorOnlyPredicate()!);
+  assert.match(query.sql, /"monitored_jobs"\."sponsorship_scope" is null/);
+  assert.match(query.sql, /"monitored_jobs"\."sponsorship_scope" <> \$/);
+  assert.match(query.sql, /"monitored_jobs"\."job_country" <> \$/);
+  assert.ok(query.params.includes('us_h1b'));
+  assert.ok(query.params.includes('non_us'));
+});
+
+test('the 500,000-job inventory definition includes persisted verified logo evidence', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const conditions = source.slice(
+    source.indexOf('export function boardConditions('),
+    source.indexOf('type PersistedCompanyLogoEvidence', source.indexOf('export function boardConditions(')),
+  );
+  assert.match(conditions, /verifiedLogoEvidencePredicate\(\)/);
+  assert.match(conditions, /monitored_jobs\.ingest_eligible/);
+  assert.match(conditions, /career_page_sources\.portal_company_name/);
+  assert.match(source, /logo_verification_status, 'verified'/);
+  assert.match(source, /career_page_sources\.logo_verified_at/);
+  assert.match(source, /career_page_sources\.company_domain/);
+  assert.match(source, /career_page_sources\.company_logo_url/);
+
+  const migration = readFileSync('scripts/apply-job-logo-evidence-schema.mjs', 'utf8');
+  for (const column of [
+    'company_domain',
+    'company_logo_url',
+    'logo_verification_status',
+    'logo_verification_method',
+    'logo_verified_at',
+  ]) {
+    assert.match(migration, new RegExp(`add column if not exists ${column}`));
+  }
+  assert.match(migration, /reviewed_company_domain_candidate/);
+  assert.match(migration, /career_page_sources_logo_evidence_check/);
+});
+
+test('the public evidence gate fails closed and has one explicit rollout bypass', () => {
+  assert.equal(publicVerifiedEvidenceGateEnabled({}), true);
+  assert.equal(publicVerifiedEvidenceGateEnabled({ JOB_BOARD_VERIFIED_EVIDENCE_GATE: 'enabled' }), true);
+  assert.equal(publicVerifiedEvidenceGateEnabled({ JOB_BOARD_VERIFIED_EVIDENCE_GATE: 'disabled' }), false);
+  assert.equal(publicVerifiedEvidenceGateEnabled({ JOB_BOARD_VERIFIED_EVIDENCE_GATE: 'false' }), true,
+    'a typo must not silently disable verified inventory enforcement');
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.match(source, /boardInventoryMetrics[\s\S]{0,500}requireVerifiedEvidence: true/);
+});
+
+test('public logo evidence uses persisted proof and never a response-time name guess', () => {
+  const direct = withVerifiedCompanyLogo({
+    company_name: 'Employer',
+    company_domain: 'employer.example',
+    company_logo_url: 'https://cdn.example/employer-logo.png',
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: '2026-08-30T00:00:00.000Z',
+  });
+  assert.equal(direct.company_logo_url, 'https://cdn.example/employer-logo.png');
+  assert.equal(direct.company_domain, 'employer.example');
+  assert.equal(direct.company_logo_verification_status, 'verified');
+  assert.equal(direct.company_logo_verification_method, 'first_party_ats_employer_logo');
+  assert.equal(direct.company_logo_verified_at, '2026-08-30T00:00:00.000Z');
+
+  const domainOnly = withVerifiedCompanyLogo({
+    company_name: 'Employer',
+    company_domain: 'employer.example',
+    company_logo_url: null,
+    logo_verification_status: 'verified',
+    logo_verification_method: 'board_backlink',
+    logo_verified_at: new Date('2026-08-30T00:00:00.000Z'),
+  });
+  assert.equal(domainOnly.company_domain, null);
+  assert.equal(domainOnly.company_logo_url, null, 'a domain alone is not fetched image proof');
+
+  const stale = withVerifiedCompanyLogo({
+    company_name: 'Employer',
+    company_domain: 'employer.example',
+    company_logo_url: 'https://cdn.example/old-logo.png',
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: new Date('2020-01-01T00:00:00.000Z'),
+  });
+  assert.equal(stale.company_logo_url, null, 'expired image proof fails closed');
+
+  const future = withVerifiedCompanyLogo({
+    company_name: 'Employer',
+    company_domain: 'employer.example',
+    company_logo_url: 'https://cdn.example/future-logo.png',
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: new Date(Date.now() + 60 * 60 * 1000),
+  });
+  assert.equal(future.company_logo_url, null, 'future-dated proof fails closed');
+
+  /* Even image-shaped candidate fields return null until proof is verified, which prevents a
+     query mistake from exposing the same uncounted logo the inventory gate excluded. */
+  const absent = withVerifiedCompanyLogo({
+    company_name: 'Airbnb',
+    company_domain: 'airbnb.com',
+    company_logo_url: 'https://airbnb.com/favicon.ico',
+    logo_verification_status: 'unverified',
+    logo_verification_method: 'catalog_company_domain_candidate',
+    logo_verified_at: null,
+  });
+  assert.equal(absent.company_domain, null);
+  assert.equal(absent.company_logo_url, null);
 });
 
 test('employment type is filterable, and an unstated type is not swept into Full-time', async () => {

@@ -1,21 +1,55 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, ilike, inArray, isNotNull, isNull, lt, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { db } from '../db/index';
-import { career_page_sources, monitored_jobs, profiles, sponsor_employers, targeting, users } from '../db/schema';
+import { DATABASE_CONNECTION_TIMEOUT_MS, db, pool } from '../db/index';
+import {
+  career_page_sources,
+  job_board_group_projection,
+  job_board_group_projection_state,
+  logo_verification_provider_circuits,
+  monitored_jobs,
+  profiles,
+  sponsor_employers,
+  targeting,
+  users,
+} from '../db/schema';
 import { decide, isBlocked } from '../engine/eligibility';
 import {
   normalizeEmployerName,
-  readPostingSponsorship,
+  readPostingSponsorshipAssessment,
   sponsorOnlyBoardRequired,
   sponsorshipVerdict,
   type PostingSponsorship,
+  type PostingSponsorshipScope,
 } from '../lib/sponsorship';
 import { postingCountryCodeFromJobContext, resolveJobCountry } from '../lib/jobLocation';
 import { portalNameAgrees } from '../lib/sponsorIdentity';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { fetchSourceJobs, isIngestablePosting, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
+import {
+  fetchSourceJobBatch,
+  isIngestablePosting,
+  POLLABLE_JOB_BOARDS,
+  type DetailFetchProgress,
+  type JobSourceInput,
+  type SupportedJobBoard,
+} from '../lib/jobMonitor';
 import { JOB_SOURCES } from '../lib/jobSources';
+import { discoverJobSources, type JobSourceDiscoveryResult } from '../lib/jobSourceDiscovery';
+import { CATALOG_DOMAIN_CANDIDATE_METHOD, catalogBrandedJobSources } from '../lib/jobSourceBrandCatalog';
+import { verifyCatalogSourceLogo } from '../lib/jobSourceLogoVerification';
+import {
+  VERIFIED_ATS_DURABLE_COPY_LOGO_METHOD,
+  VERIFIED_ATS_SOURCE_LOGO_METHOD,
+  verifyAtsSourceBranding,
+} from '../lib/atsSourceBranding';
+import { persistDurableAtsLogo } from '../lib/durableAtsLogo';
+import {
+  isTransientLogoVerificationReason,
+  retryTransientLogoVerification,
+} from '../lib/logoVerificationRetry';
+import { normalizeExecutableAtsBoardToken } from '../lib/atsBoardToken';
 import { H1B_EMPLOYERS } from '../lib/sponsorEmployers';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { rankCities } from '../lib/cities';
@@ -25,6 +59,20 @@ import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRankingShared, writeRankingShared } from '../lib/rankingCache';
 import { buildDescriptionDigest } from '../lib/descriptionDigest';
+import {
+  buildJobCertificationFingerprint,
+  normalizeEmployerCertificationIdentity,
+} from '../lib/jobCertificationFingerprint';
+import {
+  JOB_BOARD_CURSOR_START,
+  JobBoardCursorError,
+  decodeJobBoardCursor,
+  encodeJobBoardCursor,
+  jobBoardCursorFilterHash,
+  jobBoardCursorSigningSecret,
+  type GroupedJobsCursorKey,
+  type JobsCursorKey,
+} from '../lib/jobBoardCursor';
 import { applyBoardCacheHeaders } from '../lib/boardCacheHeaders';
 import { companyDomainFor } from '../lib/companyDomains';
 import { classificationCoverage, summarizeJobVariety } from '../lib/jobVariety';
@@ -41,6 +89,7 @@ import {
   POLL_TIME_BUDGET_MS,
   WORKABLE_START_INTERVAL_MS,
   pollSourcesWithinBudget,
+  retryTransient,
 } from '../lib/jobPollScheduler';
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 import {
@@ -54,6 +103,29 @@ import {
   type JobTargeting,
 } from '../lib/jobPreferences';
 
+export const LOGO_VERIFICATION_STATUSES = ['unverified', 'verified', 'failed'] as const;
+export type LogoVerificationStatus = typeof LOGO_VERIFICATION_STATUSES[number];
+
+/**
+ * Optional source-level brand proof accepted from the reviewed catalog or operator endpoint.
+ *
+ * This remains local to the persistence boundary. Provider normalizers return postings, not brand
+ * attestations, and must not be able to mint verified evidence merely because an ATS response
+ * happened to contain an image-shaped URL.
+ */
+export type JobSourceWithLogoEvidence = JobSourceInput & {
+  company_domain?: string | null;
+  company_logo_url?: string | null;
+  logo_verification_status?: LogoVerificationStatus;
+  logo_verification_method?: string | null;
+  logo_verified_at?: Date | string | null;
+};
+
+const bareCompanyDomainSchema = z.string().trim().toLowerCase()
+  .regex(/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/, 'company_domain must be a bare domain');
+const httpsLogoUrlSchema = z.string().url().max(4000)
+  .refine((value) => new URL(value).protocol === 'https:', 'company_logo_url must use HTTPS');
+
 const sourceSchema = z.object({
   company_name: z.string().trim().min(1).max(200),
   // Derived, never re-listed. This is the runtime gate on POST /internal/job-monitor/sources, and a
@@ -62,15 +134,451 @@ const sourceSchema = z.object({
   // POLLABLE_JOB_BOARDS, not AUTONOMOUS_PORTAL_FAMILIES: a source also needs a fetcher, and
   // accepting one without would store a row the daily poll can only ever record an error against.
   ats_name: z.enum(POLLABLE_JOB_BOARDS),
-  board_token: z.string().trim().min(1).max(300),
+  board_token: z.string().trim().toLowerCase().min(1).max(300),
   career_url: z.string().url().max(4000),
+  company_domain: bareCompanyDomainSchema.nullish(),
+  company_logo_url: httpsLogoUrlSchema.nullish(),
+  logo_verification_status: z.enum(LOGO_VERIFICATION_STATUSES).optional(),
+  logo_verification_method: z.string().trim().min(1).max(100).nullish(),
+  logo_verified_at: z.coerce.date().nullish(),
   enabled: z.boolean().optional().default(true),
-});
+}).superRefine((source, ctx) => {
+  if (!normalizeExecutableAtsBoardToken(source.ats_name, source.board_token)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['board_token'],
+      message: 'board_token is not executable by this ATS provider',
+    });
+  }
+  if (source.logo_verified_at
+    && source.logo_verified_at.getTime() > Date.now() + 5 * 60 * 1000) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['logo_verified_at'],
+      message: 'logo verification timestamp cannot be in the future',
+    });
+  }
+  const carriesLogoFields = source.company_domain !== undefined
+    || source.company_logo_url !== undefined
+    || source.logo_verification_status !== undefined
+    || source.logo_verification_method !== undefined
+    || source.logo_verified_at !== undefined;
+  if (carriesLogoFields && !source.logo_verification_method) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['logo_verification_method'],
+      message: 'explicit logo evidence requires a verification method',
+    });
+  }
+  if (source.logo_verification_status !== 'verified') return;
+  if (!source.company_logo_url) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['logo_verification_status'],
+      message: 'verified logo evidence requires a fetched company_logo_url',
+    });
+  }
+  if (!source.logo_verification_method) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['logo_verification_method'],
+      message: 'verified logo evidence requires a verification method',
+    });
+  }
+  if (!source.logo_verified_at) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['logo_verified_at'],
+      message: 'verified logo evidence requires a verification timestamp',
+    });
+  }
+}).transform((source) => ({
+  ...source,
+  /* The provider validator may decode a harmless percent-encoded slug. Persist exactly the token
+     the poller executes so identity keys, URLs, and catalog completeness all use one value. */
+  board_token: normalizeExecutableAtsBoardToken(source.ats_name, source.board_token)
+    ?? source.board_token,
+}));
 
 const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(100) });
-const monitorQuerySchema = z.object({
+export const monitorQuerySchema = z.object({
   drain_started_at: z.string().datetime({ offset: true }).optional(),
+  initialize_drain: z.literal('true').optional(),
 });
+export const MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS = 30_000;
+export function jobMonitorDrainStartedAtAllowed(
+  value: string | undefined,
+  now = new Date(),
+) {
+  if (!value) return true;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed)
+    && parsed <= now.getTime() + MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS;
+}
+export function jobMonitorDrainShouldInitialize(
+  drainStartedAt: string | undefined,
+  initializeDrain: boolean,
+) {
+  return !drainStartedAt || initializeDrain;
+}
+const logoVerificationQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+});
+export const LOGO_VERIFICATION_GLOBAL_CONCURRENCY = 16;
+export const LOGO_VERIFICATION_PROVIDER_CONCURRENCY = 4;
+export const LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS = 1_100;
+export const LOGO_VERIFICATION_REQUEST_CANDIDATES = 16;
+export const LOGO_VERIFICATION_PROVIDER_CANDIDATES = 4;
+export const LOGO_VERIFICATION_WORKABLE_CANDIDATES = 2;
+export const LOGO_VERIFICATION_CRELATE_CANDIDATES = 1;
+export const LOGO_VERIFICATION_CRELATE_CONCURRENCY = 1;
+/** Leave Railway a full minute to receive the bounded failure response and close the request. */
+export const LOGO_VERIFICATION_REQUEST_TIMEOUT_MS = 4 * 60 * 1000;
+export const CRELATE_LOGO_CIRCUIT_OPEN_MS = 15 * 60 * 1000;
+export const CRELATE_LOGO_CLAIM_LEASE_MS = 5 * 60 * 1000;
+export const CRELATE_LOGO_429_EXHAUSTED_REASON = 'ats:http_429_exhausted';
+const FAILED_LOGO_RETRY_MS = 7 * 24 * 60 * 60 * 1000;
+export const TRANSIENT_LOGO_RETRY_MS = 15 * 60 * 1000;
+const PROVISIONAL_SOURCE_LOGO_METHODS = new Set([
+  'cc0_board_identifier_candidate',
+  'mit_freehire_board_candidate',
+  'mit_ats_scrapers_board_candidate',
+  CATALOG_DOMAIN_CANDIDATE_METHOD,
+]);
+
+export function sourceLogoIdentityMode(method: string): 'provisional' | 'asserted' {
+  return PROVISIONAL_SOURCE_LOGO_METHODS.has(method) ? 'provisional' : 'asserted';
+}
+
+export function isCrelateLogo429(reason: string): boolean {
+  return reason.split(';').some((part) => part.split(':').at(-1) === 'http_429');
+}
+
+export function crelateLogoFailureTransition(
+  currentAttempts: number,
+  previousReason: string | null,
+  reason: string,
+) {
+  if (!isCrelateLogo429(reason)) {
+    return { attempts: 0, exhausted: false, reason, opensCircuit: false } as const;
+  }
+  /* A completed seven-day exhausted cycle starts over at attempt one. During the short retry lane,
+     attempts stay consecutive and the third response becomes a durable non-transient failure. */
+  const baseline = previousReason === CRELATE_LOGO_429_EXHAUSTED_REASON
+    ? 0
+    : Math.max(0, Math.min(3, Math.trunc(currentAttempts)));
+  const attempts = Math.min(3, baseline + 1);
+  const exhausted = attempts >= 3;
+  return {
+    attempts,
+    exhausted,
+    reason: exhausted ? CRELATE_LOGO_429_EXHAUSTED_REASON : reason,
+    opensCircuit: true,
+  } as const;
+}
+
+export type CrelateLogoVerificationClaim = {
+  token: string;
+  halfOpen: boolean;
+  leaseExpiresAt: Date;
+};
+
+async function ensureCrelateLogoCircuitRow() {
+  await db.insert(logo_verification_provider_circuits)
+    .values({ provider: 'crelate' })
+    .onConflictDoNothing();
+}
+
+/** Atomically reserve the single Crelate request allowed in both closed and half-open states. */
+export async function acquireCrelateLogoVerificationClaim(
+  at = new Date(),
+  token: string = randomUUID(),
+): Promise<CrelateLogoVerificationClaim | null> {
+  await ensureCrelateLogoCircuitRow();
+  const leaseExpiresAt = new Date(at.getTime() + CRELATE_LOGO_CLAIM_LEASE_MS);
+  const [claimed] = await db.update(logo_verification_provider_circuits).set({
+    active_claim_token: token,
+    active_claim_expires_at: leaseExpiresAt,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    or(
+      isNull(logo_verification_provider_circuits.circuit_open_until),
+      lte(logo_verification_provider_circuits.circuit_open_until, at),
+    ),
+    or(
+      isNull(logo_verification_provider_circuits.active_claim_token),
+      lte(logo_verification_provider_circuits.active_claim_expires_at, at),
+    ),
+  )).returning({
+    circuitOpenUntil: logo_verification_provider_circuits.circuit_open_until,
+  });
+  return claimed ? {
+    token,
+    halfOpen: claimed.circuitOpenUntil !== null,
+    leaseExpiresAt,
+  } : null;
+}
+
+export async function releaseCrelateLogoVerificationClaim(token: string, at = new Date()) {
+  const rows = await db.update(logo_verification_provider_circuits).set({
+    active_claim_token: null,
+    active_claim_expires_at: null,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    eq(logo_verification_provider_circuits.active_claim_token, token),
+  )).returning({ provider: logo_verification_provider_circuits.provider });
+  return rows.length === 1;
+}
+
+export async function openCrelateLogoVerificationCircuit(token: string, at = new Date()) {
+  const rows = await db.update(logo_verification_provider_circuits).set({
+    circuit_open_until: new Date(at.getTime() + CRELATE_LOGO_CIRCUIT_OPEN_MS),
+    active_claim_token: null,
+    active_claim_expires_at: null,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    eq(logo_verification_provider_circuits.active_claim_token, token),
+  )).returning({ provider: logo_verification_provider_circuits.provider });
+  return rows.length === 1;
+}
+
+export async function closeCrelateLogoVerificationCircuit(token: string, at = new Date()) {
+  const rows = await db.update(logo_verification_provider_circuits).set({
+    circuit_open_until: null,
+    active_claim_token: null,
+    active_claim_expires_at: null,
+    updated_at: at,
+  }).where(and(
+    eq(logo_verification_provider_circuits.provider, 'crelate'),
+    eq(logo_verification_provider_circuits.active_claim_token, token),
+  )).returning({ provider: logo_verification_provider_circuits.provider });
+  return rows.length === 1;
+}
+
+export async function readCrelateLogoVerificationBlock(at = new Date()) {
+  await ensureCrelateLogoCircuitRow();
+  const [state] = await db.select({
+    circuitOpenUntil: logo_verification_provider_circuits.circuit_open_until,
+    activeClaimExpiresAt: logo_verification_provider_circuits.active_claim_expires_at,
+  }).from(logo_verification_provider_circuits)
+    .where(eq(logo_verification_provider_circuits.provider, 'crelate'))
+    .limit(1);
+  const circuitOpenUntil = state?.circuitOpenUntil
+    && state.circuitOpenUntil.getTime() > at.getTime()
+    ? state.circuitOpenUntil
+    : null;
+  const activeClaimExpiresAt = state?.activeClaimExpiresAt
+    && state.activeClaimExpiresAt.getTime() > at.getTime()
+    ? state.activeClaimExpiresAt
+    : null;
+  const blockedUntil = circuitOpenUntil ?? activeClaimExpiresAt;
+  const halfOpen = state?.circuitOpenUntil !== null
+    && state?.circuitOpenUntil !== undefined
+    && state.circuitOpenUntil.getTime() <= at.getTime();
+  return {
+    blocked: blockedUntil !== null,
+    blockedUntil,
+    reason: circuitOpenUntil
+      ? 'open'
+      : activeClaimExpiresAt ? 'active' : halfOpen ? 'half_open' : 'closed',
+  } as const;
+}
+
+/** Keep one degraded provider inside the worker request timeout without hiding its deferred rows. */
+export function boundedLogoVerificationCandidates<T extends { ats_name: string }>(
+  candidates: readonly T[],
+): T[] {
+  const selected: T[] = [];
+  const selectedByProvider = new Map<string, number>();
+  for (const candidate of candidates) {
+    if (selected.length >= LOGO_VERIFICATION_REQUEST_CANDIDATES) break;
+    const providerLimit = candidate.ats_name === 'workable'
+      ? LOGO_VERIFICATION_WORKABLE_CANDIDATES
+      : candidate.ats_name === 'crelate'
+        ? LOGO_VERIFICATION_CRELATE_CANDIDATES
+        : LOGO_VERIFICATION_PROVIDER_CANDIDATES;
+    const providerSelected = selectedByProvider.get(candidate.ats_name) ?? 0;
+    if (providerSelected >= providerLimit) continue;
+    selected.push(candidate);
+    selectedByProvider.set(candidate.ats_name, providerSelected + 1);
+  }
+  return selected;
+}
+
+type ProviderAwareLogoQueueOptions = {
+  concurrency?: number;
+  providerConcurrency?: number;
+  workableStartIntervalMs?: number;
+  timeoutMs?: number;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+};
+
+export class LogoVerificationRequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Logo verification exceeded its ${timeoutMs}ms request budget`);
+    this.name = 'LogoVerificationRequestTimeoutError';
+  }
+}
+
+/** Bound the whole verifier and each ATS family while spacing the provider with a shared limit. */
+export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
+  candidates: readonly T[],
+  operation: (candidate: T, signal: AbortSignal) => Promise<void>,
+  options: ProviderAwareLogoQueueOptions = {},
+): Promise<void> {
+  if (candidates.length === 0) return;
+  const concurrency = Math.max(1, options.concurrency ?? LOGO_VERIFICATION_GLOBAL_CONCURRENCY);
+  const providerConcurrency = Math.max(
+    1,
+    options.providerConcurrency ?? LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
+  );
+  const workableStartIntervalMs = Math.max(
+    0,
+    options.workableStartIntervalMs ?? LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
+  );
+  const timeoutMs = Math.max(1, options.timeoutMs ?? LOGO_VERIFICATION_REQUEST_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutError = new LogoVerificationRequestTimeoutError(timeoutMs);
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  }));
+  const pending = [...candidates];
+  const activeByProvider = new Map<string, number>();
+  let active = 0;
+  let completed = 0;
+  let nextWorkableStart = 0;
+  let workableTimerPending = false;
+  let completionTimerPending = false;
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let hasFailure = false;
+    let firstFailure: unknown;
+    const rejectWhenProviderBarrierClears = () => {
+      if (settled || !hasFailure || active !== 0) return;
+      const delay = Math.max(0, nextWorkableStart - now());
+      if (delay > 0) {
+        if (!completionTimerPending) {
+          completionTimerPending = true;
+          void sleep(delay).then(() => {
+            completionTimerPending = false;
+            rejectWhenProviderBarrierClears();
+          }, () => {
+            completionTimerPending = false;
+            settled = true;
+            reject(firstFailure);
+          });
+        }
+        return;
+      }
+      settled = true;
+      reject(firstFailure);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      if (!hasFailure) {
+        hasFailure = true;
+        firstFailure = error;
+      }
+      /* The route holds the shared database advisory lock around this queue. Do not reject while a
+         started sibling can still mutate proof state, or while the final Workable start barrier is
+         active, because either return would release cross-replica pacing protection too early. */
+      rejectWhenProviderBarrierClears();
+    };
+    const onTimeout = () => {
+      controller.abort(timeoutError);
+      fail(timeoutError);
+    };
+    timeout = setTimeout(onTimeout, timeoutMs);
+    const schedule = () => {
+      if (settled) return;
+      if (hasFailure) {
+        rejectWhenProviderBarrierClears();
+        return;
+      }
+      if (completed === candidates.length && now() < nextWorkableStart) {
+        if (!completionTimerPending) {
+          completionTimerPending = true;
+          void sleep(nextWorkableStart - now()).then(() => {
+            completionTimerPending = false;
+            schedule();
+          }, fail);
+        }
+        return;
+      }
+      if (completed === candidates.length) {
+        settled = true;
+        resolve();
+        return;
+      }
+
+      while (active < concurrency) {
+        const timestamp = now();
+        const index = pending.findIndex((candidate) => {
+          const providerActive = activeByProvider.get(candidate.ats_name) ?? 0;
+          const providerLimit = candidate.ats_name === 'workable'
+            || candidate.ats_name === 'crelate'
+            ? 1
+            : providerConcurrency;
+          return providerActive < providerLimit
+            && (candidate.ats_name !== 'workable' || timestamp >= nextWorkableStart);
+        });
+        if (index < 0) break;
+        const [candidate] = pending.splice(index, 1);
+        active += 1;
+        activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 0) + 1);
+        if (candidate.ats_name === 'workable') {
+          nextWorkableStart = timestamp + workableStartIntervalMs;
+        }
+        let task: Promise<void>;
+        try {
+          task = operation(candidate, controller.signal);
+        } catch (error) {
+          task = Promise.reject(error);
+        }
+        void task.then(() => {
+          active -= 1;
+          activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 1) - 1);
+          completed += 1;
+          schedule();
+        }, (error) => {
+          active -= 1;
+          activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 1) - 1);
+          completed += 1;
+          fail(error);
+        });
+      }
+
+      const workableWaiting = pending.some((candidate) => candidate.ats_name === 'workable');
+      if (!workableTimerPending && active < concurrency && workableWaiting) {
+        const delay = Math.max(0, nextWorkableStart - now());
+        if (delay > 0) {
+          workableTimerPending = true;
+          void sleep(delay).then(() => {
+            workableTimerPending = false;
+            schedule();
+          }, fail);
+        }
+      }
+    };
+    schedule();
+  }).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+const VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD =
+  'first_party_ats_identity_and_homepage_logo_asset';
+const VERIFIER_ISSUED_SOURCE_LOGO_METHODS = [
+  VERIFIED_ATS_SOURCE_LOGO_METHOD,
+  VERIFIED_ATS_DURABLE_COPY_LOGO_METHOD,
+  VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD,
+] as const;
 /**
  * The two numbers that bound how many BYTES a single board request can pull out of Postgres.
  *
@@ -127,7 +635,18 @@ const listQuerySchema = z.object({
     .enum(['Full-time', 'Part-time', 'Internship', 'Apprenticeship', 'Contract'])
     .optional(),
   limit: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(50),
+  /* Legacy clients retain numeric offsets. New clients opt into seek pagination with
+     `cursor=start`, then pass the opaque next_cursor returned by the route. */
+  cursor: z.string().trim().min(1).max(4096).optional(),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
+}).superRefine((query, ctx) => {
+  if (query.cursor !== undefined && query.offset !== 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['offset'],
+      message: 'cursor pagination cannot be combined with a nonzero offset',
+    });
+  }
 });
 const jobParamsSchema = z.object({ id: z.string().uuid() });
 
@@ -227,7 +746,73 @@ export function inventoryTargetMet(surfacedPostings: number, surfacedGroupedRole
 
 /** Bound each post-poll metrics statement so the cron still has time to answer and release its lock. */
 export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
+export const GROUP_PROJECTION_REFRESH_STATEMENT_TIMEOUT_MS = 120_000;
 export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
+export const POLL_SOURCE_LOCK_TIMEOUT_MS = 5_000;
+/* One large board may update thousands of rows in chunks. Two minutes leaves room for that bounded
+   database work while guaranteeing a stuck statement cannot consume the 15-minute worker request. */
+export const POLL_SOURCE_STATEMENT_TIMEOUT_MS = 120_000;
+export const POLL_SOURCE_PERSISTENCE_ATTEMPTS = 3;
+export const POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS = 250;
+/* Three post-fetch attempts together remain below the original two-minute transaction ceiling, so
+   a poison row cannot extend one active poll past the worker's reserved response budget. */
+export const POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS = 35_000;
+/**
+ * Keep post-poll maintenance inside the worker's 15-minute request boundary. The delete is
+ * correctness work and fails the request when PostgreSQL cancels it. VACUUM is best-effort, but it
+ * still needs a server-side bound so the route cannot retain the shared advisory lock forever.
+ */
+export const PURGE_POSTINGS_LOCK_TIMEOUT_MS = 5_000;
+export const PURGE_POSTINGS_DELETE_TIMEOUT_MS = 60_000;
+export const PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS = 5_000;
+export const PURGE_POSTINGS_VACUUM_TIMEOUT_MS = 60_000;
+/** Variety classification is diagnostic, so keep its Node payload bounded at production scale. */
+export const MONITOR_VARIETY_SAMPLE_SIZE = 25_000;
+
+export class JobBoardMetricsTimeoutError extends Error {
+  constructor(
+    readonly stage: 'group_projection_refresh' | 'variety',
+    readonly timeoutMs: number,
+  ) {
+    super(`Job board ${stage} exceeded its ${timeoutMs}ms statement timeout`);
+    this.name = 'JobBoardMetricsTimeoutError';
+  }
+}
+
+export class JobBoardPurgeTimeoutError extends Error {
+  constructor(
+    readonly stage: 'purge_checkout' | 'purge_delete' | 'purge_vacuum_checkout',
+    readonly timeoutMs: number,
+  ) {
+    super(`Job board ${stage} exceeded its ${timeoutMs}ms database timeout`);
+    this.name = 'JobBoardPurgeTimeoutError';
+  }
+}
+
+function postgresErrorCode(error: unknown): unknown {
+  let current: unknown = error;
+  const seen = new Set<object>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    if ('code' in current && current.code !== undefined) return current.code;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return undefined;
+}
+
+function isPostgresStatementTimeout(error: unknown): boolean {
+  return postgresErrorCode(error) === '57014';
+}
+
+function isPostgresLockTimeout(error: unknown): boolean {
+  return postgresErrorCode(error) === '55P03';
+}
+
+function isDatabaseConnectionTimeout(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message === 'timeout exceeded when trying to connect'
+    || error.message === 'Connection terminated due to connection timeout';
+}
 
 /**
  * A posting is current when its employer's live ATS has confirmed it recently.
@@ -244,14 +829,182 @@ export const VERIFIED_ACTIVE_WINDOW_DAYS = 7;
 /** A full verification window of slack before an unrefreshed row is deleted. */
 export const PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS = VERIFIED_ACTIVE_WINDOW_DAYS * 2;
 
+/** Logo proof is refreshed before expiry, with seven days for a transient provider failure. */
+export const VERIFIED_LOGO_EVIDENCE_WINDOW_DAYS = 30;
+export const VERIFIED_LOGO_RECHECK_DAYS = 23;
+
 /**
  * One helper for every public surface. `/jobs`, `/jobs/grouped`,
  * `/jobs/facets` and `surfacedJobCount()` all call it, and a second copy of this rule is precisely
  * how the floor check ends up watching a number no visitor ever sees. One helper is also why
  * changing the verification window changes the dashboard's job feed by the same amount.
  */
-function freshnessPredicate() {
-  return sql`${monitored_jobs.last_seen_at} >= now() - (${VERIFIED_ACTIVE_WINDOW_DAYS} || ' days')::interval`;
+function freshnessPredicate(asOf?: Date) {
+  const referenceTime = asOf ? sql`${asOf}::timestamptz` : sql`now()`;
+  return sql`${monitored_jobs.last_seen_at} >= ${referenceTime}
+    - (${VERIFIED_ACTIVE_WINDOW_DAYS} || ' days')::interval`;
+}
+
+/**
+ * A posting only exists on the public board when its source carries persisted, audited logo proof.
+ *
+ * The status alone is deliberately insufficient. A partially applied migration, a bad manual
+ * update, or an old row with only a timestamp must not enter the 500,000-job headline. The database
+ * check prevents new inconsistent writes and this predicate protects reads while a migration is in
+ * flight or against legacy data that predates the constraint.
+ */
+export function verifiedLogoEvidencePredicate(asOf?: Date) {
+  const referenceTime = asOf ? sql`${asOf}::timestamptz` : sql`now()`;
+  return and(
+    eq(career_page_sources.logo_verification_status, 'verified'),
+    isNotNull(career_page_sources.logo_verified_at),
+    sql`${career_page_sources.logo_verified_at} >= ${referenceTime}
+      - (${VERIFIED_LOGO_EVIDENCE_WINDOW_DAYS} || ' days')::interval`,
+    sql`${career_page_sources.logo_verified_at} <= ${referenceTime} + interval '5 minutes'`,
+    sql`nullif(btrim(${career_page_sources.logo_verification_method}), '') is not null`,
+    inArray(career_page_sources.logo_verification_method, [...VERIFIER_ISSUED_SOURCE_LOGO_METHODS]),
+    sql`${career_page_sources.company_logo_url} ~ '^https://[^[:space:]]+$'`,
+  )!;
+}
+
+/**
+ * The source queue must use the same evidence gate as the public inventory. Polling an unverified
+ * or expired-logo source cannot make a job visible, but it can still fetch thousands of rows and
+ * churn their active state. Keeping this as one predicate also prevents the selection query and
+ * the remaining-count query from disagreeing about whether a drain is complete.
+ */
+export function pollingSourceEligibilityPredicate() {
+  return and(
+    eq(career_page_sources.enabled, true),
+    inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    eq(career_page_sources.portal_name_mismatch, false),
+    sql`nullif(btrim(${career_page_sources.portal_company_name}), '') is not null`,
+    verifiedLogoEvidencePredicate(),
+  )!;
+}
+
+/** Verified proof due for recheck leads each bounded logo-verification batch. */
+export function logoVerificationQueueOrder() {
+  return [
+    sql`case when ${career_page_sources.logo_verification_status} = 'verified' then 0 else 1 end`,
+    sql`${career_page_sources.logo_verified_at} asc nulls last`,
+    sql`${career_page_sources.logo_last_checked_at} asc nulls first`,
+    career_page_sources.created_at,
+  ] as const;
+}
+
+export type LogoVerificationCandidate = {
+  id: string;
+  company_name: string;
+  ats_name: string;
+  board_token: string;
+  company_domain: string | null;
+  logo_verification_status: string;
+  logo_verification_method: string | null;
+  logo_verified_at: Date | null;
+  logo_last_checked_at: Date | null;
+  logo_provider_429_attempts: number;
+  logo_verification_error: string | null;
+  portal_company_name: string | null;
+  portal_name_mismatch: boolean;
+};
+
+/**
+ * Select one round from every due ATS family before taking a second row from any family.
+ *
+ * Applying a global LIMIT before provider quotas lets the oldest, largest provider fill the whole
+ * scan window. With tens of thousands of sources inserted in provider groups, later families can
+ * then wait forever even though the JavaScript limiter is technically respecting its quotas. The
+ * window rank moves those quotas into PostgreSQL, where they are applied before the global limit.
+ */
+export async function selectProviderBalancedLogoVerificationCandidates(
+  eligible: SQL,
+  requestedLimit: number,
+): Promise<LogoVerificationCandidate[]> {
+  const queuePriority = sql<number>`case
+    when ${career_page_sources.logo_verification_status} = 'verified' then 0
+    else 1
+  end`.as('queue_priority');
+  const providerRank = sql<number>`row_number() over (
+    partition by ${career_page_sources.ats_name}
+    order by
+      case when ${career_page_sources.logo_verification_status} = 'verified' then 0 else 1 end,
+      ${career_page_sources.logo_verified_at} asc nulls last,
+      ${career_page_sources.logo_last_checked_at} asc nulls first,
+      ${career_page_sources.created_at},
+      ${career_page_sources.id}
+  )`.as('provider_rank');
+  const ranked = db.select({
+    id: career_page_sources.id,
+    company_name: career_page_sources.company_name,
+    ats_name: career_page_sources.ats_name,
+    board_token: career_page_sources.board_token,
+    company_domain: career_page_sources.company_domain,
+    logo_verification_status: career_page_sources.logo_verification_status,
+    logo_verification_method: career_page_sources.logo_verification_method,
+    logo_verified_at: career_page_sources.logo_verified_at,
+    logo_last_checked_at: career_page_sources.logo_last_checked_at,
+    logo_provider_429_attempts: career_page_sources.logo_provider_429_attempts,
+    logo_verification_error: career_page_sources.logo_verification_error,
+    portal_company_name: career_page_sources.portal_company_name,
+    portal_name_mismatch: career_page_sources.portal_name_mismatch,
+    created_at: career_page_sources.created_at,
+    queue_priority: queuePriority,
+    provider_rank: providerRank,
+  })
+    .from(career_page_sources)
+    .where(eligible)
+    .as('ranked_logo_verification_candidates');
+
+  const limit = Math.min(
+    LOGO_VERIFICATION_REQUEST_CANDIDATES,
+    Math.max(1, Math.trunc(requestedLimit)),
+  );
+  return db.select({
+    id: ranked.id,
+    company_name: ranked.company_name,
+    ats_name: ranked.ats_name,
+    board_token: ranked.board_token,
+    company_domain: ranked.company_domain,
+    logo_verification_status: ranked.logo_verification_status,
+    logo_verification_method: ranked.logo_verification_method,
+    logo_verified_at: ranked.logo_verified_at,
+    logo_last_checked_at: ranked.logo_last_checked_at,
+    logo_provider_429_attempts: ranked.logo_provider_429_attempts,
+    logo_verification_error: ranked.logo_verification_error,
+    portal_company_name: ranked.portal_company_name,
+    portal_name_mismatch: ranked.portal_name_mismatch,
+  })
+    .from(ranked)
+    .where(sql`${ranked.provider_rank} <= case
+      when ${ranked.ats_name} = 'workable' then ${LOGO_VERIFICATION_WORKABLE_CANDIDATES}::bigint
+      when ${ranked.ats_name} = 'crelate' then ${LOGO_VERIFICATION_CRELATE_CANDIDATES}::bigint
+      else ${LOGO_VERIFICATION_PROVIDER_CANDIDATES}::bigint
+    end`)
+    /* Round robin is intentional. It guarantees every non-empty provider appears before a large
+       provider can consume its second slot, while queue_priority preserves verified rechecks at
+       the front of each provider's own queue. */
+    .orderBy(
+      ranked.provider_rank,
+      ranked.queue_priority,
+      sql`${ranked.logo_verified_at} asc nulls last`,
+      sql`${ranked.logo_last_checked_at} asc nulls first`,
+      ranked.created_at,
+      ranked.id,
+    )
+    .limit(limit);
+}
+
+/**
+ * The only supported temporary bypass for the two-phase Railway rollout.
+ *
+ * The default is fail closed. Operators must spell the explicit value `disabled` while the
+ * verifier backfills shadow evidence, then remove it or set any other value after certification.
+ */
+export function publicVerifiedEvidenceGateEnabled(
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return environment.JOB_BOARD_VERIFIED_EVIDENCE_GATE?.trim().toLowerCase() !== 'disabled';
 }
 
 /**
@@ -269,6 +1022,41 @@ function freshnessPredicate() {
  */
 export const CLOSED_POSTING_RETENTION_DAYS = 2;
 
+type PurgeVacuumClient = Pick<PoolClient, 'query' | 'release'>;
+
+/**
+ * Keep the best-effort VACUUM from waiting behind a full pool for the rest of the process lifetime.
+ * The shared pool has its own longer bound. This shorter route deadline also releases a client that
+ * arrives after the caller has moved on, so a driver regression cannot silently shrink the pool.
+ */
+export async function connectPurgeVacuumClient(
+  connect: () => Promise<PurgeVacuumClient> = () => pool.connect(),
+  timeoutMs = PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS,
+): Promise<PurgeVacuumClient> {
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+  const checkout = connect().then((client) => {
+    if (timedOut) {
+      client.release();
+      throw new JobBoardPurgeTimeoutError('purge_vacuum_checkout', timeoutMs);
+    }
+    return client;
+  });
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      reject(new JobBoardPurgeTimeoutError('purge_vacuum_checkout', timeoutMs));
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+  });
+
+  try {
+    return await Promise.race([checkout, deadline]);
+  } finally {
+    if (!timedOut) clearTimeout(timeoutHandle!);
+  }
+}
+
 /**
  * Delete rows that can never be shown again: closed postings past their retention, and anything that
  * aged out of the window before the ingest filter existed.
@@ -284,17 +1072,44 @@ export const CLOSED_POSTING_RETENTION_DAYS = 2;
  * looks exactly like a purge that works.
  */
 export async function purgeExpiredPostings(): Promise<number> {
-  const result = await db.delete(monitored_jobs).where(or(
-    // Left its board, and the grace period for diagnosing why has passed.
-    and(
-      eq(monitored_jobs.is_active, false),
-      sql`${monitored_jobs.last_seen_at} < now() - (${CLOSED_POSTING_RETENTION_DAYS} || ' days')::interval`,
-    ),
-    /* A row no supported ATS has returned for two full verification windows cannot be counted as
-       current. This applies equally to internships and every other role because it measures the
-       observation, not the employer's publication date. */
-    sql`${monitored_jobs.last_seen_at} < now() - (${PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS} || ' days')::interval`,
-  ));
+  let result: Awaited<ReturnType<typeof db.delete>>;
+  try {
+    result = await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(
+        `set local lock_timeout = '${PURGE_POSTINGS_LOCK_TIMEOUT_MS}ms'`,
+      ));
+      await tx.execute(sql.raw(
+        `set local statement_timeout = '${PURGE_POSTINGS_DELETE_TIMEOUT_MS}ms'`,
+      ));
+      return tx.delete(monitored_jobs).where(or(
+        // Left its board, and the grace period for diagnosing why has passed.
+        and(
+          eq(monitored_jobs.is_active, false),
+          sql`${monitored_jobs.last_seen_at} < now() - (${CLOSED_POSTING_RETENTION_DAYS} || ' days')::interval`,
+        ),
+        /* A row no supported ATS has returned for two full verification windows cannot be counted
+           as current. This applies equally to internships and every other role because it measures
+           the observation, not the employer's publication date. */
+        sql`${monitored_jobs.last_seen_at} < now() - (${PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS} || ' days')::interval`,
+      ));
+    });
+  } catch (error) {
+    if (isDatabaseConnectionTimeout(error)) {
+      throw new JobBoardPurgeTimeoutError(
+        'purge_checkout',
+        DATABASE_CONNECTION_TIMEOUT_MS,
+      );
+    }
+    if (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error)) {
+      throw new JobBoardPurgeTimeoutError(
+        'purge_delete',
+        isPostgresLockTimeout(error)
+          ? PURGE_POSTINGS_LOCK_TIMEOUT_MS
+          : PURGE_POSTINGS_DELETE_TIMEOUT_MS,
+      );
+    }
+    throw error;
+  }
   const purged = (result as { rowCount?: number }).rowCount ?? 0;
 
   /* Reclaim after deleting, or the rolling window costs more space than it saves.
@@ -312,7 +1127,28 @@ export async function purgeExpiredPostings(): Promise<number> {
    * Best-effort: a failed vacuum must never fail the poll. The postings are already correct at this
    * point; this is housekeeping. */
   try {
-    await db.execute(sql`vacuum ${monitored_jobs}`);
+    const client = await connectPurgeVacuumClient();
+    let operationError: unknown;
+    try {
+      await client.query(
+        "select set_config('lock_timeout', $1, false), set_config('statement_timeout', $2, false)",
+        [`${PURGE_POSTINGS_LOCK_TIMEOUT_MS}ms`, `${PURGE_POSTINGS_VACUUM_TIMEOUT_MS}ms`],
+      );
+      await client.query('vacuum monitored_jobs');
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      let resetError: Error | undefined;
+      try {
+        await client.query('reset lock_timeout');
+        await client.query('reset statement_timeout');
+      } catch (error) {
+        resetError = error instanceof Error ? error : new Error(String(error));
+      }
+      client.release(resetError);
+      if (!operationError && resetError) throw resetError;
+    }
   } catch {
     // Intentionally swallowed. See above: the board is correct with or without this.
   }
@@ -338,6 +1174,57 @@ export function shouldKeepPostingsOnEmptyFetch(fetchedCount: number, activeNow: 
   return fetchedCount === 0 && activeNow > 0;
 }
 
+const DETAIL_CURSOR_PATTERN = /(?:^|\s)next_detail_cursor=(\d+)(?:\s|$)/;
+const DETAIL_CURSOR_KEY_PATTERN = /(?:^|\s)next_detail_cursor_key=([A-Za-z0-9_-]{1,1024})(?:\s|$)/;
+
+/** Resume a bounded multi-request provider pass without adding a schema-only cursor column. */
+export function detailCursorFromLastError(lastError: string | null | undefined): number {
+  const match = lastError?.match(DETAIL_CURSOR_PATTERN);
+  if (!match) return 0;
+  const cursor = Number(match[1]);
+  return Number.isSafeInteger(cursor) && cursor >= 0 ? cursor : 0;
+}
+
+/** Decode the opaque keyset marker without writing raw provider identifiers into diagnostics. */
+export function detailCursorKeyFromLastError(lastError: string | null | undefined): string | undefined {
+  const match = lastError?.match(DETAIL_CURSOR_KEY_PATTERN);
+  if (!match) return undefined;
+  try {
+    const key = Buffer.from(match[1], 'base64url').toString('utf8');
+    return key && Buffer.byteLength(key, 'utf8') <= 512 ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function detailCursorKeyMarker(key: string | null | undefined): string | null {
+  if (!key || Buffer.byteLength(key, 'utf8') > 512) return null;
+  return `next_detail_cursor_key=${Buffer.from(key, 'utf8').toString('base64url')}`;
+}
+
+/** Persist cursor progress in the source's existing diagnostic field until one cycle completes. */
+export function detailRefreshStatus(progress: DetailFetchProgress | undefined): string | null {
+  if (!progress || (progress.cycle_complete && progress.failed === 0)) return null;
+  const keyMarker = detailCursorKeyMarker(progress.next_cursor_key);
+  return [
+    'Job detail refresh partial:',
+    `${progress.succeeded}/${progress.attempted} attempted details succeeded;`,
+    `${progress.remaining_in_cycle} remain in this cycle;`,
+    `next_detail_cursor=${progress.next_cursor}`,
+    ...(keyMarker ? [keyMarker] : []),
+  ].join(' ');
+}
+
+/** A partial detail window remains in the active drain until its cursor reaches the list end. */
+export function completedPollFields(
+  progress: DetailFetchProgress | undefined,
+  completedAt: Date,
+): { last_polled_at?: Date; last_successful_poll_at?: Date } {
+  return progress && !progress.cycle_complete
+    ? {}
+    : { last_polled_at: completedAt, last_successful_poll_at: completedAt };
+}
+
 /**
  * How many jobs the board would show right now, under exactly the filters GET /jobs applies.
  *
@@ -355,7 +1242,7 @@ export async function surfacedJobCount(sponsorOnly = false): Promise<number> {
     // filter that gets added to the route and forgotten here: the count would have read ~22,000
     // while the board showed ~9,700, and the floor check would have been watching a number no
     // visitor ever sees.
-    .where(and(...boardConditions({ sponsorOnly })));
+    .where(and(...boardConditions({ sponsorOnly, requireVerifiedEvidence: true })));
   return row?.total ?? 0;
 }
 
@@ -372,7 +1259,7 @@ export async function surfacedGroupedRoleCount(sponsorOnly = false): Promise<num
       select 1 from ${monitored_jobs}
       inner join ${career_page_sources}
         on ${monitored_jobs.source_id} = ${career_page_sources.id}
-      where ${and(...boardConditions({ sponsorOnly }))}
+      where ${and(...boardConditions({ sponsorOnly, requireVerifiedEvidence: true }))}
       group by ${monitored_jobs.company_name}, ${monitored_jobs.title}, ${career_page_sources.ats_name}
     ) grouped_roles
   `);
@@ -382,14 +1269,38 @@ export async function surfacedGroupedRoleCount(sponsorOnly = false): Promise<num
 /** All cron inventory totals from one joined snapshot and one database round trip. */
 type JobMonitorQueryExecutor = Pick<typeof db, 'execute' | 'select'>;
 
-export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = db) {
-  const fullBoard = and(...boardConditions({ sponsorOnly: false }));
-  const sponsorBoard = and(...boardConditions({ sponsorOnly: true }));
+export async function boardInventoryMetrics(
+  executor: JobMonitorQueryExecutor = db,
+  certifiedSince?: Date,
+) {
+  const fullBoard = and(...boardConditions({ sponsorOnly: false, requireVerifiedEvidence: true }));
+  const sponsorBoard = and(...boardConditions({ sponsorOnly: true, requireVerifiedEvidence: true }));
+  const currentFingerprint = sql`${monitored_jobs.certification_fingerprint}
+    ~ '^v1:[0-9a-f]{64}:[0-9a-f]{64}$'`;
+  /* Public browsing tolerates a short provider outage until last_seen_at ages out. Certification
+     is stricter: the source must have completed a successful first-party list read and the exact
+     job detail must have been ingested in this drain. A completed paginated list cycle can still
+     contain failed or deferred detail requests, so source-level proof alone is insufficient. */
+  const currentPollProof = certifiedSince
+    ? and(
+      gte(career_page_sources.last_successful_poll_at, certifiedSince),
+      gte(monitored_jobs.last_seen_at, certifiedSince),
+    )
+    : and(
+      isNotNull(career_page_sources.last_successful_poll_at),
+      isNotNull(monitored_jobs.last_seen_at),
+    );
+  const certifiedBoard = and(fullBoard, currentFingerprint, currentPollProof);
+  const certifiedSponsorBoard = and(sponsorBoard, currentFingerprint, currentPollProof);
   const result = await executor.execute<{
     surfaced_postings: number;
     surfaced_grouped_roles: number;
     surfaced_sponsor_only_jobs: number;
     surfaced_internships: number;
+    certified_unique_jobs: number;
+    certified_unique_grouped_roles: number;
+    certified_unique_sponsor_jobs: number;
+    certified_unique_internships: number;
   }>(sql`
     select
       count(*) filter (where ${fullBoard})::int as surfaced_postings,
@@ -401,7 +1312,16 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
       count(*) filter (where ${sponsorBoard})::int as surfaced_sponsor_only_jobs,
       count(*) filter (
         where ${fullBoard} and ${monitored_jobs.employment_type} = 'Internship'
-      )::int as surfaced_internships
+      )::int as surfaced_internships,
+      count(distinct ${monitored_jobs.certification_fingerprint})
+        filter (where ${certifiedBoard})::int as certified_unique_jobs,
+      count(distinct split_part(${monitored_jobs.certification_fingerprint}, ':', 2))
+        filter (where ${certifiedBoard})::int as certified_unique_grouped_roles,
+      count(distinct ${monitored_jobs.certification_fingerprint})
+        filter (where ${certifiedSponsorBoard})::int as certified_unique_sponsor_jobs,
+      count(distinct ${monitored_jobs.certification_fingerprint}) filter (
+        where ${certifiedBoard} and ${monitored_jobs.employment_type} = 'Internship'
+      )::int as certified_unique_internships
     from ${monitored_jobs}
     inner join ${career_page_sources}
       on ${monitored_jobs.source_id} = ${career_page_sources.id}
@@ -412,6 +1332,10 @@ export async function boardInventoryMetrics(executor: JobMonitorQueryExecutor = 
     surfacedGroupedRoles: Number(row?.surfaced_grouped_roles ?? 0),
     surfacedSponsorOnly: Number(row?.surfaced_sponsor_only_jobs ?? 0),
     surfacedInternships: Number(row?.surfaced_internships ?? 0),
+    certifiedUniqueJobs: Number(row?.certified_unique_jobs ?? 0),
+    certifiedUniqueGroupedRoles: Number(row?.certified_unique_grouped_roles ?? 0),
+    certifiedUniqueSponsorJobs: Number(row?.certified_unique_sponsor_jobs ?? 0),
+    certifiedUniqueInternships: Number(row?.certified_unique_internships ?? 0),
   };
 }
 
@@ -429,7 +1353,8 @@ async function boardVarietyRows(executor: JobMonitorQueryExecutor = db) {
     })
     .from(monitored_jobs)
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-    .where(and(...boardConditions({ sponsorOnly: false })));
+    .where(and(...boardConditions({ sponsorOnly: false, requireVerifiedEvidence: true })))
+    .limit(MONITOR_VARIETY_SAMPLE_SIZE);
 }
 
 export async function boardVarietyMetrics(executor: JobMonitorQueryExecutor = db) {
@@ -461,7 +1386,7 @@ export async function targetRoleCoverageMetrics(executor: JobMonitorQueryExecuto
       from ${monitored_jobs}
       inner join ${career_page_sources}
         on ${monitored_jobs.source_id} = ${career_page_sources.id}
-      where ${and(...boardConditions({ sponsorOnly: false }))}
+      where ${and(...boardConditions({ sponsorOnly: false, requireVerifiedEvidence: true }))}
     )
     select
       count(*)::int as distinct_target_roles,
@@ -480,15 +1405,65 @@ export async function targetRoleCoverageMetrics(executor: JobMonitorQueryExecuto
 }
 
 /** A connection-bound, time-limited snapshot for inventory and variety metrics. */
-export async function boardMonitoringSnapshot() {
+export async function boardMonitoringSnapshot(certifiedSince: Date) {
   return db.transaction(async (tx) => {
+    await tx.execute(sql.raw(
+      `set local statement_timeout = '${GROUP_PROJECTION_REFRESH_STATEMENT_TIMEOUT_MS}ms'`,
+    ));
+    try {
+      await tx.execute(sql`select refresh_job_board_group_projection(${certifiedSince})`);
+    } catch (error) {
+      if (isPostgresStatementTimeout(error)) {
+        throw new JobBoardMetricsTimeoutError(
+          'group_projection_refresh',
+          GROUP_PROJECTION_REFRESH_STATEMENT_TIMEOUT_MS,
+        );
+      }
+      throw error;
+    }
+    const [projection] = await tx
+      .select()
+      .from(job_board_group_projection_state)
+      .where(eq(job_board_group_projection_state.singleton, true))
+      .limit(1);
+    if (!projection) throw new Error('Job board group projection refresh returned no state row');
     await tx.execute(sql.raw(
       `set local statement_timeout = '${MONITOR_METRICS_STATEMENT_TIMEOUT_MS}ms'`,
     ));
-    const inventory = await boardInventoryMetrics(tx);
-    const varietyRows = await boardVarietyRows(tx);
+    const inventory = {
+      surfacedPostings: projection.surfaced_postings,
+      surfacedGroupedRoles: projection.surfaced_grouped_roles,
+      surfacedSponsorOnly: projection.surfaced_sponsor_only_jobs,
+      surfacedInternships: projection.surfaced_internships,
+      certifiedUniqueJobs: projection.certified_unique_jobs,
+      certifiedUniqueGroupedRoles: projection.certified_unique_grouped_roles,
+      certifiedUniqueSponsorJobs: projection.certified_unique_sponsor_jobs,
+      certifiedUniqueInternships: projection.certified_unique_internships,
+    };
+    let varietyRows: Awaited<ReturnType<typeof boardVarietyRows>>;
+    try {
+      varietyRows = await boardVarietyRows(tx);
+    } catch (error) {
+      if (isPostgresStatementTimeout(error)) {
+        throw new JobBoardMetricsTimeoutError('variety', MONITOR_METRICS_STATEMENT_TIMEOUT_MS);
+      }
+      throw error;
+    }
     const variety = summarizeJobVariety(varietyRows);
-    return { inventory, variety };
+    return {
+      inventory,
+      projection: {
+        generation: projection.generation,
+        asOf: projection.projection_as_of,
+        refreshedAt: projection.refreshed_at,
+      },
+      variety,
+      varietySample: {
+        rows: varietyRows.length,
+        limit: MONITOR_VARIETY_SAMPLE_SIZE,
+        sampled: inventory.surfacedPostings > varietyRows.length,
+      },
+    };
   }, { isolationLevel: 'repeatable read' });
 }
 
@@ -847,28 +1822,86 @@ export async function accountJobTargeting(userId: string | undefined): Promise<J
   return normalizeTargeting(row as unknown as Record<string, unknown> | undefined);
 }
 
-/** Which evidence, if any, lets this row be shown to someone who needs sponsorship. */
-function evidenceFor(row: { sponsorship_status: string | null; employer_sponsors: boolean | null }) {
+/** Which country-scoped evidence, if any, lets this row be shown to someone who needs sponsorship. */
+function evidenceFor(row: {
+  sponsorship_status: string | null;
+  sponsorship_scope?: string | null;
+  employer_sponsors: boolean | null;
+  job_country?: string | null;
+  portal_name_mismatch?: boolean | null;
+}) {
   return sponsorshipVerdict({
     posting: (row.sponsorship_status ?? 'unstated') as PostingSponsorship,
-    employerFilesH1b: row.employer_sponsors === true,
+    postingScope: (row.sponsorship_scope ?? null) as PostingSponsorshipScope | null,
+    jobCountry: (row.job_country ?? 'unknown') as 'us' | 'non_us' | 'unknown',
+    employerFilesH1b: row.employer_sponsors === true
+      && row.portal_name_mismatch !== true
+      && row.job_country !== 'non_us',
   }).evidence;
 }
 
 /** The jurisdiction the evidence applies to, never a generic worldwide sponsorship claim. */
 export function sponsorshipCountryCodeFor(row: {
   sponsorship_status: string | null;
+  sponsorship_scope?: string | null;
   employer_sponsors: boolean | null;
+  job_country?: string | null;
+  portal_name_mismatch?: boolean | null;
   location?: string | null;
   raw_json?: unknown;
 }): string | null {
   const evidence = evidenceFor(row);
   if (evidence === 'employer_h1b_filings') return 'US';
   if (evidence !== 'posting_offers') return null;
+  if (row.sponsorship_scope === 'us_h1b') return 'US';
   const metadata = row.raw_json && typeof row.raw_json === 'object'
     ? row.raw_json as Record<string, unknown>
     : {};
   return postingCountryCodeFromJobContext({ ...metadata, location: row.location ?? undefined }) ?? null;
+}
+
+export type GroupedPostingOfferContext = {
+  sponsorship_scope?: string | null;
+  job_country?: string | null;
+  location?: string | null;
+  raw_json?: unknown;
+};
+
+/**
+ * Sponsorship proof for a grouped role without detaching an offer from the country it belongs to.
+ * The SQL aggregate feeding this helper contains affirmative posting rows only. A refusal or an
+ * unstated copy in another country therefore cannot donate its location to the sponsorship badge,
+ * and an H-1B clause on a foreign copy contributes nothing.
+ */
+export function groupedSponsorshipFor(input: {
+  postingOffers: GroupedPostingOfferContext[] | null | undefined;
+  employerFilesH1b: boolean;
+}): { evidence: 'posting_offers' | 'employer_h1b_filings' | null; countryCodes: string[] } {
+  const eligibleOffers = (input.postingOffers ?? []).filter((offer) => evidenceFor({
+    sponsorship_status: 'offers',
+    sponsorship_scope: offer.sponsorship_scope,
+    employer_sponsors: false,
+    job_country: offer.job_country,
+  }) === 'posting_offers');
+
+  if (eligibleOffers.length > 0) {
+    const countryCodes = [...new Set(eligibleOffers
+      .map((offer) => sponsorshipCountryCodeFor({
+        sponsorship_status: 'offers',
+        sponsorship_scope: offer.sponsorship_scope,
+        employer_sponsors: false,
+        job_country: offer.job_country,
+        location: offer.location,
+        raw_json: offer.raw_json,
+      }))
+      .filter((code): code is string => Boolean(code)))];
+    return { evidence: 'posting_offers', countryCodes };
+  }
+
+  if (input.employerFilesH1b) {
+    return { evidence: 'employer_h1b_filings', countryCodes: ['US'] };
+  }
+  return { evidence: null, countryCodes: [] };
 }
 
 export async function studentResumeFacts(userId: string | undefined): Promise<{ resumeText: string | null; degree: string | null }> {
@@ -927,7 +1960,7 @@ function requireOperator(request: FastifyRequest, reply: FastifyReply): boolean 
   return true;
 }
 
-function configuredSources(): JobSourceInput[] {
+function configuredSources(): JobSourceWithLogoEvidence[] {
   const raw = process.env.JOB_MONITOR_SOURCES_JSON;
   if (!raw) return [];
   let parsed: unknown;
@@ -947,12 +1980,24 @@ function configuredSources(): JobSourceInput[] {
  * correct a source while the reviewed catalog remains the durable default.
  */
 export function mergeJobSources(
-  reviewed: readonly JobSourceInput[],
-  configured: readonly JobSourceInput[],
-): JobSourceInput[] {
-  const merged = new Map<string, JobSourceInput>();
+  reviewed: readonly JobSourceWithLogoEvidence[],
+  configured: readonly JobSourceWithLogoEvidence[],
+): JobSourceWithLogoEvidence[] {
+  const merged = new Map<string, JobSourceWithLogoEvidence>();
   for (const source of [...reviewed, ...configured]) {
-    merged.set(`${source.ats_name}/${source.board_token}`, source);
+    const atsName = source.ats_name.toLowerCase() as SupportedJobBoard;
+    if (!(POLLABLE_JOB_BOARDS as readonly string[]).includes(atsName)) {
+      throw new Error(`Unsupported job board: ${String(source.ats_name)}`);
+    }
+    const boardToken = normalizeExecutableAtsBoardToken(atsName, source.board_token);
+    if (!boardToken) {
+      throw new Error(`Invalid ${atsName} board token`);
+    }
+    merged.set(`${atsName}/${boardToken}`, {
+      ...source,
+      ats_name: atsName,
+      board_token: boardToken,
+    });
   }
   return [...merged.values()];
 }
@@ -995,8 +2040,59 @@ export async function syncSponsorEmployers() {
   ));
 }
 
+export const REVIEWED_DOMAIN_CANDIDATE_METHOD = 'reviewed_company_domain_candidate';
+export const ATS_BRAND_CANDIDATE_METHOD = 'first_party_ats_brand_candidate';
+
+function logoEvidenceForSource(source: JobSourceWithLogoEvidence) {
+  const carriesExplicitEvidence = source.company_domain !== undefined
+    || source.company_logo_url !== undefined
+    || source.logo_verification_status !== undefined
+    || source.logo_verification_method !== undefined
+    || source.logo_verified_at !== undefined;
+  if (carriesExplicitEvidence) {
+    return {
+      company_domain: source.company_domain ?? null,
+      company_logo_url: source.company_logo_url ?? null,
+      logo_verification_status: source.logo_verification_status ?? 'unverified' as LogoVerificationStatus,
+      logo_verification_method: source.logo_verification_method ?? null,
+      logo_verified_at: source.logo_verified_at ? new Date(source.logo_verified_at) : null,
+      logo_last_checked_at: source.logo_verification_status === 'verified' && source.logo_verified_at
+        ? new Date(source.logo_verified_at)
+        : null,
+      logo_verification_error: null,
+    };
+  }
+
+  /* Transitional candidate only. A hand-maintained company-to-domain association is useful for
+     finding the homepage, but it is not current image proof. The bounded verifier must fetch an
+     identity-matching homepage and a real image before any posting from this source is counted. */
+  const reviewedDomain = companyDomainFor(source.company_name);
+  return reviewedDomain
+    ? {
+      company_domain: reviewedDomain,
+      company_logo_url: null,
+      logo_verification_status: 'unverified' as const,
+      logo_verification_method: REVIEWED_DOMAIN_CANDIDATE_METHOD,
+      logo_verified_at: null,
+      logo_last_checked_at: null,
+      logo_verification_error: null,
+    }
+    : {
+      company_domain: null,
+      company_logo_url: null,
+      logo_verification_status: 'unverified' as const,
+      logo_verification_method: ATS_BRAND_CANDIDATE_METHOD,
+      logo_verified_at: null,
+      logo_last_checked_at: null,
+      logo_verification_error: null,
+    };
+}
+
 /** Insert or refresh source metadata and its current sponsor link in bounded batches. */
-export async function upsertSources(sources: readonly JobSourceInput[]) {
+export async function upsertSources(
+  sources: readonly JobSourceWithLogoEvidence[],
+  options: { preserveExistingDisabled?: boolean } = {},
+) {
   // This is also called by the operator API, whose validated array may repeat a composite key.
   // PostgreSQL rejects two rows targeting the same conflict key in one INSERT, so deduplicate at
   // the shared write boundary rather than relying on every caller to remember. Last value wins.
@@ -1008,21 +2104,103 @@ export async function upsertSources(sources: readonly JobSourceInput[]) {
   const disabledIds: string[] = [];
 
   for (let start = 0; start < uniqueSources.length; start += UPSERT_CHUNK) {
-    const chunk = uniqueSources.slice(start, start + UPSERT_CHUNK);
+    /* Validate reviewed TypeScript data too. Compile-time types do not protect generated catalogs
+       or environment JSON, and a false `verified` here would inflate the public inventory. */
+    const chunk = uniqueSources.slice(start, start + UPSERT_CHUNK)
+      .map((source) => sourceSchema.parse(source));
     const rows = await db.insert(career_page_sources).values(chunk.map((source) => ({
-      ...source,
+      company_name: source.company_name,
+      ats_name: source.ats_name,
+      board_token: source.board_token,
+      career_url: source.career_url,
       enabled: source.enabled ?? true,
       sponsor_employer_id: sponsorIds.get(normalizeEmployerName(source.company_name)) ?? null,
+      ...logoEvidenceForSource(source),
     }))).onConflictDoUpdate({
       target: [career_page_sources.ats_name, career_page_sources.board_token],
       set: {
-        company_name: sql`excluded.company_name`,
+        /* A fresh discovery catalog knows a board token, not necessarily the employer identity.
+           Once independent proof has named and branded a source, a later provisional refresh must
+           not rename it back to the slug and erase that proof. */
+        company_name: sql`case
+          when excluded.logo_verification_status = 'unverified'
+            and ${career_page_sources.logo_verification_status} = 'verified'
+          then ${career_page_sources.company_name} else excluded.company_name end`,
         career_url: sql`excluded.career_url`,
-        enabled: sql`excluded.enabled`,
+        /* Scheduled discovery is additive and cannot override an operator disable. The operator
+           endpoint uses the default mode, so an explicit enabled=true there can still restore a
+           reviewed source. */
+        enabled: options.preserveExistingDisabled
+          ? sql`case when ${career_page_sources.enabled} = false then false else excluded.enabled end`
+          : sql`excluded.enabled`,
+        /* Unverified catalog candidates seed an empty row but never downgrade verified evidence or
+           erase a recorded failure on the next daily sync. Only incoming VERIFIED proof replaces
+           stored proof. A verified incoming rename re-evaluates the logo; a provisional slug is
+           never allowed to rename a source whose employer identity is already proven. */
+        company_domain: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.company_domain else ${career_page_sources.company_domain} end`,
+        company_logo_url: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.company_logo_url else ${career_page_sources.company_logo_url} end`,
+        logo_verification_status: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.logo_verification_status else ${career_page_sources.logo_verification_status} end`,
+        logo_verification_method: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.logo_verification_method else ${career_page_sources.logo_verification_method} end`,
+        logo_verified_at: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.logo_verified_at else ${career_page_sources.logo_verified_at} end`,
+        logo_last_checked_at: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.logo_last_checked_at else ${career_page_sources.logo_last_checked_at} end`,
+        logo_verification_error: sql`case
+          when (excluded.company_name is distinct from ${career_page_sources.company_name}
+              and not (excluded.logo_verification_status = 'unverified'
+                and ${career_page_sources.logo_verification_status} = 'verified'))
+            or (excluded.logo_verification_status = 'verified'
+              and excluded.logo_verification_method is distinct from ${REVIEWED_DOMAIN_CANDIDATE_METHOD})
+            or ${career_page_sources.logo_verification_status} = 'unverified'
+          then excluded.logo_verification_error else ${career_page_sources.logo_verification_error} end`,
         // A portal identity disagreement always wins. Once a later successful poll clears the
         // mismatch, the next sync may restore the reviewed employer link.
-        sponsor_employer_id: sql`case when ${career_page_sources.portal_name_mismatch}
-          then null else excluded.sponsor_employer_id end`,
+        sponsor_employer_id: sql`case
+          when ${career_page_sources.portal_name_mismatch} then null
+          when excluded.logo_verification_status = 'unverified'
+            and ${career_page_sources.logo_verification_status} = 'verified'
+          then ${career_page_sources.sponsor_employer_id}
+          else excluded.sponsor_employer_id end`,
       },
     }).returning({ id: career_page_sources.id, enabled: career_page_sources.enabled });
     disabledIds.push(...rows.filter((row) => !row.enabled).map((row) => row.id));
@@ -1033,49 +2211,46 @@ export async function upsertSources(sources: readonly JobSourceInput[]) {
   }
 }
 
-/**
- * SOURCES THAT ARE NO LONGER ON THE LIST STOP BEING ON THE BOARD.
- *
- * Deleting a company from src/lib/jobSources.ts did NOT remove it: upsertSources only inserts and
- * updates, so the row survived, the cron kept polling it, and its postings kept appearing. That is
- * how `sas` (Superior Alarm Systems) and `tcs` (Thornbury Community Services) still had 6 and 17
- * live postings on the board hours after being removed from the list for being the wrong company.
- *
- * DISABLED, NOT DELETED. `enabled = false` takes the source off every board query while keeping the
- * row, its history and its last_error, so a removal made in error is one flag away from being
- * undone and nothing about why it happened is lost.
- *
- * This makes the code list genuinely canonical, which is what jobSources.ts already claimed to be:
- * a source exists because it is in a file somebody reviewed in a pull request, and it stops
- * existing the same way.
- */
-export async function retireUnlistedSources(listed: JobSourceInput[]) {
-  const keep = new Set(listed.map((source) => `${source.ats_name}/${source.board_token}`));
-  const live = await db
-    .select({
-      id: career_page_sources.id,
-      company_name: career_page_sources.company_name,
-      ats_name: career_page_sources.ats_name,
-      board_token: career_page_sources.board_token,
-    })
-    .from(career_page_sources)
-    .where(eq(career_page_sources.enabled, true));
-  const retire = live.filter((source) => !keep.has(`${source.ats_name}/${source.board_token}`));
-  if (retire.length === 0) return [];
-  const ids = retire.map((source) => source.id);
-  await db.update(career_page_sources).set({ enabled: false }).where(inArray(career_page_sources.id, ids));
-  // Their postings go inactive in the same breath, or the board keeps serving them until the next
-  // full sweep of a source that is no longer being swept.
-  await db.update(monitored_jobs).set({ is_active: false }).where(inArray(monitored_jobs.source_id, ids));
-  return retire.map((source) => `${source.company_name} (${source.ats_name}/${source.board_token})`);
+function pollFailureMessage(error: unknown): string {
+  let current: unknown = error;
+  let message = 'Career page poll failed';
+  const seen = new Set<object>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    if ('message' in current && typeof current.message === 'string' && current.message.trim()) {
+      message = current.message;
+    }
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return message;
 }
 
 export async function pollSource(source: typeof career_page_sources.$inferSelect) {
+  const startingDetailCursor = detailCursorFromLastError(source.last_error);
+  const startingDetailCursorKey = detailCursorKeyFromLastError(source.last_error);
+  let retryDetailCursor: number | null = startingDetailCursor > 0 ? startingDetailCursor : null;
+  let retryDetailCursorKey: string | null = startingDetailCursorKey ?? null;
+  let keepInCurrentDrainOnError = startingDetailCursor > 0 || startingDetailCursorKey !== undefined;
   try {
-    const jobs = await fetchSourceJobs({
-      ats_name: source.ats_name as SupportedJobBoard,
-      board_token: source.board_token,
-    });
+    const fetched = await fetchSourceJobBatch(
+      {
+        ats_name: source.ats_name as SupportedJobBoard,
+        board_token: source.board_token,
+      },
+      fetch,
+      {
+        detail_cursor: startingDetailCursor,
+        detail_cursor_key: startingDetailCursorKey,
+      },
+    );
+    /* Once the first-party fetch succeeds, a database failure must retry in this drain. For a
+       multi-request provider it retries the same window, because the next cursor is committed in
+       the source row atomically with the jobs below. */
+    keepInCurrentDrainOnError = true;
+    retryDetailCursor = fetched.detail_progress?.cursor ?? null;
+    retryDetailCursorKey = fetched.detail_progress?.cursor_key ?? null;
+    const jobs = fetched.jobs;
+    const listedCount = fetched.listed_external_ids.length;
 
     /* AN EMPTY RESPONSE NEVER DEACTIVATES A BOARD.
      *
@@ -1095,17 +2270,31 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * A board that genuinely empties recovers by hand (disable the source, or let the row age out).
      * That is the correct trade - the manual step is on the rare true case, not the common false one.
      */
-    if (jobs.length === 0) {
-      const [existing] = await db
-        .select({ active: sql<number>`count(*)::int` })
-        .from(monitored_jobs)
-        .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
-      if (shouldKeepPostingsOnEmptyFetch(jobs.length, existing?.active ?? 0)) {
+    if (listedCount === 0) {
+      const emptyFetchMessage = await db.transaction(async (tx) => {
+        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+        await tx.execute(sql.raw(
+          `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+        ));
+        const [existing] = await tx
+          .select({ active: sql<number>`count(*)::int` })
+          .from(monitored_jobs)
+          .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
+        if (!shouldKeepPostingsOnEmptyFetch(listedCount, existing?.active ?? 0)) return null;
         const message = `Board returned no postings while ${existing!.active} are live; keeping them and not deactivating.`;
-        await db.update(career_page_sources)
+        await tx.update(career_page_sources)
           .set({ last_polled_at: new Date(), last_error: message })
           .where(eq(career_page_sources.id, source.id));
-        return { source_id: source.id, company: source.company_name, jobs: 0, ok: false as const, error: message };
+        return message;
+      });
+      if (emptyFetchMessage) {
+        return {
+          source_id: source.id,
+          company: source.company_name,
+          jobs: 0,
+          ok: false as const,
+          error: emptyFetchMessage,
+        };
       }
     }
 
@@ -1120,7 +2309,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * the window - which Greenhouse does routinely, since its date is `updated_at` - the next poll
      * simply sees it as fresh and inserts it. Nothing needs to remember what was skipped.
      *
-     * NOTE the guard above keys off `jobs.length`, the RAW fetch, and must keep doing so. If it read
+     * NOTE the guard above keys off `listedCount`, the raw list fetch, and must keep doing so. If it read
      * this filtered count instead, a board whose postings are all older than the window would look
      * identical to a board that returned nothing, and the run would refuse to deactivate postings
      * that genuinely aged out. "The API returned nothing" and "the API returned nothing FRESH" are
@@ -1143,57 +2332,103 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       .filter(isIngestablePosting);
 
     const now = new Date();
-    await db.transaction(async (tx) => {
-      await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
+    const portalName = jobs.map((job) => job.portal_company_name).find(Boolean) ?? null;
+    const agrees = portalNameAgrees(source.company_name, portalName);
+    const fingerprintEmployerName = agrees === false
+      ? null
+      : portalName ?? source.portal_company_name;
+    const detailStatus = detailRefreshStatus(fetched.detail_progress);
+    try {
+      await retryTransient(() => db.transaction(async (tx) => {
+        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+        await tx.execute(sql.raw(
+          `set local statement_timeout = '${POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS}ms'`,
+        ));
+        /* Logo verification locks the source row before it can update that source's postings. Keep
+           the poll transaction in the same source-then-jobs order so the two write paths cannot form
+           a PostgreSQL row-lock cycle if an operator invokes one outside the shared route lock. */
+        await tx.execute(sql`select ${career_page_sources.id}
+          from ${career_page_sources}
+          where ${career_page_sources.id} = ${source.id}
+          for update`);
+        await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
+      /* Rippling, Breezy, and Crelate confirm open IDs before fetching descriptions. A failed or
+         deferred detail request cannot revoke that stronger list evidence. Reactivate those
+         existing rows with their last good descriptions while the persisted cursor advances.
+         Successful details are deliberately excluded from this set: if a refreshed description
+         is now a placeholder, the ingest quality gate is allowed to remove it. */
+        for (let index = 0; index < fetched.preserve_external_ids.length; index += UPSERT_CHUNK) {
+          const ids = fetched.preserve_external_ids.slice(index, index + UPSERT_CHUNK);
+          await tx.update(monitored_jobs).set({ is_active: true }).where(and(
+            eq(monitored_jobs.source_id, source.id),
+            inArray(monitored_jobs.external_id, ids),
+          ));
+        }
       /* One statement per posting meant 7,109 round trips for a full sweep and a 469s run. A
          scheduler deadline could stop halfway through the alphabet, leaving every unreached
          source's jobs flipped to is_active = false by the sweep above. That failure empties the
          public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
-      for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
-        const chunk = ingestable.slice(index, index + UPSERT_CHUNK).map(({
+        for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
+          const chunk = ingestable.slice(index, index + UPSERT_CHUNK).map(({
           pay,
           portal_country: portalCountry,
           portal_company_name: _portalCompanyName,
           ...job
-        }) => ({
-          source_id: source.id,
-          company_name: source.company_name,
-          ...job,
-          /* Destructured OUT of the spread above, never spread in. `pay` is a nested object on
-             NormalizedJob and there is no such column; drizzle would carry it into the INSERT and
-             fail the whole 200-row chunk, which takes that board's poll down with it.
-             All four move together - a posting whose pay period could not be established stores
-             null in all of them rather than a figure with no period. See lib/compensation.ts. */
-          salary_min: pay?.min ?? null,
-          salary_max: pay?.max ?? null,
-          salary_currency: pay?.currency ?? null,
-          salary_interval: pay?.interval ?? null,
-          last_seen_at: now,
-          is_active: true,
-          /* Read here, at the moment the description arrives, so the board filter is a plain column
-             comparison. Recomputed on every poll rather than kept from the first sighting: employers
-             edit this sentence into and out of a live posting, and a policy that changed on their
-             page while ours still said the old thing is the one error this feature cannot afford. */
-          sponsorship_status: readPostingSponsorship(job.description),
-          /* Built here, at the same moment and for the same reason as sponsorship_status: the
-             description is in hand, and this is the only point where computing over it is free.
-             Recomputed on every poll rather than kept from the first sighting, because employers
-             edit requirements into and out of a live posting. */
-          description_digest: buildDescriptionDigest(job.description),
-          /* Existing schema-compatible review metadata, not a new column. The exact ATS country
-             must survive the poll so resume generation can freeze it into job_context. A coarse
-             `job_country = non_us` cannot distinguish London from Toronto, and therefore cannot
-             select one applicant declaration truthfully. Old rows remain null until their normal
-             board refresh, so this needs no backfill or unreviewed production migration. */
-          raw_json: portalCountry ? { portal_country: portalCountry } : null,
-          /* The portal's own country field first, the location string only when it published none.
-             Reading the string first is what made "IN - Bengaluru" Indiana and "Amsterdam, NH" New
-             Hampshire. */
-          job_country: resolveJobCountry(portalCountry, job.location),
-        }));
-        await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
+        }) => {
+          const sponsorship = readPostingSponsorshipAssessment(job.description);
+          const jobCountry = resolveJobCountry(portalCountry, job.location);
+          return {
+            source_id: source.id,
+            company_name: source.company_name,
+            ...job,
+            /* Destructured OUT OF the spread above, never spread in. `pay` is a nested object on
+               NormalizedJob and there is no such column; drizzle would carry it into the INSERT and
+               fail the whole 200-row chunk, which takes that board's poll down with it.
+               All four move together. A posting whose pay period could not be established stores
+               null in all of them rather than a figure with no period. See lib/compensation.ts. */
+            salary_min: pay?.min ?? null,
+            salary_max: pay?.max ?? null,
+            salary_currency: pay?.currency ?? null,
+            salary_interval: pay?.interval ?? null,
+            last_seen_at: now,
+            is_active: true,
+            /* `ingestable` was produced by the complete validator immediately above. Persist that
+               decision so every SQL surface can reject legacy or manually inserted junk too. */
+            ingest_eligible: true,
+            certification_fingerprint: fingerprintEmployerName
+              ? buildJobCertificationFingerprint({
+                employer_name: fingerprintEmployerName,
+                title: job.title,
+                description: job.description,
+              })
+              : null,
+            /* Read here, at the moment the description arrives, so the board filter is a plain
+               column comparison. Recomputed on every poll rather than kept from the first sighting:
+               employers edit this sentence into and out of a live posting, and a policy that changed
+               on their page while ours still said the old thing is the one error this feature cannot
+               afford. */
+            sponsorship_status: sponsorship.status,
+            sponsorship_scope: sponsorship.scope,
+            /* Built here, at the same moment and for the same reason as sponsorship_status: the
+               description is in hand, and this is the only point where computing over it is free.
+               Recomputed on every poll rather than kept from the first sighting, because employers
+               edit requirements into and out of a live posting. */
+            description_digest: buildDescriptionDigest(job.description),
+            /* Existing schema-compatible review metadata, not a new column. The exact ATS country
+               must survive the poll so resume generation can freeze it into job_context. A coarse
+               `job_country = non_us` cannot distinguish London from Toronto, and therefore cannot
+               select one applicant declaration truthfully. Old rows remain null until their normal
+               board refresh, so this needs no backfill or unreviewed production migration. */
+            raw_json: portalCountry ? { portal_country: portalCountry } : null,
+            /* The portal's own country field first, the location string only when it published none.
+               Reading the string first is what made "IN - Bengaluru" Indiana and "Amsterdam, NH"
+               New Hampshire. */
+            job_country: jobCountry,
+          };
+        });
+          await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
           set: {
             company_name: sql`excluded.company_name`,
@@ -1202,6 +2437,8 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             department: sql`excluded.department`,
             employment_type: sql`excluded.employment_type`,
             description: sql`excluded.description`,
+            ingest_eligible: sql`excluded.ingest_eligible`,
+            certification_fingerprint: sql`excluded.certification_fingerprint`,
             apply_url: sql`excluded.apply_url`,
             posting_url: sql`excluded.posting_url`,
             remote: sql`excluded.remote`,
@@ -1209,6 +2446,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             last_seen_at: sql`excluded.last_seen_at`,
             is_active: sql`excluded.is_active`,
             sponsorship_status: sql`excluded.sponsorship_status`,
+            sponsorship_scope: sql`excluded.sponsorship_scope`,
             description_digest: sql`excluded.description_digest`,
             job_country: sql`excluded.job_country`,
             raw_json: sql`excluded.raw_json`,
@@ -1221,9 +2459,28 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             salary_currency: sql`excluded.salary_currency`,
             salary_interval: sql`excluded.salary_interval`,
           },
-        });
-      }
-    });
+          });
+        }
+        /* Cursor state and the job window are one atomic fact. Committing either without the other
+           can skip a window forever after a transient database or source-status write failure. */
+        await tx.update(career_page_sources).set({
+          ...completedPollFields(fetched.detail_progress, now),
+          last_error: detailStatus,
+          ...(portalName ? { portal_company_name: portalName } : {}),
+          ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
+          ...(agrees === false ? { sponsor_employer_id: null } : {}),
+        }).where(eq(career_page_sources.id, source.id));
+      }), {
+        attempts: POLL_SOURCE_PERSISTENCE_ATTEMPTS,
+        delayMs: POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS,
+      });
+    } catch (error) {
+      /* A deterministic row or constraint failure must not pin the oldest-first queue forever.
+         Every retry above rolled back as one transaction, so terminal advancement records only
+         that the source was attempted. It never mints last_successful_poll_at or job evidence. */
+      keepInCurrentDrainOnError = false;
+      throw error;
+    }
     /* WHO DOES THE PORTAL SAY THIS BOARD BELONGS TO?
      *
      * Recorded on every poll, and a disagreement UNLINKS the source from its sponsoring employer.
@@ -1238,28 +2495,83 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      *
      * `jobs`, not `ingestable`: identity evidence remains available even when every description is
      * rejected by the product-quality gate. */
-    const portalName = jobs.map((job) => job.portal_company_name).find(Boolean) ?? null;
-    const agrees = portalNameAgrees(source.company_name, portalName);
-    await db.update(career_page_sources).set({
-      last_polled_at: now,
-      last_error: null,
-      ...(portalName ? { portal_company_name: portalName } : {}),
-      ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
-      ...(agrees === false ? { sponsor_employer_id: null } : {}),
-    }).where(eq(career_page_sources.id, source.id));
+    keepInCurrentDrainOnError = false;
     return {
       source_id: source.id,
       company: source.company_name,
       jobs: ingestable.length,
       fetched: jobs.length,
+      listed: listedCount,
+      preserved: fetched.preserve_external_ids.length,
+      ...(fetched.detail_progress ? { detail_progress: fetched.detail_progress } : {}),
       ok: true as const,
       ...(agrees === false ? { portal_says: portalName } : {}),
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message.slice(0, 2000) : 'Career page poll failed';
-    await db.update(career_page_sources).set({ last_polled_at: new Date(), last_error: message }).where(eq(career_page_sources.id, source.id));
+    const baseMessage = pollFailureMessage(error);
+    const cursorMarker = retryDetailCursor === null ? '' : ` next_detail_cursor=${retryDetailCursor}`;
+    const keyMarker = detailCursorKeyMarker(retryDetailCursorKey);
+    const marker = `${cursorMarker}${keyMarker ? ` ${keyMarker}` : ''}`;
+    const message = `${baseMessage.slice(0, Math.max(1, 2000 - marker.length))}${marker}`;
+    await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+      await tx.execute(sql.raw(
+        `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+      ));
+      await tx.update(career_page_sources).set({
+        ...(keepInCurrentDrainOnError ? {} : { last_polled_at: new Date() }),
+        last_error: message,
+      }).where(eq(career_page_sources.id, source.id));
+    });
     return { source_id: source.id, company: source.company_name, jobs: 0, ok: false as const, error: message };
   }
+}
+
+export type CurrentDrainPollFailure = {
+  source_id: string;
+  company: string;
+  jobs: 0;
+  ok: false;
+  error: string;
+};
+
+/**
+ * A terminally attempted source no longer belongs in the queue, but its failure must remain in
+ * every recount for this drain. last_successful_poll_at is intentionally older, so the source's
+ * jobs cannot contribute to certified inventory even though last_polled_at permits queue progress.
+ */
+export async function currentDrainPollFailures(
+  drainStartedAt: Date,
+): Promise<CurrentDrainPollFailure[]> {
+  const rows = await db.select({
+    source_id: career_page_sources.id,
+    company: career_page_sources.company_name,
+    error: career_page_sources.last_error,
+  }).from(career_page_sources).where(and(
+    gte(career_page_sources.last_polled_at, drainStartedAt),
+    isNotNull(career_page_sources.last_error),
+    or(
+      isNull(career_page_sources.last_successful_poll_at),
+      lt(career_page_sources.last_successful_poll_at, drainStartedAt),
+    ),
+  ));
+  return rows.map((row) => ({
+    source_id: row.source_id,
+    company: row.company,
+    jobs: 0,
+    ok: false,
+    error: row.error!,
+  }));
+}
+
+export function mergeCurrentDrainPollFailures<
+  TResult extends { source_id: string; jobs: number; ok: boolean },
+>(results: readonly TResult[], persistedFailures: readonly CurrentDrainPollFailure[]) {
+  const reportedSourceIds = new Set(results.map((result) => result.source_id));
+  return [
+    ...results,
+    ...persistedFailures.filter((failure) => !reportedSourceIds.has(failure.source_id)),
+  ];
 }
 
 /* The board's filter set, in ONE place.
@@ -1304,9 +2616,18 @@ export function sponsorOnlyPredicate() {
        the already-indexed column the regex was re-deriving instead of re-running it. */
     ne(monitored_jobs.sponsorship_status, 'refuses'),
     or(
-      /* The posting's own words, wherever the role is. An employer writing "visa sponsorship
-         available" on a Berlin role is talking about Germany, and it is their statement to make. */
-      eq(monitored_jobs.sponsorship_status, 'offers'),
+      /* Generic sponsorship belongs to the posting's country. An H-1B-only clause is different:
+         it can support a US role but cannot support a foreign role just because the same global
+         boilerplate appears on both descriptions. Null keeps legacy generic offers eligible until
+         the migration and the next first-party poll persist their clause-level scope. */
+      and(
+        eq(monitored_jobs.sponsorship_status, 'offers'),
+        or(
+          isNull(monitored_jobs.sponsorship_scope),
+          ne(monitored_jobs.sponsorship_scope, 'us_h1b'),
+          ne(monitored_jobs.job_country, 'non_us'),
+        ),
+      ),
       and(
         isNotNull(career_page_sources.sponsor_employer_id),
         /* Belt and braces with the unlink in pollSource: a source whose portal name disagrees with
@@ -1358,6 +2679,71 @@ function companyScatter(filters: { company?: string }) {
   ];
 }
 
+type CursorSortKey = Pick<JobsCursorKey, 'q_rank' | 'title_rank' | 'posted_at' | 'first_seen_at'>
+  & { tie_id: string };
+
+function cursorDate(value: Date | string): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new Error('Database returned an invalid cursor timestamp');
+  return parsed.toISOString();
+}
+
+/** Rows after one seek key under relevance ASC, timestamps DESC NULLS LAST, stable id DESC. */
+function cursorAfterPredicate(
+  key: CursorSortKey,
+  expressions: {
+    qRank: SQL;
+    titleRank: SQL;
+    postedAt: SQL;
+    firstSeenAt: SQL;
+    tieId: SQL;
+  },
+): SQL {
+  const firstSeenAt = new Date(key.first_seen_at);
+  const tieAfter = or(
+    sql`${expressions.firstSeenAt} < ${firstSeenAt}`,
+    and(
+      sql`${expressions.firstSeenAt} = ${firstSeenAt}`,
+      sql`${expressions.tieId} < ${key.tie_id}`,
+    ),
+  )!;
+  const postedAfter = key.posted_at === null
+    ? and(sql`${expressions.postedAt} is null`, tieAfter)!
+    : or(
+      sql`${expressions.postedAt} is null`,
+      sql`${expressions.postedAt} < ${new Date(key.posted_at)}`,
+      and(sql`${expressions.postedAt} = ${new Date(key.posted_at)}`, tieAfter),
+    )!;
+  return or(
+    sql`${expressions.qRank} > ${key.q_rank}`,
+    and(
+      sql`${expressions.qRank} = ${key.q_rank}`,
+      sql`${expressions.titleRank} > ${key.title_rank}`,
+    ),
+    and(
+      sql`${expressions.qRank} = ${key.q_rank}`,
+      sql`${expressions.titleRank} = ${key.title_rank}`,
+      postedAfter,
+    ),
+  )!;
+}
+
+function cursorErrorResponse(error: unknown, reply: FastifyReply) {
+  if (!(error instanceof JobBoardCursorError)) throw error;
+  return reply.status(400).send({
+    error: error.message,
+    code: `job_board_cursor_${error.code}`,
+  });
+}
+
+async function cursorSnapshotTime(): Promise<Date> {
+  const clock = await db.execute<{ as_of: Date }>(sql`select now() as as_of`);
+  const value = clock.rows[0]?.as_of;
+  const asOf = value instanceof Date ? value : new Date(String(value));
+  if (!Number.isFinite(asOf.getTime())) throw new Error('Database returned an invalid cursor snapshot time');
+  return asOf;
+}
+
 function isUnitedStatesLocation(location: string): boolean {
   return location.trim().toLowerCase() === 'united states';
 }
@@ -1371,13 +2757,33 @@ export function boardConditions(f: {
   sponsorOnly?: boolean;
   employmentType?: string;
   targeting?: JobTargeting;
+  requireVerifiedEvidence?: boolean;
+  asOf?: Date;
 }) {
+  const logoEvidence = f.asOf
+    ? verifiedLogoEvidencePredicate(f.asOf)
+    : verifiedLogoEvidencePredicate();
   const conditions: SQL[] = [
     eq(monitored_jobs.is_active, true),
     eq(career_page_sources.enabled, true),
     inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-    freshnessPredicate(),
+    /* A first-party board that identifies a different employer is not verified inventory. */
+    eq(career_page_sources.portal_name_mismatch, false),
+    freshnessPredicate(f.asOf),
   ];
+  const requireVerifiedEvidence = f.requireVerifiedEvidence
+    ?? publicVerifiedEvidenceGateEnabled();
+  if (requireVerifiedEvidence) {
+    conditions.push(
+      /* The complete validator ran before this row was written. A non-null description alone is
+         not evidence that the posting contains enough real information to evaluate. */
+      eq(monitored_jobs.ingest_eligible, true),
+      /* Positive first-party identity is required. A default false mismatch flag is not proof. */
+      sql`nullif(btrim(${career_page_sources.portal_company_name}), '') is not null`,
+      /* Logo completeness is part of the product's inventory definition, not presentation polish. */
+      logoEvidence,
+    );
+  }
   if (f.sponsorOnly) conditions.push(sponsorOnlyPredicate());
   /* EXACT MATCH, never ilike. The column holds one normalized product word per posting
      (resolveEmploymentType is the only writer), so a substring match here would make "Contract"
@@ -1444,16 +2850,58 @@ export function boardConditions(f: {
   return conditions;
 }
 
+type PersistedCompanyLogoEvidence = {
+  company_domain: string | null;
+  company_logo_url: string | null;
+  logo_verification_status: string;
+  logo_verification_method: string | null;
+  logo_verified_at: Date | string | null;
+};
+
 /**
- * The row as the client receives it, with the employer's own domain attached.
+ * Turn persisted proof into the exact logo evidence a client can render.
  *
- * Resolved here rather than in the browser because `career_url` cannot answer it: on every source
- * polled today that field holds the JOB BOARD, so a client deriving an identity from it would paint
- * one ATS logo across every row. See lib/companyDomains.ts for how each domain was established and
- * why an unmapped company correctly gets null.
+ * Only a direct, verified employer image is renderable. There is intentionally no favicon guess or
+ * company-name lookup here: every row
+ * reaching this helper passed verifiedLogoEvidencePredicate(), and falling back to the static map
+ * at response time would make an unpersisted logo look counted even though the inventory query had
+ * no proof for it.
  */
-function withCompanyDomain<T extends { company_name: string }>(row: T) {
-  return { ...row, company_domain: companyDomainFor(row.company_name) };
+export function withVerifiedCompanyLogo<T extends PersistedCompanyLogoEvidence>(
+  row: T,
+  referenceTime = new Date(Date.now()),
+) {
+  const {
+    company_domain: rawDomain,
+    company_logo_url: rawLogoUrl,
+    logo_verification_status: verificationStatus,
+    logo_verification_method: verificationMethod,
+    logo_verified_at: verifiedAt,
+    ...rest
+  } = row;
+  const verifiedAtMs = verifiedAt ? new Date(verifiedAt).getTime() : Number.NaN;
+  const referenceTimeMs = referenceTime.getTime();
+  const logoProofFresh = Number.isFinite(verifiedAtMs)
+    && verifiedAtMs >= referenceTimeMs - VERIFIED_LOGO_EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000
+    && verifiedAtMs <= referenceTimeMs + 5 * 60 * 1000;
+  const directLogoUrl = rawLogoUrl?.trim() || null;
+  const evidenceVerified = verificationStatus === 'verified'
+    && Boolean(verificationMethod?.trim())
+    && VERIFIER_ISSUED_SOURCE_LOGO_METHODS.includes(
+      verificationMethod as typeof VERIFIER_ISSUED_SOURCE_LOGO_METHODS[number],
+    )
+    && logoProofFresh
+    && Boolean(directLogoUrl && /^https:\/\/[^\s]+$/.test(directLogoUrl));
+  const companyDomain = evidenceVerified ? rawDomain?.trim() || null : null;
+  const companyLogoUrl = evidenceVerified ? directLogoUrl : null;
+  return {
+    ...rest,
+    company_domain: companyDomain,
+    company_logo_url: companyLogoUrl,
+    company_logo_verification_status: verificationStatus,
+    company_logo_verification_method: verificationMethod,
+    company_logo_verified_at: verifiedAt,
+  };
 }
 
 export async function jobMonitorRoutes(fastify: FastifyInstance) {
@@ -1489,7 +2937,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
   fastify.get('/jobs', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
-    const { q, title, location, company, remote, limit, offset } = parsed.data;
+    const { q, title, location, company, remote, limit, offset, cursor } = parsed.data;
+    const cursorMode = cursor !== undefined;
     /* OR, never override. The account's standing answer can only ever ADD the filter, so a request
        that omits the parameter (or sends sponsor_only=false) cannot unfilter the board of someone
        who declared at onboarding that they need sponsorship. */
@@ -1511,12 +2960,54 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        and that is the point: a widened row should still be scored against what the student asked
        for, so the screen can see it is a near miss rather than being told it is a perfect fit. */
     const relaxTargeting = parsed.data.relax_targeting === 'true';
+    const cursorFilterHash = cursorMode ? jobBoardCursorFilterHash({
+      q: q ?? null,
+      title: title ?? null,
+      location: location ?? null,
+      company: company ?? null,
+      remote: remote ?? null,
+      sponsor_only: sponsorOnly,
+      employment_type: parsed.data.employment_type ?? null,
+      relax_targeting: relaxTargeting,
+      targeting: relaxTargeting ? null : jobTargeting,
+      verified_evidence_gate: publicVerifiedEvidenceGateEnabled(),
+    }) : null;
+    const cursorSecret = cursorMode ? jobBoardCursorSigningSecret() : null;
+    if (cursorMode && !cursorSecret) {
+      return reply.status(503).send({ error: 'Job board cursor signing is not configured' });
+    }
+    let cursorAsOf: Date | null = null;
+    let cursorKey: JobsCursorKey | null = null;
+    let cursorTotal: number | null = null;
+    if (cursorMode) {
+      if (cursor === JOB_BOARD_CURSOR_START) {
+        cursorAsOf = await cursorSnapshotTime();
+      } else {
+        try {
+          const decoded = decodeJobBoardCursor(
+            cursor!,
+            { route: 'jobs', filterHash: cursorFilterHash! },
+            cursorSecret!,
+          );
+          if (decoded.route !== 'jobs') throw new JobBoardCursorError('mismatch', 'Job board cursor route mismatch');
+          cursorAsOf = decoded.asOf;
+          cursorKey = decoded.key;
+          cursorTotal = decoded.total;
+        } catch (error) {
+          return cursorErrorResponse(error, reply);
+        }
+      }
+    }
     const conditions = boardConditions({
       ...parsed.data,
       employmentType: parsed.data.employment_type,
       sponsorOnly,
       targeting: relaxTargeting ? undefined : jobTargeting,
+      asOf: cursorAsOf ?? undefined,
     });
+    const pageConditions = cursorAsOf
+      ? [...conditions, lte(monitored_jobs.first_seen_at, cursorAsOf)]
+      : conditions;
 
     const selection = {
       id: monitored_jobs.id,
@@ -1546,12 +3037,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          the board's identity for every row instead. Operators sometimes register the board URL as
          the careers URL too, so the client still has to check before trusting it. */
       career_url: career_page_sources.career_url,
+      company_domain: career_page_sources.company_domain,
+      company_logo_url: career_page_sources.company_logo_url,
+      logo_verification_status: career_page_sources.logo_verification_status,
+      logo_verification_method: career_page_sources.logo_verification_method,
+      logo_verified_at: career_page_sources.logo_verified_at,
       /* The two facts behind the sponsorship badge, sent as facts rather than as a verdict. The row
          says what the posting stated and whether the employer has a filing record; evidenceFor()
          turns that into one word, using the same function the filter does. Sending a pre-baked
          "sponsors: true" would let a badge outlive a change to the rule that drew it. */
       sponsorship_status: monitored_jobs.sponsorship_status,
+      sponsorship_scope: monitored_jobs.sponsorship_scope,
       employer_sponsors: sql<boolean>`${career_page_sources.sponsor_employer_id} is not null`,
+      job_country: monitored_jobs.job_country,
+      portal_name_mismatch: career_page_sources.portal_name_mismatch,
       raw_json: monitored_jobs.raw_json,
     };
 
@@ -1582,9 +3081,84 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .select({ total: sql<number>`count(*)::int` })
         .from(monitored_jobs)
         .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-        .where(and(...conditions));
+        .where(and(...pageConditions));
       return row?.total ?? 0;
     };
+
+    if (cursorMode) {
+      const qRank = q
+        ? sql<number>`case when ${monitored_jobs.title} ilike ${`%${q}%`} then 0 else 1 end`
+        : sql<number>`0::integer`;
+      const titleRank = title
+        ? sql<number>`case when ${monitored_jobs.title} ilike ${`%${title}%`} then 0 else 1 end`
+        : sql<number>`0::integer`;
+      const seek = cursorKey ? cursorAfterPredicate({
+        ...cursorKey,
+        tie_id: cursorKey.id,
+      }, {
+        qRank,
+        titleRank,
+        postedAt: sql`${monitored_jobs.posted_at}`,
+        firstSeenAt: sql`${monitored_jobs.first_seen_at}`,
+        tieId: sql`${monitored_jobs.id}`,
+      }) : null;
+      const rows = await db
+        .select({
+          ...selection,
+          cursor_q_rank: qRank,
+          cursor_title_rank: titleRank,
+        })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(and(...pageConditions, ...(seek ? [seek] : [])))
+        /* Cursor mode intentionally omits companyScatter. Its window function has to rank the full
+           500,000-row set on every page and therefore cannot become a seek query. Legacy offset
+           callers keep that presentation order; cursor callers get relevance, then stable recency. */
+        .orderBy(
+          qRank,
+          titleRank,
+          sql`${monitored_jobs.posted_at} desc nulls last`,
+          desc(monitored_jobs.first_seen_at),
+          desc(monitored_jobs.id),
+        )
+        .limit(limit + 1);
+      const pageRows = rows.slice(0, limit);
+      const tail = pageRows.at(-1);
+      const total = cursorTotal ?? await jobCount();
+      const nextCursor = rows.length > limit && tail
+        ? encodeJobBoardCursor({
+          route: 'jobs',
+          asOf: cursorAsOf!,
+          filterHash: cursorFilterHash!,
+          total,
+          key: {
+            q_rank: Number(tail.cursor_q_rank) as 0 | 1,
+            title_rank: Number(tail.cursor_title_rank) as 0 | 1,
+            posted_at: tail.posted_at ? cursorDate(tail.posted_at) : null,
+            first_seen_at: cursorDate(tail.first_seen_at),
+            id: tail.id,
+          },
+        }, cursorSecret!)
+        : null;
+      return reply.send({
+        jobs: pageRows.map(({ cursor_q_rank: _qRank, cursor_title_rank: _titleRank, ...row }) => ({
+          ...withVerifiedCompanyLogo(row, cursorAsOf!),
+          match_score: null,
+          sponsorship_evidence: evidenceFor(row),
+          sponsorship_country_code: sponsorshipCountryCodeFor(row),
+        })),
+        total,
+        limit,
+        offset: 0,
+        has_more: rows.length > limit,
+        next_cursor: nextCursor,
+        pagination_mode: 'cursor',
+        ranked: false,
+        ranked_pool: null,
+        pool_exhausted: false,
+        sponsor_only: sponsorOnly,
+      });
+    }
 
     if (!resumeText && !hasTargeting(jobTargeting)) {
       const rows = await db
@@ -1597,7 +3171,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .offset(offset);
       return reply.send({
         jobs: rows.slice(0, limit).map((row) => ({
-          ...withCompanyDomain(row),
+          ...withVerifiedCompanyLogo(row),
           match_score: null,
           sponsorship_evidence: evidenceFor(row),
           sponsorship_country_code: sponsorshipCountryCodeFor(row),
@@ -1838,7 +3412,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .map((row) => {
         const fit = preferenceFit(row, jobTargeting);
         return {
-          ...withCompanyDomain(row),
+          ...withVerifiedCompanyLogo(row),
           match_score: ranking!.scores.get(row.id) ?? null,
           preference_score: scored ? fit.score : null,
           preference_reasons: scored ? fit.reasons : [],
@@ -1892,7 +3466,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
   fastify.get('/jobs/grouped', { preHandler: optionalAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = listQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid job filters' });
-    const { title, limit, offset } = parsed.data;
+    const { q, title, location, company, remote, limit, offset, cursor } = parsed.data;
+    const cursorMode = cursor !== undefined;
     /* The account's answer counts HERE TOO, and leaving it out was a real hole: this route returns
        company, title, locations and an apply link, so it is a complete substitute for the list it
        mirrors, and a declared account calling it would have been handed the unfiltered board.
@@ -1900,17 +3475,162 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        server-rendered with no session - and for them the page's checkbox is the whole answer. */
     const sponsorOnly = (await accountRequiresSponsor(request.jwtPayload?.userId))
       || parsed.data.sponsor_only === 'true';
-    const where = and(...boardConditions({
+    const projectionMode = cursorMode
+      && !q
+      && !title
+      && !location
+      && !company
+      && !remote
+      && !parsed.data.employment_type
+      && !sponsorOnly
+      && publicVerifiedEvidenceGateEnabled();
+    const [projectionState] = projectionMode
+      ? await db.select()
+        .from(job_board_group_projection_state)
+        .where(eq(job_board_group_projection_state.singleton, true))
+        .limit(1)
+      : [];
+    if (projectionMode && !projectionState) {
+      return reply.status(503).send({
+        error: 'The grouped job projection has not completed its first certified refresh',
+        code: 'job_board_group_projection_unavailable',
+      });
+    }
+    const cursorFilterHash = cursorMode ? jobBoardCursorFilterHash({
+      q: q ?? null,
+      title: title ?? null,
+      location: location ?? null,
+      company: company ?? null,
+      remote: remote ?? null,
+      sponsor_only: sponsorOnly,
+      employment_type: parsed.data.employment_type ?? null,
+      verified_evidence_gate: publicVerifiedEvidenceGateEnabled(),
+      projection_generation: projectionState?.generation ?? null,
+    }) : null;
+    const cursorSecret = cursorMode ? jobBoardCursorSigningSecret() : null;
+    if (cursorMode && !cursorSecret) {
+      return reply.status(503).send({ error: 'Job board cursor signing is not configured' });
+    }
+    let cursorAsOf: Date | null = null;
+    let cursorKey: GroupedJobsCursorKey | null = null;
+    let cursorTotals: { total: number; postingsTotal: number } | null = null;
+    if (cursorMode) {
+      if (cursor === JOB_BOARD_CURSOR_START) {
+        cursorAsOf = projectionState?.projection_as_of ?? await cursorSnapshotTime();
+      } else {
+        try {
+          const decoded = decodeJobBoardCursor(
+            cursor!,
+            { route: 'grouped', filterHash: cursorFilterHash! },
+            cursorSecret!,
+          );
+          if (decoded.route !== 'grouped') throw new JobBoardCursorError('mismatch', 'Job board cursor route mismatch');
+          cursorAsOf = decoded.asOf;
+          cursorKey = decoded.key;
+          cursorTotals = {
+            total: decoded.total,
+            postingsTotal: decoded.postingsTotal,
+          };
+        } catch (error) {
+          if (projectionMode
+            && error instanceof JobBoardCursorError
+            && error.code === 'mismatch') {
+            return cursorErrorResponse(new JobBoardCursorError(
+              'mismatch',
+              'The grouped job projection refreshed; restart this cursor traversal',
+            ), reply);
+          }
+          return cursorErrorResponse(error, reply);
+        }
+      }
+    }
+    const whereConditions = boardConditions({
       ...parsed.data,
       employmentType: parsed.data.employment_type,
       sponsorOnly,
-    }));
+      asOf: cursorAsOf ?? undefined,
+    });
+    if (cursorAsOf) whereConditions.push(lte(monitored_jobs.first_seen_at, cursorAsOf));
+    const where = and(...whereConditions);
+
+    if (projectionMode && projectionState) {
+      const zeroRank = sql<number>`0::integer`;
+      const seek = cursorKey ? cursorAfterPredicate(cursorKey, {
+        qRank: zeroRank,
+        titleRank: zeroRank,
+        postedAt: sql`${job_board_group_projection.posted_at}`,
+        firstSeenAt: sql`${job_board_group_projection.first_seen_at}`,
+        tieId: sql`${job_board_group_projection.cursor_tie_id}`,
+      }) : null;
+      const projectedRows = await db
+        .select()
+        .from(job_board_group_projection)
+        .where(and(
+          eq(job_board_group_projection.generation, projectionState.generation),
+          ...(seek ? [seek] : []),
+        ))
+        .orderBy(
+          sql`${job_board_group_projection.posted_at} desc nulls last`,
+          desc(job_board_group_projection.first_seen_at),
+          desc(job_board_group_projection.cursor_tie_id),
+        )
+        .limit(limit + 1);
+      const pageRows = projectedRows.slice(0, limit);
+      const tail = pageRows.at(-1);
+      const totals = cursorTotals ?? {
+        total: projectionState.surfaced_grouped_roles,
+        postingsTotal: projectionState.surfaced_postings,
+      };
+      const nextCursor = projectedRows.length > limit && tail
+        ? encodeJobBoardCursor({
+          route: 'grouped',
+          asOf: cursorAsOf!,
+          filterHash: cursorFilterHash!,
+          total: totals.total,
+          postingsTotal: totals.postingsTotal,
+          key: {
+            q_rank: 0,
+            title_rank: 0,
+            posted_at: tail.posted_at ? cursorDate(tail.posted_at) : null,
+            first_seen_at: cursorDate(tail.first_seen_at),
+            tie_id: tail.cursor_tie_id,
+          },
+        }, cursorSecret!)
+        : null;
+
+      return applyBoardCacheHeaders(request, reply).send({
+        jobs: pageRows.map(({
+          generation: _generation,
+          cursor_tie_id: _cursorTieId,
+          posting_offers,
+          employer_sponsors,
+          ...row
+        }) => {
+          const sponsorship = groupedSponsorshipFor({
+            postingOffers: posting_offers as GroupedPostingOfferContext[],
+            employerFilesH1b: employer_sponsors,
+          });
+          return {
+            ...withVerifiedCompanyLogo(row, cursorAsOf!),
+            sponsorship_evidence: sponsorship.evidence,
+            sponsorship_country_codes: sponsorship.countryCodes,
+          };
+        }),
+        total: totals.total,
+        postings_total: totals.postingsTotal,
+        limit,
+        offset: 0,
+        has_more: projectedRows.length > limit,
+        next_cursor: nextCursor,
+        pagination_mode: 'cursor',
+        sponsor_only: false,
+      });
+    }
 
     /* One row per (company, title, ATS family). The aggregates are chosen so the row still describes
        something true of the whole group: the newest timestamps, every distinct location, and the
        apply link belonging to the newest posting in the group rather than an arbitrary member. */
-    const rows = await db
-      .select({
+    const groupedSelection = {
         id: sql<string>`(array_agg(${monitored_jobs.id} order by ${monitored_jobs.posted_at} desc nulls last, ${monitored_jobs.id} desc))[1]`,
         company_name: monitored_jobs.company_name,
         title: monitored_jobs.title,
@@ -1922,6 +3642,14 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         first_seen_at: sql<string>`min(${monitored_jobs.first_seen_at})`,
         ats_name: career_page_sources.ats_name,
         career_url: sql<string>`min(${career_page_sources.career_url})`,
+        /* Pick every evidence field from the same, most recently verified source. array_agg keeps
+           nulls, unlike min(), so a direct-URL source cannot accidentally inherit another source's
+           domain and present a hybrid proof that never existed. */
+        company_domain: sql<string | null>`(array_agg(${career_page_sources.company_domain} order by ${career_page_sources.logo_verified_at} desc, ${career_page_sources.id} desc))[1]`,
+        company_logo_url: sql<string | null>`(array_agg(${career_page_sources.company_logo_url} order by ${career_page_sources.logo_verified_at} desc, ${career_page_sources.id} desc))[1]`,
+        logo_verification_status: sql<string>`(array_agg(${career_page_sources.logo_verification_status} order by ${career_page_sources.logo_verified_at} desc, ${career_page_sources.id} desc))[1]`,
+        logo_verification_method: sql<string | null>`(array_agg(${career_page_sources.logo_verification_method} order by ${career_page_sources.logo_verified_at} desc, ${career_page_sources.id} desc))[1]`,
+        logo_verified_at: sql<string | null>`max(${career_page_sources.logo_verified_at})`,
         /* Pay and job type, aggregated with the same caution as sponsorship below: a group is one
            role open in several cities, and those copies routinely disagree.
            A range is shown only when every member that published one used the SAME currency and the
@@ -1938,15 +3666,152 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         salary_currency: sql<string | null>`case when count(distinct ${monitored_jobs.salary_currency}) = 1 and count(distinct ${monitored_jobs.salary_interval}) = 1 then min(${monitored_jobs.salary_currency}) end`,
         salary_interval: sql<string | null>`case when count(distinct ${monitored_jobs.salary_currency}) = 1 and count(distinct ${monitored_jobs.salary_interval}) = 1 then min(${monitored_jobs.salary_interval}) end`,
         employment_type: sql<string | null>`case when count(distinct ${monitored_jobs.employment_type}) = 1 then min(${monitored_jobs.employment_type}) end`,
-        /* Sponsorship, aggregated the careful way round. A group is one role posted in several
-           cities, and those copies can disagree - the same title is routinely open in a country the
-           company sponsors in and one it does not. `refuses_any` is what stops the tile claiming
-           sponsorship on behalf of a copy that refuses it: one refusal anywhere in the group and
-           the tile says nothing at all, which is true of every member. */
-        offers_any: sql<boolean>`bool_or(${monitored_jobs.sponsorship_status} = 'offers')`,
-        refuses_any: sql<boolean>`bool_or(${monitored_jobs.sponsorship_status} = 'refuses')`,
-        employer_sponsors: sql<boolean>`bool_or(${career_page_sources.sponsor_employer_id} is not null)`,
-      })
+        /* Keep each affirmative offer attached to its own location and persisted clause scope.
+           Aggregating all locations beside one offers_any flag made a Berlin refusal inherit a US
+           offer, and made a Berlin H-1B boilerplate clause look like German sponsorship. */
+        posting_offers: sql<GroupedPostingOfferContext[]>`coalesce(
+          jsonb_agg(jsonb_build_object(
+            'sponsorship_scope', ${monitored_jobs.sponsorship_scope},
+            'job_country', ${monitored_jobs.job_country},
+            'location', ${monitored_jobs.location},
+            'raw_json', ${monitored_jobs.raw_json}
+          )) filter (where ${monitored_jobs.sponsorship_status} = 'offers'),
+          '[]'::jsonb
+        )`,
+        employer_sponsors: sql<boolean>`bool_or(
+          ${career_page_sources.sponsor_employer_id} is not null
+          and ${career_page_sources.portal_name_mismatch} = false
+          and ${monitored_jobs.sponsorship_status} <> 'refuses'
+          and ${monitored_jobs.job_country} <> 'non_us'
+        )`,
+      };
+
+    const countGroupedBoard = () => db.execute<{ total: number; postings_total: number }>(sql`
+      select
+        count(*)::int as postings_total,
+        count(distinct (
+          ${monitored_jobs.company_name},
+          ${monitored_jobs.title},
+          ${career_page_sources.ats_name}
+        ))::int as total
+      from ${monitored_jobs}
+      inner join ${career_page_sources} on ${monitored_jobs.source_id} = ${career_page_sources.id}
+      where ${where}
+    `);
+
+    if (cursorMode) {
+      const qRank = q
+        ? sql<number>`case when min(${monitored_jobs.title}) ilike ${`%${q}%`} then 0 else 1 end`
+        : sql<number>`0::integer`;
+      const titleRank = title
+        ? sql<number>`case when min(${monitored_jobs.title}) ilike ${`%${title}%`} then 0 else 1 end`
+        : sql<number>`0::integer`;
+      const postedAt = sql<Date | null>`max(${monitored_jobs.posted_at})`;
+      const firstSeenAt = sql<Date>`min(${monitored_jobs.first_seen_at})`;
+      const tieId = sql<string>`(array_agg(${monitored_jobs.id} order by ${monitored_jobs.id} asc))[1]`;
+      const seek = cursorKey ? cursorAfterPredicate({
+        ...cursorKey,
+        tie_id: cursorKey.tie_id,
+      }, {
+        qRank,
+        titleRank,
+        postedAt,
+        firstSeenAt,
+        tieId,
+      }) : null;
+      const cursorSelection = {
+        ...groupedSelection,
+        cursor_q_rank: qRank,
+        cursor_title_rank: titleRank,
+        cursor_tie_id: tieId,
+      };
+      const cursorRows = seek
+        ? await db
+          .select(cursorSelection)
+          .from(monitored_jobs)
+          .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+          .where(where)
+          .groupBy(monitored_jobs.company_name, monitored_jobs.title, career_page_sources.ats_name)
+          .having(seek)
+          .orderBy(
+            qRank,
+            titleRank,
+            sql`${postedAt} desc nulls last`,
+            sql`${firstSeenAt} desc`,
+            sql`${tieId} desc`,
+          )
+          .limit(limit + 1)
+        : await db
+          .select(cursorSelection)
+          .from(monitored_jobs)
+          .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+          .where(where)
+          .groupBy(monitored_jobs.company_name, monitored_jobs.title, career_page_sources.ats_name)
+          .orderBy(
+            qRank,
+            titleRank,
+            sql`${postedAt} desc nulls last`,
+            sql`${firstSeenAt} desc`,
+            sql`${tieId} desc`,
+          )
+          .limit(limit + 1);
+      const pageRows = cursorRows.slice(0, limit);
+      const tail = pageRows.at(-1);
+      const counted = cursorTotals ? null : await countGroupedBoard();
+      const countRow = counted?.rows[0];
+      const totals = cursorTotals ?? {
+        total: Number(countRow?.total ?? 0),
+        postingsTotal: Number(countRow?.postings_total ?? 0),
+      };
+      const nextCursor = cursorRows.length > limit && tail
+        ? encodeJobBoardCursor({
+          route: 'grouped',
+          asOf: cursorAsOf!,
+          filterHash: cursorFilterHash!,
+          total: totals.total,
+          postingsTotal: totals.postingsTotal,
+          key: {
+            q_rank: Number(tail.cursor_q_rank) as 0 | 1,
+            title_rank: Number(tail.cursor_title_rank) as 0 | 1,
+            posted_at: tail.posted_at ? cursorDate(tail.posted_at) : null,
+            first_seen_at: cursorDate(tail.first_seen_at),
+            tie_id: tail.cursor_tie_id,
+          },
+        }, cursorSecret!)
+        : null;
+
+      return applyBoardCacheHeaders(request, reply).send({
+        jobs: pageRows.map(({
+          posting_offers,
+          employer_sponsors,
+          cursor_q_rank: _qRank,
+          cursor_title_rank: _titleRank,
+          cursor_tie_id: _tieId,
+          ...row
+        }) => {
+          const sponsorship = groupedSponsorshipFor({
+            postingOffers: posting_offers,
+            employerFilesH1b: employer_sponsors,
+          });
+          return {
+            ...withVerifiedCompanyLogo(row, cursorAsOf!),
+            sponsorship_evidence: sponsorship.evidence,
+            sponsorship_country_codes: sponsorship.countryCodes,
+          };
+        }),
+        total: totals.total,
+        postings_total: totals.postingsTotal,
+        limit,
+        offset: 0,
+        has_more: cursorRows.length > limit,
+        next_cursor: nextCursor,
+        pagination_mode: 'cursor',
+        sponsor_only: sponsorOnly,
+      });
+    }
+
+    const rows = await db
+      .select(groupedSelection)
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(where)
@@ -1969,40 +3834,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
     /* count of GROUPS, not of postings. Counting rows here would print a number the page cannot
        show, which is the same lie as the competitor's 644,546. */
-    const counted = await db.execute<{ total: number; postings_total: number }>(sql`
-      select
-        count(*)::int as postings_total,
-        count(distinct (
-          ${monitored_jobs.company_name},
-          ${monitored_jobs.title},
-          ${career_page_sources.ats_name}
-        ))::int as total
-      from ${monitored_jobs}
-      inner join ${career_page_sources} on ${monitored_jobs.source_id} = ${career_page_sources.id}
-      where ${where}
-    `);
+    const counted = await countGroupedBoard();
 
     const countRow = counted.rows[0];
 
     return applyBoardCacheHeaders(request, reply).send({
-      jobs: rows.slice(0, limit).map(({ offers_any, refuses_any, employer_sponsors, ...row }) => {
-        const sponsorshipEvidence = refuses_any
-          ? null
-          : evidenceFor({
-            sponsorship_status: offers_any ? 'offers' : 'unstated',
-            employer_sponsors,
-          });
-        const sponsorshipCountryCodes = sponsorshipEvidence === 'employer_h1b_filings'
-          ? ['US']
-          : sponsorshipEvidence === 'posting_offers'
-            ? [...new Set(row.locations
-              .map((location) => postingCountryCodeFromJobContext({ location }))
-              .filter((code): code is string => Boolean(code)))]
-            : [];
+      jobs: rows.slice(0, limit).map(({ posting_offers, employer_sponsors, ...row }) => {
+        const sponsorship = groupedSponsorshipFor({
+          postingOffers: posting_offers,
+          employerFilesH1b: employer_sponsors,
+        });
         return {
-          ...withCompanyDomain(row),
-          sponsorship_evidence: sponsorshipEvidence,
-          sponsorship_country_codes: sponsorshipCountryCodes,
+          ...withVerifiedCompanyLogo(row),
+          sponsorship_evidence: sponsorship.evidence,
+          sponsorship_country_codes: sponsorship.countryCodes,
         };
       }),
       total: Number(countRow?.total ?? 0),
@@ -2196,26 +4041,30 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         is_active: monitored_jobs.is_active,
         ats_name: career_page_sources.ats_name,
         career_url: career_page_sources.career_url,
+        company_domain: career_page_sources.company_domain,
+        company_logo_url: career_page_sources.company_logo_url,
+        logo_verification_status: career_page_sources.logo_verification_status,
+        logo_verification_method: career_page_sources.logo_verification_method,
+        logo_verified_at: career_page_sources.logo_verified_at,
         sponsorship_status: monitored_jobs.sponsorship_status,
+        sponsorship_scope: monitored_jobs.sponsorship_scope,
         employer_sponsors: sql<boolean>`${career_page_sources.sponsor_employer_id} is not null`,
+        job_country: monitored_jobs.job_country,
+        portal_name_mismatch: career_page_sources.portal_name_mismatch,
         raw_json: monitored_jobs.raw_json,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(and(
         eq(monitored_jobs.id, parsed.data.id),
-        eq(monitored_jobs.is_active, true),
-        eq(career_page_sources.enabled, true),
-        // Same rule as the list route. Without it a job filtered off the board is still reachable by
-        // id - from a bookmark, a shared link, or a dashboard row cached before the filter landed -
-        // and the detail page is exactly where a student commits to applying.
-        inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-        ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
+        /* Same complete rule as the list route. Without it a job excluded for stale activity,
+           missing logo evidence, or an unsendable portal stays reachable by bookmark. */
+        ...boardConditions({ sponsorOnly }),
       ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
     return reply.send({ job: {
-      ...withCompanyDomain(rows[0]),
+      ...withVerifiedCompanyLogo(rows[0]),
       sponsorship_evidence: evidenceFor(rows[0]),
       sponsorship_country_code: sponsorshipCountryCodeFor(rows[0]),
     } });
@@ -2225,8 +4074,369 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!requireOperator(request, reply)) return;
     const parsed = sourcesBodySchema.safeParse(request.body);
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid career page sources', detail: parsed.error.issues });
+    if (parsed.data.sources.some((source) => source.logo_verification_status === 'verified')) {
+      return reply.status(400).send({
+        error: 'Verified logo evidence can only be minted by the autonomous verifier',
+      });
+    }
     await upsertSources(parsed.data.sources);
     return reply.status(204).send();
+  });
+
+  /* Promote provisional catalog domains only after independent, current proof.
+   *
+   * This is a separate bounded drain from job polling because proving a brand can require a
+   * homepage request plus an image request. A source stays invisible until this succeeds. Failed
+   * candidates remain excluded and are retried after seven days, while successful proof persists
+   * the exact image URL shown on every job tile. */
+  fastify.get('/internal/job-monitor/verify-logos', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireOperator(request, reply)) return;
+    const parsed = logoVerificationQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid logo-verification query', detail: parsed.error.issues });
+    }
+    const releaseMonitorLock = await tryAcquireJobMonitorLock();
+    if (!releaseMonitorLock) {
+      return reply.status(409).send({
+        error: 'A job-monitor run is already in progress. Retry after it finishes.',
+        verification_complete: false,
+      });
+    }
+    try {
+    const now = Date.now();
+    const retryBefore = new Date(now - FAILED_LOGO_RETRY_MS);
+    const transientRetryBefore = new Date(now - TRANSIENT_LOGO_RETRY_MS);
+    const recheckBefore = new Date(now - VERIFIED_LOGO_RECHECK_DAYS * 24 * 60 * 60 * 1000);
+    const candidateState = and(
+      eq(career_page_sources.enabled, true),
+      isNotNull(career_page_sources.logo_verification_method),
+      or(
+        eq(career_page_sources.logo_verification_status, 'unverified'),
+        eq(career_page_sources.logo_verification_status, 'failed'),
+        and(eq(career_page_sources.logo_verification_status, 'verified'),
+          or(
+            isNull(career_page_sources.logo_verified_at),
+            lt(career_page_sources.logo_verified_at, recheckBefore),
+          ),
+        ),
+      ),
+    )!;
+    /* The persisted reason remains exact and queryable. Only known provider-pressure and transport
+       classes enter the short retry lane; permanent identity and asset failures keep the weekly
+       retry cadence. Composite ATS/homepage reasons retain the same component boundaries. */
+    const transientFailure = sql<boolean>`coalesce(${career_page_sources.logo_verification_error}, '') ~
+      '(^|[;:])(timeout|empty_response|verification_failed|network_(EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|UND_ERR_[A-Z0-9_]+)|http_(0|408|425|429|5[0-9]{2}))($|;)'`;
+    const eligible = and(
+      candidateState,
+      or(
+        isNull(career_page_sources.logo_last_checked_at),
+        and(
+          transientFailure,
+          lt(career_page_sources.logo_last_checked_at, transientRetryBefore),
+        ),
+        and(
+          sql<boolean>`not (${transientFailure})`,
+          lt(career_page_sources.logo_last_checked_at, retryBefore),
+        ),
+      ),
+    )!;
+    /* Claim before selection so a second API replica excludes Crelate while this request is in
+       flight. Open circuits return no claim. Closed and half-open states both permit exactly one
+       Crelate candidate, while every other ATS family remains independently selectable. */
+    const crelateClaim = await acquireCrelateLogoVerificationClaim(new Date(now));
+    const selectionEligible = crelateClaim
+      ? eligible
+      : and(eligible, ne(career_page_sources.ats_name, 'crelate'))!;
+    /* Provider quotas are applied in SQL before the global request limit. JavaScript applies the
+       same bounds again as defense in depth, but it never receives a single-provider prefix that
+       could starve the other seven ATS families. */
+    const selectedCandidates = await selectProviderBalancedLogoVerificationCandidates(
+      selectionEligible,
+      parsed.data.limit,
+    );
+    const candidates = boundedLogoVerificationCandidates(selectedCandidates);
+    const selectedCrelate = candidates.some((candidate) => candidate.ats_name === 'crelate');
+    if (crelateClaim && !selectedCrelate) {
+      await releaseCrelateLogoVerificationClaim(crelateClaim.token, new Date());
+    }
+
+    let verified = 0;
+    let failed = 0;
+    let gracePreserved = 0;
+    let transientDeferred = 0;
+    const failureSummaries: Array<{
+      source_id: string;
+      company: string;
+      ats_name: string;
+      error: string;
+      transient: boolean;
+      grace_preserved: boolean;
+      crelate_429_exhausted: boolean;
+    }> = [];
+    await runProviderAwareLogoQueue(candidates, async (candidate, signal) => {
+        const candidateMethod = candidate.logo_verification_method;
+        if (!candidateMethod) {
+          if (candidate.ats_name === 'crelate' && crelateClaim) {
+            await releaseCrelateLogoVerificationClaim(crelateClaim.token, new Date());
+          }
+          return;
+        }
+        let result: {
+          verified: true;
+          companyName: string;
+          companyLogoUrl: string;
+          method: string;
+          providerIdentity: true;
+        } | { verified: false; reason: string };
+        try {
+          result = await retryTransientLogoVerification(async () => {
+          const atsResult = await verifyAtsSourceBranding({
+            company_name: candidate.company_name,
+            ats_name: candidate.ats_name as SupportedJobBoard,
+            board_token: candidate.board_token,
+            identity_mode: sourceLogoIdentityMode(candidateMethod),
+          }, fetch, (asset) => persistDurableAtsLogo(asset, undefined, signal), { signal });
+          if (atsResult.verified) {
+            return {
+              verified: true,
+              companyName: atsResult.company_name,
+              companyLogoUrl: atsResult.company_logo_url,
+              method: atsResult.method,
+              providerIdentity: true,
+            };
+          }
+          if (candidate.company_domain && atsResult.identity_verified && atsResult.company_name) {
+            const homepageResult = await verifyCatalogSourceLogo({
+              company_name: atsResult.company_name,
+              company_domain: candidate.company_domain,
+            }, { signal });
+            return homepageResult.verified
+              ? {
+                verified: true,
+                companyName: atsResult.company_name,
+                companyLogoUrl: homepageResult.company_logo_url,
+                method: VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD,
+                providerIdentity: true,
+              }
+              : {
+                verified: false,
+                reason: `ats:${atsResult.reason};homepage:${homepageResult.reason}`,
+              };
+          }
+          return { verified: false, reason: `ats:${atsResult.reason}` };
+        }, {
+          /* ATS proof followed by bounded homepage redirects and icon candidates can consume about
+             three minutes in the worst case. Keep one proof attempt inside this HTTP request. A
+             classified transient is persisted and retried by the worker in the same drain after
+             the short retry interval, so dropping in-request retries does not drop the work. */
+          attempts: 1,
+        });
+        } catch (error) {
+          if (candidate.ats_name === 'crelate' && crelateClaim) {
+            await releaseCrelateLogoVerificationClaim(crelateClaim.token, new Date());
+          }
+          throw error;
+        }
+        const checkedAt = new Date();
+        const crelateTransition = candidate.ats_name === 'crelate' && !result.verified
+          ? crelateLogoFailureTransition(
+            candidate.logo_provider_429_attempts,
+            candidate.logo_verification_error,
+            result.reason,
+          )
+          : null;
+
+        if (candidate.ats_name === 'crelate') {
+          if (!crelateClaim) {
+            throw new Error('Crelate logo verification ran without the durable provider claim');
+          }
+          const circuitUpdated = crelateTransition?.opensCircuit
+            ? await openCrelateLogoVerificationCircuit(crelateClaim.token, checkedAt)
+            : await closeCrelateLogoVerificationCircuit(crelateClaim.token, checkedAt);
+          if (!circuitUpdated) {
+            throw new Error('Crelate logo verification lost its durable provider claim');
+          }
+        }
+
+        const unchanged = and(
+          eq(career_page_sources.id, candidate.id),
+          eq(career_page_sources.company_name, candidate.company_name),
+          eq(career_page_sources.logo_verification_status, candidate.logo_verification_status),
+          eq(career_page_sources.logo_verification_method, candidateMethod),
+          sql`${career_page_sources.company_domain} is not distinct from ${candidate.company_domain}`,
+          sql`${career_page_sources.logo_last_checked_at} is not distinct from ${candidate.logo_last_checked_at}`,
+          eq(career_page_sources.logo_provider_429_attempts, candidate.logo_provider_429_attempts),
+          sql`${career_page_sources.logo_verification_error} is not distinct from ${candidate.logo_verification_error}`,
+        );
+        if (result.verified) {
+          const certificationIdentityChanged = normalizeEmployerCertificationIdentity(candidate.company_name)
+            !== normalizeEmployerCertificationIdentity(result.companyName);
+          const promoted = await db.transaction(async (tx) => {
+            const [sponsor] = await tx.select({ id: sponsor_employers.id })
+              .from(sponsor_employers)
+              .where(eq(sponsor_employers.normalized_name, normalizeEmployerName(result.companyName)))
+              .limit(1);
+            const rows = await tx.update(career_page_sources).set({
+              company_name: result.companyName,
+              company_logo_url: result.companyLogoUrl,
+              logo_verification_status: 'verified',
+              logo_verification_method: result.method,
+              logo_verified_at: checkedAt,
+              logo_last_checked_at: checkedAt,
+              logo_verification_error: null,
+              logo_provider_429_attempts: 0,
+              sponsor_employer_id: sponsor?.id ?? null,
+              portal_company_name: result.providerIdentity
+                ? result.companyName
+                : candidate.portal_company_name,
+              portal_name_mismatch: result.providerIdentity
+                ? false
+                : candidate.portal_name_mismatch,
+            }).where(unchanged).returning({ id: career_page_sources.id });
+            if (rows.length === 0) return false;
+            await tx.update(monitored_jobs).set({
+              company_name: result.companyName,
+              /* The employer identity is part of certification. A rename must be repolled before
+                 any old hash can re-enter the unique inventory count. A routine logo recheck with
+                 the same normalized identity must retain current-drain certification. */
+              ...(certificationIdentityChanged ? { certification_fingerprint: null } : {}),
+            })
+              .where(eq(monitored_jobs.source_id, candidate.id));
+            return true;
+          });
+          if (promoted) verified += 1;
+          return;
+        }
+
+        const proofStillFresh = candidate.logo_verification_status === 'verified'
+          && candidate.logo_verified_at !== null
+          && candidate.logo_verified_at.getTime()
+            >= checkedAt.getTime() - VERIFIED_LOGO_EVIDENCE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+        const terminalCrelate429 = crelateTransition?.exhausted ?? false;
+        const persistedReason = crelateTransition?.reason ?? result.reason;
+        const transient = !terminalCrelate429
+          && isTransientLogoVerificationReason(persistedReason);
+        const rows = await db.update(career_page_sources).set({
+          /* A transient failure is not contrary brand evidence. Keep the prior proof fields, while
+             the public freshness predicate independently excludes an expired proof. */
+          company_logo_url: terminalCrelate429
+            ? null
+            : transient || proofStillFresh ? undefined : null,
+          logo_verification_status: terminalCrelate429
+            ? 'failed'
+            : transient
+            ? candidate.logo_verification_status
+            : proofStillFresh ? 'verified' : 'failed',
+          logo_verified_at: terminalCrelate429 ? null : undefined,
+          logo_last_checked_at: checkedAt,
+          logo_verification_error: persistedReason,
+          logo_provider_429_attempts: crelateTransition?.attempts
+            ?? candidate.logo_provider_429_attempts,
+        }).where(unchanged).returning({ id: career_page_sources.id });
+        if (rows.length > 0) {
+          failed += 1;
+          if (transient) transientDeferred += 1;
+          if (proofStillFresh) gracePreserved += 1;
+          failureSummaries.push({
+            source_id: candidate.id,
+            company: candidate.company_name,
+            ats_name: candidate.ats_name,
+            error: persistedReason,
+            transient,
+            grace_preserved: proofStillFresh,
+            crelate_429_exhausted: terminalCrelate429,
+          });
+        }
+    });
+
+    const scheduledTransient = and(
+      candidateState,
+      transientFailure,
+      isNotNull(career_page_sources.logo_last_checked_at),
+      gte(career_page_sources.logo_last_checked_at, transientRetryBefore),
+    )!;
+    const queueCheckedAt = new Date();
+    const crelateBlock = await readCrelateLogoVerificationBlock(queueCheckedAt);
+    const providerBlockedPending = crelateBlock.blocked
+      ? and(
+        eq(career_page_sources.ats_name, 'crelate'),
+        candidateState,
+        or(eligible, scheduledTransient),
+      )!
+      : sql<boolean>`false`;
+    const dueAfterProviderCircuit = crelateBlock.blocked
+      ? and(eligible, ne(career_page_sources.ats_name, 'crelate'))!
+      : eligible;
+    const scheduledAfterProviderCircuit = or(scheduledTransient, providerBlockedPending)!;
+    const [queue] = await db.select({
+      due: sql<number>`count(*) filter (where ${dueAfterProviderCircuit})::int`,
+      scheduled_transient: sql<number>`count(*) filter (where ${scheduledAfterProviderCircuit})::int`,
+      scheduled_crelate_circuit: sql<number>`count(*) filter (where ${providerBlockedPending})::int`,
+      next_transient_checked_at: sql<Date | null>`min(${career_page_sources.logo_last_checked_at})
+        filter (where ${scheduledTransient} and not (${providerBlockedPending}))`,
+    }).from(career_page_sources);
+    const dueSources = queue?.due ?? 0;
+    const scheduledTransientSources = queue?.scheduled_transient ?? 0;
+    const scheduledCrelateCircuitSources = queue?.scheduled_crelate_circuit ?? 0;
+    const remainingSources = dueSources + scheduledTransientSources;
+    const nextCheckedAt = queue?.next_transient_checked_at
+      ? new Date(queue.next_transient_checked_at).getTime()
+      : Number.NaN;
+    const nextIndividualRetryAt = Number.isFinite(nextCheckedAt)
+      ? nextCheckedAt + TRANSIENT_LOGO_RETRY_MS
+      : Number.POSITIVE_INFINITY;
+    const nextCrelateRetryAt = scheduledCrelateCircuitSources > 0 && crelateBlock.blockedUntil
+      ? crelateBlock.blockedUntil.getTime()
+      : Number.POSITIVE_INFINITY;
+    const nextRetryAt = Math.min(nextIndividualRetryAt, nextCrelateRetryAt);
+    const retryAfterMs = dueSources === 0 && scheduledTransientSources > 0
+      ? Math.max(1, nextRetryAt - Date.now())
+      : 0;
+    return reply.send({
+      selected_sources: candidates.length,
+      verified_sources: verified,
+      failed_sources: failed,
+      failure_summaries: failureSummaries,
+      transient_deferred_sources: transientDeferred,
+      grace_preserved_sources: gracePreserved,
+      due_sources: dueSources,
+      scheduled_transient_sources: scheduledTransientSources,
+      scheduled_crelate_circuit_sources: scheduledCrelateCircuitSources,
+      remaining_sources: remainingSources,
+      verification_complete: remainingSources === 0,
+      retry_after_ms: retryAfterMs,
+      next_retry_at: retryAfterMs > 0
+        ? new Date(Date.now() + retryAfterMs).toISOString()
+        : null,
+      concurrency: {
+        global: LOGO_VERIFICATION_GLOBAL_CONCURRENCY,
+        per_provider: LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
+        workable: 1,
+        workable_start_interval_ms: LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
+        request_candidates: LOGO_VERIFICATION_REQUEST_CANDIDATES,
+        per_provider_candidates: LOGO_VERIFICATION_PROVIDER_CANDIDATES,
+        workable_candidates: LOGO_VERIFICATION_WORKABLE_CANDIDATES,
+        crelate: LOGO_VERIFICATION_CRELATE_CONCURRENCY,
+        crelate_candidates: LOGO_VERIFICATION_CRELATE_CANDIDATES,
+        request_timeout_ms: LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
+      },
+      crelate_circuit: {
+        state: crelateBlock.reason,
+        retry_at: crelateBlock.blockedUntil?.toISOString() ?? null,
+      },
+    });
+    } catch (error) {
+      if (error instanceof LogoVerificationRequestTimeoutError) {
+        return reply.status(503).send({
+          error: 'Logo verification reached its bounded request deadline. Retry the remaining queue.',
+          verification_complete: false,
+          request_timeout_ms: error.timeoutMs,
+        });
+      }
+      throw error;
+    } finally {
+      await releaseMonitorLock();
+    }
   });
 
   fastify.get('/internal/job-monitor', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -2235,9 +4445,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!parsedQuery.success) {
       return reply.status(400).send({ error: 'Invalid job-monitor query', detail: parsedQuery.error.issues });
     }
+    if (!jobMonitorDrainStartedAtAllowed(parsedQuery.data.drain_started_at)) {
+      return reply.status(400).send({
+        error: 'drain_started_at is too far in the future',
+        maximum_future_skew_ms: MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS,
+      });
+    }
     const drainStartedAt = parsedQuery.data.drain_started_at
       ? new Date(parsedQuery.data.drain_started_at)
       : new Date();
+    const initializeDrain = jobMonitorDrainShouldInitialize(
+      parsedQuery.data.drain_started_at,
+      parsedQuery.data.initialize_drain === 'true',
+    );
     const releaseMonitorLock = await tryAcquireJobMonitorLock();
     if (!releaseMonitorLock) {
       return reply.status(409).send({
@@ -2247,38 +4467,120 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     }
     try {
     await syncSponsorEmployers();
-    const allSources = mergeJobSources(JOB_SOURCES, configuredSources());
-    await upsertSources(allSources);
-    /* Every run reconciles the database against the reviewed list, so a company removed in a pull
-       request stops appearing on the board without anybody remembering to go and disable it. */
-    /* Remote discovery makes the persisted fleet larger than the static catalog. Automatic
-       retirement is therefore unsafe: an older release or a partial catalog must not disable
-       sources that were independently verified by a newer release. Explicit operator actions
-       remain the only authority for disabling a source. */
+    /* Refresh the public board catalogs once at the start of a drain, never on every segment.
+     * It contributes board identifiers only. Each posting still comes from the employer ATS and
+     * remains outside every public count until its source has verified logo evidence.
+     *
+     * Remote discovery is additive only. Even a catalog that passes absolute completeness floors
+     * is not allowed to disable persisted sources because a smaller but syntactically valid
+     * publisher snapshot could otherwise retire thousands. Stale boards age out through the live
+     * first-party freshness gate; explicit operator actions remain the authority for disabling a
+     * source. Static reviewed and operator sources win identity conflicts with discovery data. */
+    let discoveredSources: JobSourceInput[] = [];
+    let discoveryCandidateSourceCount = 0;
+    let discoveryRefreshed = false;
+    let discoveryTrustedComplete = false;
+    let discoveryProvenance: JobSourceDiscoveryResult['provenance'] | null = null;
+    let discoveryError: string | null = null;
+    if (initializeDrain) {
+      try {
+        const discovery = await discoverJobSources();
+        discoveryCandidateSourceCount = discovery.candidateSources.length;
+        discoveredSources = discovery.sources;
+        discoveryRefreshed = true;
+        discoveryTrustedComplete = discovery.trustedComplete;
+        discoveryProvenance = discovery.provenance;
+        if (!discovery.trustedComplete) {
+          discoveryError = 'One or more remote source catalogs failed completeness checks';
+        }
+      } catch (error) {
+        discoveryError = error instanceof Error ? error.message : String(error);
+        request.log.warn({ error: discoveryError }, 'job source discovery failed; preserving persisted sources');
+      }
+    }
+    const brandedSources = initializeDrain ? catalogBrandedJobSources() : [];
+    const discoveredAndBranded = mergeJobSources(discoveredSources, brandedSources);
+    const scheduledSources = mergeJobSources(discoveredAndBranded, JOB_SOURCES);
+    const operatorConfiguredSources = configuredSources();
+    await upsertSources(scheduledSources, { preserveExistingDisabled: true });
+    /* Runtime configuration is an operator channel, not publisher discovery. Apply it separately
+       so enabled=true can deliberately restore a reviewed source after the additive catalog sync
+       has preserved its disabled state. */
+    if (operatorConfiguredSources.length > 0) await upsertSources(operatorConfiguredSources);
     const retired: string[] = [];
-    const [sourceCount] = await db
-      .select({ total: sql<number>`count(*)::int` })
-      .from(career_page_sources)
-      .where(eq(career_page_sources.enabled, true));
+    const pollEligible = pollingSourceEligibilityPredicate();
+    const [[sourceCount], [pollEligibleSourceCount]] = await Promise.all([
+      db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(career_page_sources)
+        .where(eq(career_page_sources.enabled, true)),
+      db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(career_page_sources)
+        .where(pollEligible),
+    ]);
     const enabledSourceCount = sourceCount?.total ?? 0;
     const drainEligible = or(
       isNull(career_page_sources.last_polled_at),
       lt(career_page_sources.last_polled_at, drainStartedAt),
     );
+    const pollQueueEligible = and(pollEligible, drainEligible)!;
     const sources = await db.select().from(career_page_sources)
-      .where(and(eq(career_page_sources.enabled, true), drainEligible))
+      .where(pollQueueEligible)
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
       .limit(POLL_SOURCE_LIMIT);
     /* The application-owned Railway budget leaves time for the final batch, metrics and reply.
        A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
        it first next time. Workable starts are separately spaced below its shared provider limit. */
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
-    const results = pollRun.results;
+    const persistedFailures = await currentDrainPollFailures(drainStartedAt);
+    const results = mergeCurrentDrainPollFailures(pollRun.results, persistedFailures);
     const [remaining] = await db
       .select({ total: sql<number>`count(*)::int` })
       .from(career_page_sources)
-      .where(and(eq(career_page_sources.enabled, true), drainEligible));
+      .where(pollQueueEligible);
     const { deferredSources, pollingComplete } = pollingQueueStatus(remaining?.total ?? 0);
+    const pollingPayload = {
+      retired_sources: retired,
+      discovered_sources: discoveredSources.length,
+      discovery_candidate_sources: discoveryCandidateSourceCount,
+      discovery_activated_sources: discoveredSources.length,
+      catalog_branded_sources: brandedSources.length,
+      discovery_refreshed: discoveryRefreshed,
+      discovery_trusted_complete: discoveryTrustedComplete,
+      discovery_provenance: discoveryProvenance,
+      retirement_skipped_reason: 'remote_discovery_is_additive_only',
+      discovery_error: discoveryError,
+      sources: results.length,
+      enabled_sources: enabledSourceCount,
+      poll_eligible_sources: pollEligibleSourceCount?.total ?? 0,
+      selected_sources: sources.length,
+      deferred_sources: deferredSources,
+      remaining_polling_sources: deferredSources,
+      polling_complete: pollingComplete,
+      stopped_for_time_budget: pollRun.stopped_for_time_budget,
+      polling_elapsed_ms: pollRun.elapsed_ms,
+      polling_time_budget_ms: POLL_TIME_BUDGET_MS,
+      polling_start_reserve_ms: POLL_START_RESERVE_MS,
+      poll_segment_size: POLL_SEGMENT_SIZE,
+      drain_started_at: drainStartedAt.toISOString(),
+      poll_source_limit: POLL_SOURCE_LIMIT,
+      poll_concurrency: POLL_CONCURRENCY,
+      workable_start_interval_ms: WORKABLE_START_INTERVAL_MS,
+      jobs: results.reduce((sum, result) => sum + result.jobs, 0),
+      failed: results.filter((result) => !result.ok).length,
+      results,
+    };
+    if (!pollingComplete) {
+      request.log.warn(
+        { enabledSourceCount, attempted: results.length, deferredSources, elapsedMs: pollRun.elapsed_ms },
+        'Job monitor deferred sources; the Railway worker should invoke another pass.',
+      );
+      return reply.send({
+        ...pollingPayload,
+        metrics_deferred: true,
+      });
+    }
     /* THE FLOOR CHECK. See MINIMUM_SURFACED_JOBS.
      *
      * Reported on every run, not only on a breach, so the number is watchable while it is still
@@ -2293,7 +4595,24 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      */
     /* Purge before counting, so inventory and purged_postings describe the same moment. Counting
        first would report a board that includes rows this run was about to delete. */
-    const purged = await purgeExpiredPostings();
+    let purged: number;
+    try {
+      purged = await purgeExpiredPostings();
+    } catch (error) {
+      if (!(error instanceof JobBoardPurgeTimeoutError)) throw error;
+      request.log.error({
+        metricsStage: error.stage,
+        timeoutMs: error.timeoutMs,
+        drainStartedAt: drainStartedAt.toISOString(),
+      }, 'Job board purge timed out');
+      return reply.status(503).send({
+        ...pollingPayload,
+        metrics_deferred: true,
+        metrics_error: 'statement_timeout',
+        metrics_stage: error.stage,
+        metrics_timeout_ms: error.timeoutMs,
+      });
+    }
 
     /* Three thresholds from one inventory snapshot: postings and grouped roles over the full board,
      * plus postings on the sponsor-only view. The sponsor view is the fragile one: it drains when
@@ -2301,7 +4620,25 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * refusal sentence. Measuring only the full board would let that view fall to zero while this
      * cron reported a healthy total. The snapshot uses one serverless connection and bounds each
      * statement so a slow database still returns an error and releases the advisory lock. */
-    const { inventory, variety } = await boardMonitoringSnapshot();
+    let monitoringSnapshot: Awaited<ReturnType<typeof boardMonitoringSnapshot>>;
+    try {
+      monitoringSnapshot = await boardMonitoringSnapshot(drainStartedAt);
+    } catch (error) {
+      if (!(error instanceof JobBoardMetricsTimeoutError)) throw error;
+      request.log.error({
+        metricsStage: error.stage,
+        timeoutMs: error.timeoutMs,
+        drainStartedAt: drainStartedAt.toISOString(),
+      }, 'Job board projection metrics timed out');
+      return reply.status(503).send({
+        ...pollingPayload,
+        metrics_deferred: true,
+        metrics_error: 'statement_timeout',
+        metrics_stage: error.stage,
+        metrics_timeout_ms: error.timeoutMs,
+      });
+    }
+    const { inventory, projection, variety, varietySample } = monitoringSnapshot;
     /* Target-role matching is a separate set-oriented statement. Keeping it out of the inventory
        transaction avoids holding a repeatable-read snapshot during work that grows with users. */
     const targetRoleCoverage = await targetRoleCoverageMonitoringSnapshot();
@@ -2311,30 +4648,26 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       surfacedGroupedRoles,
       surfacedSponsorOnly,
       surfacedInternships,
+      certifiedUniqueJobs,
+      certifiedUniqueGroupedRoles,
+      certifiedUniqueSponsorJobs,
+      certifiedUniqueInternships,
     } = inventory;
     const payload = {
-      retired_sources: retired,
-      sources: results.length,
-      enabled_sources: enabledSourceCount,
-      selected_sources: sources.length,
-      deferred_sources: deferredSources,
-      polling_complete: pollingComplete,
-      stopped_for_time_budget: pollRun.stopped_for_time_budget,
-      polling_elapsed_ms: pollRun.elapsed_ms,
-      polling_time_budget_ms: POLL_TIME_BUDGET_MS,
-      polling_start_reserve_ms: POLL_START_RESERVE_MS,
-      poll_segment_size: POLL_SEGMENT_SIZE,
-      drain_started_at: drainStartedAt.toISOString(),
-      poll_source_limit: POLL_SOURCE_LIMIT,
-      poll_concurrency: POLL_CONCURRENCY,
-      workable_start_interval_ms: WORKABLE_START_INTERVAL_MS,
-      jobs: results.reduce((sum, result) => sum + result.jobs, 0),
-      failed: results.filter((result) => !result.ok).length,
+      ...pollingPayload,
+      metrics_deferred: false,
+      group_projection_generation: projection.generation,
+      group_projection_as_of: projection.asOf.toISOString(),
+      group_projection_refreshed_at: projection.refreshedAt.toISOString(),
       surfaced_postings: surfaced,
       surfaced_grouped_roles: surfacedGroupedRoles,
       /* Backward-compatible alias for existing consumers. */
       surfaced_jobs: surfaced,
       surfaced_sponsor_only_jobs: surfacedSponsorOnly,
+      certified_unique_jobs: certifiedUniqueJobs,
+      certified_unique_grouped_roles: certifiedUniqueGroupedRoles,
+      certified_unique_sponsor_jobs: certifiedUniqueSponsorJobs,
+      certified_unique_internships: certifiedUniqueInternships,
       /* Reported every run from the day the commitment was made, while the board is still far
          under it. A number that only starts being reported once it looks good is a number nobody
          can show a trend for. See MINIMUM_SURFACED_INTERNSHIPS for why this is not yet a 5xx. */
@@ -2342,14 +4675,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       minimum_surfaced_internships: MINIMUM_SURFACED_INTERNSHIPS,
       internship_floor_enforced: false,
       internship_headroom_multiple: Number(
-        (surfacedInternships / MINIMUM_SURFACED_INTERNSHIPS).toFixed(2),
+        (certifiedUniqueInternships / MINIMUM_SURFACED_INTERNSHIPS).toFixed(2),
       ),
       variety,
+      variety_sample: varietySample,
       classification_coverage: coverage,
       target_role_coverage: targetRoleCoverage,
       minimum_surfaced_jobs: MINIMUM_SURFACED_JOBS,
       minimum_surfaced_grouped_roles: MINIMUM_SURFACED_GROUPED_ROLES,
       minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
+      minimum_certified_unique_jobs: MINIMUM_SURFACED_JOBS,
+      minimum_certified_unique_grouped_roles: MINIMUM_SURFACED_GROUPED_ROLES,
+      minimum_certified_unique_sponsor_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
+      certification_started_at: drainStartedAt.toISOString(),
+      public_verified_evidence_gate_enabled: publicVerifiedEvidenceGateEnabled(),
       /* THE SUSTAINABILITY CHECK, run every day rather than once.
        *
        * Whether the verification window keeps both postings and grouped roles above their warning lines
@@ -2367,26 +4706,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       required_surfaced_jobs: REQUIRED_SURFACED_JOBS,
       required_surfaced_grouped_roles: REQUIRED_SURFACED_GROUPED_ROLES,
       grouped_role_alert_threshold: GROUPED_ROLE_ALERT_THRESHOLD,
-      grouped_role_alert_triggered: groupedRoleAlertTriggered(surfacedGroupedRoles),
+      grouped_role_alert_triggered: groupedRoleAlertTriggered(certifiedUniqueGroupedRoles),
       target_surfaced_postings: TARGET_SURFACED_POSTINGS,
       target_surfaced_grouped_roles: TARGET_SURFACED_GROUPED_ROLES,
-      inventory_target_met: inventoryTargetMet(surfaced, surfacedGroupedRoles),
-      headroom_multiple: Number((surfaced / MINIMUM_SURFACED_JOBS).toFixed(1)),
+      inventory_target_met: inventoryTargetMet(certifiedUniqueJobs, certifiedUniqueGroupedRoles),
+      headroom_multiple: Number((certifiedUniqueJobs / MINIMUM_SURFACED_JOBS).toFixed(1)),
       grouped_role_headroom_multiple: Number(
-        (surfacedGroupedRoles / MINIMUM_SURFACED_GROUPED_ROLES).toFixed(1),
+        (certifiedUniqueGroupedRoles / MINIMUM_SURFACED_GROUPED_ROLES).toFixed(1),
       ),
-      board_health: boardHealth(surfaced, surfacedGroupedRoles),
-      results,
+      board_health: boardHealth(certifiedUniqueJobs, certifiedUniqueGroupedRoles),
     };
-    if (deferredSources > 0) {
-      request.log.warn(
-        { enabledSourceCount, attempted: results.length, deferredSources, elapsedMs: pollRun.elapsed_ms },
-        'Job monitor deferred sources; the external scheduler should invoke another pass.',
-      );
-    }
-    const postingsBelow = boardIsBelowFloor(surfaced);
-    const groupedRolesBelow = surfacedGroupedRoles < MINIMUM_SURFACED_GROUPED_ROLES;
-    const sponsorBelow = surfacedSponsorOnly < MINIMUM_SPONSOR_SURFACED_JOBS;
+    const postingsBelow = boardIsBelowFloor(certifiedUniqueJobs);
+    const groupedRolesBelow = certifiedUniqueGroupedRoles < MINIMUM_SURFACED_GROUPED_ROLES;
+    const sponsorBelow = certifiedUniqueSponsorJobs < MINIMUM_SPONSOR_SURFACED_JOBS;
     if (!coverage.all_coverage_thresholds_met || !targetRoleCoverage.coverage_threshold_met) {
       request.log.warn(
         {
@@ -2404,24 +4736,29 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!postingsBelow && !groupedRolesBelow && payload.board_health === 'low') {
       request.log.warn(
         {
-          surfacedPostings: surfaced,
-          surfacedGroupedRoles,
+          certifiedUniqueJobs,
+          certifiedUniqueGroupedRoles,
+          rawSurfacedPostings: surfaced,
+          rawSurfacedGroupedRoles: surfacedGroupedRoles,
           requiredPostings: REQUIRED_SURFACED_JOBS,
           requiredGroupedRoles: REQUIRED_SURFACED_GROUPED_ROLES,
           windowDays: VERIFIED_ACTIVE_WINDOW_DAYS,
         },
-        `Job board has thin headroom: ${surfaced} postings and ${surfacedGroupedRoles} grouped roles. `
+        `Job board has thin headroom: ${certifiedUniqueJobs} unique jobs and `
+        + `${certifiedUniqueGroupedRoles} unique grouped roles. `
         + `Complete the source drain or add sources before it reaches the floor.`,
       );
     }
-    if (surfacedInternships < MINIMUM_SURFACED_INTERNSHIPS) {
+    if (certifiedUniqueInternships < MINIMUM_SURFACED_INTERNSHIPS) {
       request.log.warn(
         {
-          surfacedInternships,
+          certifiedUniqueInternships,
+          rawSurfacedInternships: surfacedInternships,
           committedInternships: MINIMUM_SURFACED_INTERNSHIPS,
           windowDays: VERIFIED_ACTIVE_WINDOW_DAYS,
         },
-        `Internship inventory is ${surfacedInternships} against a committed ${MINIMUM_SURFACED_INTERNSHIPS}. `
+        `Unique internship inventory is ${certifiedUniqueInternships} against a committed `
+        + `${MINIMUM_SURFACED_INTERNSHIPS}. `
         + 'Levers, measured, in order: internship-specific freshness window, seasonal ramp, more '
         + 'density-sourced boards. Never by widening what counts as an internship.',
       );
@@ -2429,9 +4766,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (postingsBelow || groupedRolesBelow || sponsorBelow) {
       request.log.error(
         {
-          surfaced,
-          surfacedGroupedRoles,
-          surfacedSponsorOnly,
+          certifiedUniqueJobs,
+          certifiedUniqueGroupedRoles,
+          certifiedUniqueSponsorJobs,
+          rawSurfacedPostings: surfaced,
           floor: MINIMUM_SURFACED_JOBS,
           groupedRoleFloor: MINIMUM_SURFACED_GROUPED_ROLES,
           sponsorFloor: MINIMUM_SPONSOR_SURFACED_JOBS,
@@ -2441,8 +4779,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       );
       return reply.status(500).send({
         ...payload,
-        error: `The job board is showing ${surfacedGroupedRoles} grouped roles across ${surfaced} postings `
-          + `(${surfacedSponsorOnly} postings at employers confirmed to sponsor). The floors are `
+        error: `The job board has ${certifiedUniqueGroupedRoles} certified unique grouped roles across `
+          + `${certifiedUniqueJobs} certified unique jobs (${certifiedUniqueSponsorJobs} sponsor-only). `
+          + `The raw verified views contain ${surfacedGroupedRoles} grouped roles across ${surfaced} postings `
+          + `(${surfacedSponsorOnly} sponsor-only). The certified floors are `
           + `${MINIMUM_SURFACED_GROUPED_ROLES} grouped roles, ${MINIMUM_SURFACED_JOBS} postings, and `
           + `${MINIMUM_SPONSOR_SURFACED_JOBS} sponsor-only postings. `
           + 'Check career_page_sources.last_error for failing polls, whether a portal left '

@@ -38,6 +38,7 @@ import {
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
 import { ManagedBrowserAssertionFailureError, ManagedBrowserPreSubmitCrashError } from '../lib/browserbase';
 import { submitRequestDisposition } from '../lib/submissionSafety';
+import { SubmissionAccountDeletionDrainError } from '../lib/submissionAttemptLedger';
 
 const CLAIMED_AT = '2026-08-11T12:00:00.000Z';
 
@@ -80,6 +81,18 @@ function exitIsTheUnverifiedResolutionRoute(persisted: ApplicationReviewState): 
 }
 
 describe('every post-claim stop leaves the row with a way out', () => {
+  test('an account-deletion fence releases a pre-boundary claim without remote uncertainty', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new SubmissionAccountDeletionDrainError(),
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_claimed_at, undefined);
+    assert.equal(persisted.submission_claim_id, undefined);
+    assert.equal(persisted.unverified_submission, undefined);
+    assert.match(persisted.attention_reason ?? '', /Account deletion paused/);
+  });
+
   test('an action-budget stop exits by ordinary re-run, because the builder threw before the click', () => {
     /* buildManagedPortalActions throws while ASSEMBLING the action list, before runManagedBrowser is
        called at all, and records submitActionAppended false. Nothing reached the employer. */

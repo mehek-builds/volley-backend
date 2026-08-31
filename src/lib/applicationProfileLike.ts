@@ -84,9 +84,12 @@ type ResolverUserRow = {
   automatic_conduct_acceptance_consent_version?: string | null;
 };
 
-async function selectResolverUserRow(userId: string): Promise<ResolverUserRow[]> {
+async function selectResolverUserRow(
+  userId: string,
+  executor: Pick<typeof db, 'select'> = db,
+): Promise<ResolverUserRow[]> {
   try {
-    return await db.select({
+    return await executor.select({
       sponsorship_answer: users.sponsorship_answer,
       automatic_consent_acceptance_enabled: users.automatic_consent_acceptance_enabled,
       automatic_consent_acceptance_consented_at: users.automatic_consent_acceptance_consented_at,
@@ -97,7 +100,7 @@ async function selectResolverUserRow(userId: string): Promise<ResolverUserRow[]>
     }).from(users).where(eq(users.id, userId)).limit(1);
   } catch (error) {
     if (!isUndefinedColumnError(error)) throw error;
-    return db.select({
+    return executor.select({
       sponsorship_answer: users.sponsorship_answer,
     }).from(users).where(eq(users.id, userId)).limit(1);
   }
@@ -118,8 +121,9 @@ async function selectResolverUserRow(userId: string): Promise<ResolverUserRow[]>
  */
 export async function loadUnattendedConsentGrant(
   userId: string,
+  executor: Pick<typeof db, 'select'> = db,
 ): Promise<{ granted_at?: string; version: string } | null> {
-  const [userRow] = await selectResolverUserRow(userId);
+  const [userRow] = await selectResolverUserRow(userId, executor);
   return acknowledgementPermissionsFor(userRow, {
     consent: consentAcceptanceGranted,
     conduct: conductAcceptanceGranted,
@@ -128,13 +132,16 @@ export async function loadUnattendedConsentGrant(
   }).consent_acknowledgement_permission ?? null;
 }
 
-export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
+export async function loadApplicationProfileLike(
+  userId: string,
+  executor: Pick<typeof db, 'select' | 'insert'> = db,
+): Promise<ApplicationProfileLike> {
   const [appRow, [profileRow], [userRow], bankRows, submittedCompanies] = await Promise.all([
     // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a
     // 42703 here would stall every in-flight submission, not just the new questions.
-    selectApplicationProfileRow(userId),
-    db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
-    selectResolverUserRow(userId),
+    selectApplicationProfileRow(userId, executor),
+    executor.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+    selectResolverUserRow(userId, executor),
     /* The experience bank, read the one way it is allowed to be read (db/experienceBank.ts), the
      * same call coverLetterService and the submission runner already make. The resolver needs it
      * because a question about her employment history has to be answered by checking her
@@ -145,7 +152,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
      * one, because empty is the case the resolver already refuses on: "we could not read your
      * experience" and "you never worked anywhere" must not become the same input. Throwing here
      * would instead stall every submission over a question that is allowed to be left blank. */
-    readExperienceBankOrSeedFromBaseResume(userId).catch(() => []),
+    readExperienceBankOrSeedFromBaseResume(userId, executor).catch(() => []),
     /* Litos' own record of what it has already sent for this user, which is the ONLY thing that may
      * stand down the default "No" to "have you applied to us before?".
      *
@@ -155,7 +162,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
      * nothing, and could tell an employer she has never applied on a day the database was down.
      * undefined reaches the resolver as "not read" and it holds the question, which is what it does
      * today. Same shape as the experience-bank catch above, opposite value, for opposite reasons. */
-    submittedApplicationCompanies(userId).catch(() => undefined),
+    submittedApplicationCompanies(userId, executor).catch(() => undefined),
   ]);
   const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
   const parsed = (profileRow?.parsed_json && typeof profileRow.parsed_json === 'object'

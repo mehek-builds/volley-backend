@@ -21,6 +21,8 @@ import {
   artifacts,
   billing_subscriptions,
   billing_account_deletion_tombstones,
+  browser_provider_resource_cleanups,
+  managed_submission_account_deletion_drains,
   entitlement_usage_reservations,
   monetization_events,
   pending_premium_actions,
@@ -51,6 +53,9 @@ import {
   billingSubscriptionTombstoneHash,
   cancelBillingBeforeAccountDeletion,
 } from '../lib/accountDeletionBilling';
+import { drainManagedTerminalCleanupBeforeAccountDeletion } from './submissionRunner';
+import { lockSubmissionAttemptUser } from '../lib/submissionAttemptLedger';
+import { drainBrowserProviderResourcesBeforeAccountDeletion } from '../lib/browserProviderResourceCleanup';
 
 type AccountTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -310,6 +315,24 @@ export async function accountRoutes(fastify: FastifyInstance) {
         account_preserved: true,
       });
     }
+    try {
+      await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [ownedAccount] = await tx.select({ id: users.id }).from(users)
+          .where(eq(users.id, userId)).limit(1);
+        if (!ownedAccount) throw new Error('Account disappeared before deletion could be fenced');
+        await tx.insert(managed_submission_account_deletion_drains).values({
+          user_id: userId,
+        }).onConflictDoNothing();
+      });
+    } catch (err) {
+      fastify.log.error({ err, userId }, 'account deletion aborted: could not establish managed cleanup fence');
+      return reply.status(503).send({
+        error: 'Litos could not safely pause employer submissions, so your account and files were not deleted. Please retry.',
+        code: 'managed_submission_cleanup_fence_failed',
+        account_preserved: true,
+      });
+    }
     const tombstoneHashes = billingPlan.stripeSubscriptionIds.map((subscriptionId) =>
       billingSubscriptionTombstoneHash('stripe', subscriptionId));
     try {
@@ -342,6 +365,42 @@ export async function accountRoutes(fastify: FastifyInstance) {
       });
     }
 
+    try {
+      const managedCleanup = await drainManagedTerminalCleanupBeforeAccountDeletion(userId, fastify);
+      if (!managedCleanup.ready) {
+        return reply.status(409).send({
+          error: 'Litos is still removing an active employer-session copy of your application data. Your account and files remain intact. Retry shortly.',
+          code: 'managed_submission_cleanup_pending',
+          account_preserved: true,
+        });
+      }
+    } catch (err) {
+      fastify.log.error({ err, userId }, 'account deletion aborted: managed submission cleanup failed');
+      return reply.status(503).send({
+        error: 'Litos could not verify employer-session cleanup, so your account and files were not deleted. Please retry.',
+        code: 'managed_submission_cleanup_failed',
+        account_preserved: true,
+      });
+    }
+
+    try {
+      const providerCleanup = await drainBrowserProviderResourcesBeforeAccountDeletion(userId);
+      if (!providerCleanup.ready) {
+        return reply.status(409).send({
+          error: 'Litos is still closing company-hosted work that may contain your application data. Your account and files remain intact. Retry shortly.',
+          code: 'browser_provider_cleanup_pending',
+          account_preserved: true,
+        });
+      }
+    } catch (err) {
+      fastify.log.error({ err, userId }, 'account deletion aborted: browser provider cleanup failed');
+      return reply.status(503).send({
+        error: 'Litos could not confirm company browser cleanup, so your account and files were not deleted. Please retry.',
+        code: 'browser_provider_cleanup_failed',
+        account_preserved: true,
+      });
+    }
+
     // Blobs FIRST, and abort if they fail. generated_resumes cascades on users.id, so deleting
     // the user row destroys resume_object_key - the only pointer we have to these files. Doing
     // the DB first and the storage second would, on any storage hiccup, permanently strand
@@ -368,6 +427,16 @@ export async function accountRoutes(fastify: FastifyInstance) {
       // ever purge them.
       const counterKeys = email ? [userId, email] : [userId];
       await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [providerCleanupPending] = await tx.select({
+          total: sql<number>`count(*)::int`,
+        }).from(browser_provider_resource_cleanups).where(and(
+          eq(browser_provider_resource_cleanups.user_id, userId),
+          isNull(browser_provider_resource_cleanups.provider_confirmed_gone_at),
+        ));
+        if ((providerCleanupPending?.total ?? 0) !== 0) {
+          throw new Error('Browser provider cleanup changed before account deletion');
+        }
         const manualContactRows = await tx.select({ contact_id: user_contact_unlocks.contact_id })
           .from(user_contact_unlocks).where(and(
             eq(user_contact_unlocks.user_id, userId),

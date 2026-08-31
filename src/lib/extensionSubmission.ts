@@ -88,7 +88,12 @@ export function canStartExtensionSubmission(
 export function extensionOutcomePatch(
   outcome: ExtensionOutcome,
   now: string,
-  evidence: { confirmationText?: string; finalUrl: string },
+  evidence: {
+    confirmationText?: string;
+    finalUrl: string;
+    portalUrl?: string;
+    submissionRunId?: string;
+  },
 ): Partial<ApplicationReviewState> {
   if (outcome === 'confirmed') {
     return {
@@ -127,5 +132,12 @@ export function extensionOutcomePatch(
     status: 'needs_attention',
     attention_reason: 'Litos clicked Submit but could not verify the employer confirmation. Check the portal or your email before trying again.',
     submission_error: undefined,
+    submission_attempted_at: now,
+    unverified_submission: {
+      at: now,
+      cause: 'no_confirmation_state',
+      ...(evidence.portalUrl ? { portal_url: evidence.portalUrl } : {}),
+      ...(evidence.submissionRunId ? { submission_run_id: evidence.submissionRunId } : {}),
+    },
   };
 }

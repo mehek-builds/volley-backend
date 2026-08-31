@@ -7,6 +7,8 @@ import {
   looksEncrypted,
   FieldDecryptError,
   FIELD_CRYPTO_SALT_ID,
+  encryptionKeyTransitionConfigured,
+  reencryptFieldWithNextKey,
 } from './fieldCrypto';
 
 test('the legacy key-derivation salt is immutable across product renames', () => {
@@ -18,16 +20,35 @@ test('the legacy key-derivation salt is immutable across product renames', () =>
 // that throws instead of returning garbage, and the shape test that tells a legacy plaintext row
 // apart from a value the key can no longer read.
 
-function withKey<T>(key: string | undefined, fn: () => T): T {
+function withKeys<T>(
+  key: string | undefined,
+  next: string | undefined,
+  fn: () => T,
+  legacy?: string,
+): T {
   const prev = process.env.ENCRYPTION_KEY;
+  const prevNext = process.env.ENCRYPTION_KEY_NEXT;
+  const prevLegacy = process.env.ENCRYPTION_KEY_LEGACY;
   if (key === undefined) delete process.env.ENCRYPTION_KEY;
   else process.env.ENCRYPTION_KEY = key;
+  if (next === undefined) delete process.env.ENCRYPTION_KEY_NEXT;
+  else process.env.ENCRYPTION_KEY_NEXT = next;
+  if (legacy === undefined) delete process.env.ENCRYPTION_KEY_LEGACY;
+  else process.env.ENCRYPTION_KEY_LEGACY = legacy;
   try {
     return fn();
   } finally {
     if (prev === undefined) delete process.env.ENCRYPTION_KEY;
     else process.env.ENCRYPTION_KEY = prev;
+    if (prevNext === undefined) delete process.env.ENCRYPTION_KEY_NEXT;
+    else process.env.ENCRYPTION_KEY_NEXT = prevNext;
+    if (prevLegacy === undefined) delete process.env.ENCRYPTION_KEY_LEGACY;
+    else process.env.ENCRYPTION_KEY_LEGACY = prevLegacy;
   }
+}
+
+function withKey<T>(key: string | undefined, fn: () => T): T {
+  return withKeys(key, undefined, fn);
 }
 
 test('a field round-trips under the same key', () => {
@@ -52,6 +73,56 @@ test('a rotated key throws rather than yielding garbage', () => {
   const stored = withKey('original-key', () => encryptField('2026-07-18'));
   withKey('rotated-key', () => {
     assert.throws(() => decryptField(stored), FieldDecryptError);
+  });
+});
+
+test('a transition deployment reads old envelopes and writes new envelopes with the next key', () => {
+  const storedUnderOldKey = withKey('original-key', () => encryptField('Dubai'));
+  const storedUnderNextKey = withKeys('original-key', 'next-key', () => {
+    assert.equal(encryptionKeyTransitionConfigured(), true);
+    assert.equal(decryptField(storedUnderOldKey), 'Dubai');
+    return encryptField('London');
+  });
+
+  withKey('original-key', () => {
+    assert.throws(() => decryptField(storedUnderNextKey), FieldDecryptError);
+  });
+  withKey('next-key', () => {
+    assert.equal(decryptField(storedUnderNextKey), 'London');
+  });
+});
+
+test('the guarded re-encryption pass promotes an old envelope to the next key', () => {
+  const storedUnderOldKey = withKey('original-key', () => encryptField('3.89'));
+  const rewritten = withKeys('original-key', 'next-key', () =>
+    reencryptFieldWithNextKey(storedUnderOldKey));
+
+  withKey('original-key', () => {
+    assert.throws(() => decryptField(rewritten), FieldDecryptError);
+  });
+  withKey('next-key', () => {
+    assert.equal(decryptField(rewritten), '3.89');
+  });
+});
+
+test('a transition can recover an envelope from one explicit legacy key', () => {
+  const storedUnderLegacyKey = withKey('historical-key', () => encryptField('3.89'));
+  const rewritten = withKeys('current-key', 'next-key', () =>
+    reencryptFieldWithNextKey(storedUnderLegacyKey), 'historical-key');
+
+  withKey('next-key', () => {
+    assert.equal(decryptField(rewritten), '3.89');
+  });
+  withKey('historical-key', () => {
+    assert.throws(() => decryptField(rewritten), FieldDecryptError);
+  });
+});
+
+test('the re-encryption pass refuses to run without an explicit next key', () => {
+  const stored = withKey('original-key', () => encryptField('Dubai'));
+  withKey('original-key', () => {
+    assert.throws(() => reencryptFieldWithNextKey(stored), /ENCRYPTION_KEY_NEXT not configured/);
+    assert.equal(encryptionKeyTransitionConfigured(), false);
   });
 });
 

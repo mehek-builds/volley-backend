@@ -43,6 +43,7 @@ async function catalog(client) {
     con.contype as constraint_type, pg_get_constraintdef(con.oid, true) as definition
     from pg_constraint con join pg_class c on c.oid = con.conrelid
     join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'
+    and con.contype <> 'n'
     order by c.relname, con.conname`);
   const indexes = await rows(client, `select tablename as table_name, indexname as index_name, indexdef as definition
     from pg_indexes where schemaname = 'public' order by tablename, indexname`);

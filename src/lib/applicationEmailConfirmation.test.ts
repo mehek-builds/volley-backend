@@ -19,6 +19,7 @@ import {
 const USER_ID = 'a18f774b-a306-4804-93f3-cd6020c27fb3';
 const OTHER_USER_ID = 'b28f774b-a306-4804-93f3-cd6020c27fb4';
 const APPLICATION_ID = '8e29df51-09ed-4c67-b2fc-153966471473';
+const MESSAGE_ID = 'd5df7cc3-70d4-4a87-8c20-c91ed68d8c8a';
 const ALIAS = 'app-8e29df5109-8fca1550b4f3@garaierkaa.resend.app';
 const RECEIVED_AT = new Date('2026-08-10T17:36:04.157Z');
 
@@ -194,6 +195,32 @@ test('a receipt resolves its packet and writes it back under the same owner', as
   assert.equal(harness.saves[0].userId, USER_ID);
   assert.equal(harness.saves[0].review.status, 'submitted');
   assert.equal(harness.saves[0].review.attention_reason, undefined);
+});
+
+test('the confirmation resolver delegates the whole live commit with the exact message binding', async () => {
+  const committed: unknown[] = [];
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    messageId: MESSAGE_ID,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }, {
+    commitConfirmation: async (input) => {
+      committed.push(input);
+      return { resolved: true, review: review({ status: 'submitted' }) };
+    },
+  });
+  assert.equal(outcome.resolved, true);
+  assert.deepEqual(committed, [{
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    messageId: MESSAGE_ID,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }]);
 });
 
 /* A packet belongs to the owner of the alias the mail arrived at, and to nobody else. The lookup is
@@ -517,6 +544,7 @@ test('a confirmation that was already forwarded still resolves its packet', asyn
   assert.equal(result.forwarded, false);
   assert.equal(result.reason, 'already_forwarded');
   assert.equal(calls.resolved.length, 1);
+  assert.equal((calls.resolved[0] as { messageId?: string }).messageId, storedMessage().id);
   assert.equal(calls.forwarded, 0);
   assert.equal(calls.claimed, 0);
 });
@@ -640,8 +668,9 @@ test('reconciliation resolves the newest receipt per packet, once', async () => 
   const resolved: string[] = [];
   const outcome = await reconcileSubmissionConfirmations({}, {
     listConfirmations: async () => [
-      { applicationId: APPLICATION_ID, userId: USER_ID, alias: ALIAS, subject: 'newest', receivedAt: RECEIVED_AT },
+      { messageId: MESSAGE_ID, applicationId: APPLICATION_ID, userId: USER_ID, alias: ALIAS, subject: 'newest', receivedAt: RECEIVED_AT },
       {
+        messageId: 'older-message',
         applicationId: APPLICATION_ID,
         userId: USER_ID,
         alias: ALIAS,
@@ -661,9 +690,9 @@ test('reconciliation resolves the newest receipt per packet, once', async () => 
 test('reconciliation counts the packets it deliberately left alone', async () => {
   const outcome = await reconcileSubmissionConfirmations({}, {
     listConfirmations: async () => [
-      { applicationId: 'a', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
-      { applicationId: 'b', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
-      { applicationId: 'c', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { messageId: 'a', applicationId: 'a', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { messageId: 'b', applicationId: 'b', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { messageId: 'c', applicationId: 'c', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
     ],
     resolve: async (input) => (input.applicationId === 'a'
       ? { resolved: true, review: review({ status: 'submitted' }) }
@@ -684,9 +713,9 @@ test('one failing packet does not abort the reconciliation pass', async () => {
   const attempted: string[] = [];
   const outcome = await reconcileSubmissionConfirmations({}, {
     listConfirmations: async () => [
-      { applicationId: 'a', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
-      { applicationId: 'poison', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
-      { applicationId: 'c', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { messageId: 'a', applicationId: 'a', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { messageId: 'poison', applicationId: 'poison', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { messageId: 'c', applicationId: 'c', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
     ],
     resolve: async (input) => {
       attempted.push(input.applicationId);
@@ -726,6 +755,27 @@ test('the live packet read and write are both scoped by owner', () => {
   assert.match(save.slice(0, 900), /eq\(generated_resumes\.user_id, input\.userId\)/);
   // The optimistic guard that stops a second receipt restamping the first one's evidence.
   assert.match(save.slice(0, 900), /'_review'->>'status' <> 'submitted'/);
+});
+
+test('the live confirmation commits one exact message fact under the shared owner lock', () => {
+  const commit = service.slice(
+    service.indexOf('async function commitPacketConfirmationAtomically'),
+    service.indexOf('export async function resolvePacketFromConfirmation'),
+  );
+  const lock = commit.indexOf('await lockSubmissionAttemptUser(tx, input.userId)');
+  const packetLock = commit.indexOf(".for('update')", lock);
+  const messageId = commit.indexOf('eq(application_email_messages.id, messageId)', packetLock);
+  const append = commit.indexOf('await appendSubmissionAttemptEvent({', messageId);
+  const packetUpdate = commit.indexOf('await tx.update(generated_resumes)', append);
+  const canonicalSync = commit.indexOf('await syncCanonicalApplicationRow({', packetUpdate);
+  const projection = commit.indexOf('await authoritativeSubmissionProjection({', canonicalSync);
+  assert.ok(lock >= 0 && packetLock > lock && messageId > packetLock && append > messageId
+    && packetUpdate > append && canonicalSync > packetUpdate && projection > canonicalSync);
+  assert.match(commit, /eq\(application_email_messages\.user_id, input\.userId\)/);
+  assert.match(commit, /eq\(application_email_messages\.generated_resume_id, input\.applicationId\)/);
+  assert.match(commit, /eq\(application_email_messages\.classification, 'submission_confirmation'\)/);
+  assert.match(commit, /employerEmailConfirmationEvidenceCode\([\s\S]*?messageId: message\.id/);
+  assert.match(commit, /authoritativeConfirmedProjectionMatches/);
 });
 
 test('resolution is ordered ahead of the forwarding claim, not after the send', () => {

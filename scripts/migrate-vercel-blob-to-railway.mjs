@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { list } from '@vercel/blob';
+import { get, list } from '@vercel/blob';
 
 const bucket = process.env.OBJECT_STORAGE_BUCKET?.trim() || process.env.BUCKET?.trim();
 const accessKeyId = process.env.OBJECT_STORAGE_ACCESS_KEY_ID?.trim() || process.env.ACCESS_KEY_ID?.trim();
@@ -39,18 +39,32 @@ async function allVercelBlobs() {
   return blobs;
 }
 
+async function readVercelBlob(blob) {
+  const access = new URL(blob.url).hostname.endsWith('.private.blob.vercel-storage.com')
+    ? 'private'
+    : 'public';
+  const result = await get(blob.pathname, { access });
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    throw new Error(`Could not read ${blob.pathname}: ${result?.statusCode ?? 404}`);
+  }
+  return {
+    body: Buffer.from(await new Response(result.stream).arrayBuffer()),
+    contentType: result.blob.contentType || 'application/octet-stream',
+  };
+}
+
 const blobs = await allVercelBlobs();
+const concurrency = Math.max(1, Math.min(32, Number.parseInt(process.env.MIGRATION_CONCURRENCY || '8', 10) || 8));
 let copied = 0;
 let skipped = 0;
-for (const [index, blob] of blobs.entries()) {
+let completed = 0;
+
+async function migrateBlob(blob) {
   const existing = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: blob.pathname })).catch((error) => {
     if (error?.$metadata?.httpStatusCode === 404) return null;
     throw error;
   });
-  const response = await fetch(blob.url);
-  if (!response.ok) throw new Error(`Could not read ${blob.pathname}: ${response.status}`);
-  const body = Buffer.from(await response.arrayBuffer());
-  const contentType = response.headers.get('content-type') || 'application/octet-stream';
+  const { body, contentType } = await readVercelBlob(blob);
   const sourceHash = createHash('sha256').update(body).digest('hex');
 
   if (existing?.ContentLength === body.length) {
@@ -59,8 +73,7 @@ for (const [index, blob] of blobs.entries()) {
     const existingHash = createHash('sha256').update(existingBody).digest('hex');
     if (sourceHash === existingHash) {
       skipped += 1;
-      console.log(`Verified ${index + 1}/${blobs.length}`);
-      continue;
+      return;
     }
   }
 
@@ -70,7 +83,21 @@ for (const [index, blob] of blobs.entries()) {
   const copiedHash = createHash('sha256').update(copiedBody).digest('hex');
   if (sourceHash !== copiedHash) throw new Error(`Checksum mismatch for ${blob.pathname}`);
   copied += 1;
-  console.log(`Copied and verified ${index + 1}/${blobs.length}`);
 }
 
-console.log(JSON.stringify({ total: blobs.length, copied, skipped, verified: copied + skipped }));
+let nextIndex = 0;
+async function worker() {
+  while (nextIndex < blobs.length) {
+    const index = nextIndex;
+    nextIndex += 1;
+    await migrateBlob(blobs[index]);
+    completed += 1;
+    if (completed % 25 === 0 || completed === blobs.length) {
+      console.log(`Verified ${completed}/${blobs.length}`);
+    }
+  }
+}
+
+await Promise.all(Array.from({ length: Math.min(concurrency, blobs.length) }, () => worker()));
+
+console.log(JSON.stringify({ total: blobs.length, copied, skipped, verified: copied + skipped, concurrency }));

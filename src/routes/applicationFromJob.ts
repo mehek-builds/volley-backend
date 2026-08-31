@@ -1,11 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, inArray, or } from 'drizzle-orm';
+import { and, desc, eq, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
 import { applications, career_page_sources, monitored_jobs, profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
-import { accountRequiresSponsor, sponsorOnlyPredicate } from './jobMonitor';
+import { accountRequiresSponsor, boardConditions } from './jobMonitor';
 import { canonicalApplicationFingerprint } from './canonicalApplications';
 import { RESUME_REQUEST_LIMITS } from './resumeRequestSchema';
 
@@ -49,10 +48,7 @@ async function attachablePosting(jobId: string, userId: string) {
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
     .where(and(
       eq(monitored_jobs.id, jobId),
-      eq(monitored_jobs.is_active, true),
-      eq(career_page_sources.enabled, true),
-      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-      ...(sponsorOnly ? [sponsorOnlyPredicate()] : []),
+      ...boardConditions({ sponsorOnly, requireVerifiedEvidence: true }),
     ))
     .limit(1);
   return row;

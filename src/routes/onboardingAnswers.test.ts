@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { reusableAnswersToStore } from '../lib/answerReuse';
 
 /* What POST /onboarding/answers is allowed to keep.
@@ -57,4 +58,19 @@ describe('what the questions screen may keep', () => {
     assert.equal(submitted.length, 2);
     assert.equal(stored.length, 1, 'the declaration must not be stored account-wide');
   });
+});
+
+test('work eligibility resolves a job before any answer write', () => {
+  const route = readFileSync('src/routes/onboarding.ts', 'utf8');
+  const handler = route.slice(
+    route.indexOf("fastify.post('/onboarding/answers'"),
+    route.indexOf("fastify.post('/onboarding/gaps-asked'"),
+  );
+  const postingRead = handler.indexOf('await actionPostingRowForUser(parsed.data.job_id, userId)');
+  const answerWrite = handler.indexOf('await rememberReusableAnswers(');
+  assert.ok(postingRead >= 0);
+  assert.ok(answerWrite > postingRead);
+  assert.match(handler, /if \(parsed\.data\.job_id && !posting\)/);
+  assert.match(handler, /posting\?\.job_country \?\? null/);
+  assert.doesNotMatch(handler, /\.from\(monitored_jobs\)/);
 });

@@ -1,0 +1,131 @@
+name: Repair exact submission confirmation
+
+on:
+  workflow_dispatch:
+    inputs:
+      user_id:
+        description: Exact Litos user UUID
+        required: true
+        type: string
+      application_id:
+        description: Exact canonical application UUID
+        required: true
+        type: string
+      apply:
+        description: Apply the eligible repair after the mandatory dry run
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
+      REPAIR_USER_ID: ${{ inputs.user_id }}
+      REPAIR_APPLICATION_ID: ${{ inputs.application_id }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Require production schema connection
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "SCHEMA_CHECK_DATABASE_URL is required." >&2
+            exit 2
+          fi
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Require the exact frozen backend revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          health_file=$(mktemp)
+          status=$(curl --silent --show-error --max-time 30 \
+            --output "$health_file" --write-out '%{http_code}' \
+            "${API_BASE%/}/health")
+          if [ "$status" != "200" ] && [ "$status" != "503" ]; then
+            echo "Backend health returned HTTP $status instead of 200 or dependency-degraded 503." >&2
+            exit 3
+          fi
+          jq --exit-status --arg revision "$GITHUB_SHA" '
+            .revision == $revision
+            and .submission_cutover.mode == "freeze"
+            and .submission_cutover.config_valid == true
+            and .submission_authority.ready == true
+            and .submission_authority.attempt_ledger.ready == true
+            and .submission_authority.revision.ready == true
+          ' "$health_file" >/dev/null || {
+            jq '{revision, revision_source, build, submission_cutover, submission_authority}' "$health_file" >&2
+            echo "The exact workflow revision and both authority schemas must be ready in valid freeze mode before repair." >&2
+            exit 4
+          }
+
+      - name: Dry run the exact repair
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          output_file=$(mktemp)
+          npx tsx scripts/repair-submission-confirmation.mts \
+            --user-id "$REPAIR_USER_ID" \
+            --application-id "$REPAIR_APPLICATION_ID" | tee "$output_file"
+          jq --exit-status '.status == "eligible" or .status == "already_applied"' "$output_file" >/dev/null
+
+      - name: Apply the exact repair
+        if: inputs.apply
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          output_file=$(mktemp)
+          npx tsx scripts/repair-submission-confirmation.mts \
+            --user-id "$REPAIR_USER_ID" \
+            --application-id "$REPAIR_APPLICATION_ID" \
+            --apply | tee "$output_file"
+          jq --exit-status '.status == "applied" or .status == "already_applied"' "$output_file" >/dev/null
+
+      - name: Verify the repair is now immutable
+        if: inputs.apply
+        shell: bash
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          output_file=$(mktemp)
+          npx tsx scripts/repair-submission-confirmation.mts \
+            --user-id "$REPAIR_USER_ID" \
+            --application-id "$REPAIR_APPLICATION_ID" | tee "$output_file"
+          jq --exit-status '.status == "already_applied"' "$output_file" >/dev/null
+
+      - name: Record repair evidence
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "## Exact submission confirmation repair"
+            echo
+            echo "User: $REPAIR_USER_ID"
+            echo "Application: $REPAIR_APPLICATION_ID"
+            echo "Apply requested: ${{ inputs.apply }}"
+            echo "Commit: $GITHUB_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"

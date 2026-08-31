@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -8,6 +9,7 @@ import {
   application_artifacts,
   application_submission_events,
   applications,
+  artifact_versions,
   artifacts,
   monetization_events,
   outreach_draft_generations,
@@ -24,6 +26,32 @@ import { apiBaseFor } from '../lib/apiBase';
 import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { manualSubmissionTransition } from '../lib/canonicalApplicationLifecycle';
+import {
+  buildCanonicalFreeVersionedDocumentBinding,
+  CANONICAL_FREE_NONE_BINDING,
+} from '../lib/canonicalFreeDocumentBinding';
+import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
+import { bindingPdfIdentity } from '../lib/pdfGenerationBinding';
+import {
+  appendSubmissionAttemptEvent,
+  authorizeFinalSubmissionBoundary,
+  freezePostingIdentity,
+  lockSubmissionAttemptUser,
+  submissionAttemptBindingFromEvent,
+  submissionAttemptEventId,
+  submissionAttemptEventsForPacket,
+  submissionAttemptRetrySafety,
+  type SubmissionAttemptBinding,
+  type SubmissionAttemptEventRecord,
+} from '../lib/submissionAttemptLedger';
+import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
+import {
+  authoritativeConfirmedProjectionMatches,
+  authoritativeSubmissionProjection,
+  measuredPersistedReceiptMatchesOpening,
+} from '../lib/authoritativeSubmissionProjection';
+import { canonicalMonitoredPortalUrl } from '../lib/portalSubmission';
+import { actionPostingRowForUser } from './jdMatch';
 
 export { manualSubmissionTransition };
 
@@ -108,6 +136,89 @@ export function manualOutcomeEventDecision(existing: {
     return 'promote';
   }
   return 'terminal_conflict';
+}
+
+type CanonicalDocumentApplication = Pick<typeof applications.$inferSelect,
+'id' | 'user_id' | 'selected_resume_artifact_id' | 'resume_attached' | 'resume_source' | 'resume_attached_at'>;
+
+/** Freeze the exact retained document tuple before a canonical-only attempt can be opened. */
+export function canonicalManualDocumentBindingFromSnapshot(input: {
+  application: CanonicalDocumentApplication;
+  links: Array<typeof application_artifacts.$inferSelect>;
+  artifact: typeof artifacts.$inferSelect | null;
+  versions: Array<typeof artifact_versions.$inferSelect>;
+}): string | null {
+  const { application, links, artifact, versions } = input;
+  if (application.resume_source === 'none') {
+    return !application.resume_attached
+      && application.selected_resume_artifact_id === null
+      && application.resume_attached_at === null
+      && links.filter((link) => link.purpose === 'resume' && link.selected).length === 0
+      ? CANONICAL_FREE_NONE_BINDING
+      : null;
+  }
+  if (application.resume_source !== 'artifact'
+    || !application.resume_attached
+    || !application.resume_attached_at
+    || !application.selected_resume_artifact_id
+    || !artifact
+    || artifact.id !== application.selected_resume_artifact_id
+    || artifact.user_id !== application.user_id
+    || artifact.deleted_at
+    || (artifact.kind !== 'resume' && artifact.kind !== 'tailored_resume')
+    || !artifact.rendered_object_key) return null;
+  const exactLinks = links.filter((link) => link.application_id === application.id
+    && link.artifact_id === artifact.id
+    && link.purpose === 'resume'
+    && link.selected
+    && link.attached_at?.getTime() === application.resume_attached_at!.getTime());
+  if (exactLinks.length !== 1
+    || links.filter((link) => link.purpose === 'resume' && link.selected).length !== 1) return null;
+  const exactVersions = versions.filter((version) => version.artifact_id === artifact.id
+    && version.rendered_object_key === artifact.rendered_object_key
+    && version.content_hash === immutableDocumentContentHash(version.structured_content));
+  if (exactVersions.length !== 1) return null;
+  const version = exactVersions[0]!;
+  if (!version.rendered_object_key) return null;
+  const structured = version.structured_content
+    && typeof version.structured_content === 'object'
+    && !Array.isArray(version.structured_content)
+    ? version.structured_content as { _quality?: { pdfGenerationBinding?: unknown } }
+    : null;
+  const pdf = bindingPdfIdentity(
+    structured?._quality?.pdfGenerationBinding,
+    version.rendered_object_key,
+  );
+  if (!pdf) return null;
+  return buildCanonicalFreeVersionedDocumentBinding('artifact', {
+    artifactId: artifact.id,
+    versionId: version.id,
+    versionNumber: version.version_number,
+    contentHash: version.content_hash,
+    objectKey: version.rendered_object_key,
+    blobUrl: version.rendered_blob_url,
+    attachedAt: exactLinks[0]!.attached_at!.toISOString(),
+    pdfSha256: pdf.sha256,
+  });
+}
+
+async function canonicalManualDocumentBinding(
+  executor: Pick<typeof db, 'select'>,
+  application: CanonicalDocumentApplication,
+): Promise<string | null> {
+  const links = await executor.select().from(application_artifacts)
+    .where(eq(application_artifacts.application_id, application.id));
+  const artifactRows = application.selected_resume_artifact_id
+    ? await executor.select().from(artifacts).where(and(
+      eq(artifacts.id, application.selected_resume_artifact_id),
+      eq(artifacts.user_id, application.user_id),
+    )).limit(1)
+    : [];
+  const artifact = artifactRows[0] ?? null;
+  const versions = artifact
+    ? await executor.select().from(artifact_versions).where(eq(artifact_versions.artifact_id, artifact.id))
+    : [];
+  return canonicalManualDocumentBindingFromSnapshot({ application, links, artifact, versions });
 }
 
 export function lifecycleStateAfterFill(input: {
@@ -442,10 +553,28 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid application', detail: parsed.error.issues });
     const userId = request.jwtPayload!.userId;
     let portalUrl: string | null;
-    try {
-      portalUrl = canonicalPortalUrl(parsed.data.portal_url);
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : 'Invalid portal URL' });
+    if (parsed.data.job_id) {
+      const posting = await actionPostingRowForUser(parsed.data.job_id, userId);
+      const monitoredPortalUrl = posting ? canonicalMonitoredPortalUrl(
+        posting.apply_url,
+        posting.ats_name,
+        posting.board_token,
+        posting.external_id,
+        posting.posting_url,
+      ) : undefined;
+      if (!posting || !monitoredPortalUrl) {
+        return reply.status(409).send({
+          error: 'Current verified posting not found',
+          code: 'job_not_available',
+        });
+      }
+      portalUrl = monitoredPortalUrl;
+    } else {
+      try {
+        portalUrl = canonicalPortalUrl(parsed.data.portal_url);
+      } catch (error) {
+        return reply.status(400).send({ error: error instanceof Error ? error.message : 'Invalid portal URL' });
+      }
     }
     const companyScopeKey = canonicalCompanyScope({
       companyId: parsed.data.company_id,
@@ -577,11 +706,13 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     if (!application) return;
     const userId = request.jwtPayload!.userId;
     let finalUrl: string;
+    let applicationPortalUrl: string;
     let portalIdentity: string;
     try {
       finalUrl = canonicalPortalUrl(parsed.data.final_url, true)!;
       if (!application.portal_url) throw new Error('Application portal URL is required');
-      portalIdentity = canonicalPortalIdentity(application.portal_url);
+      applicationPortalUrl = canonicalPortalUrl(application.portal_url, true)!;
+      portalIdentity = canonicalPortalIdentity(applicationPortalUrl);
       if (canonicalPortalIdentity(finalUrl) !== portalIdentity) {
         return reply.status(409).send({
           error: 'Submission outcome URL does not match this application portal',
@@ -602,19 +733,93 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     };
     try {
       const runManualSubmissionOutcomeTransaction = (database: typeof db) => database.transaction(async (tx): Promise<OutcomeResult> => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`manual-submission:${userId}:${parsed.data.event_id}`}, 0::bigint))`);
+        await lockSubmissionAttemptUser(tx, userId);
         const [currentApplication] = await tx.select().from(applications).where(and(
           eq(applications.id, application.id),
           eq(applications.user_id, userId),
-        )).limit(1);
+        )).limit(1).for('update');
         if (!currentApplication) {
           throw Object.assign(new Error('Application not found'), { statusCode: 404, code: 'application_not_found' });
         }
+        if (!currentApplication.portal_url) {
+          throw Object.assign(new Error('Application portal URL is required'), {
+            statusCode: 409,
+            code: 'submission_attempt_authority_missing',
+          });
+        }
+        let lockedPortalUrl: string;
+        try {
+          lockedPortalUrl = canonicalPortalUrl(currentApplication.portal_url, true)!;
+        } catch {
+          throw Object.assign(new Error('The application portal changed before its outcome was recorded'), {
+            statusCode: 409,
+            code: 'submission_portal_changed',
+          });
+        }
+        if (lockedPortalUrl !== applicationPortalUrl) {
+          throw Object.assign(new Error('The application portal changed before its outcome was recorded'), {
+            statusCode: 409,
+            code: 'submission_portal_changed',
+          });
+        }
+        const documentBinding = await canonicalManualDocumentBinding(tx, currentApplication);
+        if (!documentBinding) {
+          throw Object.assign(new Error('The selected resume does not have one exact retained version for this receipt'), {
+            statusCode: 409,
+            code: 'submission_document_authority_missing',
+          });
+        }
+        const postingIdentity = freezePostingIdentity({
+          job_id: currentApplication.job_id,
+          company: currentApplication.company_name,
+          role: currentApplication.role,
+        }, currentApplication.portal_url);
+        const expectedBinding: SubmissionAttemptBinding = {
+          attemptId: parsed.data.event_id,
+          userId,
+          packetId: currentApplication.id,
+          applicationId: currentApplication.id,
+          parentAttemptId: null,
+          source: 'chrome_extension',
+          operation: 'manual_submission',
+          postingIdentity,
+          submissionRunId: null,
+          submissionClaimId: null,
+          packetVersion: documentBinding,
+        };
         const [existing] = await tx.select().from(application_submission_events).where(and(
           eq(application_submission_events.user_id, userId),
           eq(application_submission_events.event_id, parsed.data.event_id),
         )).limit(1);
         const confirmationText = parsed.data.confirmation_text ?? null;
+        const allEvents = await submissionAttemptEventsForPacket(userId, currentApplication.id, { executor: tx });
+        const exactEvents = allEvents.filter((event) => event.attempt_id === parsed.data.event_id);
+        const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+        const openingIsExact = opening
+          && opening.source === 'chrome_extension'
+          && opening.operation === 'manual_submission'
+          && opening.evidence_code === 'canonical_manual_submit_reserved'
+          && opening.packet_version === documentBinding
+          && isDeepStrictEqual(submissionAttemptBindingFromEvent(opening), expectedBinding);
+        const assertConfirmedProjection = async (attemptId: string) => {
+          const projections = await authoritativeSubmissionProjection({
+            userId,
+            applicationIds: [currentApplication.id],
+            executor: tx,
+          });
+          const exact = {
+            attemptId,
+            canonicalApplicationId: currentApplication.id,
+            packetId: null,
+          };
+          if (!authoritativeConfirmedProjectionMatches(
+            projections.byApplicationId.get(currentApplication.id),
+            exact,
+          )) throw Object.assign(new Error('The manual receipt did not produce one exact authority projection'), {
+            statusCode: 409,
+            code: 'submission_receipt_authority_incomplete',
+          });
+        };
         if (existing) {
           const decision = manualOutcomeEventDecision(existing, {
             applicationId: currentApplication.id,
@@ -630,6 +835,27 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
             });
           }
           if (decision === 'exact_replay') {
+            if (!openingIsExact) {
+              throw Object.assign(new Error('This historical receipt has no exact immutable attempt binding'), {
+                statusCode: 409,
+                code: 'submission_attempt_authority_missing',
+              });
+            }
+            const safety = submissionAttemptRetrySafety(exactEvents);
+            if (parsed.data.outcome === 'confirmed') {
+              if (safety.kind !== 'blocked_confirmed') {
+                throw Object.assign(new Error('This receipt is missing immutable confirmation evidence'), {
+                  statusCode: 409,
+                  code: 'submission_receipt_authority_incomplete',
+                });
+              }
+              await assertConfirmedProjection(parsed.data.event_id);
+            } else if (safety.kind !== 'blocked_unverified') {
+              throw Object.assign(new Error('This outcome is missing its immutable employer attempt'), {
+                statusCode: 409,
+                code: 'submission_attempt_authority_missing',
+              });
+            }
             return { idempotent: true, event: existing, application: currentApplication };
           }
           if (decision === 'terminal_conflict') {
@@ -638,8 +864,59 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
               code: 'submission_event_terminal',
             });
           }
+          if (!openingIsExact || submissionAttemptRetrySafety(exactEvents).kind !== 'blocked_unverified') {
+            throw Object.assign(new Error('This outcome cannot be promoted without its exact immutable attempt'), {
+              statusCode: 409,
+              code: 'submission_attempt_authority_missing',
+            });
+          }
+          const duplicate = await duplicateApplicationVerdict({
+            userId,
+            applicationId: currentApplication.id,
+            jobContext: {
+              job_id: currentApplication.job_id,
+              company: currentApplication.company_name,
+              role: currentApplication.role,
+            },
+            portalUrl: currentApplication.portal_url,
+            excludeAttemptId: parsed.data.event_id,
+          }, tx);
+          if (duplicate.kind !== 'clear') {
+            throw Object.assign(new Error(duplicate.reason), {
+              statusCode: 409,
+              code: 'duplicate_application_risk',
+            });
+          }
           const transition = manualSubmissionTransition(currentApplication.submission_state, parsed.data.outcome);
-          const now = new Date();
+          const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+          const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+          const now = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+          if (Number.isNaN(now.getTime())) throw new Error('Database manual outcome clock was unavailable');
+          if (parsed.data.outcome === 'confirmed') {
+            const confirmationPrototype = {
+              ...opening!,
+              event_kind: 'submission_confirmed',
+              evidence_code: 'canonical_manual_receipt_confirmed',
+              observed_at: now,
+              created_at: now,
+            } as SubmissionAttemptEventRecord;
+            if (!confirmationText || !measuredPersistedReceiptMatchesOpening(
+              opening!,
+              confirmationPrototype,
+              finalUrl,
+              confirmationText,
+            )) throw Object.assign(new Error('The employer result is not an exact receipt for this posting'), {
+              statusCode: 409,
+              code: 'submission_receipt_not_authoritative',
+            });
+            await appendSubmissionAttemptEvent({
+              ...submissionAttemptBindingFromEvent(opening!),
+              eventId: submissionAttemptEventId(parsed.data.event_id, 'submission_confirmed', 'canonical-manual-receipt'),
+              eventKind: 'submission_confirmed',
+              evidenceCode: 'canonical_manual_receipt_confirmed',
+              observedAt: now,
+            }, { executor: tx });
+          }
           const [updatedApplication] = await tx.update(applications).set({
             submission_state: transition.submissionState,
             tracker_state: transition.trackerState,
@@ -655,15 +932,81 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
             applied_submission_state: transition.submissionState,
             observed_at: now,
           }).where(eq(application_submission_events.id, existing.id)).returning();
+          if (parsed.data.outcome === 'confirmed') await assertConfirmedProjection(parsed.data.event_id);
           return { idempotent: false, event: promoted, application: updatedApplication };
         }
 
+        const duplicate = await duplicateApplicationVerdict({
+          userId,
+          applicationId: currentApplication.id,
+          jobContext: {
+            job_id: currentApplication.job_id,
+            company: currentApplication.company_name,
+            role: currentApplication.role,
+          },
+          portalUrl: currentApplication.portal_url,
+        }, tx);
+        if (duplicate.kind !== 'clear') {
+          throw Object.assign(new Error(duplicate.reason), {
+            statusCode: 409,
+            code: 'duplicate_application_risk',
+          });
+        }
+        const clockResult = await tx.execute(sql`select clock_timestamp() as opened_at`);
+        const clockValue = (clockResult.rows[0] as { opened_at?: Date | string } | undefined)?.opened_at;
+        const openedAt = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+        if (Number.isNaN(openedAt.getTime())) throw new Error('Database manual opening clock was unavailable');
+        const opened = await appendSubmissionAttemptEvent({
+          ...expectedBinding,
+          eventId: submissionAttemptEventId(parsed.data.event_id, 'attempt_opened', 'canonical-manual-reservation'),
+          eventKind: 'attempt_opened',
+          evidenceCode: 'canonical_manual_submit_reserved',
+          observedAt: openedAt,
+        }, { executor: tx });
+        const authorization = await authorizeFinalSubmissionBoundary(expectedBinding, {
+          executor: tx,
+          factKey: 'canonical-manual-boundary',
+          evidenceCode: 'canonical_manual_boundary_authorized',
+        });
+        if (authorization.kind !== 'fresh') throw new Error('CANONICAL_MANUAL_BOUNDARY_CONFLICT');
+        const observedAt = new Date(authorization.authorization.authorizedAt);
+        await appendSubmissionAttemptEvent({
+          ...expectedBinding,
+          eventId: submissionAttemptEventId(parsed.data.event_id, 'press_observed', 'canonical-manual-press'),
+          eventKind: 'press_observed',
+          evidenceCode: 'canonical_manual_submit_pressed',
+          observedAt,
+        }, { executor: tx });
+        if (parsed.data.outcome === 'confirmed') {
+          const confirmationPrototype = {
+            ...opened.event,
+            event_kind: 'submission_confirmed',
+            evidence_code: 'canonical_manual_receipt_confirmed',
+            observed_at: observedAt,
+            created_at: observedAt,
+          } as SubmissionAttemptEventRecord;
+          if (!confirmationText || !measuredPersistedReceiptMatchesOpening(
+            opened.event,
+            confirmationPrototype,
+            finalUrl,
+            confirmationText,
+          )) throw Object.assign(new Error('The employer result is not an exact receipt for this posting'), {
+            statusCode: 409,
+            code: 'submission_receipt_not_authoritative',
+          });
+          await appendSubmissionAttemptEvent({
+            ...expectedBinding,
+            eventId: submissionAttemptEventId(parsed.data.event_id, 'submission_confirmed', 'canonical-manual-receipt'),
+            eventKind: 'submission_confirmed',
+            evidenceCode: 'canonical_manual_receipt_confirmed',
+            observedAt,
+          }, { executor: tx });
+        }
         const transition = manualSubmissionTransition(currentApplication.submission_state, parsed.data.outcome);
-        const now = new Date();
         const [updatedApplication] = await tx.update(applications).set({
           submission_state: transition.submissionState,
           tracker_state: transition.trackerState,
-          updated_at: now,
+          updated_at: observedAt,
         }).where(and(
           eq(applications.id, currentApplication.id),
           eq(applications.user_id, userId),
@@ -677,8 +1020,9 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
           portal_identity: portalIdentity,
           confirmation_text: confirmationText,
           applied_submission_state: transition.submissionState,
-          observed_at: now,
+          observed_at: observedAt,
         }).returning();
+        if (parsed.data.outcome === 'confirmed') await assertConfirmedProjection(parsed.data.event_id);
         return { idempotent: false, event: createdEvent, application: updatedApplication };
       });
       const result = await withReadOnlyRetry(

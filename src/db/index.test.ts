@@ -1,8 +1,28 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
+import { rootCertificates } from 'node:tls';
 import ConnectionParameters from 'pg/lib/connection-parameters';
 import { parse as parseConnectionString } from 'pg-connection-string';
-import { dedicatedDatabaseUrl, sslOptionForHost, withVerifiedSslMode } from './index';
+import {
+  DATABASE_CONNECTION_TIMEOUT_MS,
+  databaseConnectionConfig,
+  dedicatedDatabaseClientConfig,
+  dedicatedDatabaseUrl,
+  pool,
+  sslOptionForHost,
+  withVerifiedSslMode,
+} from './index';
+
+test('bounds shared and dedicated PostgreSQL connection acquisition', () => {
+  assert.equal(DATABASE_CONNECTION_TIMEOUT_MS, 10_000);
+  assert.equal(pool.options.connectionTimeoutMillis, DATABASE_CONNECTION_TIMEOUT_MS);
+  assert.equal(
+    dedicatedDatabaseClientConfig({
+      DATABASE_URL: 'postgresql://postgres:password@localhost:5432/litos',
+    }).connectionTimeoutMillis,
+    DATABASE_CONNECTION_TIMEOUT_MS,
+  );
+});
 
 test('derives a direct Neon endpoint for connection-bound advisory locks', () => {
   const url = dedicatedDatabaseUrl({
@@ -18,6 +38,70 @@ test('prefers an explicit direct database URL and rejects unknown poolers', () =
     () => dedicatedDatabaseUrl({ DATABASE_URL: 'postgresql://user:secret@pgbouncer.example.com/litos' }),
     /session-pinned/,
   );
+});
+
+describe('Railway private PostgreSQL TLS', () => {
+  const ROOT_CA = rootCertificates[0];
+  const railwayUrl =
+    'postgresql://postgres:secret@postgres.railway.internal:5432/railway?sslmode=no-verify&application_name=litos';
+  const resolveConfig = (config: { connectionString: string; ssl: unknown }) =>
+    new (ConnectionParameters as unknown as new (c: unknown) => {
+      ssl: unknown;
+      host: string;
+    })(config);
+
+  test('uses the inline Railway CA with strict verification after removing URL sslmode', () => {
+    const config = databaseConnectionConfig(railwayUrl, {
+      DATABASE_SSL_ROOT_CERT: ROOT_CA.replace(/\n/g, '\\n'),
+    });
+
+    const parsedUrl = new URL(config.connectionString);
+    assert.equal(parsedUrl.searchParams.has('sslmode'), false);
+    assert.equal(parsedUrl.searchParams.get('application_name'), 'litos');
+    assert.deepEqual(config.ssl, {
+      rejectUnauthorized: true,
+      ca: `${ROOT_CA.trim()}\n`,
+    });
+    assert.deepEqual(resolveConfig(config).ssl, config.ssl);
+  });
+
+  test('missing or malformed Railway root certificates fail closed', () => {
+    assert.throws(
+      () => databaseConnectionConfig(railwayUrl, {}),
+      /DATABASE_SSL_ROOT_CERT is required/,
+    );
+    assert.throws(
+      () => databaseConnectionConfig(railwayUrl, { DATABASE_SSL_ROOT_CERT: 'not a certificate' }),
+      /valid inline PEM certificate/,
+    );
+  });
+
+  test('connection-string TLS settings cannot replace the Railway CA or disable verification', () => {
+    const strict = databaseConnectionConfig(railwayUrl, { DATABASE_SSL_ROOT_CERT: ROOT_CA });
+    assert.deepEqual(resolveConfig(strict).ssl, {
+      rejectUnauthorized: true,
+      ca: `${ROOT_CA.trim()}\n`,
+    });
+
+    for (const parameter of ['ssl=true', 'sslcert=%2Ftmp%2Fclient.pem', 'sslrootcert=%2Ftmp%2Fca.pem']) {
+      assert.throws(
+        () =>
+          databaseConnectionConfig(
+            `postgresql://postgres:secret@postgres.railway.internal:5432/railway?${parameter}`,
+            { DATABASE_SSL_ROOT_CERT: ROOT_CA },
+          ),
+        /must not set/,
+      );
+    }
+  });
+
+  test('the Railway CA is not applied to Neon', () => {
+    const config = databaseConnectionConfig('postgresql://u:p@h.neon.tech/d?sslmode=require', {
+      DATABASE_SSL_ROOT_CERT: 'malformed and intentionally ignored',
+    });
+    assert.equal(config.connectionString, 'postgresql://u:p@h.neon.tech/d?sslmode=verify-full');
+    assert.deepEqual(resolveConfig(config).ssl, {});
+  });
 });
 
 

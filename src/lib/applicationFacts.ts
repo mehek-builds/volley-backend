@@ -126,13 +126,17 @@ export type ApplicationProfileRow =
  * Returns undefined when there is no row for this user, which is a real state: /profile/application
  * 404s on it and the resolver treats it as an empty profile.
  */
-export async function selectApplicationProfileRow(userId: string): Promise<ApplicationProfileRow | undefined> {
+export async function selectApplicationProfileRow(
+  userId: string,
+  executor: Pick<typeof db, 'select'> = db,
+): Promise<ApplicationProfileRow | undefined> {
   try {
-    const rows = await db.select().from(application_profile).where(eq(application_profile.user_id, userId)).limit(1);
+    const rows = await executor.select().from(application_profile)
+      .where(eq(application_profile.user_id, userId)).limit(1);
     return rows[0];
   } catch (error) {
     if (!isUndefinedColumnError(error)) throw error;
-    const rows = await db
+    const rows = await executor
       .select(legacyColumns())
       .from(application_profile)
       .where(eq(application_profile.user_id, userId))
