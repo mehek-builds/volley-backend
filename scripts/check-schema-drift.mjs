@@ -81,12 +81,22 @@ async function main() {
   // Verification on, matching sslOptionForHost in src/db/index.ts. This one runs against the REAL
   // database before every schema change (DEPLOY.md), so it is the last place that should be the
   // loose one.
+  //
+  // One explicit exception, opted into by the connection string itself: Railway's public TCP
+  // proxy terminates TLS with a leaf certificate of CN=localhost issued by a private root-ca, so
+  // strict verification against the proxy hostname can NEVER pass; no CA bundle fixes a hostname
+  // mismatch. `sslmode=no-verify` in the URL keeps the connection encrypted and drops only the
+  // identity check, which is the documented node-postgres escape for exactly this topology. It
+  // must be requested in the secret on purpose; nothing here defaults to it.
+  const noVerify = /[?&]sslmode=no-verify(?:&|$)/.test(connectionString);
   const client = new pg.Client({
     connectionString,
     // Guarded like the other scripts and like src/db/index.ts: a LOCAL Postgres often has a
     // self-signed certificate, and forcing verification on it turns a working dev setup into a
     // connection error. `.env.example` points at localhost.
-    ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? undefined : { rejectUnauthorized: true },
+    ssl: /localhost|127\.0\.0\.1/.test(connectionString)
+      ? undefined
+      : noVerify ? { rejectUnauthorized: false } : { rejectUnauthorized: true },
   });
   await client.connect();
 
