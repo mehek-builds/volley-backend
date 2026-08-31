@@ -37,6 +37,7 @@
 // than the one it is reporting.
 
 import { readFileSync } from 'node:fs';
+import tls from 'node:tls';
 import pg from 'pg';
 
 const SCHEMA_FILE = 'src/db/schema.ts';
@@ -86,7 +87,29 @@ async function main() {
     // Guarded like the other scripts and like src/db/index.ts: a LOCAL Postgres often has a
     // self-signed certificate, and forcing verification on it turns a working dev setup into a
     // connection error. `.env.example` points at localhost.
-    ssl: /localhost|127\.0\.0\.1/.test(connectionString) ? undefined : { rejectUnauthorized: true },
+    //
+    // Railway prod is reached through its public TCP proxy, whose PostgreSQL presents a
+    // certificate from Railway's PRIVATE root (CN=root-ca), so the public trust store can never
+    // verify it: that surfaced as "self-signed certificate in certificate chain" the day the
+    // secret was repointed off Neon (2026-08-31). SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT carries
+    // that root, the same material src/db/index.ts pins from DATABASE_SSL_ROOT_CERT, with the
+    // same literal-\n normalization because a GitHub secret can carry either form.
+    //
+    // The identity check names postgres.railway.internal rather than the host we dialed: the
+    // certificate's SAN is [localhost, postgres.railway.internal] and the proxy hostname is not
+    // in it, so default verification would reject a legitimately pinned chain. Checking the
+    // internal name is still a real identity check, not a bypass: only Railway's own instance
+    // holds a certificate for that SAN signed by this private root. Verified live before this
+    // change shipped: the pinned handshake against the proxy reports authorized: true.
+    ssl: /localhost|127\.0\.0\.1/.test(connectionString)
+      ? undefined
+      : process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT?.trim()
+        ? {
+            rejectUnauthorized: true,
+            ca: `${process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT.trim().replace(/\\n/g, '\n')}\n`,
+            checkServerIdentity: (host, cert) => tls.checkServerIdentity('postgres.railway.internal', cert),
+          }
+        : { rejectUnauthorized: true },
   });
   await client.connect();
 
