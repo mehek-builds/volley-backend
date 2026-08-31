@@ -292,12 +292,24 @@ function decodeHtml(value: string): string {
     .replace(/&nbsp;/gi, ' ');
 }
 
+/* Segments need whitespace on BOTH sides of the separator, so hyphenated and slashed brand names
+   ("Rent-A-Center", "TCP/IP Labs") survive intact. Measured 2026-08-31: 1,896 enabled sources sat
+   failed on homepage:identity_mismatch, and the dominant shape was a brand named in a title
+   segment the old lead-only split never reached - anthropic.com's "Home \ Anthropic" being the
+   canonical example (backslash was not a separator at all, and the brand trails). */
+const TITLE_SEGMENT_SEPARATOR_RE = /\s+[|:\\/·•–—-]\s+/;
+
 function homepageIdentityAgrees(companyName: string, originalDomain: string, html: string, finalUrl: URL): boolean {
   const title = decodeHtml(html.match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i)?.[1] ?? '')
     .replace(/\s+/g, ' ').trim();
   const ogSiteName = decodeHtml(
     html.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']{1,200})["']/i)?.[1]
       ?? html.match(/<meta[^>]+content=["']([^"']{1,200})["'][^>]+property=["']og:site_name["']/i)?.[1]
+      ?? '',
+  );
+  const applicationName = decodeHtml(
+    html.match(/<meta[^>]+name=["']application-name["'][^>]+content=["']([^"']{1,200})["']/i)?.[1]
+      ?? html.match(/<meta[^>]+content=["']([^"']{1,200})["'][^>]+name=["']application-name["']/i)?.[1]
       ?? '',
   );
   const openingText = `${title} ${ogSiteName} ${html.slice(0, 6_000)}`.toLowerCase();
@@ -308,9 +320,11 @@ function homepageIdentityAgrees(companyName: string, originalDomain: string, htm
   const finalLabel = normalizeName(finalUrl.hostname.replace(/^www\./, '').split('.')[0] ?? '');
   if (target.length < 2 || originalLabel.length < 2 || finalLabel.length < 2) return false;
   const hostAgrees = target === originalLabel || target === finalLabel;
-  const titleLead = title.split(/\s+(?:[|:-])\s+/)[0] ?? '';
+  /* ANY segment, not only the lead: brands trail their titles ("Home \ Anthropic") as often as
+     they lead them. This stays a two-signal check - the domain label must independently equal the
+     company name via hostAgrees, so a lookalike host naming the brand mid-title still fails. */
   const titleBrand = title.replace(/\s+(?:careers|jobs|official site)$/i, '').trim();
-  const pageAgrees = [ogSiteName, title, titleLead, titleBrand]
+  const pageAgrees = [ogSiteName, applicationName, title, titleBrand, ...title.split(TITLE_SEGMENT_SEPARATOR_RE)]
     .filter(Boolean)
     .some((value) => normalizeName(value) === target);
   return hostAgrees && pageAgrees;

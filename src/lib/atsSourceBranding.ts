@@ -44,6 +44,11 @@ export type AtsSourceBrandingOptions = {
 
 const USER_AGENT = 'LitosAtsBrandingVerifier/1.0';
 const REQUEST_TIMEOUT_MS = 10_000;
+/* Bounded because a provider that answers 301 with itself forever must cost three requests, not a
+   worker slot. Measured 2026-08-31: 2,234 enabled sources sat failed on ats:http_301/302/307 alone,
+   almost all of them token renames and regional migrations the provider itself announces via the
+   redirect - recoverable inventory as long as the target stays on provider-owned hosts. */
+const MAX_PROVIDER_REDIRECTS = 3;
 const MAX_HTML_BYTES = 4_000_000;
 const MAX_JSON_BYTES = 6_000_000;
 const MAX_IMAGE_BYTES = 1_000_000;
@@ -180,26 +185,62 @@ function responseType(response: Response): string {
   return (response.headers.get('content-type') ?? '').toLowerCase();
 }
 
+/* The next hop, only when the provider redirects WITHIN ITSELF - a token rename, a trailing-slash
+ * canonicalization, an EU-cluster migration. Anywhere else returns null and the caller preserves
+ * the original 3xx as the failure reason, exactly as if the redirect had not been followed: the
+ * whole point of fetching fixed provider hosts is that the response author is known, and a hop to
+ * an arbitrary host would let that author be whoever the redirect names. */
+function providerInternalRedirect(
+  location: string,
+  currentUrl: string,
+  allowedRedirectHost: (hostname: string) => boolean,
+): string | null {
+  try {
+    const target = new URL(location, currentUrl);
+    if (target.protocol !== 'https:' || target.username || target.password || target.port) return null;
+    if (!allowedRedirectHost(target.hostname.toLowerCase())) return null;
+    return target.toString();
+  } catch {
+    return null;
+  }
+}
+
 async function fetchText(
   fetcher: typeof fetch,
   url: string,
   expectedType: 'html' | 'json',
   maxBytes: number,
+  allowedRedirectHost?: (hostname: string) => boolean,
 ): Promise<string> {
-  const response = await fetcher(url, {
-    headers: {
-      Accept: expectedType === 'json' ? 'application/json' : 'text/html,application/xhtml+xml',
-      'User-Agent': USER_AGENT,
-    },
-    redirect: 'manual',
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) fail(`http_${response.status}`);
-  const type = responseType(response);
-  if (expectedType === 'json' ? !type.includes('json') : !type.includes('html')) {
-    fail('unexpected_content_type');
+  let target = url;
+  for (let hop = 0; hop <= MAX_PROVIDER_REDIRECTS; hop += 1) {
+    const response = await fetcher(target, {
+      headers: {
+        Accept: expectedType === 'json' ? 'application/json' : 'text/html,application/xhtml+xml',
+        'User-Agent': USER_AGENT,
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      const next = location && allowedRedirectHost
+        ? providerInternalRedirect(location, target, allowedRedirectHost)
+        : null;
+      if (!next || hop === MAX_PROVIDER_REDIRECTS) fail(`http_${response.status}`);
+      target = next;
+      continue;
+    }
+    if (!response.ok) fail(`http_${response.status}`);
+    const type = responseType(response);
+    if (expectedType === 'json' ? !type.includes('json') : !type.includes('html')) {
+      fail('unexpected_content_type');
+    }
+    return new TextDecoder().decode(await readBounded(response, maxBytes));
   }
-  return new TextDecoder().decode(await readBounded(response, maxBytes));
+  /* Unreachable: the final iteration either returns a body or fails on the redirect above.
+     TypeScript needs the terminal statement; a reason is still named in case that ever changes. */
+  return fail('redirect_limit');
 }
 
 function parseJson(raw: string): unknown {
@@ -267,6 +308,7 @@ async function greenhouseBranding(token: string, fetcher: typeof fetch): Promise
     `https://job-boards.greenhouse.io/embed/job_board?for=${encodeURIComponent(token)}`,
     'html',
     MAX_HTML_BYTES,
+    (host) => host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io',
   );
   for (const tag of htmlTags(html, 'img')) {
     const classes = tagAttribute(tag, 'class')?.split(/\s+/) ?? [];
@@ -287,7 +329,13 @@ async function greenhouseBranding(token: string, fetcher: typeof fetch): Promise
 }
 
 async function leverBranding(token: string, fetcher: typeof fetch): Promise<ExtractedBranding> {
-  const html = await fetchText(fetcher, `https://jobs.lever.co/${encodeURIComponent(token)}`, 'html', MAX_HTML_BYTES);
+  const html = await fetchText(
+    fetcher,
+    `https://jobs.lever.co/${encodeURIComponent(token)}`,
+    'html',
+    MAX_HTML_BYTES,
+    (host) => host === 'jobs.lever.co' || host === 'jobs.eu.lever.co',
+  );
   const companyName = pageTitle(html);
   const ogTitle = metaContent(html, 'og:title')?.replace(/\s+jobs$/i, '').trim();
   const rawLogo = metaContent(html, 'og:image');
@@ -305,7 +353,13 @@ async function leverBranding(token: string, fetcher: typeof fetch): Promise<Extr
 }
 
 async function ashbyBranding(token: string, fetcher: typeof fetch): Promise<ExtractedBranding> {
-  const html = await fetchText(fetcher, `https://jobs.ashbyhq.com/${encodeURIComponent(token)}`, 'html', MAX_HTML_BYTES);
+  const html = await fetchText(
+    fetcher,
+    `https://jobs.ashbyhq.com/${encodeURIComponent(token)}`,
+    'html',
+    MAX_HTML_BYTES,
+    (host) => host === 'jobs.ashbyhq.com',
+  );
   const title = pageTitle(html);
   const ogTitle = metaContent(html, 'og:title');
   if (!title || !ogTitle || !namesAgree(title.replace(/\s+jobs$/i, ''), ogTitle.replace(/\s+jobs$/i, ''))) {
@@ -328,7 +382,13 @@ async function ashbyBranding(token: string, fetcher: typeof fetch): Promise<Extr
 }
 
 async function workableBranding(token: string, fetcher: typeof fetch): Promise<ExtractedBranding> {
-  const html = await fetchText(fetcher, `https://apply.workable.com/${encodeURIComponent(token)}/`, 'html', MAX_HTML_BYTES);
+  const html = await fetchText(
+    fetcher,
+    `https://apply.workable.com/${encodeURIComponent(token)}/`,
+    'html',
+    MAX_HTML_BYTES,
+    (host) => host === 'apply.workable.com',
+  );
   const titleName = pageTitle(html)?.replace(/\s+-\s+current openings$/i, '').trim();
   const companyName = metaContent(html, 'og:title');
   const rawLogo = metaContent(html, 'og:image');
@@ -342,7 +402,13 @@ async function workableBranding(token: string, fetcher: typeof fetch): Promise<E
 }
 
 async function breezyBranding(token: string, fetcher: typeof fetch): Promise<ExtractedBranding> {
-  const raw = await fetchText(fetcher, `https://${token}.breezy.hr/json`, 'json', MAX_JSON_BYTES);
+  const raw = await fetchText(
+    fetcher,
+    `https://${token}.breezy.hr/json`,
+    'json',
+    MAX_JSON_BYTES,
+    (host) => /^[a-z0-9-]+\.breezy\.hr$/.test(host),
+  );
   const payload = parseJson(raw);
   if (!Array.isArray(payload) || payload.length === 0) fail('malformed_response');
   const companies = payload.map((item) => (
@@ -366,7 +432,13 @@ async function breezyBranding(token: string, fetcher: typeof fetch): Promise<Ext
 }
 
 async function recruiteeBranding(token: string, fetcher: typeof fetch): Promise<ExtractedBranding> {
-  const html = await fetchText(fetcher, `https://${token}.recruitee.com`, 'html', MAX_HTML_BYTES);
+  const html = await fetchText(
+    fetcher,
+    `https://${token}.recruitee.com`,
+    'html',
+    MAX_HTML_BYTES,
+    (host) => /^[a-z0-9-]+\.recruitee\.com$/.test(host),
+  );
   for (const tag of htmlTags(html, 'img')) {
     const classes = tagAttribute(tag, 'class')?.split(/\s+/) ?? [];
     const dataCy = tagAttribute(tag, 'data-cy');
@@ -442,6 +514,7 @@ async function ripplingBranding(token: string, fetcher: typeof fetch): Promise<E
     `https://ats.rippling.com/${encodeURIComponent(token)}/jobs`,
     'html',
     MAX_HTML_BYTES,
+    (host) => host === 'ats.rippling.com',
   );
   const rawName = firstElementText(html, 'h1') ?? pageTitle(html);
   if (!rawName) fail('identity_missing');
@@ -516,9 +589,11 @@ function fetcherWithSignal(fetcher: typeof fetch, signal: AbortSignal | undefine
  * Prove the employer identity and logo from an ATS-owned public board response.
  *
  * The verifier only requests fixed provider endpoints derived from a constrained board token. It
- * refuses redirects, generic vendor artwork, social banners, arbitrary third-party image hosts,
- * and any provider identity that disagrees with the source catalog. A candidate is promoted only
- * after the returned image also answers as a bounded, recognizable image payload.
+ * follows a bounded number of redirects only while they stay on that provider's own hosts (token
+ * renames, EU-cluster migrations), and refuses every other redirect, generic vendor artwork,
+ * social banners, arbitrary third-party image hosts, and any provider identity that disagrees
+ * with the source catalog. A candidate is promoted only after the returned image also answers as
+ * a bounded, recognizable image payload.
  */
 export async function verifyAtsSourceBranding(
   source: AtsSourceBrandingCandidate,

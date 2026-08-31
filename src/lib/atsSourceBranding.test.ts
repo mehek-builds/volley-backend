@@ -421,3 +421,44 @@ test('an aggregate verifier deadline aborts a provider request that never resolv
   assert.deepEqual(await verification, { verified: false, reason: 'timeout' });
   assert.equal(providerSignal?.aborted, true);
 });
+
+test('follows a provider-internal redirect to a renamed board and verifies there', async () => {
+  const logo = 'https://lever-client-logos.s3-us-west-2.amazonaws.com/acme.png';
+  const urls: string[] = [];
+  const result = await verifyAtsSourceBranding(candidate('lever', 'acme', 'Acme'), async (input) => {
+    const url = String(input);
+    urls.push(url);
+    if (url === 'https://jobs.lever.co/acme') {
+      return new Response(null, { status: 301, headers: { location: 'https://jobs.eu.lever.co/acme' } });
+    }
+    if (url === logo) return image();
+    return html(`<title>Acme</title><meta property="og:title" content="Acme jobs">
+      <meta property="og:image" content="${logo}">`);
+  });
+  assert.deepEqual(urls.slice(0, 2), ['https://jobs.lever.co/acme', 'https://jobs.eu.lever.co/acme']);
+  assert.deepEqual(result, {
+    verified: true,
+    company_name: 'Acme',
+    company_logo_url: logo,
+    method: VERIFIED_ATS_SOURCE_LOGO_METHOD,
+  });
+});
+
+test('a redirect crossing out of the provider keeps the original status as the reason', async () => {
+  /* greenhouse.io.evil.example is the classic suffix lookalike; a host check that only does
+     endsWith would follow it. The exact-host predicate must not. */
+  const result = await verifyAtsSourceBranding(candidate('greenhouse', 'acme', 'Acme'), async () => (
+    new Response(null, { status: 301, headers: { location: 'https://job-boards.greenhouse.io.evil.example/embed/job_board?for=acme' } })
+  ));
+  assert.deepEqual(result, { verified: false, reason: 'http_301' });
+});
+
+test('a provider that redirects forever costs a bounded number of requests', async () => {
+  let requests = 0;
+  const result = await verifyAtsSourceBranding(candidate('recruitee', 'acme', 'Acme'), async () => {
+    requests += 1;
+    return new Response(null, { status: 302, headers: { location: 'https://acme.recruitee.com/' } });
+  });
+  assert.equal(requests, 4);
+  assert.deepEqual(result, { verified: false, reason: 'http_302' });
+});
