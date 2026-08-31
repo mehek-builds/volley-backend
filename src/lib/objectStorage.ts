@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import {
   DeleteObjectsCommand,
   GetObjectCommand,
@@ -19,6 +19,38 @@ export type PutObjectOptions = {
   addRandomSuffix?: boolean;
   allowOverwrite?: boolean;
 };
+
+type PublicLogoVercelPut = (
+  pathname: string,
+  body: Buffer,
+  options: {
+    access: 'public';
+    contentType: string;
+    addRandomSuffix: false;
+    allowOverwrite: true;
+    cacheControlMaxAge: number;
+  },
+) => Promise<{ url: string; pathname: string }>;
+
+export type PublicLogoPutDependencies = {
+  railwayPut?: (
+    command: PutObjectCommand,
+    options?: { abortSignal?: AbortSignal },
+  ) => Promise<unknown>;
+  vercelPut?: PublicLogoVercelPut;
+};
+
+/* This tenant grammar intentionally matches normalizeExecutableAtsBoardToken's path-segment
+   branch: 1 to 128 lowercase ASCII slug characters, with punctuation only in the interior. */
+const PUBLIC_LOGO_KEY_RE = /^company-logos\/(rippling)\/([a-z0-9](?:[a-z0-9._~-]{0,126}[a-z0-9])?)\/([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
+const PUBLIC_LOGO_CONTENT_TYPES = new Map([
+  ['png', 'image/png'],
+  ['jpg', 'image/jpeg'],
+  ['gif', 'image/gif'],
+  ['webp', 'image/webp'],
+]);
+const PUBLIC_LOGO_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+const PUBLIC_LOGO_CACHE_SECONDS = 365 * 24 * 60 * 60;
 
 function railwayConfigured(): boolean {
   return Boolean(
@@ -114,6 +146,148 @@ function publicBaseUrl(): string {
 
 export function objectReadUrl(objectKey: string): string {
   return `${publicBaseUrl()}/storage/object?t=${encodeURIComponent(mintObjectReadToken(objectKey))}`;
+}
+
+/** Only content-addressed, non-sensitive logo objects may receive a stable public path. */
+export function isPublicObjectKey(objectKey: string): boolean {
+  return PUBLIC_LOGO_KEY_RE.test(objectKey);
+}
+
+/** Compatibility URL for public logo links minted before the Railway route migration. */
+export function publicObjectReadUrl(objectKey: string): string {
+  if (!isPublicObjectKey(objectKey)) throw new Error('Object key is not public');
+  return `${publicBaseUrl()}/storage/public/${objectKey}`;
+}
+
+export function isPublicObjectReadUrlForKey(rawUrl: string, objectKey: string): boolean {
+  if (!isPublicObjectKey(objectKey)) return false;
+  try {
+    const actual = new URL(rawUrl);
+    const expected = new URL(publicObjectReadUrl(objectKey));
+    return actual.protocol === 'https:'
+      && !actual.username
+      && !actual.password
+      && !actual.port
+      && !actual.search
+      && !actual.hash
+      && actual.origin === expected.origin
+      && actual.pathname === expected.pathname;
+  } catch {
+    return false;
+  }
+}
+
+export function publicLogoObjectUrl(objectKey: string): string {
+  const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
+  if (!match) throw new Error('Invalid public logo object key');
+  const [, providerName, tenant, digest, extension] = match;
+  return `${publicBaseUrl()}/storage/logo/${providerName}/${encodeURIComponent(tenant)}/${digest}.${extension}`;
+}
+
+export function publicLogoObjectKey(input: {
+  provider?: string;
+  tenant?: string;
+  file?: string;
+}): string | null {
+  const providerName = input.provider ?? '';
+  const tenant = input.tenant ?? '';
+  const file = input.file ?? '';
+  const candidate = `company-logos/${providerName}/${tenant}/${file}`;
+  return PUBLIC_LOGO_KEY_RE.test(candidate) ? candidate : null;
+}
+
+export function publicLogoContentType(objectKey: string): string | null {
+  const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
+  return match ? PUBLIC_LOGO_CONTENT_TYPES.get(match[4]) ?? null : null;
+}
+
+function isVercelPublicLogoUrlForKey(rawUrl: string, objectKey: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    let decodedPath = '';
+    try {
+      decodedPath = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+    } catch {
+      return false;
+    }
+    return url.protocol === 'https:'
+      && !url.username
+      && !url.password
+      && !url.port
+      && !url.search
+      && !url.hash
+      && /^[a-z0-9-]+\.public\.blob\.vercel-storage\.com$/i.test(url.hostname)
+      && decodedPath === objectKey;
+  } catch {
+    return false;
+  }
+}
+
+/** Accept only an exact current, compatibility, or Vercel rollback URL for this public logo key. */
+export function isPublicLogoObjectReadUrlForKey(rawUrl: string, objectKey: string): boolean {
+  if (!isPublicObjectKey(objectKey)) return false;
+  if (isVercelPublicLogoUrlForKey(rawUrl, objectKey)) return true;
+  try {
+    const actual = new URL(rawUrl);
+    const canonical = new URL(publicLogoObjectUrl(objectKey));
+    const compatibility = new URL(publicObjectReadUrl(objectKey));
+    return actual.protocol === 'https:'
+      && !actual.username
+      && !actual.password
+      && !actual.port
+      && !actual.search
+      && !actual.hash
+      && actual.origin === canonical.origin
+      && (actual.pathname === canonical.pathname || actual.pathname === compatibility.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export async function putPublicLogoObject(
+  objectKey: string,
+  body: Buffer,
+  contentType: string,
+  dependencies: PublicLogoPutDependencies = {},
+  signal?: AbortSignal,
+): Promise<{ url: string; pathname: string }> {
+  signal?.throwIfAborted();
+  const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
+  const expectedContentType = publicLogoContentType(objectKey);
+  const actualDigest = createHash('sha256').update(body).digest('hex');
+  if (!match || !expectedContentType || expectedContentType !== contentType || match[3] !== actualDigest) {
+    throw new Error('Invalid public logo object');
+  }
+
+  if (provider() === 'vercel') {
+    const upload = dependencies.vercelPut ?? vercelPut;
+    const blob = await upload(objectKey, body, {
+      access: 'public',
+      contentType,
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      cacheControlMaxAge: PUBLIC_LOGO_CACHE_SECONDS,
+    });
+    signal?.throwIfAborted();
+    if (blob.pathname !== objectKey || !isVercelPublicLogoUrlForKey(blob.url, objectKey)) {
+      throw new Error('Public logo storage returned a mismatched object path');
+    }
+    return { url: blob.url, pathname: objectKey };
+  }
+
+  const command = new PutObjectCommand({
+    Bucket: bucket(),
+    Key: objectKey,
+    Body: body,
+    ContentType: contentType,
+    CacheControl: PUBLIC_LOGO_CACHE_CONTROL,
+  });
+  const requestOptions = signal ? { abortSignal: signal } : undefined;
+  await (dependencies.railwayPut
+    ? dependencies.railwayPut(command, requestOptions)
+    : client().send(command, requestOptions));
+  signal?.throwIfAborted();
+  return { url: publicLogoObjectUrl(objectKey), pathname: objectKey };
 }
 
 export async function putObject(

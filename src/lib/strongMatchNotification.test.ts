@@ -4,6 +4,7 @@ import test from 'node:test';
 import { breachesStrongFitSla, hoursSinceFound, STRONG_FIT_SLA_HOURS, VERY_STRONG_FIT_SCORE } from './strongMatchNotification';
 
 const NOW = new Date('2026-08-20T12:00:00.000Z');
+const SOURCE = readFileSync('src/lib/strongMatchNotification.ts', 'utf8');
 
 test('hoursSinceFound is the plain elapsed time, not floored or coarsened', () => {
   assert.equal(hoursSinceFound(new Date('2026-08-20T09:00:00.000Z'), NOW), 3);
@@ -40,6 +41,28 @@ test('exactly on the boundary is not yet a breach', () => {
     first_seen_at: new Date(NOW.getTime() - STRONG_FIT_SLA_HOURS * 60 * 60 * 1000),
   };
   assert.equal(breachesStrongFitSla(onTheLine, NOW), false);
+});
+
+test('the ranked-pool materialization rechecks the exact strict board conditions', () => {
+  const secondRead = SOURCE.slice(
+    SOURCE.indexOf('const pool = await db'),
+    SOURCE.indexOf('const poolById = new Map'),
+  );
+  assert.match(
+    secondRead,
+    /\.innerJoin\(career_page_sources, eq\(monitored_jobs\.source_id, career_page_sources\.id\)\)/,
+    'the second read needs the source row because the board predicate depends on it',
+  );
+  assert.match(
+    secondRead,
+    /\.where\(and\(\s*\.\.\.conditions,\s*inArray\(monitored_jobs\.id, poolIds\),\s*notInArray\(monitored_jobs\.id, announced\)/,
+    'the second read must recheck the shared strict conditions and notification dedupe',
+  );
+  assert.match(
+    SOURCE,
+    /boardConditions\(\{ sponsorOnly, targeting: jobTargeting, requireVerifiedEvidence: true \}\)/,
+    'alerts must never inherit a public evidence-gate bypass',
+  );
 });
 
 /**

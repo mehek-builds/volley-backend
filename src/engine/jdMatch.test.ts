@@ -2235,7 +2235,7 @@ describe('route registration', () => {
   test('POST /resume/generate stores posting location in the generated application context', () => {
     const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'resume.ts'), 'utf8');
     assert.match(routeFile, /let postingLocation: string \| null = null/);
-    assert.match(routeFile, /postingLocation = row\?\.location \?\? null/);
+    assert.match(routeFile, /postingLocation = resolvedPosting\.location/);
     assert.match(routeFile, /\.\.\.\(postingLocation \? \{ location: postingLocation \} : \{\}\)/);
   });
 });

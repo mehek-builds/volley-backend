@@ -1,4 +1,8 @@
-# Deploying the Litos backend to Vercel
+# Deploying the Litos backend
+
+The active production migration targets Railway. The Vercel instructions below remain only for
+rollback reference during cutover. Use the Railway verified-job inventory cutover section for the
+current API, worker, object storage, and scheduler configuration.
 
 The app is a Fastify server wrapped as a single Vercel serverless function
 (`api/index.ts`); `vercel.json` rewrites every path to it and raises the function
@@ -60,6 +64,7 @@ Set these for Production (and Preview if you want):
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
 | `GOOGLE_CLIENT_ID` | Google OAuth web client ID, must match the website's `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |
 | `ENCRYPTION_KEY` | any 32+ char random string, encrypts `application_profile` columns at rest |
+| `ENCRYPTION_KEY_NEXT` | temporary rotation target only; new profile writes use it and reads accept both keys until the guarded rekey pass completes |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Storage tab -> Create -> Blob; stores generated resume files |
 | `ANTHROPIC_API_KEY` | your Anthropic key |
 | `HUNTER_API_KEY` | your Hunter key |
@@ -97,6 +102,24 @@ Set these for Production (and Preview if you want):
 | `UPSTASH_REDIS_REST_URL` | optional, turns on the ranking cache's shared tier; see below |
 | `UPSTASH_REDIS_REST_TOKEN` | optional, pairs with the URL above |
 | `NODE_ENV` | `production` |
+
+### Guarded encryption-key transition
+
+Never replace `ENCRYPTION_KEY` directly while encrypted profile values exist. Use one transition
+release that keeps the current `ENCRYPTION_KEY`, adds a distinct `ENCRYPTION_KEY_NEXT`, and keeps
+`INTERNAL_CRON_SECRET` configured. That release writes new profile envelopes with the next key and
+reads envelopes written by either key.
+
+Invoke `POST /internal/encryption-rekey` once with `Authorization: Bearer <INTERNAL_CRON_SECRET>`.
+The route locks every `application_profile` row in one database transaction, verifies that every
+authenticated envelope can be decrypted, rewrites it with the next key, verifies each rewrite with
+that key, and commits only if the entire pass succeeds. Its response contains counts only. It never
+returns protected values.
+
+The expected response must match a fresh database inventory. Then deploy the destination with the
+next value promoted to `ENCRYPTION_KEY` and with `ENCRYPTION_KEY_NEXT` removed. Verify protected
+profile reads before retiring the transition deployment. A failure or count mismatch means the
+transaction must be treated as unverified and the current key retained.
 
 ### Submission ledger cutover fence
 
@@ -261,23 +284,65 @@ curl -s https://student-outreach-backend.vercel.app/health
 variables have not reached the running build. The field reports names, never values. Nothing else changes: unconfigured, the code
 path is a deliberate no-op, which is why it was safe to ship ahead of the database existing.
 
-The reviewed source list lives in `src/lib/jobSources.ts`; use `JOB_MONITOR_SOURCES_JSON` only for
-temporary additions that cannot wait for a code review. In GitHub, add `INTERNAL_CRON_SECRET` as an
-Actions secret with the same value used by Vercel. Optionally set the `LITOS_API_BASE` Actions
-variable when the API is not hosted at `https://student-outreach-backend.vercel.app`.
+### Railway verified-job inventory cutover
 
-Vercel starts the monitor daily at 06:00 UTC. The GitHub Actions workflow starts ten minutes later
-and makes up to five bounded follow-up passes to drain a large source queue. It fails visibly when
-sources fail, polling remains incomplete, or the 90-day surfaced board drops below an inventory
-floor. Each pass writes raw postings, distinct grouped roles, sponsor-only postings, and variety
-metrics to the workflow summary. Each invocation selects at most 400 oldest sources, so source 401
-starts a follow-up segment rather than extending one serverless run. Follow-up passes carry the
-first response's `drain_started_at` watermark, so each source is attempted once per drain run. The hard full-board floors are
-10,000 postings and 10,000 grouped roles. Posting headroom warns below 12,000, while grouped-role
-headroom warns below 11,000. The summary also warns when job-family or employer-industry coverage
-misses its configured threshold, or when any distinct user-entered target role returns zero jobs.
-If the bounded target-role query times out, monitoring reports `measurement_available=false` and
-keeps that coverage threshold unhealthy without aborting the inventory monitor.
+The reviewed source list lives in `src/lib/jobSources.ts`. Remote catalogs add bounded candidate
+identifiers only, and `JOB_MONITOR_SOURCES_JSON` is reserved for temporary operator additions. A
+candidate never counts as inventory until its first-party ATS poll succeeds in the current drain,
+its job description and exact action URL pass validation, and its employer logo has current
+verifier-issued evidence.
+
+Use this order for the Railway migration:
+
+1. Run `npm run db:job-logo-evidence:columns` against the production database.
+2. Deploy the current API revision privately on Railway.
+3. Stop the legacy Vercel job-monitor cron and the scheduled GitHub job-monitor workflow. Keep only
+   the workflow's manual fallback.
+4. Run `npm run db:job-logo-evidence:finalize`.
+5. Run `npm run db:job-board-performance` against the production database. This verifies the
+   finalized certification fingerprint constraint before installing the versioned grouped
+   projection, its atomic refresh function, and the posting and search indexes.
+6. Set the Railway worker service start command to `npm run worker:job-monitor` and scale it to
+   exactly one replica. Set the API service start command to `node dist/index.js` and its health
+   check path to `/health`. The shared `railway.json` intentionally declares neither command so the
+   two services cannot inherit the wrong process.
+7. Wait for the worker's `complete_drain` event and verify its deployed SHA and every certified
+   inventory floor.
+8. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
+
+The API requires `DATABASE_URL`, `JWT_SIGNING_SECRET` or `JOB_BOARD_CURSOR_SECRET`,
+`INTERNAL_CRON_SECRET`, `PUBLIC_API_BASE`, an explicitly validated `TRUST_PROXY_HOPS`, `GIT_SHA`,
+and the Railway object-storage credentials. The worker requires only the same
+`INTERNAL_CRON_SECRET`, a private Railway `LITOS_API_BASE`, its cycle settings, and the deployed
+SHA. It does not connect directly to Postgres or object storage. Run the worker with exactly one
+replica and set `JOB_MONITOR_CYCLE_INTERVAL_MS=7200000`. Its `complete_drain.deployed_sha` uses
+`RAILWAY_GIT_COMMIT_SHA`, falling back to `GIT_SHA`, so retain the former Railway-provided variable
+and set the latter when the runtime does not provide it. The API copies expiring first-party
+Rippling logos into durable public storage before their evidence can qualify. `BLOB_READ_WRITE_TOKEN`
+is a rollback compatibility input, not a worker requirement. Set `STRATUS_API_KEY` when autonomous
+submission runs on Railway. Keep the Vercel-specific `VERCEL` variable unset. The API and worker
+`INTERNAL_CRON_SECRET` values must match.
+
+The worker keeps one `drain_started_at` watermark while it processes bounded 400-source polling
+segments and the independent logo-proof queue. The hard certification floors are 500,000 unique
+jobs, 50,000 unique grouped roles, and 5,000 unique sponsor-only jobs. A source or row must have
+fresh current-drain proof to count, so a preserved stale row cannot satisfy the threshold. The
+worker sleeps for two hours only after a successful complete drain. Configure an external alert on
+the age of the last `complete_drain` log, because a failed drain intentionally retries rather than
+declaring success.
+
+The 500,000-row PostgreSQL 16 benchmark uses 5,000 sources, 60,000 grouped roles, and a cursor at
+90 percent depth. The measured deep posting, searched posting, and grouped cursor queries complete
+in under 36 milliseconds. The full certification refresh completes in about 19.4 seconds locally.
+Production allows up to 120 seconds for that refresh and returns structured stage-specific timeout
+evidence. After consecutive timeouts the worker emits `persistent_metrics_timeout_alert` and never
+emits `complete_drain`.
+
+In GitHub, set `INTERNAL_CRON_SECRET` to the same value as Railway and set the `LITOS_API_BASE`
+Actions variable to the Railway API before retiring Vercel. The job-monitor workflow is manual-only.
+Daily maintenance and the dedicated sub-daily workflows call the explicit Railway API target, fail
+closed when that target is absent, and never fall back to the retired Vercel hostname. Vercel owns
+no scheduled jobs after cutover.
 
 Before enabling Google sign-in, add the identity column without touching existing users:
 

@@ -240,6 +240,38 @@ test('the endpoint is authenticated and takes a board posting id', () => {
   assert.match(ROUTE, /paramsSchema = z\.object\(\{ jobId: z\.string\(\)\.uuid\(\) \}\)/);
 });
 
+test('an arbitrary posting id must still satisfy the strict current-board evidence contract', () => {
+  const targetLoader = ROUTE.slice(
+    ROUTE.indexOf('async function loadPostingTarget'),
+    ROUTE.indexOf('type StoredScan'),
+  );
+  assert.match(
+    targetLoader,
+    /\.innerJoin\(career_page_sources, eq\(monitored_jobs\.source_id, career_page_sources\.id\)\)/,
+    'the current-board predicate requires source evidence',
+  );
+  assert.match(
+    targetLoader,
+    /\.\.\.boardConditions\(\{ sponsorOnly: false, requireVerifiedEvidence: true \}\)/,
+    'the pre-apply scan must fail closed even if the public list is temporarily bypassed',
+  );
+  assert.doesNotMatch(
+    targetLoader,
+    /\.where\(and\(eq\(monitored_jobs\.id, jobId\), eq\(career_page_sources\.enabled, true\)\)\)/,
+    'enabled alone is not proof of a current verified posting',
+  );
+  assert.match(
+    targetLoader,
+    /const applyUrl = canonicalMonitoredPortalUrl\([\s\S]{0,180}row\.external_id/,
+    'the browser target must be reconstructed from the monitored provider identity',
+  );
+  assert.doesNotMatch(
+    targetLoader,
+    /canonicalMonitoredPortalUrl\([^\n]+\) \?\? row\.apply_url/,
+    'a malformed or cross-family monitored URL must never fall back to the stored raw URL',
+  );
+});
+
 test('the route is registered', () => {
   const index = readFileSync('src/index.ts', 'utf8');
   assert.match(index, /await fastify\.register\(postingQuestionsRoutes\);/);

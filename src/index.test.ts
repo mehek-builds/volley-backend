@@ -670,6 +670,18 @@ test('/privacy redirects to the canonical trylitos.com policy', async () => {
   assert.equal(res.headers.location, 'https://trylitos.com/privacy');
 });
 
+test('public logo routing accepts the poller contract maximum 128-character tenant token', async () => {
+  const app = await getApp();
+  const tenant = `a${'b'.repeat(126)}z`;
+  const response = await app.inject({
+    method: 'GET',
+    url: `/storage/logo/rippling/${tenant}/${'a'.repeat(63)}.png`,
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.deepEqual(response.json(), { error: 'Object not found' });
+});
+
 test('account export and deletion require auth', async () => {
   const app = await getApp();
   assert.equal((await app.inject({ method: 'GET', url: '/account/export' })).statusCode, 401);

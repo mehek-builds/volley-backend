@@ -3336,6 +3336,21 @@ test('every managed provider start, continuation POST, and direct session creati
     < create.indexOf('provider_resource_id: session.id'));
 });
 
+test('unattended preparation parks unavailable monitored jobs before browser work', async () => {
+  const { join } = await import('node:path');
+  const runner = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+  const prepareStart = runner.indexOf('async function prepare(');
+  const prepareBody = runner.slice(prepareStart, runner.indexOf('\nasync function ', prepareStart + 10));
+  const repair = prepareBody.indexOf('repairReviewPortalFromMonitoredJob');
+  const proofGate = prepareBody.indexOf('monitoredPortalProofUnavailable', repair);
+  const attention = prepareBody.indexOf("status: 'needs_attention'", proofGate);
+  assert.ok(repair >= 0 && proofGate > repair && attention > proofGate);
+  for (const browserWork of ['prepareManaged(', 'createBrowserContext(', 'createBrowserSession(']) {
+    const browserAt = prepareBody.indexOf(browserWork);
+    if (browserAt !== -1) assert.ok(attention < browserAt, `${browserWork} must remain behind monitored proof`);
+  }
+});
+
 // ─── Which stage a prepare-time stall records ─────────────────────────────────
 //
 // SOURCE-LEVEL for the same reason as the test above: prepareManaged is not exported and needs a

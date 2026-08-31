@@ -1,24 +1,22 @@
-# Runs the job-monitor poll on a sub-daily cadence, and drains bounded follow-up passes within
-# each run.
+# Manual fallback for a bounded job-monitor diagnostic.
 #
-# The endpoint stops starting polls after three minutes and keeps another 30 seconds for the final
-# batch, leaving at least one minute before Vercel's hard limit. If the
-# source queue is larger than one bounded pass can finish, this workflow calls it again. Every pass
-# selects sources by oldest last_polled_at first, so it resumes the deferred tail automatically.
+# The recurring owner is the single-replica Railway worker. This workflow has no schedule so it
+# cannot advance source timestamps during that worker's current-drain certification cycle.
+#
+# The endpoint owns a nine-minute start budget and reserves time for active polls, metrics, and its
+# response. The client allows fifteen minutes per request. If the source queue is larger than one
+# bounded pass can finish, this fallback calls it again with the same client-owned drain cursor.
 name: job-monitor
 
 on:
-  schedule:
-    # Every two hours, offset ten minutes past the Vercel floor run's own slot (0/2/4/.../22:10
-    # UTC). Widened from a single 6:10 daily pass on 2026-08-20: strong-match-notifications.yml now
-    # promises a very-strong-fit posting reaches a student within 3 hours of being FOUND, and
-    # "found" means monitored_jobs.first_seen_at, which this job is what sets. A posting can only be
-    # emailed within 3 hours of being found if it is FOUND within a couple of hours of going live,
-    # so the barrier in the notifications workflow is hollow unless this one also runs sub-daily.
-    # The two schedules stay intentionally independent: the application still gets its one Vercel-
-    # native daily poll (see vercel.json) if GitHub Actions is delayed or unavailable that day.
-    - cron: '10 */2 * * *'
+  # Railway's single-replica worker owns the recurring drain. Keep this only as an operator-run
+  # diagnostic so a second scheduler cannot advance source timestamps during certification.
   workflow_dispatch:
+    inputs:
+      drain_started_at:
+        description: Optional RFC 3339 cursor for explicitly resuming an existing drain
+        required: false
+        type: string
 
 concurrency:
   group: job-monitor
@@ -27,70 +25,98 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 120
     steps:
       - name: Drain the bounded polling queue
         env:
           INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
-          API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
+          API_BASE: ${{ vars.LITOS_API_BASE }}
+          JOB_MONITOR_DRAIN_STARTED_AT: ${{ inputs.drain_started_at }}
         run: |
           set -euo pipefail
 
-          if [ -z "${INTERNAL_CRON_SECRET}" ]; then
-            echo "::error::INTERNAL_CRON_SECRET is not set on this repository."
+          if [ -z "${INTERNAL_CRON_SECRET}" ] || [ -z "${API_BASE}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET and LITOS_API_BASE must both be set on this repository."
             exit 1
           fi
 
           completed=false
           final_status=unknown
           total_failed=0
-          drain_started_at=""
+          initialize_drain=true
+          if [ -n "${JOB_MONITOR_DRAIN_STARTED_AT}" ]; then
+            drain_started_at="$(DRAIN_CURSOR_INPUT="${JOB_MONITOR_DRAIN_STARTED_AT}" node -e '
+              const value = process.env.DRAIN_CURSOR_INPUT.trim();
+              const pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+              const timestamp = Date.parse(value);
+              if (!pattern.test(value) || !Number.isFinite(timestamp)) process.exit(1);
+              process.stdout.write(new Date(timestamp).toISOString());
+            ')" || {
+              echo "::error::drain_started_at must be an RFC 3339 timestamp with an explicit timezone."
+              exit 1
+            }
+          else
+            drain_started_at="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+          fi
+          echo "Drain cursor: ${drain_started_at}"
+
           for pass in 1 2 3 4 5; do
             response_file="response-${pass}.json"
-            http_status=409
-            for lock_attempt in $(seq 1 20); do
-              monitor_url="${API_BASE}/internal/job-monitor"
-              if [ -n "${drain_started_at}" ]; then
-                monitor_url="${monitor_url}?drain_started_at=${drain_started_at}"
+            request_ready=false
+            for request_attempt in 1 2 3; do
+              http_status=409
+              curl_exit=0
+              for lock_attempt in $(seq 1 20); do
+                monitor_url="${API_BASE}/internal/job-monitor?drain_started_at=${drain_started_at}"
+                if [ "${initialize_drain}" = true ]; then
+                  monitor_url="${monitor_url}&initialize_drain=true"
+                fi
+                set +e
+                http_status=$(curl -sS \
+                  --connect-timeout 30 \
+                  --max-time 900 \
+                  -o "${response_file}" \
+                  -w '%{http_code}' \
+                  -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+                  "${monitor_url}")
+                curl_exit=$?
+                set -e
+                if [ "${curl_exit}" -ne 0 ] || [ "${http_status}" != 409 ]; then
+                  break
+                fi
+                if [ "${lock_attempt}" -lt 20 ]; then
+                  echo "Another monitor run holds the polling lock; retrying in 15 seconds (${lock_attempt}/20)."
+                  sleep 15
+                fi
+              done
+
+              structured_monitor_response=false
+              if [ "${curl_exit}" -eq 0 ] && jq -e --arg cursor "${drain_started_at}" '
+                (.polling_complete | type) == "boolean"
+                and .drain_started_at == $cursor
+                and (.results | type) == "array"
+                and (.minimum_surfaced_jobs | type) == "number"
+              ' "${response_file}" > /dev/null 2>&1; then
+                structured_monitor_response=true
               fi
-              http_status=$(curl -sS \
-                --max-time 300 \
-                -o "${response_file}" \
-                -w '%{http_code}' \
-                -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
-                "${monitor_url}")
-              if [ "${http_status}" != 409 ]; then
+              if { [ "${http_status}" = 200 ] || [ "${http_status}" = 500 ]; } \
+                && [ "${structured_monitor_response}" = true ]; then
+                request_ready=true
+                initialize_drain=false
                 break
               fi
-              if [ "${lock_attempt}" -lt 20 ]; then
-                echo "Another monitor run holds the polling lock; retrying in 15 seconds (${lock_attempt}/20)."
-                sleep 15
+
+              if [ "${request_attempt}" -lt 3 ]; then
+                echo "::warning::Job-monitor request did not return a valid response; retrying the same cursor (${request_attempt}/3)."
               fi
             done
-            final_status="${http_status}"
-            if [ -z "${drain_started_at}" ]; then
-              drain_started_at=$(jq -r '.drain_started_at // empty' "${response_file}")
-            fi
 
-            # A 500 can be the structured board-floor alarm after a successful polling pass. Keep
-            # draining only that response. A timeout or unexpected server error has no monitor
-            # payload and must fail immediately instead of repeating expensive polling five times.
-            structured_monitor_response=false
-            if jq -e '
-              (.polling_complete | type) == "boolean"
-              and (.drain_started_at | type) == "string"
-              and (.results | type) == "array"
-              and (.minimum_surfaced_jobs | type) == "number"
-            ' "${response_file}" > /dev/null 2>&1; then
-              structured_monitor_response=true
-            fi
-            if [ "${http_status}" != 200 ] && {
-              [ "${http_status}" != 500 ] || [ "${structured_monitor_response}" != true ];
-            }; then
-              echo "::error::Job-monitor request returned HTTP ${http_status}."
-              cat "${response_file}"
+            if [ "${request_ready}" != true ]; then
+              echo "::error::Job-monitor request did not return a valid structured response for ${drain_started_at}."
+              if [ -f "${response_file}" ]; then cat "${response_file}"; fi
               exit 1
             fi
+            final_status="${http_status}"
 
             echo "pass=${pass}"
             cat "${response_file}"
@@ -102,7 +128,7 @@ jobs:
               echo "### Job monitor pass ${pass}"
               echo ""
               echo '```json'
-              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, drain_started_at, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
+              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, drain_started_at, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, certified_unique_jobs, certified_unique_grouped_roles, certified_unique_sponsor_jobs, certification_started_at, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 

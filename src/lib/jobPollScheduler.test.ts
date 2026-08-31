@@ -31,6 +31,28 @@ test('polls ordinary sources up to the configured concurrency', async () => {
   assert.equal(outcome.stopped_for_time_budget, false);
 });
 
+test('replenishes an ordinary polling slot without waiting for the whole active pool', async () => {
+  const sources = Array.from({ length: 3 }, (_, index) => ({ ats_name: 'greenhouse', index }));
+  const starts: number[] = [];
+  const completions = new Map<number, () => void>();
+  const outcomePromise = pollSourcesWithinBudget(sources, async (source) => {
+    starts.push(source.index);
+    await new Promise<void>((resolve) => { completions.set(source.index, resolve); });
+    return source.index;
+  }, { concurrency: 2 });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(starts, [0, 1]);
+  completions.get(0)!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(starts, [0, 1, 2], 'a free slot must be replenished while source 1 is still active');
+
+  completions.get(1)!();
+  completions.get(2)!();
+  const outcome = await outcomePromise;
+  assert.equal(outcome.attempted, 3);
+});
+
 test('spaces Workable request starts beyond the shared provider limit', async () => {
   let clock = 0;
   const starts: number[] = [];
@@ -45,6 +67,107 @@ test('spaces Workable request starts beyond the shared provider limit', async ()
 
   assert.deepEqual(starts, [0, WORKABLE_START_INTERVAL_MS, WORKABLE_START_INTERVAL_MS * 2]);
   assert.equal(outcome.deferred, 0);
+});
+
+test('spaces Workable starts across consecutive scheduler invocations', async () => {
+  let clock = 10_000;
+  const starts: number[] = [];
+  const now = () => clock;
+  const sleep = async (milliseconds: number) => { clock += milliseconds; };
+  const poll = async () => {
+    starts.push(clock);
+    return starts.length;
+  };
+
+  await pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+  await pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+
+  assert.deepEqual(starts, [10_000, 10_000 + WORKABLE_START_INTERVAL_MS]);
+});
+
+test('spaces concurrent Workable scheduler invocations that share a clock', async () => {
+  let clock = 20_000;
+  const starts: number[] = [];
+  const now = () => clock;
+  const sleep = async (milliseconds: number) => { clock += milliseconds; };
+  const poll = async () => {
+    starts.push(clock);
+    return starts.length;
+  };
+
+  const first = pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+  const second = pollSourcesWithinBudget([{ ats_name: 'workable' }], poll, { now, sleep });
+  await Promise.all([first, second]);
+
+  assert.deepEqual(starts, [20_000, 20_000 + WORKABLE_START_INTERVAL_MS]);
+});
+
+test('holds the final Workable cooldown before propagating a poll rejection', async () => {
+  let clock = 30_000;
+  const waits: number[] = [];
+
+  await assert.rejects(
+    pollSourcesWithinBudget([{ ats_name: 'workable' }], async () => {
+      throw new Error('workable failed');
+    }, {
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        waits.push(milliseconds);
+        clock += milliseconds;
+      },
+    }),
+    /workable failed/,
+  );
+
+  assert.deepEqual(waits, [WORKABLE_START_INTERVAL_MS]);
+  assert.equal(clock, 30_000 + WORKABLE_START_INTERVAL_MS);
+});
+
+test('starts paced Workable polls without waiting for an earlier Workable request to finish', async () => {
+  let clock = 0;
+  const starts: number[] = [];
+  const completions: Array<() => void> = [];
+  const sources = Array.from({ length: 2 }, (_, index) => ({ ats_name: 'workable', index }));
+  const outcomePromise = pollSourcesWithinBudget(sources, async () => {
+    starts.push(clock);
+    await new Promise<void>((resolve) => { completions.push(resolve); });
+    return starts.length;
+  }, {
+    concurrency: 2,
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(starts, [0, WORKABLE_START_INTERVAL_MS]);
+  completions.forEach((resolve) => resolve());
+  const outcome = await outcomePromise;
+  assert.equal(outcome.attempted, 2);
+});
+
+test('waits for every started sibling before propagating a poll rejection', async () => {
+  let settleSibling: (() => void) | undefined;
+  let rejected = false;
+  let outcomeError: unknown;
+  const outcome = pollSourcesWithinBudget([
+    { ats_name: 'greenhouse', index: 0 },
+    { ats_name: 'lever', index: 1 },
+  ], async (source) => {
+    if (source.index === 0) throw new Error('source failed');
+    await new Promise<void>((resolve) => { settleSibling = resolve; });
+    return source.index;
+  }, { concurrency: 2 }).catch((error) => {
+    rejected = true;
+    outcomeError = error;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(rejected, false, 'the scheduler must retain the caller lock while a sibling is active');
+  assert.ok(settleSibling);
+  settleSibling();
+  await outcome;
+  assert.equal(rejected, true);
+  assert.match(String(outcomeError), /source failed/);
 });
 
 test('leaves unattempted sources for the next run at the time budget', async () => {

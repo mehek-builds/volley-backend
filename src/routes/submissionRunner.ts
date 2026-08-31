@@ -285,6 +285,7 @@ import {
   storedCoverLetter,
 } from '../lib/coverLetterService';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
+import { monitoredPortalProofUnavailable } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import {
@@ -8361,6 +8362,21 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   let current = readApplicationReview(row.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
+  if (monitoredPortalProofUnavailable(row, current)) {
+    fastify.log.warn(
+      { applicationId: row.id, code: 'job_not_available' },
+      'Application preparation withheld because its monitored posting proof is unavailable',
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      attention_reason: 'This job is no longer available from its verified company source. Nothing was opened or sent.',
+      attention_categories: ['evidence_gap'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
   /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
      returns can carry a NEW resume_object_key. Everything below reads from that row, never from
      inputRow, or the run assembles a packet from the key the sweep deleted. */

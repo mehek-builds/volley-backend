@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   hasUsableDescription,
+  fetchSourceJobBatch,
   fetchSourceJobs,
   isIngestablePosting,
   isSelfDeclaredTestPosting,
@@ -518,7 +519,7 @@ test('accepts explicit empty job collections', () => {
 test('fetches and dispatches a Workable account response through the public ingestion function', async () => {
   let requestedUrl = '';
   const jobs = await fetchSourceJobs(
-    { ats_name: 'workable', board_token: 'acme team' },
+    { ats_name: 'workable', board_token: 'acme-team' },
     async (input) => {
       requestedUrl = String(input);
       return new Response(JSON.stringify({
@@ -533,7 +534,7 @@ test('fetches and dispatches a Workable account response through the public inge
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     },
   );
-  assert.equal(requestedUrl, 'https://www.workable.com/api/accounts/acme%20team?details=true');
+  assert.equal(requestedUrl, 'https://www.workable.com/api/accounts/acme-team?details=true');
   assert.equal(jobs[0]?.external_id, 'WK1');
   assert.equal(jobs[0]?.portal_company_name, 'Acme');
 });
@@ -558,6 +559,7 @@ test('Workable fetch rejects provider errors and malformed successful payloads',
 test('normalizes a Recruitee offer, preferring the direct apply link over the careers page', () => {
   const jobs = normalizeRecruiteeJobs({ offers: [{
     id: 2713947,
+    slug: 'senior-consultant',
     title: '(Senior) Consultant SAP TECH PMO (m/w/d)',
     careers_url: 'https://cbsconsulting.recruitee.com/o/senior-consultant',
     careers_apply_url: 'https://cbsconsulting.recruitee.com/o/senior-consultant/c/new',
@@ -597,6 +599,7 @@ test('fetches and dispatches a Recruitee offers response through the public inge
       requestedUrl = String(input);
       return new Response(JSON.stringify({ offers: [{
         id: 1,
+        slug: 'working-student',
         title: 'Working Student Finance',
         careers_url: 'https://cbsconsulting.recruitee.com/o/working-student',
         description: 'Werkstudent Finance role supporting the team with daily reporting tasks and analysis.',
@@ -644,8 +647,8 @@ test('Rippling deduplicates one job repeated per work location and reads the det
   assert.ok(jobs[0].posted_at instanceof Date);
 });
 
-test('Rippling drops a posting whose detail fetch fails, without losing the rest of the board', async () => {
-  const jobs = await fetchSourceJobs(
+test('Rippling separates a list-confirmed posting from a failed detail refresh', async () => {
+  const fetched = await fetchSourceJobBatch(
     { ats_name: 'rippling', board_token: 'rippling' },
     async (input) => {
       const url = String(input);
@@ -664,8 +667,147 @@ test('Rippling drops a posting whose detail fetch fails, without losing the rest
       }), { status: 200 });
     },
   );
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0].external_id, 'ok');
+  assert.deepEqual(fetched.jobs.map((job) => job.external_id), ['ok']);
+  assert.deepEqual(fetched.listed_external_ids, ['broken', 'ok']);
+  assert.deepEqual(fetched.preserve_external_ids, ['broken']);
+  assert.equal(fetched.detail_progress?.failed, 1);
+});
+
+test('Rippling rejects off-provider, cross-tenant, and cross-job posting URLs', async () => {
+  const cases = [
+    ['off-provider', 'https://attacker.example/rippling/jobs/off-provider'],
+    ['cross-tenant', 'https://ats.rippling.com/another/jobs/cross-tenant'],
+    ['cross-job', 'https://ats.rippling.com/rippling/jobs/different-id'],
+  ] as const;
+  for (const [uuid, postingUrl] of cases) {
+    const fetched = await fetchSourceJobBatch(
+      { ats_name: 'rippling', board_token: 'rippling' },
+      async (input) => String(input).endsWith('/jobs')
+        ? new Response(JSON.stringify([{ uuid }]), { status: 200 })
+        : new Response(JSON.stringify({
+          uuid,
+          name: 'Platform Engineer',
+          url: postingUrl,
+          description: { role: 'Build and operate reliable production systems for customers.' },
+        }), { status: 200 }),
+    );
+    assert.deepEqual(fetched.jobs, []);
+    assert.deepEqual(fetched.preserve_external_ids, [uuid]);
+  }
+});
+
+test('Rippling migrates a numeric detail cursor to a stable external-ID keyset', async () => {
+  const ids = ['a', 'b', 'c', 'd', 'e'];
+  const fetcher = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/jobs')) {
+      return new Response(JSON.stringify(ids.map((uuid) => ({ uuid }))), { status: 200 });
+    }
+    const uuid = url.split('/').at(-1)!;
+    return new Response(JSON.stringify({
+      uuid,
+      name: `Role ${uuid}`,
+      url: `https://ats.rippling.com/rippling/jobs/${uuid}`,
+      description: { role: `Build and operate the ${uuid} service with the product engineering team.` },
+    }), { status: 200 });
+  };
+
+  const first = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    fetcher,
+    { detail_fetch_limit: 2, detail_cursor: 0 },
+  );
+  assert.deepEqual(first.jobs.map((job) => job.external_id), ['a', 'b']);
+  assert.deepEqual(first.preserve_external_ids, ['c', 'd', 'e']);
+  assert.equal(first.detail_progress?.next_cursor, 2);
+  assert.equal(first.detail_progress?.next_cursor_key, 'b');
+  assert.equal(first.detail_progress?.cycle_complete, false);
+
+  const second = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    fetcher,
+    { detail_fetch_limit: 2, detail_cursor_key: first.detail_progress?.next_cursor_key ?? undefined },
+  );
+  assert.deepEqual(second.jobs.map((job) => job.external_id), ['c', 'd']);
+  assert.deepEqual(second.preserve_external_ids, ['a', 'b', 'e']);
+  assert.equal(second.detail_progress?.next_cursor, 4);
+  assert.equal(second.detail_progress?.cursor_key, 'b');
+  assert.equal(second.detail_progress?.next_cursor_key, 'd');
+
+  const third = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    fetcher,
+    { detail_fetch_limit: 2, detail_cursor_key: second.detail_progress?.next_cursor_key ?? undefined },
+  );
+  assert.deepEqual(third.jobs.map((job) => job.external_id), ['e']);
+  assert.equal(third.detail_progress?.next_cursor, 0);
+  assert.equal(third.detail_progress?.next_cursor_key, null);
+  assert.equal(third.detail_progress?.cycle_complete, true);
+});
+
+test('Rippling keyset cursor does not skip or repeat tail jobs when the list shifts between passes', async () => {
+  let ids = ['b', 'c', 'd'];
+  const fetcher = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/jobs')) {
+      return new Response(JSON.stringify(ids.map((uuid) => ({ uuid }))), { status: 200 });
+    }
+    const uuid = url.split('/').at(-1)!;
+    return new Response(JSON.stringify({
+      uuid,
+      name: `Role ${uuid}`,
+      url: `https://ats.rippling.com/rippling/jobs/${uuid}`,
+      description: { role: `Build and operate the ${uuid} service with the product engineering team.` },
+    }), { status: 200 });
+  };
+
+  const first = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    fetcher,
+    { detail_fetch_limit: 1, detail_cursor: 0 },
+  );
+  assert.deepEqual(first.jobs.map((job) => job.external_id), ['b']);
+  assert.equal(first.detail_progress?.next_cursor_key, 'b');
+
+  ids = ['a', 'b', 'c', 'd'];
+  const second = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    fetcher,
+    { detail_fetch_limit: 1, detail_cursor_key: first.detail_progress?.next_cursor_key ?? undefined },
+  );
+  assert.deepEqual(second.jobs.map((job) => job.external_id), ['c']);
+  assert.equal(second.detail_progress?.next_cursor_key, 'c');
+
+  ids = ['b', 'd'];
+  const third = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    fetcher,
+    { detail_fetch_limit: 1, detail_cursor_key: second.detail_progress?.next_cursor_key ?? undefined },
+  );
+  assert.deepEqual(third.jobs.map((job) => job.external_id), ['d']);
+  assert.equal(third.detail_progress?.cycle_complete, true);
+  assert.equal(third.detail_progress?.next_cursor_key, null);
+});
+
+test('Rippling stops starting detail requests at one aggregate source deadline', async () => {
+  const ids = Array.from({ length: 9 }, (_, index) => `job-${index}`);
+  const startedAt = Date.now();
+  const fetched = await fetchSourceJobBatch(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    async (input) => {
+      if (String(input).endsWith('/jobs')) {
+        return new Response(JSON.stringify(ids.map((uuid) => ({ uuid }))), { status: 200 });
+      }
+      return new Promise<Response>(() => {});
+    },
+    { detail_deadline_ms: 10 },
+  );
+  assert.ok(Date.now() - startedAt < 1_000, 'one stuck board must return inside its aggregate deadline');
+  assert.equal(fetched.detail_progress?.attempted, 8);
+  assert.equal(fetched.detail_progress?.deadline_reached, true);
+  assert.equal(fetched.detail_progress?.next_cursor, 8);
+  assert.equal(fetched.detail_progress?.next_cursor_key, 'job-7');
+  assert.deepEqual(fetched.preserve_external_ids, fetched.listed_external_ids);
 });
 
 test('Breezy reads its list endpoint for structure and the detail page\'s JSON-LD block for description', async () => {
@@ -696,8 +838,34 @@ test('Breezy reads its list endpoint for structure and the detail page\'s JSON-L
   assert.equal(jobs[0].employment_type, 'Full-time');
 });
 
-test('Breezy keeps a posting even when its detail page fails to load, just without a description', async () => {
-  const jobs = await fetchSourceJobs(
+test('Breezy resumes a detail pass strictly after its external-ID cursor', async () => {
+  const detailHtml = `<script type="application/ld+json">${JSON.stringify({
+    '@context': 'https://schema.org/',
+    '@type': 'JobPosting',
+    title: 'Engineering role',
+    description: 'Build and operate reliable production services with the product engineering team.',
+  })}</script>`;
+  const fetched = await fetchSourceJobBatch(
+    { ats_name: 'breezy', board_token: 'transparent-hiring' },
+    async (input) => {
+      if (String(input).endsWith('/json')) {
+        return new Response(JSON.stringify(['a', 'b', 'c'].map((id) => ({
+          id,
+          name: `Role ${id}`,
+          url: `https://transparent-hiring.breezy.hr/p/${id}-role`,
+        }))), { status: 200 });
+      }
+      return new Response(detailHtml, { status: 200, headers: { 'content-type': 'text/html' } });
+    },
+    { detail_fetch_limit: 1, detail_cursor_key: 'a' },
+  );
+  assert.deepEqual(fetched.jobs.map((job) => job.external_id), ['b']);
+  assert.equal(fetched.detail_progress?.cursor_key, 'a');
+  assert.equal(fetched.detail_progress?.next_cursor_key, 'b');
+});
+
+test('Breezy preserves a list-confirmed posting when its detail page fails to load', async () => {
+  const fetched = await fetchSourceJobBatch(
     { ats_name: 'breezy', board_token: 'transparent-hiring' },
     async (input) => {
       const url = String(input);
@@ -711,8 +879,37 @@ test('Breezy keeps a posting even when its detail page fails to load, just witho
       return new Response('server error', { status: 500 });
     },
   );
-  assert.equal(jobs.length, 1);
-  assert.equal(jobs[0].description, '');
+  assert.deepEqual(fetched.jobs, []);
+  assert.deepEqual(fetched.listed_external_ids, ['abc123']);
+  assert.deepEqual(fetched.preserve_external_ids, ['abc123']);
+  assert.equal(fetched.detail_progress?.failed, 1);
+});
+
+test('Breezy never follows a tenant-controlled detail URL off the expected provider posting path', async () => {
+  let detailRequests = 0;
+  const fetched = await fetchSourceJobBatch(
+    { ats_name: 'breezy', board_token: 'transparent-hiring' },
+    async (input, init) => {
+      if (String(input).endsWith('/json')) {
+        return new Response(JSON.stringify([
+          { id: 'metadata', name: 'Blocked', url: 'http://169.254.169.254/latest/meta-data' },
+          { id: 'other', name: 'Wrong tenant', url: 'https://attacker.breezy.hr/p/other-role' },
+          { id: 'safe', name: 'Safe', url: 'https://transparent-hiring.breezy.hr/p/safe-role' },
+        ]), { status: 200 });
+      }
+      detailRequests += 1;
+      assert.equal(String(input), 'https://transparent-hiring.breezy.hr/p/safe-role');
+      assert.equal(init?.redirect, 'manual');
+      return new Response('<title>redirect refused</title>', {
+        status: 302,
+        headers: { location: 'http://169.254.169.254/latest/meta-data' },
+      });
+    },
+  );
+  assert.equal(detailRequests, 1);
+  assert.deepEqual(fetched.jobs, []);
+  assert.deepEqual(fetched.listed_external_ids, ['safe']);
+  assert.deepEqual(fetched.preserve_external_ids, ['safe']);
 });
 
 test('a Greenhouse internship is classified through the DECODED description, not raw markup', () => {

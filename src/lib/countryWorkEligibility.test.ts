@@ -581,17 +581,16 @@ describe('exact-country resolver', () => {
      * the job_id branch feeds. The resolver behaviour on either side of it is pinned for real in
      * questionDiscovery.test.ts. */
     const resume = readFileSync('src/routes/resume.ts', 'utf8');
-    assert.match(
-      resume,
-      /if \(!body\.job_id && ownedCanonicalApplication\.job_id\) \{[\s\S]{0,400}?postingRow\(ownedCanonicalApplication\.job_id\)/,
-      'the canonical application\'s own posting is the fallback when the body names none',
-    );
-    assert.match(resume, /postingLocation = canonicalPosting\?\.location \?\? null/);
-    assert.match(resume, /postingPortalCountry = canonicalPosting\?\.portal_country \?\? null/);
+    const effectiveJob = resume.indexOf('const effectiveJobId = body.job_id ?? ownedCanonicalApplication?.job_id');
+    const postingRead = resume.indexOf('actionPostingRowForUser(effectiveJobId, userId)', effectiveJob);
+    assert.ok(effectiveJob >= 0 && postingRead > effectiveJob,
+      'the canonical application\'s own posting is the fallback when the body names none');
+    assert.match(resume, /postingLocation = resolvedPosting\.location/);
+    assert.match(resume, /postingPortalCountry = resolvedPosting\.portal_country/);
     // AFTER the binding gate, so the row read is provably the same posting this request is about.
     assert.ok(
-      resume.indexOf("code: 'application_context_mismatch'") < resume.indexOf('postingRow(ownedCanonicalApplication.job_id)'),
-      'the mismatch refusal must come first',
+      resume.indexOf("code: 'application_context_mismatch'") < resume.indexOf('const effectiveJobId ='),
+      'the canonical request mismatch refusal must come first',
     );
   });
 });

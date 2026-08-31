@@ -1,13 +1,11 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
+import { X509Certificate } from 'node:crypto';
 import { Client, Pool } from 'pg';
 import * as schema from './schema';
 import { isPassThroughQueryCall, withReadOnlyRetry } from './readOnlyRetry';
 
 const connectionString =
   process.env.DATABASE_URL || 'postgresql://postgres:password@localhost:5432/student_outreach';
-
-// Local Postgres needs no SSL; hosted serverless Postgres (Neon / Vercel Postgres) requires it.
-const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
 
 /** The modes pg warns about, all of which it currently treats as aliases for `verify-full`. */
 const ALIASED_SSL_MODES = new Set(['require', 'prefer', 'verify-ca']);
@@ -141,9 +139,92 @@ export function sslOptionForHost(local: boolean): undefined | { rejectUnauthoriz
   return local ? undefined : { rejectUnauthorized: true };
 }
 
+export type DatabaseConnectionConfig = {
+  connectionString: string;
+  ssl: undefined | { rejectUnauthorized: true; ca?: string };
+};
+
+/**
+ * Bound both an initial PostgreSQL connection and a checkout queued behind a full shared pool.
+ * pg otherwise defaults to waiting forever, which can outlive an HTTP request and any lock its
+ * still-running handler owns.
+ */
+export const DATABASE_CONNECTION_TIMEOUT_MS = 10_000;
+
+const CONNECTION_STRING_TLS_PARAMETERS = ['ssl', 'sslcert', 'sslkey', 'sslrootcert'] as const;
+
+function validatedRailwayRootCertificate(value: string | undefined): string {
+  if (!value?.trim()) {
+    throw new Error('DATABASE_SSL_ROOT_CERT is required for a Railway private PostgreSQL connection');
+  }
+
+  // Railway variables can carry literal newlines or their escaped representation. Normalize both
+  // to the PEM bytes Node's TLS implementation expects, without accepting a file path.
+  const certificate = value.trim().replace(/\\n/g, '\n');
+  let parsed: X509Certificate;
+  try {
+    parsed = new X509Certificate(certificate);
+  } catch {
+    throw new Error('DATABASE_SSL_ROOT_CERT must contain a valid inline PEM certificate');
+  }
+  if (!parsed.ca) {
+    throw new Error('DATABASE_SSL_ROOT_CERT must contain a CA certificate');
+  }
+  return `${certificate}\n`;
+}
+
+/**
+ * Resolve the exact connection config handed to pg.
+ *
+ * Railway's private PostgreSQL endpoint uses a private CA, so public trust roots cannot verify it.
+ * That path requires an inline CA and removes sslmode from the URL because pg gives URL TLS options
+ * precedence over the explicit ssl object. Other connection-string TLS inputs are rejected on the
+ * Railway path so they cannot replace the validated CA or disable hostname verification.
+ *
+ * Neon and local PostgreSQL retain their existing behavior.
+ */
+export function databaseConnectionConfig(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env,
+): DatabaseConnectionConfig {
+  const local = /localhost|127\.0\.0\.1/.test(value);
+  if (local) return { connectionString: value, ssl: undefined };
+
+  let url: URL | undefined;
+  try {
+    url = new URL(value);
+  } catch {
+    // Preserve the existing deferred pg parse error and verified fallback for malformed hosted URLs.
+  }
+
+  if (
+    !url ||
+    !url.hostname.toLowerCase().endsWith('.railway.internal') ||
+    url.searchParams.getAll('host').length !== 0
+  ) {
+    return {
+      connectionString: withVerifiedSslMode(value),
+      ssl: sslOptionForHost(false),
+    };
+  }
+
+  for (const parameter of CONNECTION_STRING_TLS_PARAMETERS) {
+    if (url.searchParams.has(parameter)) {
+      throw new Error(`Railway private DATABASE_URL must not set the ${parameter} query parameter`);
+    }
+  }
+  url.searchParams.delete('sslmode');
+  const ca = validatedRailwayRootCertificate(env.DATABASE_SSL_ROOT_CERT);
+  return {
+    connectionString: url.toString(),
+    ssl: { rejectUnauthorized: true, ca },
+  };
+}
+
+const poolConnectionConfig = databaseConnectionConfig(connectionString);
 const pool = new Pool({
-  connectionString: isLocal ? connectionString : withVerifiedSslMode(connectionString),
-  ssl: sslOptionForHost(isLocal),
+  ...poolConnectionConfig,
+  connectionTimeoutMillis: DATABASE_CONNECTION_TIMEOUT_MS,
   // Keep the per-instance pool tiny on serverless (one container == one or few requests)
   // to avoid exhausting the database's connection limit across many warm lambdas.
   max: process.env.VERCEL ? 1 : 10,
@@ -240,18 +321,21 @@ export function dedicatedDatabaseUrl(env: NodeJS.ProcessEnv = process.env): stri
   return url.toString();
 }
 
-/** A dedicated session for features such as PostgreSQL advisory locks that must stay connection-bound. */
-export async function connectDedicatedDatabaseClient() {
-  const directConnectionString = dedicatedDatabaseUrl();
-  const directIsLocal = /localhost|127\.0\.0\.1/.test(directConnectionString);
-  const client = new Client({
+export function dedicatedDatabaseClientConfig(env: NodeJS.ProcessEnv = process.env) {
+  const directConnectionString = dedicatedDatabaseUrl(env);
+  return {
     // Same reason as the pool above. dedicatedDatabaseUrl's own contract is unchanged: it still
     // returns the URL with every parameter the caller gave it, because DEPLOY.md documents it as
     // the direct endpoint and a caller reading it should see what they configured. Only what is
     // handed to pg is normalized.
-    connectionString: directIsLocal ? directConnectionString : withVerifiedSslMode(directConnectionString),
-    ssl: sslOptionForHost(directIsLocal),
-  });
+    ...databaseConnectionConfig(directConnectionString, env),
+    connectionTimeoutMillis: DATABASE_CONNECTION_TIMEOUT_MS,
+  };
+}
+
+/** A dedicated session for features such as PostgreSQL advisory locks that must stay connection-bound. */
+export async function connectDedicatedDatabaseClient() {
+  const client = new Client(dedicatedDatabaseClientConfig());
   await client.connect();
   return client;
 }

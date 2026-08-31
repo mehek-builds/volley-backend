@@ -55,6 +55,7 @@ import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { DiscoveredQuestion } from '../lib/questionDiscovery';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
+import { boardConditions } from './jobMonitor';
 
 const paramsSchema = z.object({ jobId: z.string().uuid() });
 
@@ -70,7 +71,9 @@ export type PostingTarget = {
 
 async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
   const [row] = await db.select({
+    external_id: monitored_jobs.external_id,
     apply_url: monitored_jobs.apply_url,
+    posting_url: monitored_jobs.posting_url,
     company_name: monitored_jobs.company_name,
     title: monitored_jobs.title,
     // Capped the same way jdMatch caps it. The JD is read here only so that the handful of
@@ -84,14 +87,32 @@ async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
   })
     .from(monitored_jobs)
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-    .where(and(eq(monitored_jobs.id, jobId), eq(career_page_sources.enabled, true)))
+    /* This endpoint can spend a managed-browser run and starts the Apply flow for any supplied
+       UUID. Only a posting that still satisfies the strict current-board evidence contract may
+       cross that action boundary. There is no owner-bound historical application read here. */
+    .where(and(
+      eq(monitored_jobs.id, jobId),
+      ...boardConditions({ sponsorOnly: false, requireVerifiedEvidence: true }),
+    ))
     .limit(1);
   if (!row) return null;
-  const applyUrl = canonicalMonitoredPortalUrl(row.apply_url, row.ats_name, row.board_token) ?? row.apply_url;
+  const applyUrl = canonicalMonitoredPortalUrl(
+    row.apply_url,
+    row.ats_name,
+    row.board_token,
+    row.external_id,
+    row.posting_url,
+  );
   if (!applyUrl) return null;
+  let portal: SupportedPortal;
+  try {
+    portal = detectPortal(applyUrl);
+  } catch {
+    return null;
+  }
   return {
     applyUrl,
-    portal: detectPortal(applyUrl),
+    portal,
     company: row.company_name,
     title: row.title,
     description: row.description ?? '',
@@ -268,7 +289,12 @@ export async function postingQuestionsRoutes(fastify: FastifyInstance) {
     }
 
     const target = await loadPostingTarget(params.jobId);
-    if (!target) return reply.status(404).send({ error: 'That posting is not on the board.' });
+    if (!target) {
+      return reply.status(409).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
 
     const stored = await loadStoredScan(params.jobId);
     let questions = stored?.questions ?? [];

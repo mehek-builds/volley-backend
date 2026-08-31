@@ -468,6 +468,31 @@ test('a subscriber with no resume is never told anything is a strong match', asy
   assert.equal(sent.length, 0);
 });
 
+test('strong-match alerts keep the strict evidence gate when the public board bypass is enabled', async () => {
+  await seedBoard();
+  await seedResume();
+  const previousGate = process.env.JOB_BOARD_VERIFIED_EVIDENCE_GATE;
+  process.env.JOB_BOARD_VERIFIED_EVIDENCE_GATE = 'disabled';
+  try {
+    await database.exec('update "monitored_jobs" set "ingest_eligible" = false');
+    const incompletePosting = await runStrongMatchSweep(new Date());
+    assert.equal(incompletePosting.matched, 0, 'a raw description is not proof that ingestion accepted it');
+    assert.equal(sent.length, 0);
+
+    await database.exec('update "monitored_jobs" set "ingest_eligible" = true');
+    await database.exec(`
+      update "career_page_sources"
+      set "logo_verification_method" = 'reviewed_company_domain_map'
+    `);
+    const unissuedLogoProof = await runStrongMatchSweep(new Date());
+    assert.equal(unissuedLogoProof.matched, 0, 'operator-provided branding is not verifier-issued proof');
+    assert.equal(sent.length, 0);
+  } finally {
+    if (previousGate === undefined) delete process.env.JOB_BOARD_VERIFIED_EVIDENCE_GATE;
+    else process.env.JOB_BOARD_VERIFIED_EVIDENCE_GATE = previousGate;
+  }
+});
+
 test('the sweep mails one posting, above the floor, and never the same one twice', async () => {
   await seedBoard();
   await seedResume();
@@ -554,10 +579,10 @@ test('a very strong fit blocked by the daily cap is still counted as a breach, n
   ].join('\n').replace(/'/g, "''");
   await database.exec(`
     insert into "monitored_jobs"
-      ("source_id", "external_id", "company_name", "title", "location", "description", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
+      ("source_id", "external_id", "company_name", "title", "location", "description", "ingest_eligible", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
     values (
       'c4f0e4a2-7c1f-4a4c-9c53-9c2b7f1a2b3c', 'job-2', 'Ramp', 'Senior Software Engineer Intern', 'New York, NY',
-      '${description}', '${description}',
+      '${description}', true, '${description}',
       'https://job-boards.greenhouse.io/ramp/jobs/2', 'https://job-boards.greenhouse.io/ramp/jobs/2',
       now() - interval '6 hours', now() - interval '6 hours'
     )
@@ -602,10 +627,10 @@ test('a stale very strong fit that loses the single-slot pick to a fresher one, 
   ].join('\n').replace(/'/g, "''");
   await database.exec(`
     insert into "monitored_jobs"
-      ("source_id", "external_id", "company_name", "title", "location", "description", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
+      ("source_id", "external_id", "company_name", "title", "location", "description", "ingest_eligible", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
     values (
       'c4f0e4a2-7c1f-4a4c-9c53-9c2b7f1a2b3c', 'job-2', 'Ramp', 'Software Engineer Intern', 'New York, NY',
-      '${description}', '${description}',
+      '${description}', true, '${description}',
       'https://job-boards.greenhouse.io/ramp/jobs/2', 'https://job-boards.greenhouse.io/ramp/jobs/2',
       now() - interval '6 hours', now() - interval '6 hours'
     )
@@ -702,15 +727,20 @@ async function seedBoard(
     'Unlimited vacation, great coffee, a passionate team.',
   ].join('\n').replace(/'/g, "''");
   await database.exec(`
-    insert into "career_page_sources" ("id", "company_name", "ats_name", "board_token", "career_url", "enabled")
-    values ('${sourceId}', 'Ramp', 'greenhouse', 'ramp', 'https://ramp.com/careers', true)
+    insert into "career_page_sources"
+      ("id", "company_name", "ats_name", "board_token", "career_url", "company_domain", "company_logo_url", "logo_verification_status", "logo_verification_method", "logo_verified_at", "enabled", "portal_company_name", "portal_name_mismatch")
+    values (
+      '${sourceId}', 'Ramp', 'greenhouse', 'ramp', 'https://ramp.com/careers', 'ramp.com',
+      'https://ramp.com/verified-company-logo.png', 'verified', 'first_party_ats_employer_logo', now(),
+      true, 'Ramp', false
+    )
   `);
   await database.exec(`
     insert into "monitored_jobs"
-      ("source_id", "external_id", "company_name", "title", "location", "description", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
+      ("source_id", "external_id", "company_name", "title", "location", "description", "ingest_eligible", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
     values (
       '${sourceId}', 'job-1', 'Ramp', 'Software Engineer Intern', 'New York, NY',
-      '${description}', '${description}',
+      '${description}', true, '${description}',
       'https://job-boards.greenhouse.io/ramp/jobs/1', 'https://job-boards.greenhouse.io/ramp/jobs/1',
       now() - interval '4 hours', ${firstSeen}
     )

@@ -65,6 +65,7 @@ import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/sub
 import { objectStorageRoutes } from './routes/objectStorage';
 import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
 import { submissionAuthorityRevisionReadiness } from './lib/submissionAuthorityRevision';
+import { encryptionRekeyRoutes } from './routes/encryptionRekey';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -127,7 +128,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   assertEncryptionKeyConfigured();
 
   const fastify = Fastify({
-    // Vercel is the only public ingress, so one proxy hop is trusted there. Local and
+    // Public logo tenant tokens share the poller's validated 128-character path-segment bound.
+    routerOptions: { maxParamLength: 128 },
+    // Railway production ingress uses an explicitly configured proxy-hop count. Local and
     // self-hosted processes do not trust spoofable forwarding headers unless configured.
     trustProxy: trustProxySetting(),
     logger: {
@@ -482,6 +485,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(applicationEmailRoutes);
   await fastify.register(resumeRoutes);
   await fastify.register(objectStorageRoutes);
+  await fastify.register(encryptionRekeyRoutes);
   await fastify.register(baseResumeRoutes);
   await fastify.register(accountRoutes);
   await fastify.register(resumeRetentionRoutes);

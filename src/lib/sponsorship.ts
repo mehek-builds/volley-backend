@@ -40,6 +40,21 @@ export type SponsorshipEvidence = 'posting_offers' | 'employer_h1b_filings';
 export type PostingSponsorship = 'offers' | 'refuses' | 'unstated';
 
 /**
+ * Which jurisdiction an affirmative posting clause actually covers.
+ *
+ * `job_country` is the ordinary case: the posting says that visa sponsorship is available, so the
+ * offer belongs to the country where that posting is located. `us_h1b` is deliberately separate.
+ * H-1B is a United States visa, and a global boilerplate H-1B sentence on a Berlin posting is not
+ * evidence that the employer will sponsor a German work permit.
+ */
+export type PostingSponsorshipScope = 'job_country' | 'us_h1b';
+
+export type PostingSponsorshipAssessment = {
+  status: PostingSponsorship;
+  scope: PostingSponsorshipScope | null;
+};
+
+/**
  * A company's legal name reduced to something two datasets can agree on.
  *
  * USCIS files entity names as they appear on the petition ("AIRBNB INC", "STRIPE INC.", "MONGODB,
@@ -99,6 +114,11 @@ const OFFERS_PATTERNS: RegExp[] = [
   /\b(?:visa|relocation\s+and\s+visa)\s+sponsorship\s+for\s+(?:this|the)\s+role\b/i,
 ];
 
+/* This is intentionally tested only on the affirmative clause that matched OFFERS_PATTERNS. A
+ * posting may mention H-1B elsewhere while making a generic sponsorship offer for this role, and
+ * that unrelated mention must not turn a German or Canadian offer into a US-only one. */
+const H1B_VISA = /\bh\s*-?\s*1\s*-?\s*b(?:s)?\b/i;
+
 /**
  * A person who needs employment sponsorship cannot satisfy a posting restricted to U.S. Persons.
  * Keep this source compatible with both JavaScript RegExp and PostgreSQL's case-insensitive regex
@@ -144,25 +164,44 @@ const NON_IMMIGRATION_SENSE =
  * reads as a refusal here, which costs six postings out of four hundred and is the right way round
  * to be wrong.
  */
-export function readPostingSponsorship(description: string | null | undefined): PostingSponsorship {
-  if (!description) return 'unstated';
+export function readPostingSponsorshipAssessment(
+  description: string | null | undefined,
+): PostingSponsorshipAssessment {
+  if (!description) return { status: 'unstated', scope: null };
   /* Postings are unbounded text and these are backtracking regexes. Capped for the same reason
      scoring is (SCORING_CHARS in routes/jobMonitor.ts): the statement, when it exists, is in the
      requirements or the legal block, never past 20k characters of one posting. */
   const text = description.slice(0, 20_000);
   /* Check before sentence splitting because the full stop in "U.S." is punctuation, not the end
      of the requirement. Splitting first would separate "U.S." from "Person status is required". */
-  if (SPONSORSHIP_BLOCKING_STATUS.test(text)) return 'refuses';
+  if (SPONSORSHIP_BLOCKING_STATUS.test(text)) return { status: 'refuses', scope: null };
   /* Only sentences that mention sponsorship at all are worth splitting hairs over, and the split is
      on sentence enders plus newlines - postings are half prose and half bullet list, and a bullet
      ends with a line break far more often than a full stop. */
   const sentences = text
     .split(/(?<=[.!?])\s+|[\n\r]+|(?:<\/(?:p|li|div|h[1-6])>)/i)
     .filter((sentence) => /sponsor/i.test(sentence) && !NON_IMMIGRATION_SENSE.test(sentence));
-  if (sentences.length === 0) return 'unstated';
-  if (sentences.some((sentence) => REFUSES_PATTERNS.some((pattern) => pattern.test(sentence)))) return 'refuses';
-  if (sentences.some((sentence) => OFFERS_PATTERNS.some((pattern) => pattern.test(sentence)))) return 'offers';
-  return 'unstated';
+  if (sentences.length === 0) return { status: 'unstated', scope: null };
+  if (sentences.some((sentence) => REFUSES_PATTERNS.some((pattern) => pattern.test(sentence)))) {
+    return { status: 'refuses', scope: null };
+  }
+  const offerSentences = sentences.filter(
+    (sentence) => OFFERS_PATTERNS.some((pattern) => pattern.test(sentence)),
+  );
+  if (offerSentences.length === 0) return { status: 'unstated', scope: null };
+
+  /* A generic affirmative clause applies to the posting's country. Only an offer made exclusively
+     in H-1B terms is US-only. This preserves a separate generic offer if a description also has an
+     H-1B-specific clause. */
+  const scope: PostingSponsorshipScope = offerSentences.every((sentence) => H1B_VISA.test(sentence))
+    ? 'us_h1b'
+    : 'job_country';
+  return { status: 'offers', scope };
+}
+
+/** Backward-compatible status-only view used by callers that do not persist evidence details. */
+export function readPostingSponsorship(description: string | null | undefined): PostingSponsorship {
+  return readPostingSponsorshipAssessment(description).status;
 }
 
 /**
@@ -178,9 +217,18 @@ export function readPostingSponsorship(description: string | null | undefined): 
 export function sponsorshipVerdict(input: {
   posting: PostingSponsorship;
   employerFilesH1b: boolean;
+  postingScope?: PostingSponsorshipScope | null;
+  jobCountry?: 'us' | 'non_us' | 'unknown' | null;
 }): { surfaced: boolean; evidence: SponsorshipEvidence | null } {
   if (input.posting === 'refuses') return { surfaced: false, evidence: null };
-  if (input.posting === 'offers') return { surfaced: true, evidence: 'posting_offers' };
+  if (input.posting === 'offers') {
+    /* A persisted H-1B clause is evidence for US roles only. Unknown remains eligible because the
+       posting may be remote in the US; a location positively identified as foreign does not. */
+    if (input.postingScope === 'us_h1b' && input.jobCountry === 'non_us') {
+      return { surfaced: false, evidence: null };
+    }
+    return { surfaced: true, evidence: 'posting_offers' };
+  }
   if (input.employerFilesH1b) return { surfaced: true, evidence: 'employer_h1b_filings' };
   return { surfaced: false, evidence: null };
 }

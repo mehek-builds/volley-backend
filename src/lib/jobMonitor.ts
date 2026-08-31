@@ -6,6 +6,7 @@ import {
   readLeverPay,
   type NormalizedPay,
 } from './compensation';
+import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 
 // The boards the job monitor may poll.
 //
@@ -240,14 +241,116 @@ function date(value: unknown): Date | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }
 
-export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
+function externalIdentifier(value: unknown): string | undefined {
+  if (typeof value === 'string') return text(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+const GREENHOUSE_ACTION_HOSTS = new Set([
+  'boards.greenhouse.io',
+  'boards.eu.greenhouse.io',
+  'job-boards.greenhouse.io',
+  'job-boards.eu.greenhouse.io',
+]);
+const LEVER_ACTION_HOSTS = new Set(['jobs.lever.co', 'jobs.eu.lever.co']);
+const ASHBY_ACTION_HOSTS = new Set(['jobs.ashbyhq.com']);
+const RECRUITEE_SLUG = /^[a-z0-9](?:[a-z0-9-]{0,198}[a-z0-9])?$/;
+
+type ExactActionUrl = { host: string; canonical: string };
+
+function encodedPathSegment(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => (
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  ));
+}
+
+/**
+ * Accept one known first-party action route and return its canonical spelling.
+ *
+ * Provider payload URLs are data, not authority. This deliberately rejects credentials, query
+ * parameters, fragments, alternate ports, encoded separators, extra path components, and vendor
+ * lookalike hosts before a row can receive the persisted ingest eligibility proof.
+ */
+function exactActionUrl(
+  raw: unknown,
+  allowedHosts: ReadonlySet<string>,
+  expectedSegments: readonly string[],
+  expectedHost?: string,
+): ExactActionUrl | null {
+  const value = text(raw);
+  if (!value || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  if (
+    url.protocol !== 'https:'
+    || url.username
+    || url.password
+    || url.port
+    || url.search
+    || url.hash
+    || !allowedHosts.has(host)
+    || (expectedHost !== undefined && host !== expectedHost)
+  ) return null;
+
+  const rawSegments = url.pathname.split('/').slice(1);
+  if (rawSegments.at(-1) === '') rawSegments.pop();
+  if (rawSegments.length !== expectedSegments.length || rawSegments.some((segment) => !segment)) {
+    return null;
+  }
+  const segments: string[] = [];
+  for (const rawSegment of rawSegments) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSegment);
+    } catch {
+      return null;
+    }
+    if (!decoded || decoded === '.' || decoded === '..' || /[/\\\u0000-\u001f\u007f]/.test(decoded)) {
+      return null;
+    }
+    segments.push(decoded);
+  }
+  if (segments.some((segment, index) => segment !== expectedSegments[index])) return null;
+  return {
+    host,
+    canonical: `https://${host}/${expectedSegments.map(encodedPathSegment).join('/')}`,
+  };
+}
+
+function strictSourceToken(
+  provider: 'greenhouse' | 'lever' | 'ashby' | 'recruitee',
+  boardToken: string | undefined,
+): string | null | undefined {
+  return boardToken === undefined
+    ? undefined
+    : normalizeExecutableAtsBoardToken(provider, boardToken);
+}
+
+export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
   const jobs = (payload as { jobs?: unknown[] } | null)?.jobs;
   if (!Array.isArray(jobs)) throw new Error('Greenhouse board returned an invalid jobs payload');
+  const expectedToken = strictSourceToken('greenhouse', boardToken);
   return jobs.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
-    const id = String(job.id ?? '').trim();
+    const id = externalIdentifier(job.id);
     const title = text(job.title);
-    const postingUrl = text(job.absolute_url);
+    let postingUrl = text(job.absolute_url);
+    if (expectedToken !== undefined) {
+      if (!expectedToken || !id) return [];
+      const action = exactActionUrl(
+        job.absolute_url,
+        GREENHOUSE_ACTION_HOSTS,
+        [expectedToken, 'jobs', id],
+      );
+      if (!action) return [];
+      postingUrl = action.canonical;
+    }
     if (!id || !title || !postingUrl) return [];
     const location = text((job.location as Record<string, unknown> | undefined)?.name);
     const departments = Array.isArray(job.departments) ? job.departments : [];
@@ -295,14 +398,30 @@ export function normalizeGreenhouseJobs(payload: unknown): NormalizedJob[] {
   });
 }
 
-export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
+export function normalizeLeverJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
   if (!Array.isArray(payload)) throw new Error('Lever board returned an invalid jobs payload');
+  const expectedToken = strictSourceToken('lever', boardToken);
   return payload.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
     const id = text(job.id);
     const title = text(job.text);
-    const postingUrl = text(job.hostedUrl);
-    const applyUrl = text(job.applyUrl) ?? postingUrl;
+    let postingUrl = text(job.hostedUrl);
+    let applyUrl = text(job.applyUrl) ?? postingUrl;
+    if (expectedToken !== undefined) {
+      if (!expectedToken || !id) return [];
+      const posting = exactActionUrl(job.hostedUrl, LEVER_ACTION_HOSTS, [expectedToken, id]);
+      if (!posting) return [];
+      const suppliedApplyUrl = text(job.applyUrl);
+      const apply = suppliedApplyUrl
+        ? exactActionUrl(suppliedApplyUrl, LEVER_ACTION_HOSTS, [expectedToken, id, 'apply'], posting.host)
+        : {
+            host: posting.host,
+            canonical: `${posting.canonical}/apply`,
+          };
+      if (!apply) return [];
+      postingUrl = posting.canonical;
+      applyUrl = apply.canonical;
+    }
     if (!id || !title || !postingUrl || !applyUrl) return [];
     const categories = (job.categories ?? {}) as Record<string, unknown>;
     const location = text(categories.location);
@@ -330,15 +449,31 @@ export function normalizeLeverJobs(payload: unknown): NormalizedJob[] {
   });
 }
 
-export function normalizeAshbyJobs(payload: unknown): NormalizedJob[] {
+export function normalizeAshbyJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
   const jobs = (payload as { jobs?: unknown[] } | null)?.jobs;
   if (!Array.isArray(jobs)) throw new Error('Ashby board returned an invalid jobs payload');
+  const expectedToken = strictSourceToken('ashby', boardToken);
   return jobs.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
-    const postingUrl = text(job.jobUrl);
-    const applyUrl = text(job.applyUrl) ?? postingUrl;
-    const id = text(job.id) ?? postingUrl;
+    let postingUrl = text(job.jobUrl);
+    let applyUrl = text(job.applyUrl) ?? postingUrl;
+    const id = text(job.id) ?? (expectedToken === undefined ? postingUrl : undefined);
     const title = text(job.title);
+    if (expectedToken !== undefined) {
+      if (!expectedToken || !id) return [];
+      const posting = exactActionUrl(job.jobUrl, ASHBY_ACTION_HOSTS, [expectedToken, id]);
+      if (!posting) return [];
+      const suppliedApplyUrl = text(job.applyUrl);
+      const apply = suppliedApplyUrl
+        ? exactActionUrl(suppliedApplyUrl, ASHBY_ACTION_HOSTS, [expectedToken, id, 'application'], posting.host)
+        : {
+            host: posting.host,
+            canonical: `${posting.canonical}/application`,
+          };
+      if (!apply) return [];
+      postingUrl = posting.canonical;
+      applyUrl = apply.canonical;
+    }
     if (!id || !title || !postingUrl || !applyUrl) return [];
     const location = text(job.location);
     const postal = ((job.address as Record<string, unknown> | undefined)?.postalAddress
@@ -631,7 +766,9 @@ export function isIngestablePosting(job: Pick<NormalizedJob, 'description' | 'ti
  *
  * If pay ever silently disappears from the board again, look here first. */
 export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_token'>): string {
-  const token = encodeURIComponent(source.board_token.trim());
+  const normalizedToken = normalizeExecutableAtsBoardToken(source.ats_name, source.board_token);
+  if (!normalizedToken) throw new Error(`Invalid ${source.ats_name} board token`);
+  const token = encodeURIComponent(normalizedToken);
   switch (source.ats_name) {
     case 'greenhouse':
       return `https://boards-api.greenhouse.io/v1/boards/${token}/jobs?content=true&pay_transparency=true`;
@@ -653,44 +790,211 @@ export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_
     /* Crelate needs this metadata request before its public jobs request. The board token is
        base64-encoded by Crelate itself, then query-encoded so padding cannot become query syntax. */
     case 'crelate':
-      return `https://jobs.crelate.com/api/candidateportal/getclientvars?onv=${encodeURIComponent(Buffer.from(source.board_token.trim(), 'utf8').toString('base64'))}`;
+      return `https://jobs.crelate.com/api/candidateportal/getclientvars?onv=${encodeURIComponent(Buffer.from(normalizedToken, 'utf8').toString('base64'))}`;
     default:
       return assertNever(source.ats_name);
   }
 }
 
+const DETAIL_FETCH_CONCURRENCY = 8;
+/* A source-level detail pass must leave enough room for the other sources selected in the same
+   monitor segment. The cursor returned with a partial pass is persisted by pollSource, so this is
+   a per-pass bound rather than a permanent first-N truncation. */
+export const MAX_DETAIL_FETCHES_PER_SOURCE = 600;
+export const DETAIL_FETCH_DEADLINE_MS = 45_000;
+const DETAIL_REQUEST_TIMEOUT_MS = 20_000;
+
+export type DetailFetchProgress = {
+  /** Resolved position in the current sorted list. Retained for numeric-cursor migration only. */
+  cursor: number;
+  /** Last attempted external ID supplied by the caller, or null for a legacy numeric pass. */
+  cursor_key?: string | null;
+  total: number;
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  remaining_in_cycle: number;
+  /** Resolved next offset in this response's list. Retained for old persisted numeric cursors. */
+  next_cursor: number;
+  /** Persist this value for the next partial pass so list insertions/removals cannot shift work. */
+  next_cursor_key?: string | null;
+  cycle_complete: boolean;
+  deadline_reached: boolean;
+};
+
 /**
- * Runs `items` through `fn` with at most `limit` in flight at once.
- *
- * Exists for Rippling and Breezy, whose list endpoints carry no usable description and force one
- * detail request per posting. Reused rather than firing every request at once, which would either
- * blow past each provider's own rate limiting or eat the whole cron's POLL_TIME_BUDGET_MS on one
- * oversized board.
+ * A list response is authoritative about which posting IDs are still open. A detail response is
+ * only enrichment. Keeping those facts separate lets the poller close IDs missing from the list
+ * without closing a listed ID merely because its description request timed out.
  */
-async function mapWithConcurrency<T, R>(
+export type SourceJobFetch = {
+  jobs: NormalizedJob[];
+  listed_external_ids: string[];
+  preserve_external_ids: string[];
+  detail_progress?: DetailFetchProgress;
+};
+
+export type DetailFetchOptions = {
+  /** Legacy array offset. A successful partial pass migrates it to next_cursor_key. */
+  detail_cursor?: number;
+  /** Stable external ID after which the next detail window starts. */
+  detail_cursor_key?: string;
+  detail_fetch_limit?: number;
+  detail_deadline_ms?: number;
+  now?: () => number;
+};
+
+type DetailMapResult<R> = {
+  results: R[];
+  attempted: number;
+  deadlineReached: boolean;
+};
+
+/** Run one contiguous cursor window, starting no work after the aggregate source deadline. */
+async function mapWithConcurrencyBeforeDeadline<T, R>(
   items: readonly T[],
   limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
+  deadlineMs: number,
+  now: () => number,
+  fn: (item: T, remainingMs: number) => Promise<R>,
+): Promise<DetailMapResult<R>> {
   const results: R[] = new Array(items.length);
+  const deadlineAt = now() + Math.max(1, deadlineMs);
   let next = 0;
+  let attempted = 0;
   async function worker(): Promise<void> {
-    for (let index = next++; index < items.length; index = next++) {
-      results[index] = await fn(items[index]);
+    while (next < items.length && now() < deadlineAt) {
+      const index = next;
+      next += 1;
+      attempted += 1;
+      results[index] = await fn(items[index], Math.max(1, deadlineAt - now()));
     }
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+  return {
+    results: results.slice(0, attempted),
+    attempted,
+    deadlineReached: attempted < items.length,
+  };
 }
 
-const DETAIL_FETCH_CONCURRENCY = 8;
-/* One oversized board (Rippling's own is 752 rows before de-duplication by posting) must not eat the
-   whole cron's time budget by itself. Sources past the cap keep polling on later runs; a cap this
-   size covers essentially every real board, so it is a backstop rather than a routine truncation. */
-const MAX_DETAIL_FETCHES_PER_SOURCE = 600;
+/**
+ * Abort and reject even when an injected test fetcher ignores AbortSignal. Native fetch observes
+ * the same signal, so production sockets are also released when the per-request or aggregate
+ * source budget expires.
+ */
+async function fetchWithinDetailDeadline<T>(
+  fetcher: typeof fetch,
+  input: string,
+  init: Omit<RequestInit, 'signal'>,
+  remainingMs: number,
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
+  const timeoutMs = Math.max(1, Math.min(DETAIL_REQUEST_TIMEOUT_MS, Math.floor(remainingMs)));
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('job detail request exceeded its source deadline'));
+      }, timeoutMs);
+      fetcher(input, { ...init, signal: controller.signal })
+        .then(consume)
+        .then(resolve, reject);
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function compareDetailKeys(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+type DetailWindow<T> = {
+  cursor: number;
+  cursorKey: string | null;
+  items: T[];
+  itemKeys: string[];
+};
+
+/**
+ * Resume strictly after the last attempted external ID. Unlike an array offset, this remains
+ * stable when jobs are inserted or removed before the cursor between partial passes.
+ */
+function boundedDetailWindow<T>(
+  items: readonly T[],
+  options: DetailFetchOptions,
+  keyOf: (item: T) => string,
+): DetailWindow<T> {
+  const requestedKey = typeof options.detail_cursor_key === 'string'
+    && options.detail_cursor_key.trim().length > 0
+    ? options.detail_cursor_key.trim()
+    : null;
+  const requestedCursor = Number.isSafeInteger(options.detail_cursor)
+    ? Math.max(0, options.detail_cursor ?? 0)
+    : 0;
+  let cursor: number;
+  if (requestedKey !== null) {
+    let low = 0;
+    let high = items.length;
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2);
+      if (compareDetailKeys(keyOf(items[middle]), requestedKey) <= 0) low = middle + 1;
+      else high = middle;
+    }
+    cursor = low;
+  } else {
+    /* Numeric markers already persisted in last_error get one compatible pass. Once at least one
+       detail is attempted, next_cursor_key upgrades the source to stable keyset pagination. */
+    cursor = requestedCursor < items.length ? requestedCursor : 0;
+  }
+  const limit = Math.max(1, Math.min(
+    MAX_DETAIL_FETCHES_PER_SOURCE,
+    options.detail_fetch_limit ?? MAX_DETAIL_FETCHES_PER_SOURCE,
+  ));
+  const selectedItems = items.slice(cursor, cursor + limit);
+  return {
+    cursor,
+    cursorKey: requestedKey,
+    items: selectedItems,
+    itemKeys: selectedItems.map(keyOf),
+  };
+}
+
+function detailProgress(
+  window: DetailWindow<unknown>,
+  total: number,
+  attempted: number,
+  succeeded: number,
+  failed: number,
+  deadlineReached: boolean,
+): DetailFetchProgress {
+  const reachedEnd = window.cursor + attempted >= total;
+  const nextCursorKey = attempted > 0
+    ? window.itemKeys[attempted - 1]
+    : window.cursorKey;
+  return {
+    cursor: window.cursor,
+    cursor_key: window.cursorKey,
+    total,
+    attempted,
+    succeeded,
+    failed,
+    remaining_in_cycle: reachedEnd ? 0 : total - window.cursor - attempted,
+    next_cursor: reachedEnd ? 0 : window.cursor + attempted,
+    next_cursor_key: reachedEnd ? null : nextCursorKey,
+    cycle_complete: reachedEnd,
+    deadline_reached: deadlineReached,
+  };
+}
 
 function detailRequestInit(): RequestInit {
-  return { headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' }, signal: AbortSignal.timeout(20_000) };
+  return {
+    headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
+    signal: AbortSignal.timeout(DETAIL_REQUEST_TIMEOUT_MS),
+  };
 }
 
 /**
@@ -703,7 +1007,8 @@ function detailRequestInit(): RequestInit {
 async function fetchRipplingJobs(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch,
-): Promise<NormalizedJob[]> {
+  options: DetailFetchOptions,
+): Promise<SourceJobFetch> {
   const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
   if (!listResponse.ok) throw new Error(`rippling board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json();
@@ -714,29 +1019,50 @@ async function fetchRipplingJobs(
     listPayload
       .map((raw) => text((raw as Record<string, unknown>).uuid))
       .filter((value): value is string => Boolean(value)),
-  )].slice(0, MAX_DETAIL_FETCHES_PER_SOURCE);
-
-  const details = await mapWithConcurrency(uuids, DETAIL_FETCH_CONCURRENCY, async (uuid) => {
+  )].sort(compareDetailKeys);
+  const window = boundedDetailWindow(uuids, options, (uuid) => uuid);
+  const detailRun = await mapWithConcurrencyBeforeDeadline(
+    window.items,
+    DETAIL_FETCH_CONCURRENCY,
+    options.detail_deadline_ms ?? DETAIL_FETCH_DEADLINE_MS,
+    options.now ?? Date.now,
+    async (uuid, remainingMs) => {
     try {
-      const response = await fetcher(
+      const outcome = await fetchWithinDetailDeadline(
+        fetcher,
         `https://api.rippling.com/platform/api/ats/v1/board/${token}/jobs/${encodeURIComponent(uuid)}`,
-        detailRequestInit(),
+        { headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' } },
+        remainingMs,
+        async (response) => ({
+          ok: response.ok,
+          raw: response.ok ? await response.json() : null,
+        }),
       );
-      return response.ok ? await response.json() : null;
+      if (!outcome.ok) return { externalId: uuid, failed: true as const };
+      return { externalId: uuid, failed: false as const, raw: outcome.raw };
     } catch {
       /* One posting's detail request failing (timeout, transient 5xx) costs that posting, not the
          whole board - the list call already succeeded, so every other row still ingests normally. */
-      return null;
+      return { externalId: uuid, failed: true as const };
     }
-  });
+    },
+  );
 
-  return details.flatMap((raw) => {
-    if (!raw || typeof raw !== 'object') return [];
-    const job = raw as Record<string, unknown>;
+  const failedIds = new Set<string>();
+  const succeededIds = new Set<string>();
+  const jobs = detailRun.results.flatMap((outcome) => {
+    if (outcome.failed || !outcome.raw || typeof outcome.raw !== 'object') {
+      failedIds.add(outcome.externalId);
+      return [];
+    }
+    const job = outcome.raw as Record<string, unknown>;
     const id = text(job.uuid);
     const title = text(job.name);
-    const postingUrl = text(job.url);
-    if (!id || !title || !postingUrl) return [];
+    const postingUrl = ripplingPostingUrl(text(job.url) ?? null, source.board_token, outcome.externalId);
+    if (!id || id !== outcome.externalId || !title || !postingUrl) {
+      failedIds.add(outcome.externalId);
+      return [];
+    }
 
     const location = Array.isArray(job.workLocations)
       ? job.workLocations
@@ -752,6 +1078,7 @@ async function fetchRipplingJobs(
     const descriptionFields = job.description as Record<string, unknown> | undefined;
     const ripplingDescription = cleanHtml(descriptionFields?.role) || cleanHtml(descriptionFields?.company);
 
+    succeededIds.add(outcome.externalId);
     return [{
       external_id: id,
       title,
@@ -765,6 +1092,40 @@ async function fetchRipplingJobs(
       posted_at: date(job.createdOn),
     }];
   });
+
+  const progress = detailProgress(
+    window,
+    uuids.length,
+    detailRun.attempted,
+    succeededIds.size,
+    failedIds.size,
+    detailRun.deadlineReached,
+  );
+  return {
+    jobs,
+    listed_external_ids: uuids,
+    preserve_external_ids: uuids.filter((id) => !succeededIds.has(id)),
+    detail_progress: progress,
+  };
+}
+
+function ripplingPostingUrl(
+  raw: string | null,
+  expectedTenant: string,
+  expectedId: string,
+): string | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'ats.rippling.com'
+      || url.username || url.password || url.port || url.search || url.hash) return null;
+    const parts = url.pathname.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+    if (parts.length !== 3 || parts[0].toLowerCase() !== expectedTenant.toLowerCase()
+      || parts[1].toLowerCase() !== 'jobs' || parts[2] !== expectedId) return null;
+    return `https://ats.rippling.com/${encodeURIComponent(expectedTenant)}/jobs/${encodeURIComponent(expectedId)}`;
+  } catch {
+    return null;
+  }
 }
 
 /* A single JobPosting entry from a Breezy detail page's schema.org JSON-LD block. */
@@ -792,6 +1153,31 @@ function extractBreezyDescription(html: string): string | undefined {
   return undefined;
 }
 
+/** Accept only the posting path for this exact Breezy tenant and list-row id. */
+export function validatedBreezyPostingUrl(
+  raw: string,
+  boardToken: string,
+  externalId: string,
+): string | null {
+  const tenant = boardToken.trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(tenant)
+    || !/^[a-z0-9-]{1,200}$/i.test(externalId)) return null;
+  try {
+    const url = new URL(raw);
+    const pathPrefix = `/p/${externalId}`;
+    const suffix = url.pathname.slice(pathPrefix.length);
+    const postingPath = url.pathname.startsWith(pathPrefix)
+      && (suffix === '' || suffix === '/' || /^-[^/]+\/?$/.test(suffix));
+    if (url.protocol !== 'https:'
+      || url.username || url.password || url.port || url.search || url.hash
+      || url.hostname.toLowerCase() !== `${tenant}.breezy.hr`
+      || !postingPath) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Breezy's list endpoint (see sourceEndpoint) carries `published_date`, a structured `location`
  * with `is_remote`, `salary`, `department` and a native `type` field, but no description at all -
@@ -802,32 +1188,60 @@ function extractBreezyDescription(html: string): string | undefined {
 async function fetchBreezyJobs(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch,
-): Promise<NormalizedJob[]> {
+  options: DetailFetchOptions,
+): Promise<SourceJobFetch> {
   const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
   if (!listResponse.ok) throw new Error(`breezy board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json();
   if (!Array.isArray(listPayload)) throw new Error('Breezy board returned an invalid jobs payload');
 
-  const candidates = listPayload.slice(0, MAX_DETAIL_FETCHES_PER_SOURCE);
-  const jobs = await mapWithConcurrency(candidates, DETAIL_FETCH_CONCURRENCY, async (raw) => {
+  const candidatesById = new Map<string, { job: Record<string, unknown>; postingUrl: string }>();
+  for (const raw of listPayload) {
     const job = raw as Record<string, unknown>;
     const id = text(job.id);
     const title = text(job.name);
-    const postingUrl = text(job.url);
-    if (!id || !title || !postingUrl) return null;
+    const rawPostingUrl = text(job.url);
+    if (!id || !title || !rawPostingUrl || candidatesById.has(id)) continue;
+    const postingUrl = validatedBreezyPostingUrl(rawPostingUrl, source.board_token, id);
+    if (!postingUrl) continue;
+    candidatesById.set(id, { job, postingUrl });
+  }
+  const candidates = [...candidatesById.entries()]
+    .sort(([left], [right]) => compareDetailKeys(left, right))
+    .map(([externalId, candidate]) => ({ externalId, ...candidate }));
+  const window = boundedDetailWindow(candidates, options, (candidate) => candidate.externalId);
+  const detailRun = await mapWithConcurrencyBeforeDeadline(
+    window.items,
+    DETAIL_FETCH_CONCURRENCY,
+    options.detail_deadline_ms ?? DETAIL_FETCH_DEADLINE_MS,
+    options.now ?? Date.now,
+    async (candidate, remainingMs) => {
+      let breezyDescription = '';
+      try {
+        const detailBody = await fetchWithinDetailDeadline(
+          fetcher,
+          candidate.postingUrl,
+          {
+            headers: { Accept: 'text/html', 'User-Agent': 'LitosJobMonitor/1.0' },
+            redirect: 'manual',
+          },
+          remainingMs,
+          async (response) => response.ok ? await response.text() : '',
+        );
+        breezyDescription = cleanHtml(extractBreezyDescription(detailBody));
+      } catch {
+        /* One failed detail request is represented below as list-confirmed preservation. */
+      }
+      return { ...candidate, breezyDescription };
+    },
+  );
 
-    let breezyDescription = '';
-    try {
-      const detailResponse = await fetcher(postingUrl, {
-        headers: { Accept: 'text/html', 'User-Agent': 'LitosJobMonitor/1.0' },
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (detailResponse.ok) breezyDescription = cleanHtml(extractBreezyDescription(await detailResponse.text()));
-    } catch {
-      /* Same reasoning as Rippling above: one posting's detail page failing to load costs this one
-         row, not the source's whole poll. */
-    }
-
+  const succeededIds = new Set<string>();
+  const jobs = detailRun.results.flatMap(({ externalId, job, postingUrl, breezyDescription }) => {
+    if (!breezyDescription) return [];
+    const id = text(job.id);
+    const title = text(job.name);
+    if (!id || id !== externalId || !title) return [];
     const type = job.type as Record<string, unknown> | undefined;
     const location = job.location as Record<string, unknown> | undefined;
     const locations = Array.isArray(job.locations) ? job.locations : [];
@@ -838,7 +1252,8 @@ async function fetchBreezyJobs(
     const isRemote = location?.is_remote === true
       || locations.some((item) => (item as Record<string, unknown>).is_remote === true);
 
-    const result: NormalizedJob = {
+    succeededIds.add(externalId);
+    return [{
       external_id: id,
       title,
       location: locationName,
@@ -849,26 +1264,58 @@ async function fetchBreezyJobs(
       posting_url: postingUrl,
       remote: isRemote || /\bremote\b/i.test(locationName ?? ''),
       posted_at: date(job.published_date),
-    };
-    return result;
+    }];
   });
 
-  return jobs.filter((job): job is NormalizedJob => job !== null);
+  const listedExternalIds = candidates.map((candidate) => candidate.externalId);
+  const progress = detailProgress(
+    window,
+    candidates.length,
+    detailRun.attempted,
+    succeededIds.size,
+    detailRun.attempted - succeededIds.size,
+    detailRun.deadlineReached,
+  );
+  return {
+    jobs,
+    listed_external_ids: listedExternalIds,
+    preserve_external_ids: listedExternalIds.filter((id) => !succeededIds.has(id)),
+    detail_progress: progress,
+  };
 }
 
 /** Recruitee's `/api/offers/` list endpoint carries the full posting - title, HTML description,
  *  location, department, an ISO country code and both a careers page and a direct apply link - so,
  *  unlike Rippling and Breezy, this fits the same single-fetch-then-normalize shape as the first
  *  four boards. Verified live 2026-08-29 against cbsconsulting.recruitee.com (201 offers). */
-export function normalizeRecruiteeJobs(payload: unknown): NormalizedJob[] {
+export function normalizeRecruiteeJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
   const offers = (payload as { offers?: unknown[] } | null)?.offers;
   if (!Array.isArray(offers)) throw new Error('Recruitee board returned an invalid jobs payload');
+  const expectedToken = strictSourceToken('recruitee', boardToken);
   return offers.flatMap((raw) => {
     const job = raw as Record<string, unknown>;
-    const id = job.id !== undefined && job.id !== null ? String(job.id) : undefined;
+    const id = externalIdentifier(job.id);
     const title = text(job.title);
-    const postingUrl = text(job.careers_url);
-    const applyUrl = text(job.careers_apply_url) ?? postingUrl;
+    let postingUrl = text(job.careers_url);
+    let applyUrl = text(job.careers_apply_url) ?? postingUrl;
+    if (expectedToken !== undefined) {
+      const slug = text(job.slug);
+      if (!expectedToken || !id || !slug || !RECRUITEE_SLUG.test(slug)) return [];
+      const expectedHost = `${expectedToken}.recruitee.com`;
+      const hosts = new Set([expectedHost]);
+      const posting = exactActionUrl(job.careers_url, hosts, ['o', slug], expectedHost);
+      if (!posting) return [];
+      const suppliedApplyUrl = text(job.careers_apply_url);
+      const apply = suppliedApplyUrl
+        ? exactActionUrl(suppliedApplyUrl, hosts, ['o', slug, 'c', 'new'], expectedHost)
+        : {
+            host: expectedHost,
+            canonical: `${posting.canonical}/c/new`,
+          };
+      if (!apply) return [];
+      postingUrl = posting.canonical;
+      applyUrl = apply.canonical;
+    }
     if (!id || !title || !postingUrl || !applyUrl) return [];
 
     const location = text(job.city) && text(job.country)
@@ -943,7 +1390,8 @@ function crelateTags(value: unknown): string | undefined {
 async function fetchCrelateJobs(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch,
-): Promise<NormalizedJob[]> {
+  options: DetailFetchOptions,
+): Promise<SourceJobFetch> {
   const varsResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
   if (!varsResponse.ok) throw new Error(`crelate board returned HTTP ${varsResponse.status}`);
   const varsPayload = await varsResponse.json();
@@ -956,7 +1404,8 @@ async function fetchCrelateJobs(
   const organizationDisplayName = text(vars.ORG_DISPLAY_NAME) ?? organizationName;
   const baseUrl = text(vars.BASE_URL) ?? 'jobs.crelate.com';
   const portalVersion = text(vars.PORTAL_VERSION);
-  if (!organizationId || !organizationName || !CRELATE_ORG_NAME.test(organizationName)) {
+  if (!organizationId || !organizationName || !CRELATE_ORG_NAME.test(organizationName)
+    || organizationName.toLowerCase() !== source.board_token.toLowerCase()) {
     throw new Error('Crelate board returned invalid organization metadata');
   }
   /* The autonomous submission adapter is intentionally scoped to this first-party, unversioned
@@ -992,26 +1441,48 @@ async function fetchCrelateJobs(
     if (!listedByCode.has(jobCode.toLowerCase())) listedByCode.set(jobCode.toLowerCase(), listed);
   }
 
-  const details = await mapWithConcurrency(
-    [...listedByCode.entries()],
+  const candidates = [...listedByCode.entries()]
+    .sort(([left], [right]) => compareDetailKeys(left, right))
+    .map(([requestedCode, listed]) => ({
+      requestedCode,
+      listed,
+      /* JobCode is the public posting identity used by both detail and apply routes. The opaque Id
+         field is not constrained unique by Crelate and cannot safely key our source rows. */
+      externalId: requestedCode,
+    }));
+  const window = boundedDetailWindow(candidates, options, (candidate) => candidate.externalId);
+  const detailRun = await mapWithConcurrencyBeforeDeadline(
+    window.items,
     DETAIL_FETCH_CONCURRENCY,
-    async ([requestedCode, listed]) => {
+    options.detail_deadline_ms ?? DETAIL_FETCH_DEADLINE_MS,
+    options.now ?? Date.now,
+    async ({ requestedCode, listed, externalId }, remainingMs) => {
       try {
-        const response = await fetcher(
+        const outcome = await fetchWithinDetailDeadline(
+          fetcher,
           crelateApiEndpoint('GetJob', { JobCode: text(listed.JobCode) }),
-          detailRequestInit(),
+          { headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' } },
+          remainingMs,
+          async (response) => ({
+            ok: response.ok,
+            payload: response.ok ? await response.json() : null,
+          }),
         );
-        if (!response.ok) return null;
-        const payload = await response.json() as {
+        if (!outcome.ok) return { externalId, job: null };
+        const payload = outcome.payload as {
           Job?: unknown;
           IsError?: unknown;
         };
         if (!payload || typeof payload !== 'object' || payload.IsError === true
-          || !payload.Job || typeof payload.Job !== 'object' || Array.isArray(payload.Job)) return null;
+          || !payload.Job || typeof payload.Job !== 'object' || Array.isArray(payload.Job)) {
+          return { externalId, job: null };
+        }
         const job = payload.Job as CrelateJob;
         const jobCode = text(job.JobCode);
         const title = text(job.Title) ?? text(listed.Title);
-        if (!jobCode || jobCode.toLowerCase() !== requestedCode || !title) return null;
+        if (!jobCode || jobCode.toLowerCase() !== requestedCode || !title) {
+          return { externalId, job: null };
+        }
 
         const description = cleanHtml(job.Description);
         const city = text(job.City) ?? text(listed.City);
@@ -1023,7 +1494,7 @@ async function fetchCrelateJobs(
         const applyUrl = `https://jobs.crelate.com${portalPath}/apply/${encodeURIComponent(jobCode)}`;
 
         const normalized: NormalizedJob = {
-          external_id: text(job.Id) ?? text(listed.Id) ?? jobCode,
+          external_id: externalId,
           title,
           location,
           department: crelateTags(job.Tags) ?? crelateTags(listed.Tags),
@@ -1038,40 +1509,115 @@ async function fetchCrelateJobs(
             ?? text(listed.CompanyName)
             ?? organizationDisplayName,
         };
-        return normalized;
+        return { externalId, job: normalized };
       } catch {
         /* One missing, malformed, or timed-out detail must not suppress every other current role.
            It is still excluded itself because the list response contains only a truncated body. */
-        return null;
+        return { externalId, job: null };
       }
     },
   );
 
-  return details.filter((job): job is NormalizedJob => job !== null);
+  const jobs = detailRun.results
+    .map((outcome) => outcome.job)
+    .filter((job): job is NormalizedJob => job !== null);
+  const succeededIds = new Set(jobs.map((job) => job.external_id));
+  const listedExternalIds = candidates.map((candidate) => candidate.externalId);
+  const progress = detailProgress(
+    window,
+    candidates.length,
+    detailRun.attempted,
+    succeededIds.size,
+    detailRun.attempted - succeededIds.size,
+    detailRun.deadlineReached,
+  );
+  return {
+    jobs,
+    listed_external_ids: listedExternalIds,
+    preserve_external_ids: listedExternalIds.filter((id) => !succeededIds.has(id)),
+    detail_progress: progress,
+  };
 }
 
-export async function fetchSourceJobs(
+function uniqueListedExternalIds(
+  records: readonly unknown[],
+  identity: (record: unknown) => string | undefined,
+): string[] {
+  return [...new Set(records.map(identity).filter((id): id is string => Boolean(id)))];
+}
+
+export async function fetchSourceJobBatch(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch = fetch,
-): Promise<NormalizedJob[]> {
+  options: DetailFetchOptions = {},
+): Promise<SourceJobFetch> {
+  const boardToken = normalizeExecutableAtsBoardToken(source.ats_name, source.board_token);
+  if (!boardToken) throw new Error(`Invalid ${source.ats_name} board token`);
+  const executableSource = { ...source, board_token: boardToken };
   // Rippling and Breezy cannot go through the generic single-fetch path below: neither one's list
   // endpoint carries a usable description, so both need their own multi-request fetch.
-  if (source.ats_name === 'rippling') return fetchRipplingJobs(source, fetcher);
-  if (source.ats_name === 'breezy') return fetchBreezyJobs(source, fetcher);
-  if (source.ats_name === 'crelate') return fetchCrelateJobs(source, fetcher);
+  if (source.ats_name === 'rippling') return fetchRipplingJobs(executableSource, fetcher, options);
+  if (source.ats_name === 'breezy') return fetchBreezyJobs(executableSource, fetcher, options);
+  if (source.ats_name === 'crelate') return fetchCrelateJobs(executableSource, fetcher, options);
 
-  const response = await fetcher(sourceEndpoint(source), {
+  const response = await fetcher(sourceEndpoint(executableSource), {
     headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
     signal: AbortSignal.timeout(20_000),
   });
   if (!response.ok) throw new Error(`${source.ats_name} board returned HTTP ${response.status}`);
   const payload = await response.json();
+  let jobs: NormalizedJob[];
+  let listedExternalIds: string[] | undefined;
   switch (source.ats_name) {
-    case 'greenhouse': return normalizeGreenhouseJobs(payload);
-    case 'lever': return normalizeLeverJobs(payload);
-    case 'ashby': return normalizeAshbyJobs(payload);
-    case 'workable': return normalizeWorkableJobs(payload);
-    case 'recruitee': return normalizeRecruiteeJobs(payload);
+    case 'greenhouse': {
+      jobs = normalizeGreenhouseJobs(payload, boardToken);
+      listedExternalIds = uniqueListedExternalIds(
+        (payload as { jobs: unknown[] }).jobs,
+        (raw) => externalIdentifier((raw as Record<string, unknown>).id),
+      );
+      break;
+    }
+    case 'lever': {
+      jobs = normalizeLeverJobs(payload, boardToken);
+      listedExternalIds = uniqueListedExternalIds(
+        payload as unknown[],
+        (raw) => externalIdentifier((raw as Record<string, unknown>).id),
+      );
+      break;
+    }
+    case 'ashby': {
+      jobs = normalizeAshbyJobs(payload, boardToken);
+      listedExternalIds = uniqueListedExternalIds(
+        (payload as { jobs: unknown[] }).jobs,
+        (raw) => externalIdentifier((raw as Record<string, unknown>).id),
+      );
+      break;
+    }
+    case 'workable': jobs = normalizeWorkableJobs(payload); break;
+    case 'recruitee': {
+      jobs = normalizeRecruiteeJobs(payload, boardToken);
+      listedExternalIds = uniqueListedExternalIds(
+        (payload as { offers: unknown[] }).offers,
+        (raw) => externalIdentifier((raw as Record<string, unknown>).id),
+      );
+      break;
+    }
     default: return assertNever(source.ats_name);
   }
+  return {
+    jobs,
+    /* The raw provider identity list remains authoritative for the empty-board guard and closure.
+       A row with a malformed action URL is listed but intentionally absent from jobs, so it is
+       deactivated instead of receiving ingest_eligible=true or making a nonempty board look empty. */
+    listed_external_ids: listedExternalIds ?? jobs.map((job) => job.external_id),
+    preserve_external_ids: [],
+  };
+}
+
+/** Backward-compatible array-only view for callers that do not persist polling state. */
+export async function fetchSourceJobs(
+  source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
+  fetcher: typeof fetch = fetch,
+): Promise<NormalizedJob[]> {
+  return (await fetchSourceJobBatch(source, fetcher)).jobs;
 }
