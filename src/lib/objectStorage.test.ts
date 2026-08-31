@@ -165,9 +165,14 @@ test('Railway public logo writes use the exact key, MIME type, and immutable cac
     const digest = createHash('sha256').update(body).digest('hex');
     const key = `company-logos/rippling/utility/${digest}.png`;
     let command: PutObjectCommand | undefined;
+    let requestOptions: { abortSignal?: AbortSignal } | undefined;
+    const controller = new AbortController();
     const stored = await putPublicLogoObject(key, body, 'image/png', {
-      railwayPut: async (input) => { command = input; },
-    });
+      railwayPut: async (input, options) => {
+        command = input;
+        requestOptions = options;
+      },
+    }, controller.signal);
 
     assert.ok(command);
     assert.equal(command.input.Bucket, 'litos-files');
@@ -175,6 +180,7 @@ test('Railway public logo writes use the exact key, MIME type, and immutable cac
     assert.deepEqual(command.input.Body, body);
     assert.equal(command.input.ContentType, 'image/png');
     assert.equal(command.input.CacheControl, 'public, max-age=31536000, immutable');
+    assert.equal(requestOptions?.abortSignal, controller.signal);
     assert.deepEqual(stored, {
       pathname: key,
       url: `https://api.trylitos.com/storage/logo/rippling/utility/${digest}.png`,

@@ -232,6 +232,8 @@ export const LOGO_VERIFICATION_PROVIDER_CANDIDATES = 4;
 export const LOGO_VERIFICATION_WORKABLE_CANDIDATES = 2;
 export const LOGO_VERIFICATION_CRELATE_CANDIDATES = 1;
 export const LOGO_VERIFICATION_CRELATE_CONCURRENCY = 1;
+/** Leave Railway a full minute to receive the bounded failure response and close the request. */
+export const LOGO_VERIFICATION_REQUEST_TIMEOUT_MS = 4 * 60 * 1000;
 export const CRELATE_LOGO_CIRCUIT_OPEN_MS = 15 * 60 * 1000;
 export const CRELATE_LOGO_CLAIM_LEASE_MS = 5 * 60 * 1000;
 export const CRELATE_LOGO_429_EXHAUSTED_REASON = 'ats:http_429_exhausted';
@@ -410,14 +412,22 @@ type ProviderAwareLogoQueueOptions = {
   concurrency?: number;
   providerConcurrency?: number;
   workableStartIntervalMs?: number;
+  timeoutMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
 };
 
+export class LogoVerificationRequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Logo verification exceeded its ${timeoutMs}ms request budget`);
+    this.name = 'LogoVerificationRequestTimeoutError';
+  }
+}
+
 /** Bound the whole verifier and each ATS family while spacing the provider with a shared limit. */
 export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
   candidates: readonly T[],
-  operation: (candidate: T) => Promise<void>,
+  operation: (candidate: T, signal: AbortSignal) => Promise<void>,
   options: ProviderAwareLogoQueueOptions = {},
 ): Promise<void> {
   if (candidates.length === 0) return;
@@ -430,6 +440,9 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
     0,
     options.workableStartIntervalMs ?? LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
   );
+  const timeoutMs = Math.max(1, options.timeoutMs ?? LOGO_VERIFICATION_REQUEST_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutError = new LogoVerificationRequestTimeoutError(timeoutMs);
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
     setTimeout(resolve, milliseconds);
@@ -442,6 +455,7 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
   let workableTimerPending = false;
   let completionTimerPending = false;
 
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     let hasFailure = false;
@@ -477,6 +491,11 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
          active, because either return would release cross-replica pacing protection too early. */
       rejectWhenProviderBarrierClears();
     };
+    const onTimeout = () => {
+      controller.abort(timeoutError);
+      fail(timeoutError);
+    };
+    timeout = setTimeout(onTimeout, timeoutMs);
     const schedule = () => {
       if (settled) return;
       if (hasFailure) {
@@ -519,7 +538,7 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         }
         let task: Promise<void>;
         try {
-          task = operation(candidate);
+          task = operation(candidate, controller.signal);
         } catch (error) {
           task = Promise.reject(error);
         }
@@ -549,6 +568,8 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
       }
     };
     schedule();
+  }).finally(() => {
+    if (timeout) clearTimeout(timeout);
   });
 }
 const VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD =
@@ -4152,7 +4173,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       grace_preserved: boolean;
       crelate_429_exhausted: boolean;
     }> = [];
-    await runProviderAwareLogoQueue(candidates, async (candidate) => {
+    await runProviderAwareLogoQueue(candidates, async (candidate, signal) => {
         const candidateMethod = candidate.logo_verification_method;
         if (!candidateMethod) {
           if (candidate.ats_name === 'crelate' && crelateClaim) {
@@ -4174,7 +4195,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             ats_name: candidate.ats_name as SupportedJobBoard,
             board_token: candidate.board_token,
             identity_mode: sourceLogoIdentityMode(candidateMethod),
-          }, fetch, persistDurableAtsLogo);
+          }, fetch, (asset) => persistDurableAtsLogo(asset, undefined, signal), { signal });
           if (atsResult.verified) {
             return {
               verified: true,
@@ -4188,7 +4209,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             const homepageResult = await verifyCatalogSourceLogo({
               company_name: atsResult.company_name,
               company_domain: candidate.company_domain,
-            });
+            }, { signal });
             return homepageResult.verified
               ? {
                 verified: true,
@@ -4397,12 +4418,22 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         workable_candidates: LOGO_VERIFICATION_WORKABLE_CANDIDATES,
         crelate: LOGO_VERIFICATION_CRELATE_CONCURRENCY,
         crelate_candidates: LOGO_VERIFICATION_CRELATE_CANDIDATES,
+        request_timeout_ms: LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
       },
       crelate_circuit: {
         state: crelateBlock.reason,
         retry_at: crelateBlock.blockedUntil?.toISOString() ?? null,
       },
     });
+    } catch (error) {
+      if (error instanceof LogoVerificationRequestTimeoutError) {
+        return reply.status(503).send({
+          error: 'Logo verification reached its bounded request deadline. Retry the remaining queue.',
+          verification_complete: false,
+          request_timeout_ms: error.timeoutMs,
+        });
+      }
+      throw error;
     } finally {
       await releaseMonitorLock();
     }

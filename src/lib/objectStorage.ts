@@ -32,7 +32,10 @@ type PublicLogoVercelPut = (
 ) => Promise<{ url: string; pathname: string }>;
 
 export type PublicLogoPutDependencies = {
-  railwayPut?: (command: PutObjectCommand) => Promise<unknown>;
+  railwayPut?: (
+    command: PutObjectCommand,
+    options?: { abortSignal?: AbortSignal },
+  ) => Promise<unknown>;
   vercelPut?: PublicLogoVercelPut;
 };
 
@@ -245,7 +248,9 @@ export async function putPublicLogoObject(
   body: Buffer,
   contentType: string,
   dependencies: PublicLogoPutDependencies = {},
+  signal?: AbortSignal,
 ): Promise<{ url: string; pathname: string }> {
+  signal?.throwIfAborted();
   const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
   const expectedContentType = publicLogoContentType(objectKey);
   const actualDigest = createHash('sha256').update(body).digest('hex');
@@ -262,6 +267,7 @@ export async function putPublicLogoObject(
       allowOverwrite: true,
       cacheControlMaxAge: PUBLIC_LOGO_CACHE_SECONDS,
     });
+    signal?.throwIfAborted();
     if (blob.pathname !== objectKey || !isVercelPublicLogoUrlForKey(blob.url, objectKey)) {
       throw new Error('Public logo storage returned a mismatched object path');
     }
@@ -275,7 +281,11 @@ export async function putPublicLogoObject(
     ContentType: contentType,
     CacheControl: PUBLIC_LOGO_CACHE_CONTROL,
   });
-  await (dependencies.railwayPut ? dependencies.railwayPut(command) : client().send(command));
+  const requestOptions = signal ? { abortSignal: signal } : undefined;
+  await (dependencies.railwayPut
+    ? dependencies.railwayPut(command, requestOptions)
+    : client().send(command, requestOptions));
+  signal?.throwIfAborted();
   return { url: publicLogoObjectUrl(objectKey), pathname: objectKey };
 }
 

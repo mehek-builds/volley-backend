@@ -14,6 +14,7 @@ type DurableLogoPutOptions = {
   addRandomSuffix: false;
   contentType: string;
   cacheControlMaxAge: number;
+  signal?: AbortSignal;
 };
 
 export type DurableLogoUploader = (
@@ -36,13 +37,14 @@ function defaultUploader(
   body: Buffer,
   options: DurableLogoPutOptions,
 ): Promise<{ url: string }> {
-  return putPublicLogoObject(pathname, body, options.contentType);
+  return putPublicLogoObject(pathname, body, options.contentType, {}, options.signal);
 }
 
 /** Copy a proven expiring ATS image to the same durable public store used by Litos documents. */
 export async function persistDurableAtsLogo(
   asset: DurableAtsLogoAsset,
   uploader: DurableLogoUploader = defaultUploader,
+  signal?: AbortSignal,
 ): Promise<string> {
   /* Rippling is the only current provider whose first-party logo URL expires. Keeping this narrow
      prevents a future caller from laundering an arbitrary provider URL through controlled storage. */
@@ -59,6 +61,7 @@ export async function persistDurableAtsLogo(
     addRandomSuffix: false,
     contentType,
     cacheControlMaxAge: ONE_YEAR_SECONDS,
+    ...(signal ? { signal } : {}),
   });
 
   let url: URL;

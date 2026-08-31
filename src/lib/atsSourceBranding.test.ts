@@ -396,3 +396,28 @@ test('preserves a retryable image status after first-party identity succeeds', a
     company_name: 'Acme',
   });
 });
+
+test('an aggregate verifier deadline aborts a provider request that never resolves', async () => {
+  const controller = new AbortController();
+  let providerSignal: AbortSignal | undefined;
+  const verification = verifyAtsSourceBranding(
+    candidate('lever', 'acme', 'Acme'),
+    ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        providerSignal = init?.signal ?? undefined;
+        assert.ok(providerSignal);
+        const rejectForAbort = () => reject(providerSignal?.reason);
+        if (providerSignal.aborted) rejectForAbort();
+        else providerSignal.addEventListener('abort', rejectForAbort, { once: true });
+      })
+    )) as typeof fetch,
+    undefined,
+    { signal: controller.signal },
+  );
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort(new DOMException('request budget elapsed', 'TimeoutError'));
+
+  assert.deepEqual(await verification, { verified: false, reason: 'timeout' });
+  assert.equal(providerSignal?.aborted, true);
+});

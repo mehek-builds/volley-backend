@@ -93,3 +93,24 @@ test('preserves transient homepage and icon status reasons for the retry lane', 
   );
   assert.deepEqual(iconPressure, { verified: false, reason: 'http_503' });
 });
+
+test('an aggregate verifier deadline stops a DNS lookup that never resolves', async () => {
+  const controller = new AbortController();
+  let lookupStarted = false;
+  const verification = verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      signal: controller.signal,
+      resolveHost: async () => {
+        lookupStarted = true;
+        return new Promise<string[]>(() => undefined);
+      },
+    },
+  );
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort(new DOMException('request budget elapsed', 'TimeoutError'));
+
+  assert.equal(lookupStarted, true);
+  assert.deepEqual(await verification, { verified: false, reason: 'timeout' });
+});

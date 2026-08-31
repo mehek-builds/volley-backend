@@ -11,8 +11,10 @@ import {
   LOGO_VERIFICATION_PROVIDER_CANDIDATES,
   LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
   LOGO_VERIFICATION_REQUEST_CANDIDATES,
+  LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
   LOGO_VERIFICATION_WORKABLE_CANDIDATES,
   LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
+  LogoVerificationRequestTimeoutError,
   boundedLogoVerificationCandidates,
   crelateLogoFailureTransition,
   logoVerificationQueueOrder,
@@ -21,6 +23,7 @@ import {
   sourceLogoIdentityMode,
 } from './jobMonitor';
 import { normalizeEmployerCertificationIdentity } from '../lib/jobCertificationFingerprint';
+import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 
 test('polling eligibility requires current verified logo proof and an autonomous matched source', () => {
   const query = db.select().from(career_page_sources)
@@ -180,6 +183,58 @@ test('logo queue retains the final Workable barrier after an ordinary provider f
   assert.equal(clock, 500, 'failure must not release the route before the final provider barrier');
 });
 
+test('logo request timeout aborts a stuck provider fetch before releasing the advisory lock', async () => {
+  const queries: string[] = [];
+  let clientEnded = 0;
+  const releaseMonitorLock = await tryAcquireJobMonitorLock(async () => ({
+    query: async (text: string) => {
+      queries.push(text);
+      return { rows: [text.includes('unlock') ? { released: true } : { acquired: true }] };
+    },
+    end: async () => { clientEnded += 1; },
+  }));
+  assert.ok(releaseMonitorLock);
+
+  let fetchStarted = false;
+  let fetchAborted = false;
+  const neverSettlingFetcher = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) => (
+    new Promise<Response>((_resolve, reject) => {
+      fetchStarted = true;
+      const signal = init?.signal;
+      assert.ok(signal);
+      const rejectForAbort = () => {
+        fetchAborted = true;
+        reject(signal.reason);
+      };
+      if (signal.aborted) rejectForAbort();
+      else signal.addEventListener('abort', rejectForAbort, { once: true });
+    })
+  )) as typeof fetch;
+
+  try {
+    await assert.rejects(runProviderAwareLogoQueue(
+      [{ ats_name: 'greenhouse' }],
+      async (_candidate, signal) => {
+        await neverSettlingFetcher('https://job-boards.greenhouse.io/example', { signal });
+      },
+      { timeoutMs: 20 },
+    ), (error) => (
+      error instanceof LogoVerificationRequestTimeoutError
+      && error.timeoutMs === 20
+    ));
+  } finally {
+    await releaseMonitorLock();
+  }
+
+  assert.equal(fetchStarted, true);
+  assert.equal(fetchAborted, true, 'the route deadline must reach every started provider fetch');
+  assert.deepEqual(queries, [
+    'select pg_try_advisory_lock($1) as acquired',
+    'select pg_advisory_unlock($1) as released',
+  ]);
+  assert.equal(clientEnded, 1, 'the timeout path must close the lock-owning database session');
+});
+
 test('logo verification shares the monitor advisory lock across API replicas', () => {
   const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
   const handler = source.slice(
@@ -194,6 +249,9 @@ test('logo verification shares the monitor advisory lock across API replicas', (
   assert.ok(firstQueueRead > acquire, 'the lock must cover every logo queue read, claim, and write');
   assert.match(handler, /if \(!releaseMonitorLock\) \{[\s\S]*reply\.status\(409\)/);
   assert.match(handler, /try \{[\s\S]*\} finally \{\s*await releaseMonitorLock\(\);/);
+  assert.match(handler, /runProviderAwareLogoQueue\(candidates, async \(candidate, signal\) =>/);
+  assert.match(handler, /error instanceof LogoVerificationRequestTimeoutError[\s\S]*status\(503\)/);
+  assert.ok(LOGO_VERIFICATION_REQUEST_TIMEOUT_MS < 5 * 60 * 1000);
   assert.ok(release > firstQueueRead, 'the lock must be released only after queue work settles');
 });
 

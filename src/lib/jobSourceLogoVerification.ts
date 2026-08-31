@@ -22,6 +22,7 @@ type ResolveHost = (hostname: string) => Promise<string[]>;
 type VerificationOptions = {
   fetcher?: typeof fetch;
   resolveHost?: ResolveHost;
+  signal?: AbortSignal;
 };
 
 const USER_AGENT = 'LitosCompanyLogoVerifier/1.0';
@@ -80,9 +81,31 @@ const defaultResolveHost: ResolveHost = async (hostname) => (
   await lookup(hostname, { all: true, verbatim: true })
 ).map((entry) => entry.address);
 
-async function publicAddresses(hostname: string, resolveHost: ResolveHost): Promise<string[]> {
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('The operation was aborted', 'AbortError');
+}
+
+async function publicAddresses(
+  hostname: string,
+  resolveHost: ResolveHost,
+  signal?: AbortSignal,
+): Promise<string[]> {
   if (blockedHostname(hostname) || isIP(hostname)) throw new Error('blocked_host');
-  const addresses = await resolveHost(hostname);
+  signal?.throwIfAborted();
+  const lookupPromise = resolveHost(hostname);
+  const addresses = signal
+    ? await new Promise<string[]>((resolve, reject) => {
+      const onAbort = () => reject(abortError(signal));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      void lookupPromise.then(resolve, reject).finally(() => {
+        signal.removeEventListener('abort', onAbort);
+      });
+    })
+    : await lookupPromise;
+  signal?.throwIfAborted();
   if (addresses.length === 0 || addresses.some(ipBlocked)) throw new Error('non_public_host');
   return addresses;
 }
@@ -138,17 +161,21 @@ async function fetchPinnedHttps(
   address: string,
   accept: string,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<PinnedHttpsResponse> {
   return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     let settled = false;
     let absoluteTimer: ReturnType<typeof setTimeout> | undefined;
     const settle = <T>(callback: (value: T) => void, value: T) => {
       if (settled) return;
       settled = true;
       if (absoluteTimer) clearTimeout(absoluteTimer);
+      signal?.removeEventListener('abort', onAbort);
       callback(value);
     };
     const fail = (error: Error) => settle(reject, error);
+    const onAbort = () => request.destroy(abortError(signal!));
     const request = httpsRequest({
       protocol: 'https:',
       hostname: address,
@@ -193,6 +220,8 @@ async function fetchPinnedHttps(
     absoluteTimer = setTimeout(() => request.destroy(new Error('timeout')), REQUEST_TIMEOUT_MS);
     request.setTimeout(REQUEST_TIMEOUT_MS, () => request.destroy(new Error('timeout')));
     request.on('error', fail);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     request.end();
   });
 }
@@ -203,15 +232,19 @@ async function fetchPublic(
   maxBytes: number,
   fetcher: typeof fetch | undefined,
   resolveHost: ResolveHost,
+  signal?: AbortSignal,
 ): Promise<{ bytes: Uint8Array; contentType: string; finalUrl: URL }> {
   let url = initialUrl;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const addresses = await publicAddresses(url.hostname, resolveHost);
+    const requestSignal = signal
+      ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), signal])
+      : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const addresses = await publicAddresses(url.hostname, resolveHost, requestSignal);
     const response = fetcher
       ? await (async () => {
         const fetched = await fetcher(url, {
           redirect: 'manual',
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: requestSignal,
           headers: { Accept: accept, 'User-Agent': USER_AGENT },
         });
         return {
@@ -225,7 +258,7 @@ async function fetchPublic(
             : new Uint8Array(),
         };
       })()
-      : await fetchPinnedHttps(url, addresses[0], accept, maxBytes);
+      : await fetchPinnedHttps(url, addresses[0], accept, maxBytes, requestSignal);
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const { location } = response;
       if (!location || redirect === MAX_REDIRECTS) throw new Error('bad_redirect');
@@ -333,12 +366,20 @@ export async function verifyCatalogSourceLogo(
   if (!BARE_DOMAIN_RE.test(domain) || blockedHostname(domain)) return { verified: false, reason: 'invalid_domain' };
   const fetcher = options.fetcher;
   const resolveHost = options.resolveHost ?? defaultResolveHost;
+  const signal = options.signal;
   try {
     let home: Awaited<ReturnType<typeof fetchPublic>> | null = null;
     const homeFailures: string[] = [];
     for (const raw of [`https://${domain}/`, `https://www.${domain}/`]) {
       try {
-        home = await fetchPublic(safeHttpsUrl(raw), 'text/html,application/xhtml+xml', MAX_HTML_BYTES, fetcher, resolveHost);
+        home = await fetchPublic(
+          safeHttpsUrl(raw),
+          'text/html,application/xhtml+xml',
+          MAX_HTML_BYTES,
+          fetcher,
+          resolveHost,
+          signal,
+        );
         break;
       } catch (error) {
         homeFailures.push(logoVerificationErrorReason(error));
@@ -358,7 +399,14 @@ export async function verifyCatalogSourceLogo(
     const iconFailures: string[] = [];
     for (const iconUrl of iconCandidates(html, home.finalUrl, domain)) {
       try {
-        const image = await fetchPublic(iconUrl, 'image/*', MAX_IMAGE_BYTES, fetcher, resolveHost);
+        const image = await fetchPublic(
+          iconUrl,
+          'image/*',
+          MAX_IMAGE_BYTES,
+          fetcher,
+          resolveHost,
+          signal,
+        );
         if (hasImageSignature(image.bytes, image.contentType)) {
           /* A signed or cache-busting query can expire. Do not prove one URL and persist a
              different guessed path, and do not put an ephemeral asset into every job response. */

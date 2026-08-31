@@ -38,6 +38,10 @@ type ExtractedBranding = {
 
 export type DurableAtsLogoPersister = (asset: DurableAtsLogoAsset) => Promise<string>;
 
+export type AtsSourceBrandingOptions = {
+  signal?: AbortSignal;
+};
+
 const USER_AGENT = 'LitosAtsBrandingVerifier/1.0';
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_HTML_BYTES = 4_000_000;
@@ -498,6 +502,16 @@ async function extractBranding(
   }
 }
 
+function fetcherWithSignal(fetcher: typeof fetch, signal: AbortSignal | undefined): typeof fetch {
+  if (!signal) return fetcher;
+  return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const requestSignal = init?.signal
+      ? AbortSignal.any([init.signal, signal])
+      : signal;
+    return fetcher(input, { ...init, signal: requestSignal });
+  }) as typeof fetch;
+}
+
 /**
  * Prove the employer identity and logo from an ATS-owned public board response.
  *
@@ -510,12 +524,14 @@ export async function verifyAtsSourceBranding(
   source: AtsSourceBrandingCandidate,
   fetcher: typeof fetch = fetch,
   persistDurableLogo?: DurableAtsLogoPersister,
+  options: AtsSourceBrandingOptions = {},
 ): Promise<AtsSourceBrandingResult> {
+  const boundedFetcher = fetcherWithSignal(fetcher, options.signal);
   let extracted: ExtractedBranding;
   try {
     const expectedName = source.company_name.trim();
     if (!expectedName || expectedName.length > 200) fail('invalid_source');
-    extracted = await extractBranding(source, fetcher);
+    extracted = await extractBranding(source, boundedFetcher);
     if (source.identity_mode !== 'provisional' && !namesAgree(expectedName, extracted.companyName)) {
       fail('identity_mismatch');
     }
@@ -534,7 +550,7 @@ export async function verifyAtsSourceBranding(
   }
   let provenImage: { bytes: Uint8Array; contentType: string };
   try {
-    provenImage = await proveImage(fetcher, extracted.logoUrl);
+    provenImage = await proveImage(boundedFetcher, extracted.logoUrl);
   } catch (error) {
     const reason = error instanceof BrandingFailure
       ? error.reason
