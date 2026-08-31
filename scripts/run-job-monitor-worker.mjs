@@ -14,6 +14,8 @@
 import { pathToFileURL } from 'node:url';
 
 const MAX_TIMER_MS = 2_147_483_647;
+const DEFAULT_REQUEST_TIMEOUT_MS = 14 * 60_000;
+const MINIMUM_REQUEST_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
 
 export const INVENTORY_FLOOR_FIELDS = Object.freeze([
   Object.freeze({
@@ -60,7 +62,23 @@ function apiOrigin(raw) {
   return url.origin;
 }
 
-export function loadConfig(environment = process.env) {
+function dateFromClock(now, name) {
+  const value = now();
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error(`${name} must return a valid date`);
+  return date;
+}
+
+function validatedDrainStartedAt(raw, now, name) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const value = String(raw).trim();
+  if (!validDrainStartedAt(value)) throw new Error(`${name} must be a valid timestamp`);
+  const parsed = new Date(value);
+  if (parsed.getTime() > now.getTime()) throw new Error(`${name} cannot be in the future`);
+  return parsed.toISOString();
+}
+
+export function loadConfig(environment = process.env, now = () => new Date()) {
   const secret = (environment.INTERNAL_CRON_SECRET ?? '').trim();
   if (!secret) throw new Error('INTERNAL_CRON_SECRET is required');
 
@@ -114,10 +132,20 @@ export function loadConfig(environment = process.env) {
       3,
       { name: 'JOB_MONITOR_METRICS_TIMEOUT_MAX_ATTEMPTS', max: 100 },
     ),
-    requestTimeoutMs: integerSetting(environment.JOB_MONITOR_REQUEST_TIMEOUT_MS, 420_000, {
-      name: 'JOB_MONITOR_REQUEST_TIMEOUT_MS',
-      max: MAX_TIMER_MS,
-    }),
+    requestTimeoutMs: integerSetting(
+      environment.JOB_MONITOR_REQUEST_TIMEOUT_MS,
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      {
+        name: 'JOB_MONITOR_REQUEST_TIMEOUT_MS',
+        min: MINIMUM_REQUEST_TIMEOUT_MS,
+        max: MAX_TIMER_MS,
+      },
+    ),
+    resumeDrainStartedAt: validatedDrainStartedAt(
+      environment.JOB_MONITOR_DRAIN_STARTED_AT,
+      dateFromClock(now, 'loadConfig clock'),
+      'JOB_MONITOR_DRAIN_STARTED_AT',
+    ),
   });
 }
 
@@ -129,7 +157,16 @@ export function createJsonRequester(config, fetchImplementation = globalThis.fet
   if (typeof fetchImplementation !== 'function') {
     throw new Error('This worker requires a runtime with fetch support');
   }
+  let requestInFlight = false;
   return async function requestJson(path) {
+    if (requestInFlight) {
+      return {
+        status: 0,
+        body: null,
+        error: 'A job monitor request is already in flight',
+      };
+    }
+    requestInFlight = true;
     let response;
     try {
       response = await fetchImplementation(`${config.apiBase}${path}`, {
@@ -138,6 +175,8 @@ export function createJsonRequester(config, fetchImplementation = globalThis.fet
       });
     } catch (error) {
       return { status: 0, body: null, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      requestInFlight = false;
     }
     let body = null;
     try { body = await response.json(); } catch { /* Invalid JSON is handled by the caller. */ }
@@ -265,7 +304,7 @@ async function requestLogoStatus({ requestJson, config, logger, pass }) {
 /**
  * Drain both bounded queues and make a fresh monitor recount. A certified recount completes the
  * drain. A real floor breach returns a noncertified result so the outer worker can use its longer
- * recovery interval and start a new drain, which reruns source discovery and upstream polling.
+ * recovery interval and start a new drain with a fresh polling watermark.
  */
 export async function runCompleteDrain({
   config,
@@ -273,8 +312,15 @@ export async function runCompleteDrain({
   sleepFn = sleep,
   shouldStop = () => false,
   logger = console,
+  drainStartedAt: requestedDrainStartedAt = null,
+  now = () => new Date(),
 }) {
-  let drainStartedAt = '';
+  const startedAt = dateFromClock(now, 'runCompleteDrain clock');
+  const drainStartedAt = validatedDrainStartedAt(
+    requestedDrainStartedAt ?? startedAt.toISOString(),
+    startedAt,
+    'drain_started_at',
+  );
   let pollingComplete = false;
   let logoComplete = false;
   let pass = 0;
@@ -310,7 +356,6 @@ export async function runCompleteDrain({
           await sleepFn(config.retryMs);
           continue;
         }
-        drainStartedAt ||= monitor.body.drain_started_at;
         pollingComplete = monitor.body.polling_complete;
         logMonitorPass(logger, 'monitor_pass', pass, monitor, drainStartedAt, {
           floor_breach_during_drain: monitor.status === 500,
@@ -515,8 +560,10 @@ export async function runWorkerLoop({
   logger = console,
   now = () => new Date(),
 }) {
+  let activeDrainStartedAt = config.resumeDrainStartedAt ?? null;
   while (!shouldStop()) {
     const startedAt = now();
+    activeDrainStartedAt ??= dateFromClock(now, 'runWorkerLoop clock').toISOString();
     try {
       const result = await runCompleteDrain({
         config,
@@ -524,6 +571,8 @@ export async function runWorkerLoop({
         sleepFn,
         shouldStop,
         logger,
+        drainStartedAt: activeDrainStartedAt,
+        now,
       });
       if (!result) break;
 
@@ -545,6 +594,7 @@ export async function runWorkerLoop({
           next_drain_uses_fresh_cursor: true,
         }));
         if (!shouldStop()) await sleepFn(config.floorBreachRetryMs);
+        activeDrainStartedAt = null;
         continue;
       }
 
@@ -556,6 +606,7 @@ export async function runWorkerLoop({
         completed_at: now().toISOString(),
         next_cycle_in_ms: config.cycleIntervalMs,
       }));
+      activeDrainStartedAt = null;
     } catch (error) {
       logger.error(JSON.stringify({
         event: 'drain_failed',

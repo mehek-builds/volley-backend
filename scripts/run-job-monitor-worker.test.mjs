@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  createJsonRequester,
   inventoryFloorAssessment,
   loadConfig,
   runCompleteDrain,
@@ -114,11 +115,115 @@ function silentLogger() {
   };
 }
 
+test('a failed first monitor request retries sequentially with the same client-owned cursor', async () => {
+  const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
+  const logoPath = '/internal/job-monitor/verify-logos?limit=100';
+  const sequence = [
+    { path: drainPath, response: { status: 0, body: null, error: 'request timed out' } },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: logoPath, response: logos(true) },
+    { path: logoPath, response: logos(true) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+  ];
+  let activeRequests = 0;
+  let maximumActiveRequests = 0;
+  const calls = [];
+  const requestJson = async (path) => {
+    activeRequests += 1;
+    maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+    calls.push(path);
+    const next = sequence.shift();
+    assert.ok(next, `unexpected request for ${path}`);
+    assert.equal(path, next.path);
+    await Promise.resolve();
+    activeRequests -= 1;
+    return next.response;
+  };
+  const sleeps = [];
+
+  const result = await runCompleteDrain({
+    config: testConfig(),
+    requestJson,
+    sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
+    logger: silentLogger().logger,
+    now: () => new Date(DRAIN_STARTED_AT),
+  });
+
+  assert.equal(result.certified, true);
+  assert.equal(result.drain_started_at, DRAIN_STARTED_AT);
+  assert.equal(maximumActiveRequests, 1);
+  assert.deepEqual(sleeps, [37]);
+  assert.equal(calls.includes('/internal/job-monitor'), false);
+  assert.equal(calls.filter((path) => path === drainPath).length, 3);
+  assert.equal(sequence.length, 0);
+});
+
+test('the JSON requester rejects an overlapping local request', async () => {
+  let releaseFetch;
+  const pendingResponse = new Promise((resolve) => {
+    releaseFetch = () => resolve({
+      status: 200,
+      json: async () => ({ ok: true }),
+    });
+  });
+  const requestJson = createJsonRequester(
+    testConfig(),
+    async () => pendingResponse,
+  );
+
+  const first = requestJson('/first');
+  await Promise.resolve();
+  const overlapping = await requestJson('/second');
+  assert.deepEqual(overlapping, {
+    status: 0,
+    body: null,
+    error: 'A job monitor request is already in flight',
+  });
+  releaseFetch();
+  assert.deepEqual(await first, {
+    status: 200,
+    body: { ok: true },
+    error: null,
+  });
+});
+
+test('the outer worker keeps its cursor when a bounded drain attempt throws', async () => {
+  const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
+  const logoPath = '/internal/job-monitor/verify-logos?limit=100';
+  const sequence = [
+    { path: drainPath, response: { status: 0, body: null, error: 'request timed out' } },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: logoPath, response: logos(true) },
+    { path: logoPath, response: logos(true) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+  ];
+  const requester = sequenceRequester(sequence);
+  const sleeps = [];
+  let stopping = false;
+
+  await runWorkerLoop({
+    config: testConfig({ maxPasses: 1, resumeDrainStartedAt: DRAIN_STARTED_AT }),
+    requestJson: requester.requestJson,
+    sleepFn: async (milliseconds) => {
+      sleeps.push(milliseconds);
+      if (milliseconds === 999) stopping = true;
+    },
+    shouldStop: () => stopping,
+    logger: silentLogger().logger,
+    now: () => new Date(DRAIN_STARTED_AT),
+  });
+
+  assert.equal(sequence.length, 0);
+  assert.deepEqual(sleeps, [37, 37, 999]);
+  assert.equal(requester.calls.includes('/internal/job-monitor'), false);
+  assert.equal(requester.calls.filter((path) => path === drainPath).length, 3);
+});
+
 test('a completed queue always gets a fresh HTTP 200 final recount before completion', async () => {
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(500, { pollingComplete: false, surfacedPostings: 2 }) },
+    { path: drainPath, response: monitor(500, { pollingComplete: false, surfacedPostings: 2 }) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 3 }) },
     { path: logoPath, response: logos(true) },
@@ -134,6 +239,7 @@ test('a completed queue always gets a fresh HTTP 200 final recount before comple
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.deepEqual(result, {
@@ -158,7 +264,7 @@ test('a final structured HTTP 500 returns a noncertified result and never proves
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
+    { path: drainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
@@ -172,6 +278,7 @@ test('a final structured HTTP 500 returns a noncertified result and never proves
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.equal(result.certified, false);
@@ -187,7 +294,7 @@ test('HTTP 200 without complete floor evidence is not accepted as final proof', 
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(200, { pollingComplete: true }) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(200, { pollingComplete: true, includeSponsorFloor: false }) },
@@ -205,6 +312,7 @@ test('HTTP 200 without complete floor evidence is not accepted as final proof', 
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.equal(result.final_recount_attempts, 3);
@@ -218,7 +326,7 @@ test('the final logo check can reopen its queue without changing drain_started_a
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(200, { pollingComplete: true }) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(false) },
     { path: logoPath, response: logos(true) },
@@ -233,21 +341,22 @@ test('the final logo check can reopen its queue without changing drain_started_a
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
     logger: silentLogger().logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.equal(result.drain_started_at, DRAIN_STARTED_AT);
   assert.equal(result.certified, true);
   assert.equal(result.passes, 2);
   assert.deepEqual(sleeps, []);
-  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 1);
-  assert.equal(requester.calls.filter((path) => path === drainPath).length, 1);
+  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
+  assert.equal(requester.calls.filter((path) => path === drainPath).length, 2);
 });
 
 test('a deferred transient logo retry sleeps without resetting the drain cursor', async () => {
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(200, { pollingComplete: true }) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
     {
       path: logoPath,
       response: logos(false, { retryAfterMs: 123, scheduledTransientSources: 1 }),
@@ -265,13 +374,14 @@ test('a deferred transient logo retry sleeps without resetting the drain cursor'
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.equal(result.certified, true);
   assert.equal(result.drain_started_at, DRAIN_STARTED_AT);
   assert.deepEqual(sleeps, [123]);
   assert.equal(messages.log.some((entry) => entry.event === 'logo_transient_retry_scheduled'), true);
-  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 1);
+  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
 });
 
 test('floor assessment enforces only configured hard floors', () => {
@@ -309,7 +419,7 @@ test('the worker waits for the public evidence gate before certifying', async ()
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(200, { pollingComplete: true }) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(200, { pollingComplete: true, gateEnabled: false }) },
@@ -324,6 +434,7 @@ test('the worker waits for the public evidence gate before certifying', async ()
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
   assert.equal(result.certified, true);
   assert.deepEqual(sleeps, [37]);
@@ -343,6 +454,9 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
   assert.equal(defaults.cycleIntervalMs, 2 * 60 * 60 * 1000,
     'the Railway worker replaces the prior sub-daily discovery cadence');
   assert.equal(defaults.deployedSha, 'railway-sha');
+  assert.equal(defaults.requestTimeoutMs, 14 * 60_000,
+    'the client must outlive the bounded nine-minute poll and post-poll metrics');
+  assert.equal(defaults.resumeDrainStartedAt, null);
 
   const fallbackRevision = loadConfig({
     LITOS_API_BASE: 'https://litos.example',
@@ -359,13 +473,16 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
     JOB_MONITOR_LOGO_LIMIT: '200',
     JOB_MONITOR_MAX_PASSES: '10000',
     JOB_MONITOR_FINAL_RECOUNT_MAX_ATTEMPTS: '25',
-    JOB_MONITOR_REQUEST_TIMEOUT_MS: '3000',
-  });
+    JOB_MONITOR_REQUEST_TIMEOUT_MS: '900000',
+    JOB_MONITOR_DRAIN_STARTED_AT: DRAIN_STARTED_AT,
+  }, () => new Date('2026-08-30T10:16:00.000Z'));
   assert.equal(config.apiBase, 'https://litos.example');
   assert.equal(config.secret, 'secret');
   assert.equal(config.logoLimit, 200);
   assert.equal(config.maxPasses, 10_000);
   assert.equal(config.finalRecountMaxAttempts, 25);
+  assert.equal(config.requestTimeoutMs, 900_000);
+  assert.equal(config.resumeDrainStartedAt, DRAIN_STARTED_AT);
   assert.ok(config.floorBreachRetryMs > config.retryMs);
 
   assert.throws(
@@ -401,6 +518,30 @@ test('worker configuration validates origins, secrets, and safe integer bounds',
     }),
     /JOB_MONITOR_FLOOR_BREACH_RETRY_MS/,
   );
+  assert.throws(
+    () => loadConfig({
+      LITOS_API_BASE: 'https://litos.example',
+      INTERNAL_CRON_SECRET: 'secret',
+      JOB_MONITOR_REQUEST_TIMEOUT_MS: '839999',
+    }),
+    /JOB_MONITOR_REQUEST_TIMEOUT_MS/,
+  );
+  assert.throws(
+    () => loadConfig({
+      LITOS_API_BASE: 'https://litos.example',
+      INTERNAL_CRON_SECRET: 'secret',
+      JOB_MONITOR_DRAIN_STARTED_AT: 'not-a-date',
+    }),
+    /JOB_MONITOR_DRAIN_STARTED_AT must be a valid timestamp/,
+  );
+  assert.throws(
+    () => loadConfig({
+      LITOS_API_BASE: 'https://litos.example',
+      INTERNAL_CRON_SECRET: 'secret',
+      JOB_MONITOR_DRAIN_STARTED_AT: '2026-08-30T10:16:00.001Z',
+    }, () => new Date('2026-08-30T10:16:00.000Z')),
+    /JOB_MONITOR_DRAIN_STARTED_AT cannot be in the future/,
+  );
 });
 
 test('every transient final-recount failure class is bounded', async (t) => {
@@ -422,7 +563,7 @@ test('every transient final-recount failure class is bounded', async (t) => {
   for (const [name, failure] of Object.entries(cases)) {
     await t.test(name, async () => {
       const sequence = [
-        { path: '/internal/job-monitor', response: monitor(200, { pollingComplete: true }) },
+        { path: drainPath, response: monitor(200, { pollingComplete: true }) },
         { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
         { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
         { path: drainPath, response: failure },
@@ -436,6 +577,7 @@ test('every transient final-recount failure class is bounded', async (t) => {
           requestJson: requester.requestJson,
           sleepFn: async () => undefined,
           logger: silentLogger().logger,
+          now: () => new Date(DRAIN_STARTED_AT),
         }),
         /final recount did not certify within 2 attempts/,
       );
@@ -444,18 +586,18 @@ test('every transient final-recount failure class is bounded', async (t) => {
   }
 });
 
-test('the worker uses a longer floor backoff and starts the next drain with an empty cursor', async () => {
+test('the worker uses a longer floor backoff and starts the next drain with a fresh client cursor', async () => {
   const secondDrainStartedAt = '2026-08-30T11:15:00.000Z';
   const firstDrainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const secondDrainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(secondDrainStartedAt)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
+    { path: firstDrainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: firstDrainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
     {
-      path: '/internal/job-monitor',
+      path: secondDrainPath,
       response: monitor(200, { drainStartedAt: secondDrainStartedAt, pollingComplete: true }),
     },
     { path: logoPath, response: logos(true) },
@@ -471,7 +613,7 @@ test('the worker uses a longer floor backoff and starts the next drain with an e
   let stopping = false;
 
   await runWorkerLoop({
-    config: testConfig(),
+    config: testConfig({ resumeDrainStartedAt: DRAIN_STARTED_AT }),
     requestJson: requester.requestJson,
     sleepFn: async (milliseconds) => {
       sleeps.push(milliseconds);
@@ -479,12 +621,14 @@ test('the worker uses a longer floor backoff and starts the next drain with an e
     },
     shouldStop: () => stopping,
     logger,
-    now: () => new Date('2026-08-30T12:00:00.000Z'),
+    now: () => new Date(secondDrainStartedAt),
   });
 
   assert.equal(sequence.length, 0);
   assert.deepEqual(sleeps, [370, 999]);
-  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 2);
+  assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
+  assert.equal(requester.calls.filter((path) => path === firstDrainPath).length, 2);
+  assert.equal(requester.calls.filter((path) => path === secondDrainPath).length, 2);
   const scheduled = messages.error.find((entry) => entry.event === 'inventory_floor_repoll_scheduled');
   assert.equal(scheduled.retry_ms, 370);
   assert.equal(scheduled.next_drain_uses_fresh_cursor, true);
@@ -505,7 +649,7 @@ test('persistent projection timeout emits a distinct alert and never completes t
     metricsTimeoutMs: 120_000,
   });
   const sequence = [
-    { path: '/internal/job-monitor', response: timedOut() },
+    { path: drainPath, response: timedOut() },
     { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
     { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
     { path: drainPath, response: timedOut() },
@@ -524,6 +668,7 @@ test('persistent projection timeout emits a distinct alert and never completes t
     },
     shouldStop: () => stopping,
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.equal(sequence.length, 0);
@@ -546,7 +691,7 @@ test('only consecutive metrics timeouts trigger the persistent timeout result', 
     metricsTimeoutMs: 120_000,
   });
   const sequence = [
-    { path: '/internal/job-monitor', response: monitor(200, { pollingComplete: true }) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: { status: 409, body: null, error: null } },
@@ -567,6 +712,7 @@ test('only consecutive metrics timeouts trigger the persistent timeout result', 
     requestJson: requester.requestJson,
     sleepFn: async () => undefined,
     logger,
+    now: () => new Date(DRAIN_STARTED_AT),
   });
 
   assert.equal(sequence.length, 0);
