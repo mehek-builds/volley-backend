@@ -54,6 +54,7 @@ test('sub-daily API jobs remain owned by dedicated GitHub workflows', () => {
     ['autopilot-matcher.yml', '/internal/autopilot-matcher'],
     ['strong-match-notifications.yml', '/internal/strong-match-notifications'],
     ['submission-runner.yml', '/internal/application-submission-runner'],
+    ['reconcile-submission-confirmations.yml', '/internal/reconcile-submission-confirmations'],
   ] as const) {
     const source = workflow(file);
     assert.match(source, /schedule:/, `${file} must keep a schedule`);

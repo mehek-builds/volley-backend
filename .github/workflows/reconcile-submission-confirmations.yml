@@ -1,0 +1,108 @@
+# Heals submissions stuck at "sent, could not confirm" from employer confirmation emails Litos
+# already holds but never acted on.
+#
+# The email fallback resolves a packet only at the instant an inbound confirmation is stored
+# (handleStoredEmployerMessage). A confirmation that misses that instant - arrived out of order
+# relative to the pressed attempt, during a forwarding-failure window, or before the resolution
+# logic was deployed - stays a receipt in application_email_messages that nothing re-reads. This
+# calls /internal/reconcile-submission-confirmations, which runs reconcileSubmissionConfirmations:
+# it re-reads stored confirmations and resolves any packet still unconfirmed. Safe on a cadence by
+# construction - it only ever acts on rows already classified 'submission_confirmation' for a real
+# application, and each resolve is idempotent, evidence-guarded, atomic and never-throwing, so it
+# can heal a held receipt but never invent one.
+#
+# limit=1000 is the reconciler's own clamp ceiling, i.e. "scan as deep as one pass may". The scan is
+# newest-first and deliberately keeps already-resolved rows (they let reconcile also heal a canonical
+# row that lags a submitted packet), so a smaller window could let already-healed receipts crowd an
+# older still-unresolved one out of reach. At current scale the whole table sits well inside 1000, so
+# each run reaches every held receipt; if confirmation volume ever approaches that ceiling, the deeper
+# fix is an unresolved-aware scan in listStoredConfirmations rather than a larger number here.
+#
+# Why a GitHub workflow instead of a vercel.json cron: the Vercel account is on Hobby (daily crons
+# only), and the backend is on Railway now anyway - see strong-match-notifications.yml and
+# job-monitor.yml for the same constraint on the sibling jobs. Every 3 hours at :15 keeps the slot
+# clear of autopilot-matcher (:5,:20,:35,:50), job-monitor (:10) and strong-match (:40).
+#
+# The retry loop retries ONLY a connection that never reached the app (DNS, TLS, a refused/reset
+# connection during a cold start or mid-deploy window). Once curl completes an HTTP exchange the
+# loop stops, whatever the status: the reconciler is idempotent, so a completed 200 needs no retry
+# and re-running it would only re-pay the scan cost.
+name: reconcile-submission-confirmations
+
+on:
+  schedule:
+    - cron: '15 */3 * * *'
+  workflow_dispatch:
+
+# One run at a time. Each resolve is idempotent (a packet already submitted is left exactly as it
+# is), so overlap is safe, but serialising keeps each run's counts legible.
+concurrency:
+  group: reconcile-submission-confirmations
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Worst case for the retry loop is 3 attempts x 300s (--max-time) plus two 15s backoffs,
+    # ~15.5 minutes. 20 leaves headroom without masking a genuinely stuck run for hours.
+    timeout-minutes: 20
+    steps:
+      - name: Call the confirmation reconciler
+        env:
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          API_BASE: ${{ vars.LITOS_API_BASE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${INTERNAL_CRON_SECRET}" ] || [ -z "${API_BASE}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET and LITOS_API_BASE must both be set on this repository."
+            echo "They must match the Railway API production configuration."
+            exit 1
+          fi
+
+          # Retries only a connection that never reached the app - see the header comment for why
+          # curl's own --retry is wrong here. `if http_status=$(...)` is deliberate: a command used
+          # as an if-condition is exempt from `set -e`, so a failed connection attempt does not kill
+          # the script, it falls through to the retry/backoff below instead.
+          max_attempts=3
+          attempt=1
+          while true; do
+            if http_status=$(curl -sS \
+              --max-time 300 \
+              -o response.json \
+              -w '%{http_code}' \
+              -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+              "${API_BASE}/internal/reconcile-submission-confirmations?limit=1000"); then
+              break
+            fi
+            if [ "${attempt}" -ge "${max_attempts}" ]; then
+              echo "::error::Could not reach ${API_BASE} after ${max_attempts} attempts - the connection never completed (DNS, TLS, or a refused/reset connection), so no response was ever received."
+              exit 1
+            fi
+            echo "Connection attempt ${attempt} did not reach ${API_BASE}; retrying in 15 seconds (${attempt}/${max_attempts})."
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+
+          echo "status=${http_status}"
+          cat response.json
+          echo
+
+          {
+            echo "### Submission confirmation reconcile"
+            echo ""
+            echo '```json'
+            cat response.json
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${http_status}" = 401 ] || [ "${http_status}" = 503 ]; then
+            echo "::error::Reconcile refused to run (HTTP ${http_status}) - check the cron secret in the Railway project."
+            exit 1
+          fi
+
+          if [ "${http_status}" != 200 ]; then
+            echo "::error::Reconcile call failed with unexpected status ${http_status}."
+            exit 1
+          fi
