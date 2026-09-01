@@ -148,6 +148,10 @@ import {
   greenhousePublicQuestionLabelKey,
 } from '../lib/greenhousePublicApplication';
 import {
+  ashbyPublicApplicationSchema,
+  ashbyPublicQuestionLabelKey,
+} from '../lib/ashbyPublicApplication';
+import {
   exactManagedSubmitVerdict,
   isManagedRunTimeout,
   managedSubmitVerdict,
@@ -7083,6 +7087,45 @@ async function prepareManaged(
       }, 'Could not read the employer-published Greenhouse form schema, keeping the live DOM read');
     }
   }
+  /* THE SAME READ FOR ASHBY, and here it is the ONLY read rather than a second one.
+   *
+   * managedOptionProbeTargets is gated to ['greenhouse','rippling','paylocity'] and
+   * pushManagedReactSelectOptionProbeActions returns early off the greenhouse family, so no pass in
+   * this runner ever opens an Ashby control to see what it offers. Ashby renders its choice controls
+   * with the option list absent until the menu is opened, so discovery's DOM walk reports a closed
+   * control with nothing on it and questionMetadataBlockerForDiscovered files missing_exact_options.
+   * The dashboard's "read the employer fields again" button re-enters THIS function, so the retry
+   * reproduces the same blocker forever - a hold with no exit rather than a slow one.
+   *
+   * Measured on OpenAI's Software Engineer, Internal Applications - Enterprise (posting
+   * db053b0e-c1a5-4b7a-bcb6-6e766629e7b1) on 2026-09-01: two required MultiValueSelect controls,
+   * "Applicant Arbitration Agreement Acknowledgement" and "I hereby certify that I have not
+   * knowingly withheld any information...", each offering exactly ONE accepted value, both blocked.
+   *
+   * THIS DOES NOT MAKE LITOS ANSWER THEM. Both labels return no consent class from
+   * consentAcknowledgementClasses - arbitration is deliberately outside the privacy_and_terms and
+   * conduct licence, per the CONSENT_PRIVACY_DOCUMENT_ACCEPTANCE note that it "cannot absorb
+   * arbitration" - so they stay held for the applicant either way. What changes is that she is now
+   * handed the employer's exact wording to accept or decline, instead of a refusal telling her Litos
+   * could not read the control. A legal attestation she cannot see is not safer than one she can. */
+  let ashbySchema: Awaited<ReturnType<typeof ashbyPublicApplicationSchema>> = null;
+  if (portal === 'ashby' || portal === 'controlled_ashby') {
+    try {
+      ashbySchema = await ashbyPublicApplicationSchema(applicationUrl);
+      if (ashbySchema) {
+        fastify.log.info({
+          applicationId: row.id,
+          publicOptionLabelCount: Object.keys(ashbySchema.optionsByLabel).length,
+          multiSelectLabelCount: ashbySchema.multiSelectLabels.length,
+        }, 'Read the employer-published Ashby form schema');
+      }
+    } catch (error) {
+      fastify.log.warn({
+        applicationId: row.id,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }, 'Could not read the employer-published Ashby form schema, keeping the live DOM read');
+    }
+  }
   // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
@@ -7101,8 +7144,41 @@ async function prepareManaged(
       const options = labelKey ? greenhouseSchema.optionsByLabel[labelKey] : undefined;
       return options?.length ? { ...field, options } : field;
     });
+  /* The Ashby join, by label, because the public form definition names its fields by UUID `path`
+   * and the live DOM never carries that path - there is no control id to join on, only the wording.
+   *
+   * TWO THINGS THIS DOES THAT THE GREENHOUSE JOIN ABOVE DOES NOT, both required for it to work:
+   *
+   * 1. `optionsComplete: true`. questionMetadataBlockerForDiscovered files missing_exact_options
+   *    whenever `optionsComplete === false`, REGARDLESS of whether options are present, so attaching
+   *    a list without clearing the flag would leave the blocker exactly where it was. The flag is
+   *    honest here: this is the employer's own published inventory for the control, which is the
+   *    same claim attachManagedFieldOptions makes when a probe read one off the live page. Greenhouse
+   *    is deliberately left alone - it has a live probe as its second source and does not need this.
+   * 2. An ambiguity guard on the DISCOVERED side. The parser already drops a label two published
+   *    fields share; this drops one that two DISCOVERED fields share, so a duplicated question on
+   *    the page can never take a list that might belong to its twin. Same rule as
+   *    attachManagedFieldOptions' refusal to attach one list to two controls sharing a durable id. */
+  const ashbyDiscoveredLabelCounts = new Map<string, number>();
+  if (ashbySchema) {
+    for (const field of normalizedDiscoveredFields) {
+      const labelKey = ashbyPublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
+      if (labelKey) {
+        ashbyDiscoveredLabelCounts.set(labelKey, (ashbyDiscoveredLabelCounts.get(labelKey) ?? 0) + 1);
+      }
+    }
+  }
+  const publicSchemaDiscoveredFields = !ashbySchema
+    ? normalizedDiscoveredFields
+    : normalizedDiscoveredFields.map((field) => {
+      if (field.options?.length && field.optionsComplete !== false) return field;
+      const labelKey = ashbyPublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
+      if (!labelKey || ashbyDiscoveredLabelCounts.get(labelKey) !== 1) return field;
+      const options = ashbySchema.optionsByLabel[labelKey];
+      return options?.length ? { ...field, options, optionsComplete: true } : field;
+    });
   const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(
-    normalizedDiscoveredFields,
+    publicSchemaDiscoveredFields,
   );
   /* THE THIRD STAGE, and the reason option snapping reaches every confirmed closed control.
    *
@@ -7293,7 +7369,7 @@ async function prepareManaged(
       covered,
     );
   })();
-  const discoveredFields = attachManagedFieldOptions(normalizedDiscoveredFields, fieldOptions)
+  const discoveredFields = attachManagedFieldOptions(publicSchemaDiscoveredFields, fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
       return !controlId || !blockingOptionProbeFailedIds.has(controlId);
