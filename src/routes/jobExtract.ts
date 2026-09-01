@@ -1,9 +1,13 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
+import { canonicalMonitoredPortalUrl } from '../lib/portalSubmission';
+import { db } from '../db/index';
+import { career_page_sources, monitored_jobs } from '../db/schema';
 
 // Bounded so a page with an unusually large DOM (or a hostile one padding its text node) cannot
 // blow past resumeGenerateBodySchema's jd_text cap (100_000) once the frontend forwards this
@@ -74,8 +78,162 @@ export function jobDescriptionSourceUrl(rawUrl: string): string {
   return rawUrl;
 }
 
+/** The pasted URL without query or fragment, or undefined when it has neither (or cannot parse). */
+function urlWithoutTrackingState(rawUrl: string): string | undefined {
+  try {
+    const url = new URL(rawUrl);
+    if (!url.search && !url.hash) return undefined;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Equality keys used only to SELECT candidate monitored rows for a pasted URL. This is deliberately
+ * looser than the route's per-ATS rewrite rule: a wrong variant here cannot extract a wrong page,
+ * because a candidate row becomes a match only when monitoredJobDescriptionMatch proves posting
+ * identity through canonicalMonitoredPortalUrl. The variants exist so the common paste shapes -
+ * with or without a trailing slash, the overview versus its /apply form, a copied link with
+ * tracking state - still find the row whose stored URL is the other shape.
+ */
+export function monitoredInventoryLookupKeys(rawUrl: string): string[] {
+  const keys = new Set<string>([rawUrl]);
+  try {
+    keys.add(jobDescriptionSourceUrl(rawUrl));
+    const url = new URL(rawUrl);
+    url.search = '';
+    url.hash = '';
+    const basePath = url.pathname.replace(/\/$/, '');
+    for (const pathname of [
+      basePath,
+      `${basePath}/`,
+      /\/apply$/i.test(basePath) ? basePath.replace(/\/apply$/i, '') : `${basePath}/apply`,
+    ]) {
+      url.pathname = pathname;
+      keys.add(url.toString());
+    }
+  } catch {
+    // The route's schema already validated the URL; an unparsable value keeps only its raw key.
+  }
+  return [...keys];
+}
+
+export type MonitoredInventoryJob = {
+  external_id: string;
+  apply_url: string;
+  posting_url: string;
+  title: string;
+  description: string;
+  ats_name: string | null;
+  board_token: string | null;
+};
+
+/**
+ * Decide whether a pasted URL IS this monitored posting, by the same bar
+ * repairReviewPortalFromMonitoredJob applies to stored packet state: both the row's own apply_url
+ * and the pasted URL must canonicalize under the row's source-owned family, board token, and
+ * external id, and to the SAME application URL. String equality against apply_url/posting_url only
+ * nominates candidates; this is what makes one a match. A row whose source family is not
+ * autonomous, whose token is missing, or whose tenant or posting id disagrees with the pasted URL
+ * fails closed here and the route falls back to the managed browser, which was its whole behavior
+ * before this lookup existed.
+ */
+export function monitoredJobDescriptionMatch(
+  rawUrl: string,
+  job: MonitoredInventoryJob,
+): { jdText: string; pageTitle: string } | undefined {
+  const storedCanonical = canonicalMonitoredPortalUrl(
+    job.apply_url,
+    job.ats_name,
+    job.board_token,
+    job.external_id,
+    job.posting_url,
+  );
+  if (!storedCanonical) return undefined;
+  /* RAW FIRST, THEN WITHOUT TRACKING STATE, and the order is the whole point. Outside Greenhouse,
+     canonicalMonitoredPortalUrl rejects any query string outright, which is right for a STORED
+     provider-owned URL and wrong for one a student pasted: links copied off LinkedIn or an
+     aggregator carry `?utm_source=` and `?lever-source=`, and that is the commonest paste shape
+     there is. Greenhouse is why the raw attempt has to come first - its embed URL carries the
+     posting's identity IN the query (`?for=&token=`), so stripping it there destroys the match.
+     Dropping the query cannot select a WRONG posting: the row's tenant and external id are still
+     proven below, and jobDescriptionSourceUrl already treats this state as not part of what
+     identifies a posting. */
+  const pastedCanonical = [rawUrl, urlWithoutTrackingState(rawUrl)]
+    .filter((candidate): candidate is string => Boolean(candidate))
+    .map((candidate) => canonicalMonitoredPortalUrl(
+      candidate,
+      job.ats_name,
+      job.board_token,
+      job.external_id,
+      job.posting_url,
+    ))
+    .find((canonical) => canonical === storedCanonical);
+  if (!pastedCanonical) return undefined;
+  const jdText = clipJdText(job.description);
+  if (!jdText) return undefined;
+  return { jdText, pageTitle: job.title.trim() };
+}
+
+/**
+ * Look the pasted URL up against the monitored jobs inventory before ever paying for a browser
+ * run. Observed live 2026-09-01: extraction transiently 502ed on a Breezy posting that sat in
+ * monitored_jobs with a full substantive description the board was already serving. When the
+ * inventory holds the exact posting, its stored description is strictly better than a fresh render:
+ * it was captured from the provider's own feed, it cannot be a consent banner or an application
+ * form, and it is immune to the SPA-render timing this route documents below.
+ *
+ * Gated to rows the board itself would serve (is_active, ingest_eligible, enabled source), so a
+ * closed or unvalidated row never short-circuits a live read.
+ */
+export async function findMonitoredJobDescription(
+  rawUrl: string,
+): Promise<{ jobId: string; jdText: string; pageTitle: string } | undefined> {
+  const keys = monitoredInventoryLookupKeys(rawUrl);
+  const candidates = await db.select({
+    id: monitored_jobs.id,
+    external_id: monitored_jobs.external_id,
+    apply_url: monitored_jobs.apply_url,
+    posting_url: monitored_jobs.posting_url,
+    title: monitored_jobs.title,
+    // Same bounded read the portal repair path uses: the route clips to MAX_JD_TEXT_CHARS anyway,
+    // so there is no reason to move a multi-hundred-kilobyte description over the wire.
+    description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+    ats_name: career_page_sources.ats_name,
+    board_token: career_page_sources.board_token,
+  })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(and(
+      or(
+        inArray(monitored_jobs.apply_url, keys),
+        inArray(monitored_jobs.posting_url, keys),
+      ),
+      eq(monitored_jobs.is_active, true),
+      eq(monitored_jobs.ingest_eligible, true),
+      eq(career_page_sources.enabled, true),
+    ))
+    /* Ordered so a URL that several rows claim resolves to the freshest capture rather than to
+       whatever the planner returned first. Duplicates are possible in principle: apply_url carries
+       no uniqueness constraint, and a posting reachable through two enabled sources is one row per
+       source. The cap is small because every extra candidate is a canonical check against the same
+       pasted URL, and past a handful they can no longer be telling the truth about one posting. */
+    .orderBy(desc(monitored_jobs.last_seen_at))
+    .limit(5);
+  for (const candidate of candidates) {
+    const match = monitoredJobDescriptionMatch(rawUrl, candidate);
+    if (match) return { jobId: candidate.id, ...match };
+  }
+  return undefined;
+}
+
 export async function jobExtractRoutes(fastify: FastifyInstance) {
-  // POST /jobs/extract - given a posting URL, render it in the managed browser (the same
+  // POST /jobs/extract - given a posting URL, first answer from the monitored jobs inventory when
+  // the URL canonically matches a posting the monitor already holds (see
+  // findMonitoredJobDescription above); otherwise render it in the managed browser (the same
   // provider used for portal submission) and return its visible text as a starting point for the
   // job description field. This exists so "New application" can go from a pasted URL to a
   // reviewable packet without the operator hand-copying text out of a separate tab: the dashboard
@@ -103,6 +261,52 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
 
     if (!(await allowHourly(userId, 'jobExtract', LIMITS.perHour.jobExtract))) {
       return rateLimitedReply(reply);
+    }
+
+    /* INVENTORY FIRST, BROWSER SECOND. If the pasted URL is a posting the monitor already holds,
+       the stored description answers without a render: no SPA timing race, no consent banner, no
+       application form, and no transient 502 on a page the board is serving right now (observed
+       live 2026-09-01 on a Breezy posting). The lookup is best-effort by design: any database
+       error, canonical mismatch, or description that states no requirement simply falls through to
+       the managed-browser path, which then behaves exactly as it did before this lookup existed.
+       Sits ahead of the runner-config check on purpose, so a deployment without a managed browser
+       can still answer for postings it monitors. */
+    let monitored: Awaited<ReturnType<typeof findMonitoredJobDescription>>;
+    try {
+      monitored = await findMonitoredJobDescription(body.job_url);
+    } catch (err) {
+      fastify.log.warn(
+        { err, userId, job_url: body.job_url },
+        'monitored inventory lookup failed; falling back to browser extraction',
+      );
+      monitored = undefined;
+    }
+    if (monitored) {
+      /* The same bar the browser path applies below, on the same clipped text that would be frozen
+         into the packet. A stored description that states no requirement is not proof the live page
+         states none (the monitor may have captured a shape leadAlignment cannot read), so it is a
+         fall-through to the browser rather than a refusal: the inventory path may only ever
+         short-circuit with a GOOD result, never introduce a new failure. */
+      if (leadRequirementCandidates(monitored.jdText).length > 0) {
+        fastify.log.info(
+          {
+            userId,
+            job_url: body.job_url,
+            monitored_job_id: monitored.jobId,
+            title: monitored.pageTitle,
+            textLen: monitored.jdText.length,
+          },
+          'job description served from monitored inventory',
+        );
+        return reply.status(200).send({
+          jd_text: monitored.jdText,
+          page_title: monitored.pageTitle || undefined,
+        });
+      }
+      fastify.log.warn(
+        { userId, job_url: body.job_url, monitored_job_id: monitored.jobId },
+        'monitored inventory description states no requirement; falling back to browser extraction',
+      );
     }
 
     if (!isBrowserbaseConfigured() && !isManagedStratusProvider()) {
