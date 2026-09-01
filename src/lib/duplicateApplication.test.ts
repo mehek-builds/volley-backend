@@ -145,6 +145,29 @@ describe('what counts as the same posting', () => {
     const b = postingIdentity({ company: 'Akuna', role: AKUNA_ROLE }, AKUNA_DIRECT_URL);
     assert.deepEqual(comparePostings(a, b), { same: false, basis: null });
   });
+
+  test('two weak-identity postings with different company are proven different, not unknown', () => {
+    // No ATS posting key, no job id, no comparable URL: the only shared tier is company|role. A
+    // confirmed application to one company is not a prior submission of another, so this must read
+    // as a different posting rather than the null "cannot compare" that becomes an unidentifiable
+    // refusal and blocks every new weak-identity application.
+    const cresta = postingIdentity({ company: 'cresta', role: 'Data Science Intern (Customer Success)' }, undefined);
+    const verkada = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    assert.deepEqual(comparePostings(verkada, cresta), { same: false, basis: 'company_role' });
+  });
+
+  test('two weak-identity postings that are the same company and role still read as the same', () => {
+    // The exact posting re-sent must still be caught, so a real duplicate stays blocked.
+    const a = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    const b = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    assert.deepEqual(comparePostings(a, b), { same: true, basis: 'company_role' });
+  });
+
+  test('different roles at the same company are different postings', () => {
+    const frontend = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    const backend = postingIdentity({ company: 'Verkada', role: 'Backend Software Engineering Intern 2027' }, undefined);
+    assert.deepEqual(comparePostings(frontend, backend), { same: false, basis: 'company_role' });
+  });
 });
 
 describe('the verdict over a set of already-submitted applications', () => {
