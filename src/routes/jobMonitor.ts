@@ -1196,6 +1196,57 @@ export function shouldKeepPostingsOnFullyRejectedFetch(
   return listedCount > 0 && normalizedCount === 0 && activeNow > 0;
 }
 
+/* The rejection-spike thresholds, exported so the test pins the numbers rather than inferring them.
+ *
+ * A DELTA against the previous completed poll, never a fixed rejected-fraction: employer-hosted
+ * absolute_url boards (Stripe's and Databricks's shapes) are host-rejected at a steady rate BY
+ * DESIGN, so "40% rejected" is a healthy Tuesday on one board and a five-alarm drift on another.
+ * The only shape that is always a fault is the rate MOVING - the mixed-CDN version of the SpaceX
+ * wipe, where a new query param rolls through some caches first and 2,238 of 2,239 URLs fail while
+ * 1 survives, which slips past the fully-rejected guard and sweeps the board on a clean success.
+ *
+ * Both floors exist so churn cannot page: the absolute floor keeps small boards' organic posting
+ * turnover quiet, and the listed-fraction floor keeps a large board's ordinary drift (a few dozen
+ * postings closing between polls) below the line. A real format drift clears both at once. */
+export const REJECTION_SPIKE_MIN_DELTA = 25;
+export const REJECTION_SPIKE_LISTED_FRACTION = 0.2;
+
+/** The one clamp, shared, so the number the alert prints is the number the predicate judged. */
+export function rejectedFromCounts(listedCount: number, normalizedCount: number): number {
+  return Math.max(0, listedCount - normalizedCount);
+}
+
+/**
+ * Whether this poll's rejection count (listed minus normalized) jumped against the stored baseline.
+ *
+ * The baseline is scaled to the CURRENT list size before comparing, because what is steady about a
+ * by-design host-rejected board is its rejection RATE, not its count: a board growing tenfold at an
+ * unchanged 40% rejection rate has ten times the rejections and none of the drift this predicate
+ * hunts. Judging raw counts across different list sizes would page on that growth.
+ *
+ * NULL (or empty, see below) baseline - a source that has never completed a listing poll since the
+ * counts began persisting - never alerts: there is nothing to have jumped FROM, and the first
+ * completed poll writes the baseline the next one is judged against. A zero previous list carries
+ * no rate at all, which is also why pollSource never stores one. The fully-rejected case never
+ * reaches this predicate; shouldKeepPostingsOnFullyRejectedFetch already refuses to let that poll
+ * complete at all.
+ */
+export function rejectionSpikeExceedsBaseline(
+  previousListedCount: number | null,
+  previousNormalizedCount: number | null,
+  listedCount: number,
+  normalizedCount: number,
+): boolean {
+  if (!previousListedCount || previousNormalizedCount === null) return false;
+  const expectedRejections = Math.round(
+    (rejectedFromCounts(previousListedCount, previousNormalizedCount) / previousListedCount)
+      * listedCount,
+  );
+  const rejected = listedCount - normalizedCount;
+  return rejected - expectedRejections
+    >= Math.max(REJECTION_SPIKE_MIN_DELTA, Math.ceil(listedCount * REJECTION_SPIKE_LISTED_FRACTION));
+}
+
 const DETAIL_CURSOR_PATTERN = /(?:^|\s)next_detail_cursor=(\d+)(?:\s|$)/;
 const DETAIL_CURSOR_KEY_PATTERN = /(?:^|\s)next_detail_cursor_key=([A-Za-z0-9_-]{1,1024})(?:\s|$)/;
 
@@ -2247,6 +2298,40 @@ function pollFailureMessage(error: unknown): string {
   return message;
 }
 
+/**
+ * The one transaction both board-preserving guards share: count the source's live rows, ask the
+ * caller what fault (if any) that count proves, and record it on the source without touching
+ * monitored_jobs. `buildMessage` returning null means "no fault after all" - the empty-fetch guard
+ * uses it to fall through to the ordinary sweep when there is nothing to preserve - and the
+ * transaction then commits having written nothing.
+ *
+ * Deliberately NOT advancing last_successful_poll_at, and deliberately NOT persisting the
+ * rejection-baseline counts: a guard firing is a fault, and a fault must neither mint success
+ * evidence nor become the baseline the next poll's rejections are judged against (a baseline of
+ * "everything rejected" would read recovery as improvement and the next partial drift as noise).
+ */
+async function recordBoardPreservingFault(
+  sourceId: string,
+  buildMessage: (activeNow: number) => string | null,
+): Promise<string | null> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+    await tx.execute(sql.raw(
+      `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+    ));
+    const [existing] = await tx
+      .select({ active: sql<number>`count(*)::int` })
+      .from(monitored_jobs)
+      .where(and(eq(monitored_jobs.source_id, sourceId), eq(monitored_jobs.is_active, true)));
+    const message = buildMessage(existing?.active ?? 0);
+    if (message === null) return null;
+    await tx.update(career_page_sources)
+      .set({ last_polled_at: new Date(), last_error: message })
+      .where(eq(career_page_sources.id, sourceId));
+    return message;
+  });
+}
+
 export async function pollSource(source: typeof career_page_sources.$inferSelect) {
   const startingDetailCursor = detailCursorFromLastError(source.last_error);
   const startingDetailCursorKey = detailCursorKeyFromLastError(source.last_error);
@@ -2293,22 +2378,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * That is the correct trade - the manual step is on the rare true case, not the common false one.
      */
     if (listedCount === 0) {
-      const emptyFetchMessage = await db.transaction(async (tx) => {
-        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
-        await tx.execute(sql.raw(
-          `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
-        ));
-        const [existing] = await tx
-          .select({ active: sql<number>`count(*)::int` })
-          .from(monitored_jobs)
-          .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
-        if (!shouldKeepPostingsOnEmptyFetch(listedCount, existing?.active ?? 0)) return null;
-        const message = `Board returned no postings while ${existing!.active} are live; keeping them and not deactivating.`;
-        await tx.update(career_page_sources)
-          .set({ last_polled_at: new Date(), last_error: message })
-          .where(eq(career_page_sources.id, source.id));
-        return message;
-      });
+      const emptyFetchMessage = await recordBoardPreservingFault(source.id, (active) =>
+        shouldKeepPostingsOnEmptyFetch(listedCount, active)
+          ? `Board returned no postings while ${active} are live; keeping them and not deactivating.`
+          : null);
       if (emptyFetchMessage) {
         return {
           source_id: source.id,
@@ -2341,30 +2414,17 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * detailRefreshStatus persists the failure and cursor, and this early return must not bypass
      * that cursor advancement. */
     if (!fetched.detail_progress && listedCount > 0 && jobs.length === 0) {
-      const rejectedFetchMessage = await db.transaction(async (tx) => {
-        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
-        await tx.execute(sql.raw(
-          `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
-        ));
-        const [existing] = await tx
-          .select({ active: sql<number>`count(*)::int` })
-          .from(monitored_jobs)
-          .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
-        const active = existing?.active ?? 0;
-        const message = shouldKeepPostingsOnFullyRejectedFetch(listedCount, jobs.length, active)
+      const rejectedFetchMessage = await recordBoardPreservingFault(source.id, (active) =>
+        shouldKeepPostingsOnFullyRejectedFetch(listedCount, jobs.length, active)
           ? `Board listed ${listedCount} postings but none survived normalization; keeping the ${active} live rows and not deactivating.`
-          : `Board listed ${listedCount} postings but none survived normalization; no live rows to keep.`;
-        await tx.update(career_page_sources)
-          .set({ last_polled_at: new Date(), last_error: message })
-          .where(eq(career_page_sources.id, source.id));
-        return message;
-      });
+          : `Board listed ${listedCount} postings but none survived normalization; no live rows to keep.`);
       return {
         source_id: source.id,
         company: source.company_name,
         jobs: 0,
         ok: false as const,
-        error: rejectedFetchMessage,
+        /* Non-null in fact: unlike the empty-fetch builder, this one never declines to record. */
+        error: rejectedFetchMessage!,
       };
     }
 
@@ -2408,6 +2468,30 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       ? null
       : portalName ?? source.portal_company_name;
     const detailStatus = detailRefreshStatus(fetched.detail_progress);
+    /* THE PARTIAL SIBLING OF THE FULLY-REJECTED GUARD, detection only. When most but not ALL of a
+     * board fails action-URL validation - a new Greenhouse query param rolling through mixed CDN
+     * caches, so 2,238 of 2,239 URLs are rejected while 1 survives - the guard above does not fire,
+     * and this poll goes on to sweep every rejected row inactive as a recorded SUCCESS. That sweep
+     * is not second-guessed here (one surviving posting is real list evidence, unlike zero), but it
+     * must stop being invisible: the fault lands in last_error on a poll that otherwise cleared it,
+     * and in the cron result for the route to log.
+     *
+     * Single-fetch providers only, same scoping and same reason as the guard: a multi-request
+     * provider's `jobs` is one detail window against the full list, so listed-minus-normalized is
+     * not a rejection count there, and preserve_external_ids already keeps those boards honest. */
+    const rejectedCount = fetched.detail_progress ? null : listedCount - jobs.length;
+    const rejectionSpikeMessage = rejectedCount !== null
+      && rejectionSpikeExceedsBaseline(
+        source.last_poll_listed_count,
+        source.last_poll_normalized_count,
+        listedCount,
+        jobs.length,
+      )
+      ? `Action-URL rejections jumped: ${rejectedCount} of ${listedCount} listed postings failed `
+        + `normalization against ${rejectedFromCounts(source.last_poll_listed_count!, source.last_poll_normalized_count!)} `
+        + `of ${source.last_poll_listed_count} on the previous completed poll. The rejected rows were `
+        + 'swept inactive on a poll recorded as a success; suspect provider URL-format drift.'
+      : null;
     try {
       await retryTransient(() => db.transaction(async (tx) => {
         await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
@@ -2535,7 +2619,17 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
            can skip a window forever after a transient database or source-status write failure. */
         await tx.update(career_page_sources).set({
           ...completedPollFields(fetched.detail_progress, now),
-          last_error: detailStatus,
+          /* The baseline moves only when a poll completes its sweep, so a spike is always judged
+             against the last poll that actually wrote the board - never against a guard fault. An
+             EMPTY completed poll (nothing listed and nothing live for the guard to preserve) is
+             also excluded: it says nothing about rejection rates, and a 0/0 baseline would make
+             the next real poll's steady by-design rejections read as a jump from zero. */
+          ...(rejectedCount === null || listedCount === 0 ? {} : {
+            last_poll_listed_count: listedCount,
+            last_poll_normalized_count: jobs.length,
+          }),
+          /* Never both: a spike only exists on the single-fetch path, where detailStatus is null. */
+          last_error: rejectionSpikeMessage ?? detailStatus,
           ...(portalName ? { portal_company_name: portalName } : {}),
           ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
           ...(agrees === false ? { sponsor_employer_id: null } : {}),
@@ -2573,6 +2667,8 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       fetched: jobs.length,
       listed: listedCount,
       preserved: fetched.preserve_external_ids.length,
+      ...(rejectedCount === null ? {} : { rejected: rejectedCount }),
+      ...(rejectionSpikeMessage === null ? {} : { rejection_spike: rejectionSpikeMessage }),
       ...(fetched.detail_progress ? { detail_progress: fetched.detail_progress } : {}),
       ok: true as const,
       ...(agrees === false ? { portal_says: portalName } : {}),
@@ -4621,6 +4717,18 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
     const persistedFailures = await currentDrainPollFailures(drainStartedAt);
     const results = mergeCurrentDrainPollFailures(pollRun.results, persistedFailures);
+    /* A rejection spike is a SUCCESSFUL poll - the sweep committed, the queue advanced - so it can
+       never reach the failed count or the floor 5xx. Logged per source, because the drift it
+       detects (see rejectionSpikeExceedsBaseline) starts on one board and the whole point is to
+       see it before the fully-rejected guard, the floor, or a user does. */
+    for (const result of results) {
+      if ('rejection_spike' in result && result.rejection_spike) {
+        request.log.warn(
+          { sourceId: result.source_id, company: result.company },
+          result.rejection_spike,
+        );
+      }
+    }
     const [remaining] = await db
       .select({ total: sql<number>`count(*)::int` })
       .from(career_page_sources)

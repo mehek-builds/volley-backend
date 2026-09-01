@@ -42,6 +42,9 @@ import {
   mergeJobSources,
   mergeCurrentDrainPollFailures,
   monitorQuerySchema,
+  REJECTION_SPIKE_LISTED_FRACTION,
+  REJECTION_SPIKE_MIN_DELTA,
+  rejectionSpikeExceedsBaseline,
   shouldKeepPostingsOnEmptyFetch,
   shouldKeepPostingsOnFullyRejectedFetch,
   targetRoleCoverageMetrics,
@@ -156,6 +159,10 @@ test('every pollSource database unit installs bounded lock and statement timeout
   assert.ok(POLL_SOURCE_STATEMENT_TIMEOUT_MS < 15 * 60_000);
 
   const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const guardHelper = source.slice(
+    source.indexOf('async function recordBoardPreservingFault'),
+    source.indexOf('export async function pollSource'),
+  );
   const poll = source.slice(
     source.indexOf('export async function pollSource'),
     source.indexOf('/* The board\'s filter set'),
@@ -184,16 +191,21 @@ test('every pollSource database unit installs bounded lock and statement timeout
     poll.indexOf('/* CURRENTNESS IS ESTABLISHED AT INGEST'),
   );
 
-  assertTimeoutsPrecede(emptyGuard, '.select({ active:', 'empty-board guard');
-  assertTimeoutsPrecede(rejectedGuard, '.select({ active:', 'fully-rejected-fetch guard');
+  /* Both preserving guards run through the one shared transaction, so its timeout ordering is
+     asserted once at the helper and each guard is pinned to actually use it. */
+  assertTimeoutsPrecede(guardHelper, '.select({ active:', 'board-preserving fault helper');
+  assert.match(emptyGuard, /recordBoardPreservingFault\(/, 'empty-board guard must use the shared helper');
+  assert.match(rejectedGuard, /recordBoardPreservingFault\(/, 'fully-rejected-fetch guard must use the shared helper');
   assertTimeoutsPrecede(atomicWrite, 'tx.update(monitored_jobs)', 'atomic source and job write');
   assertTimeoutsPrecede(failureWrite, 'tx.update(career_page_sources)', 'failure-state write');
   assert.ok(
     atomicWrite.indexOf('for update') < atomicWrite.indexOf('tx.update(monitored_jobs)'),
     'the atomic poll write must lock its source row before mutating monitored jobs',
   );
-  assert.equal(poll.match(/set local lock_timeout/g)?.length, 4);
-  assert.equal(poll.match(/set local statement_timeout/g)?.length, 4);
+  assert.equal(guardHelper.match(/set local lock_timeout/g)?.length, 1);
+  assert.equal(guardHelper.match(/set local statement_timeout/g)?.length, 1);
+  assert.equal(poll.match(/set local lock_timeout/g)?.length, 2);
+  assert.equal(poll.match(/set local statement_timeout/g)?.length, 2);
 });
 
 test('terminal poll failures stay visible without keeping a source in the drain queue', () => {
@@ -399,14 +411,54 @@ test('a fully rejected fetch preserves live rows and is recorded, never reported
     'multi-request providers must keep their preserve/cursor path; only single-fetch wipes are intercepted');
   assert.match(poll, /none survived normalization/,
     'the fault must be queryable in career_page_sources.last_error');
-  const rejectedGuard = poll.slice(
-    poll.indexOf('if (!fetched.detail_progress && listedCount > 0'),
-    poll.indexOf('/* CURRENTNESS IS ESTABLISHED AT INGEST'),
+  const guardHelper = source.slice(
+    source.indexOf('async function recordBoardPreservingFault'),
+    source.indexOf('export async function pollSource'),
   );
-  assert.match(rejectedGuard, /last_polled_at: new Date\(\)/,
+  assert.match(guardHelper, /last_polled_at: new Date\(\)/,
     'the source must still advance through the oldest-first queue');
-  assert.doesNotMatch(rejectedGuard, /last_successful_poll_at/,
-    'a fully rejected fetch must never mint success evidence');
+  assert.doesNotMatch(guardHelper, /last_successful_poll_at/,
+    'a preserved fault must never mint success evidence');
+  assert.doesNotMatch(guardHelper, /last_poll_listed_count|last_poll_normalized_count/,
+    'a preserved fault must never become the rejection baseline the next poll is judged against');
+});
+
+test('a rejection spike is a jump against the previous poll, never a fixed rejected fraction', () => {
+  // The accepted gap in the fully-rejected guard: a PARTIAL drift (a new Greenhouse query param
+  // rolling through mixed CDN caches, 2,238 of 2,239 URLs rejected, 1 survivor) completes as a
+  // clean success and sweeps the rejected rows. The spike check catches it as a DELTA because
+  // employer-hosted absolute_url boards (Stripe, Databricks shapes) are host-rejected at a steady
+  // baseline by design, so any fixed ratio either pages daily or misses the drift.
+  assert.equal(REJECTION_SPIKE_MIN_DELTA, 25);
+  assert.equal(REJECTION_SPIKE_LISTED_FRACTION, 0.2);
+
+  assert.equal(rejectionSpikeExceedsBaseline(2239, 2235, 2239, 1), true,
+    'the mixed-CDN partial wipe must alert');
+  assert.equal(rejectionSpikeExceedsBaseline(600, 360, 600, 355), false,
+    'a steady 40% host-rejection baseline is healthy by design');
+  assert.equal(rejectionSpikeExceedsBaseline(600, 360, 600, 100), true,
+    'the same board drifting from 240 to 500 rejections is a fault');
+  assert.equal(rejectionSpikeExceedsBaseline(null, null, 2239, 1), false,
+    'no baseline, no alert: the first completed poll only writes the baseline');
+  assert.equal(rejectionSpikeExceedsBaseline(60, 60, 60, 30), true,
+    'a jump of half a mid-size board clears both floors');
+  assert.equal(rejectionSpikeExceedsBaseline(60, 60, 60, 40), false,
+    'a jump below the absolute floor stays quiet on a small board');
+  assert.equal(rejectionSpikeExceedsBaseline(10000, 9000, 10000, 7500), false,
+    'organic churn under a fifth of a large board stays quiet');
+  assert.equal(rejectionSpikeExceedsBaseline(2239, 1, 2239, 2235), false,
+    'recovery from a drift is an improvement, not a spike');
+
+  // The baseline is a RATE scaled to the current list, not a raw count, so a board changing size
+  // at its steady by-design rejection rate stays quiet in both directions.
+  assert.equal(rejectionSpikeExceedsBaseline(60, 36, 600, 360), false,
+    'tenfold growth at an unchanged 40% rejection rate is growth, not drift');
+  assert.equal(rejectionSpikeExceedsBaseline(60, 36, 600, 100), true,
+    'the same growth WITH a drifted rate still alerts');
+  assert.equal(rejectionSpikeExceedsBaseline(600, 360, 60, 36), false,
+    'a shrinking board at its steady rate stays quiet too');
+  assert.equal(rejectionSpikeExceedsBaseline(0, 0, 600, 360), false,
+    'a zero previous list carries no rate; pollSource never stores one, but defend anyway');
 });
 
 test('multi-request provider cursor progress survives between source polls', () => {
