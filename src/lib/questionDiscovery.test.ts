@@ -4907,6 +4907,9 @@ test('identity controls are fixed fields on every family, whatever the welded la
     ['lever', 'full name cname', '[name="name"]'],
     ['breezy', 'email address cemail', '[name="cEmail"]'],
     ['ashby', 'Name', 'input[name="_systemfield_name"]'],
+    ['ashby', 'Name *', 'input[name="_systemfield_name"]'],
+    ['ashby', 'name* name', 'input[name="_systemfield_name"]'],
+    ['ashby', 'Name (required)', 'input[name="_systemfield_name"]'],
   ] as const) {
     assert.equal(discoveredFieldIsFixedPortalProfileControl(portal, { label, selector, durableSelector: selector }), true, `${portal} ${label}`);
   }
@@ -4917,6 +4920,15 @@ test('identity controls are fixed fields on every family, whatever the welded la
     ['greenhouse', 'legal first name', '#legal_first_name'],
     ['greenhouse', 'please provide your university email address', '#question_1'],
     ['greenhouse', 'emergency contact name', '#question_2'],
+    // A label that says what is being named is a question, never the applicant's name: the
+    // Belvedere required school dropdown and its siblings.
+    ['greenhouse', 'Name of School', '#question_3'],
+    ['greenhouse', 'name of school ✱', '#question_3'],
+    ['greenhouse', 'name of post-secondary institution', '#question_4'],
+    ['greenhouse', 'name of the college you attend (not your high school)', '#question_5'],
+    ['greenhouse', 'Name of referring employee', '#question_6'],
+    ['greenhouse', 'Name a project you are proud of', '#question_7'],
+    ['greenhouse', 'School name* school_name', '#school_name'],
   ] as const) {
     assert.equal(discoveredFieldIsFixedPortalProfileControl(portal, { label, selector, durableSelector: selector }), false, `${portal} ${label}`);
   }

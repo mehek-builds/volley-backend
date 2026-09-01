@@ -6409,7 +6409,14 @@ export function isCoreIdentityField(label: string): boolean {
   const l = (label ?? '').toLowerCase();
   if (!l) return false;
   if (/\b(?:legal|preferred|maiden|previous|former|nick)\b/.test(l)) return false;
-  if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\b|\bname\s*\*/.test(l)) return true;
+  /* A BARE "Name" CONTROL, not any label that opens with the word. "^name\b" and "\bname\s*\*"
+   * read "Name of School" (Belvedere's required 3,000-option dropdown), "name of post-secondary
+   * institution", "Name of referring employee" and "Name a project you are proud of" as the
+   * applicant's name, and once this predicate governed discovery on every family (2026-09-01)
+   * that would have deleted those questions from the review, the packet and the fill. The bare
+   * control is "Name", "Name *", "Name (required)", or Ashby's welded "name* name"; a label that
+   * says what is being named is a question. */
+  if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\s*(?:\*|\(required\)|\(optional\))?\s*$|^name\s*\*\s+name\b/.test(l)) return true;
   return /\be-?mail\b/.test(l) && !NON_APPLICANT_EMAIL_SUBJECT.test(l);
 }
 
