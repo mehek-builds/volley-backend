@@ -444,13 +444,37 @@ test('provider-outage continuity still drops an entry the dedupe emptied', () =>
     { type: 'project', org: 'Tonee', title: 'AI Engineer', date_range: '2025 - Present', bullets: [...shared] },
   ];
 
-  const dropped: { org: string; bullets: number }[] = [];
+  const dropped: { org: string; bullets: number; reason: string }[] = [];
   const result = enforceExperienceBulletFloor(input, [first, second], {
     allowSparseAll: true,
     onDropped: (entry) => dropped.push(entry),
   });
   assert.equal(result.experience.length, 1);
-  assert.deepEqual(dropped, [{ org: 'Tonee', bullets: 0 }], 'the emptied entry is reported, not silently gone');
+  /* `reason` is what stops the caller printing "it has 0 bullets, add another and it goes on" for
+     a drop that adding a bullet cannot fix: every bullet on this entry is already on the page
+     under an earlier heading, so a fourth would change nothing and the student would be sent round
+     a loop. The two routes branch on this to say what actually happened. */
+  assert.deepEqual(
+    dropped,
+    [{ org: 'Tonee', bullets: 0, reason: 'already_printed' }],
+    'the emptied entry is reported with the cause, not silently gone',
+  );
+});
+
+test('a genuinely thin entry still reports the bullet-count cause', () => {
+  const source = bankEntry('thin', 'job', 'Acme', 'Intern', ['Helped users onboard to the new billing flow']);
+  const input = rawSpec();
+  input.experience = [{
+    type: 'job',
+    org: 'Acme',
+    title: 'Intern',
+    date_range: '2025 - Present',
+    bullets: ['Helped users onboard to the new billing flow'],
+  }];
+
+  const dropped: { org: string; bullets: number; reason: string }[] = [];
+  enforceExperienceBulletFloor(input, [source], { onDropped: (entry) => dropped.push(entry) });
+  assert.deepEqual(dropped, [{ org: 'Acme', bullets: 1, reason: 'below_floor' }]);
 });
 
 /* Two genuinely different entries keep every one of their bullets. The dedupe keys on the sentence,

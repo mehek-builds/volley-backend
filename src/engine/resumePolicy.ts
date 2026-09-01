@@ -463,8 +463,19 @@ export function enforceExperienceBulletFloor(
      * An entry below the floor used to disappear with nothing said about it. The student read a
      * resume showing one job when they had handed over two, and the only signal was its absence.
      * Whatever the floor is, the honest behaviour when something falls under it is to say so and
-     * to say what would fix it, which is one more bullet on that entry. */
-    onDropped?: (entry: { org: string; bullets: number }) => void;
+     * to say what would fix it, which is one more bullet on that entry.
+     *
+     * `reason` EXISTS BECAUSE THERE ARE NOW TWO WAYS TO FALL OFF and only one of them is fixed by
+     * writing another bullet. An entry emptied by the cross-entry dedupe reports zero bullets even
+     * though the student's bank row has three, and telling them to add a fourth sends them round a
+     * loop that cannot terminate: every bullet on it is already printed under an earlier heading,
+     * so the entry is omitted again on the next build. The count alone cannot distinguish the two,
+     * so the caller is handed the cause rather than left to infer it. */
+    onDropped?: (entry: {
+      org: string;
+      bullets: number;
+      reason: 'below_floor' | 'already_printed';
+    }) => void;
   } = {},
 ): ResumeSpec {
   /* SHARED ACROSS EVERY ENTRY, which is the difference between this and the per-entry set it
@@ -534,11 +545,11 @@ export function enforceExperienceBulletFloor(
      * whose every bullet was already printed under an earlier heading empties completely, and
      * `allowSparseAll` would otherwise have waved the empty shell through. */
     if (bullets.length === 0) {
-      options.onDropped?.({ org: entry.org, bullets: 0 });
+      options.onDropped?.({ org: entry.org, bullets: 0, reason: 'already_printed' });
       return [];
     }
     if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority && !options.allowSparseAll) {
-      options.onDropped?.({ org: entry.org, bullets: bullets.length });
+      options.onDropped?.({ org: entry.org, bullets: bullets.length, reason: 'below_floor' });
       return [];
     }
     const kept = bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);

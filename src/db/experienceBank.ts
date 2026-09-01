@@ -19,10 +19,9 @@ export function bankEntriesFromResumeSpec(spec: ResumeSpec, userId: string): New
     .filter((entry) => (entry.bullet_variants as string[]).length > 0);
 }
 
-/* Org and title, and NOT type: see the note inside missingBankEntriesFromResumeSpec for why a
-   differing type is a rendering disagreement about one entry rather than a second entry. Narrowed
-   rather than left carrying an unused field, so the next reader cannot conclude type still votes. */
-type ExistingBankIdentity = Pick<ExperienceBankEntry, 'org' | 'title'>;
+/* Org and title decide identity. `type` is kept only as the TIE-BREAK OF LAST RESORT for a blank
+   title - see the note inside missingBankEntriesFromResumeSpec. */
+type ExistingBankIdentity = Pick<ExperienceBankEntry, 'type' | 'org' | 'title'>;
 
 function normalizedBankIdentity(value: string | null | undefined): string {
   return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -37,7 +36,7 @@ export function missingBankEntriesFromResumeSpec(
     const candidateOrg = normalizedBankIdentity(candidate.org);
     const candidateTitle = normalizedBankIdentity(candidate.title);
     return !existing.some((entry) => {
-      /* TYPE IS NOT PART OF AN ENTRY'S IDENTITY, and treating it as one seeded duplicates.
+      /* TYPE DOES NOT DECIDE AN ENTRY'S IDENTITY, and letting it do so seeded duplicates.
        *
        * This used to open with `if (entry.type !== candidate.type) return false`, so a bank
        * already holding Tonee as a `project` did not suppress the same Tonee arriving from the
@@ -52,7 +51,22 @@ export function missingBankEntriesFromResumeSpec(
        * this filter exists to collapse rather than to wave through. */
       if (normalizedBankIdentity(entry.org) !== candidateOrg) return false;
       const entryTitle = normalizedBankIdentity(entry.title);
-      return !candidateTitle || !entryTitle || candidateTitle === entryTitle;
+      if (candidateTitle && entryTitle) return candidateTitle === entryTitle;
+      /* A BLANK TITLE HAS NOTHING LEFT TO DISCRIMINATE ON, so type comes back for this branch only.
+       *
+       * The title clause above is deliberately lenient about a blank: a missing title means "we
+       * cannot tell", and collapsing on the org alone is the safer read when both rows are the
+       * same kind of thing.
+       * That leniency used to be backstopped by the type comparison this function no longer opens
+       * with, and removing it wholesale left the untitled case with no discriminator at all - a
+       * bank holding leadership "USC Lava Lab" / "Product Manager" then suppressed an untitled
+       * PROJECT at USC Lava Lab describing entirely different work, and the student lost that
+       * entry from their bank permanently.
+       *
+       * So: same org and same title collapses across types, which is the fix this function exists
+       * for. Same org and an unknown title collapses only WITHIN a type, which is as much as can be
+       * honestly concluded from a row that never said what it was. */
+      return entry.type === candidate.type;
     });
   });
 }

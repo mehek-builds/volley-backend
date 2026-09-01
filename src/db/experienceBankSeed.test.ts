@@ -86,6 +86,7 @@ test('base resume rescue fills missing entries in a partial experience bank', ()
   };
 
   const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    type: 'job',
     org: 'Tonee',
     title: 'AI Engineer',
   }]);
@@ -119,6 +120,7 @@ test('a venture already banked as a project is not re-seeded as a job', () => {
   };
 
   const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    type: 'project',
     org: 'Tonee - AI Texting Tone Detector',
     title: 'AI Engineer',
   }]);
@@ -150,6 +152,7 @@ test('a second distinct role at one organisation is still seeded', () => {
   };
 
   const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    type: 'job',
     org: 'Department of Biology',
     title: 'Lab Technician',
   }]);
@@ -170,4 +173,68 @@ test('resume, answer, cover letter, gap evidence, and profile-bank reads use the
     assert.match(source, /readExperienceBankOrSeedFromBaseResume/, name);
   }
   assert.doesNotMatch(sources.applicationGates, /import \{ readExperienceBank \}/);
+});
+
+/* A BLANK TITLE KEEPS ITS TYPE DISCRIMINATOR.
+ *
+ * Dropping type from the identity check entirely made this case collapse: the bank's leadership
+ * row suppressed an untitled PROJECT at the same org describing completely different work, and the
+ * student lost that entry from their bank for good. Same org plus same title still collapses
+ * across types (the test above); same org plus an unknown title collapses only within a type. */
+test('an untitled entry is not suppressed by a different-type row at the same org', () => {
+  const spec: ResumeSpec = {
+    school: '',
+    degree: '',
+    grad_date: '',
+    coursework: '',
+    education_position: 'top',
+    experience: [
+      {
+        type: 'project',
+        org: 'USC Lava Lab',
+        title: '',
+        date_range: '2025',
+        bullets: ['Built a matching engine pairing founders with mentors across the cohort.'],
+      },
+    ],
+    skills: [],
+  };
+
+  const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    type: 'leadership',
+    org: 'USC Lava Lab',
+    title: 'Product Manager',
+  }]);
+
+  assert.deepEqual(missing.map((entry) => entry.org), ['USC Lava Lab']);
+});
+
+/* The same untitled entry IS suppressed by a row of its own type, which is the pre-existing
+   leniency this branch preserves rather than a behaviour the review change introduced. */
+test('an untitled entry is still suppressed by a same-type row at the same org', () => {
+  const spec: ResumeSpec = {
+    school: '',
+    degree: '',
+    grad_date: '',
+    coursework: '',
+    education_position: 'top',
+    experience: [
+      {
+        type: 'project',
+        org: 'USC Lava Lab',
+        title: '',
+        date_range: '2025',
+        bullets: ['Built a matching engine pairing founders with mentors across the cohort.'],
+      },
+    ],
+    skills: [],
+  };
+
+  const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    type: 'project',
+    org: 'USC Lava Lab',
+    title: 'Builder',
+  }]);
+
+  assert.deepEqual(missing, []);
 });
