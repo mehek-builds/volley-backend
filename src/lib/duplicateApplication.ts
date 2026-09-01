@@ -389,7 +389,16 @@ function ledgerTwin(
       && !attempt.postingIdentity.jobId
       && hasExactScope,
     ),
-    user_wide_scope: isRootAutofillOrphan && !hasExactScope,
+    /* A root autofill orphan with no exact URL scope is treated as user-wide: it could be any
+       posting, so the duplicate gate refuses every new send until it is resolved. But an orphan
+       that carries a normalized company|role is NOT identity-less - it names a company and role,
+       and comparePostings can decide it against the candidate like any other weak-identity row (a
+       different company|role is a different posting; an equal one is still caught as a duplicate).
+       Only a truly label-less orphan stays user-wide, so one confirmed application to a named
+       company can no longer fail-closed every unrelated new application. */
+    user_wide_scope: isRootAutofillOrphan
+      && !hasExactScope
+      && !attempt.postingIdentity.companyRole,
     tracker_available: Boolean(attempt.applicationId),
     submitted_at: submittedAt,
     unverified_at: unverifiedAt,
