@@ -10,6 +10,7 @@ import {
   getManagedBrowserTerminalResult,
   isBrowserbaseConfigured,
   MANAGED_PREPARE_FILL_DEADLINE_MS,
+  MANAGED_PREPARE_SCAN_OPTIONS,
   MANAGED_READ_ONLY_ACTION_TYPES,
   MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
   MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
@@ -358,9 +359,11 @@ test('an uncorrelated managed run that mutates the employer page is refused befo
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example/';
   let fetchCalls = 0;
+  let sentBody: Record<string, unknown> | null = null;
   try {
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (_input, init) => {
       fetchCalls += 1;
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return new Response(JSON.stringify({
         run: { title: 'Application', url: 'https://portal.example/apply', text: '' },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -380,7 +383,14 @@ test('an uncorrelated managed run that mutates the employer page is refused befo
     ]);
     assert.equal(readOnly.title, 'Application');
     assert.equal(fetchCalls, 1);
-    // The read-only action set must mirror stratus's READ_ONLY_ACTIONS exactly.
+    // ABSENCE ON THE WIRE, not merely a passing run. If a later refactor made the scan pair
+    // unconditional, every jobExtract and probe read would start sending throwaway attempt UUIDs to
+    // stratus, and a test that only checked the run succeeded would stay green through it.
+    assert.equal('submissionAttempt' in sentBody!, false, 'a read must send no correlation');
+    assert.equal('providerDeadlineAt' in sentBody!, false, 'a read must send no provider deadline');
+    // A LOCAL CHANGE-DETECTOR, NOT A LOCKSTEP PROOF. The invariant that matters lives in
+    // stratus-browser-cloud's READ_ONLY_ACTIONS; nothing here can see that repo, so this catches an
+    // accidental edit to the set and cannot catch drift from stratus.
     assert.deepEqual(
       [...MANAGED_READ_ONLY_ACTION_TYPES].sort(),
       ['discover', 'extract', 'requireCapability', 'waitForSelector'],
@@ -417,20 +427,41 @@ test('a prepare-path fill widens its scan deadline to cover the provider run bud
     await runManagedBrowser(
       'https://portal.example/apply',
       [{ type: 'fill', selector: '#first_name', text: 'Mehek' }],
-      { scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS },
+      MANAGED_PREPARE_SCAN_OPTIONS,
     );
     const body = sentBody as unknown as { allowSubmit?: unknown; providerDeadlineAt?: string };
-    // Never a submit release, and a deadline past the 240s read-scan default: the fill can run to
-    // stratus's own 270s budget, so the window must strictly cover it while staying inside the
-    // 300s provider maximum.
-    assert.equal(body.allowSubmit, false);
+    assert.equal(body.allowSubmit, false, 'a prepare fill must never release a submission');
+    /* THE TWO CLOCKS STRATUS DERIVES FROM THIS ONE VALUE, and why 280s is a ceiling rather than a
+     * preference. The sandbox acts until deadline minus its 10s response margin; the host waits for
+     * the result only min(270s, deadline minus 2s). A deadline above 280s puts the sandbox's window
+     * past the host's wait, so a fill finishing in that band has already touched the employer form
+     * and gets discarded as RUN_TIMED_OUT. At exactly 280s the sandbox window equals stratus's own
+     * 270s run budget, which is the largest window that can actually produce a result. */
     const remainingMs = Date.parse(body.providerDeadlineAt!) - before;
-    assert.ok(remainingMs > 270_000 && remainingMs <= 300_000, `deadline out of bounds: ${remainingMs}ms`);
+    assert.ok(remainingMs > 275_000 && remainingMs <= 280_000, `deadline out of bounds: ${remainingMs}ms`);
+    assert.equal(MANAGED_PREPARE_FILL_DEADLINE_MS, 280_000);
+    assert.ok(
+      MANAGED_PREPARE_FILL_DEADLINE_MS - 10_000 <= 270_000,
+      'the sandbox action window must not outlast the provider host wait',
+    );
     // A widened deadline without the scan correlation is a usage error, not a silent no-op.
     await assert.rejects(
       runManagedBrowser('https://portal.example/apply', [], { scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS }),
       /only meaningful on a scan-correlated run/i,
     );
+    // A window computed down to zero (or past the provider maximum) is a configuration bug and must
+    // say so, rather than minting an expired deadline that reads as a provider timeout downstream.
+    for (const scanDeadlineMs of [0, -1, 12_000, 300_001, 1.5]) {
+      await assert.rejects(
+        runManagedBrowser(
+          'https://portal.example/apply',
+          [{ type: 'fill', selector: '#first_name', text: 'Mehek' }],
+          { scanCorrelation: true, scanDeadlineMs },
+        ),
+        /more than 12 seconds and at most 5 minutes/i,
+        `scanDeadlineMs ${scanDeadlineMs} must be refused`,
+      );
+    }
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.STRATUS_API_KEY;

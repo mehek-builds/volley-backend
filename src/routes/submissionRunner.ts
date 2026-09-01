@@ -51,7 +51,7 @@ import {
   isManagedStratusProvider,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
-  MANAGED_PREPARE_FILL_DEADLINE_MS,
+  MANAGED_PREPARE_SCAN_OPTIONS,
   managedBrowserTerminalResultId,
   managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
@@ -7016,7 +7016,7 @@ async function prepareManaged(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
-    { scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS },
+    MANAGED_PREPARE_SCAN_OPTIONS,
   )
     .catch((error: unknown) => {
       // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
@@ -7638,7 +7638,7 @@ async function prepareManaged(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
-    { scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS },
+    MANAGED_PREPARE_SCAN_OPTIONS,
   );
   const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
   if (actionDiagnostics.length > 0) {

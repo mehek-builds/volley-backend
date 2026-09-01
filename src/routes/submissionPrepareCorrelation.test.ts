@@ -13,52 +13,59 @@ import test from 'node:test';
  * cannot submit. The missing piece was the EPHEMERAL scan correlation that the posting-questions
  * pre-scan already carried for exactly this policy.
  *
- * These assertions pin the shape: every prepare-path managed run that mutates the employer page
- * carries scanCorrelation, the two big runs (discovery and fill) carry the widened deadline that
- * covers stratus's own run budget, and the real submit still derives its correlation from the
- * durable attempt claimed before launch. runManagedBrowser's own guard refuses any future
- * uncorrelated mutating launch at runtime; this test names the call sites so the guard never fires.
+ * WHY A SOURCE TEST RATHER THAN AN EXECUTED ONE. runManagedBrowser's own guard already refuses an
+ * uncorrelated mutating launch at runtime, so that half needs no pinning here. What the guard
+ * cannot see is a call site that correlates but drops the widened deadline, which silently reverts
+ * the two big runs to the 240s read-scan window and aborts fills stratus is still finishing. That
+ * is what these assertions hold, and prepareManaged has no executed-path coverage through the
+ * provider to hold it instead.
  */
+
+/** The whole call expression at an anchor, so an assertion can never pass on a truncated window. */
+function callSiteAt(source: string, anchor: string, occurrence = 0): string {
+  let index = -1;
+  for (let found = 0; found <= occurrence; found += 1) {
+    index = source.indexOf(anchor, index + 1);
+    assert.ok(index > 0, `call site not found: ${anchor} (occurrence ${occurrence})`);
+  }
+  const start = source.lastIndexOf('await runManagedBrowserWithAccountFence(', index);
+  assert.ok(start > 0, `no fenced managed launch encloses: ${anchor}`);
+  const end = source.indexOf('\n  );', start);
+  const nestedEnd = source.indexOf('\n    );', start);
+  const close = Math.min(end < 0 ? Number.MAX_SAFE_INTEGER : end, nestedEnd < 0 ? Number.MAX_SAFE_INTEGER : nestedEnd);
+  assert.ok(close < Number.MAX_SAFE_INTEGER, `unterminated managed launch at: ${anchor}`);
+  return source.slice(start, close);
+}
+
 test('every prepare-path managed mutation carries an ephemeral scan correlation', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
 
-  const prepareStart = runner.indexOf('async function prepareManaged(');
-  assert.ok(prepareStart > 0);
-  const discoveryCall = runner.indexOf(
-    'managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),',
-    prepareStart,
-  );
-  assert.ok(discoveryCall > prepareStart, 'the discovery pass call site must exist');
+  // The two big runs share one named options constant, so the correlation policy for a prepare run
+  // has a single definition rather than a literal per call site.
+  const discovery = callSiteAt(runner, 'buildManagedDiscoveryActions(portal, packet)');
   assert.match(
-    runner.slice(discoveryCall, discoveryCall + 250),
-    /\{ scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS \},/,
-    'the discovery pass fills fixed fields, so it must carry the widened scan correlation',
+    discovery,
+    /MANAGED_PREPARE_SCAN_OPTIONS/,
+    'the discovery pass fills fixed fields, so it must launch with the prepare scan options',
+  );
+  const fill = callSiteAt(runner, 'managedActionsWithExactPageUrl(fillActions, applicationUrl)');
+  assert.match(
+    fill,
+    /MANAGED_PREPARE_SCAN_OPTIONS/,
+    'the prepare fill mutates the form without submitting, so it must launch with the prepare scan options',
   );
 
-  const fillCall = runner.indexOf(
-    'managedActionsWithExactPageUrl(fillActions, applicationUrl),',
-    prepareStart,
-  );
-  assert.ok(fillCall > discoveryCall, 'the fill call site must exist after the discovery pass');
+  // Probe-sized mutations keep the standard read-scan window; they only need the correlation.
+  const optionProbe = callSiteAt(runner, 'optionProbeBatchFailures.push({ controlIds, reason })');
   assert.match(
-    runner.slice(fillCall, fillCall + 250),
-    /\{ scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS \},/,
-    'the prepare fill mutates the form without submitting, so it must carry the widened scan correlation',
-  );
-
-  const optionProbeCall = runner.indexOf('const result = await runManagedBrowserWithAccountFence(', prepareStart);
-  assert.ok(optionProbeCall > 0 && optionProbeCall < fillCall, 'the option-probe call site must exist');
-  assert.match(
-    runner.slice(optionProbeCall, optionProbeCall + 250),
-    /\{ screenshot: false, scanCorrelation: true \},/,
+    optionProbe,
+    /scanCorrelation: true/,
     'option-probe clicks classify as mutations, so the probe batches must carry the scan correlation',
   );
-
-  const evidenceCall = runner.indexOf('buildWorkablePhoneEvidenceActions(),');
-  assert.ok(evidenceCall > 0, 'the Workable phone evidence call site must exist');
+  const evidence = callSiteAt(runner, 'buildWorkablePhoneEvidenceActions()');
   assert.match(
-    runner.slice(evidenceCall, evidenceCall + 250),
-    /\{ screenshot: false, scanCorrelation: true \},/,
+    evidence,
+    /scanCorrelation: true/,
     'the evidence run clicks the cookie decline, so it must carry the scan correlation',
   );
 
@@ -67,8 +74,10 @@ test('every prepare-path managed mutation carries an ephemeral scan correlation'
   // employer-facing press auditable in the attempt ledger.
   const submitCall = runner.indexOf('...managedApplicationSubmitOptions(');
   assert.ok(submitCall > 0, 'the managed submit must keep its durable-attempt submit options');
-  const submitWindow = runner.slice(submitCall - 2_000, submitCall + 400);
-  assert.match(submitWindow, /managedInitialSubmissionAttempt\(\s*attemptBinding,/);
+  assert.match(
+    runner.slice(submitCall - 2_000, submitCall + 400),
+    /managedInitialSubmissionAttempt\(\s*attemptBinding,/,
+  );
   assert.doesNotMatch(
     runner.slice(submitCall, submitCall + 400),
     /scanCorrelation/,
@@ -77,10 +86,12 @@ test('every prepare-path managed mutation carries an ephemeral scan correlation'
 
   // The account-gate probe and the CAPTCHA probe are extract-only reads and must stay
   // uncorrelated: minting throwaway attempts for reads would blur what a correlation means.
-  const accountGateCall = runner.indexOf('buildManagedAttendedAccountProbeActions(portal),');
-  assert.ok(accountGateCall > 0);
-  assert.doesNotMatch(runner.slice(accountGateCall, accountGateCall + 120), /scanCorrelation/);
-  const captchaProbeCall = runner.indexOf('buildManagedCaptchaProbeActions(),');
-  assert.ok(captchaProbeCall > 0);
-  assert.doesNotMatch(runner.slice(captchaProbeCall, captchaProbeCall + 120), /scanCorrelation/);
+  assert.doesNotMatch(
+    callSiteAt(runner, 'buildManagedAttendedAccountProbeActions(portal)'),
+    /scanCorrelation/,
+  );
+  assert.doesNotMatch(
+    callSiteAt(runner, 'buildManagedCaptchaProbeActions()'),
+    /scanCorrelation/,
+  );
 });
