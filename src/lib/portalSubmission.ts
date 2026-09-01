@@ -63,6 +63,11 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
+import {
+  GREENHOUSE_LEGACY_EMBED_HOST,
+  buildGreenhouseEmbedUrl,
+  greenhouseEmbedHostForHostname,
+} from './greenhouseEmbedUrl';
 import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 import {
   postingCountryCodeFromJobContext,
@@ -8735,7 +8740,7 @@ function greenhouseEmbedApplicationUrl(rawUrl: string): string | undefined {
   const url = new URL(rawUrl);
   if (url.protocol !== 'https:') return undefined;
   const databricksJobId = databricksGreenhouseJobId(url);
-  if (databricksJobId) return `https://boards.greenhouse.io/embed/job_app?token=${databricksJobId}`;
+  if (databricksJobId) return buildGreenhouseEmbedUrl(GREENHOUSE_LEGACY_EMBED_HOST, databricksJobId);
   // Greenhouse boards embedded on an employer's own domain. The board token is never read off the
   // page; see lib/greenhouseEmbeddedBoards for how it is established.
   const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);
@@ -8745,15 +8750,13 @@ function greenhouseEmbedApplicationUrl(rawUrl: string): string | undefined {
     const token = url.searchParams.get('token') ?? '';
     if (!/^\d+$/.test(token)) return undefined;
     const board = url.searchParams.get('for') ?? url.searchParams.get('b') ?? '';
-    return board
-      ? `https://boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(board)}&token=${token}`
-      : `https://boards.greenhouse.io/embed/job_app?token=${token}`;
+    return buildGreenhouseEmbedUrl(GREENHOUSE_LEGACY_EMBED_HOST, token, board || undefined);
   }
   if (host !== 'boards.greenhouse.io' && host !== 'job-boards.greenhouse.io') return undefined;
   const jobMatch = url.pathname.match(/^\/([^/]+)\/jobs\/(\d+)\/?$/i);
   if (!jobMatch) return undefined;
   const [, board, greenhouseJobId] = jobMatch;
-  return `https://boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(board)}&token=${greenhouseJobId}`;
+  return buildGreenhouseEmbedUrl(GREENHOUSE_LEGACY_EMBED_HOST, greenhouseJobId, board);
 }
 
 export function detectPortal(rawUrl: string): SupportedPortal {
@@ -9030,10 +9033,7 @@ export function canonicalMonitoredPortalUrl(
       }
       if (!/^\d+$/.test(greenhouseJobId)
         || (externalId && greenhouseJobId !== externalId)) return undefined;
-      const embedHost = host === 'job-boards.eu.greenhouse.io'
-        ? 'job-boards.eu.greenhouse.io'
-        : 'job-boards.greenhouse.io';
-      return `https://${embedHost}/embed/job_app?for=${encodeURIComponent(token)}&token=${greenhouseJobId}`;
+      return buildGreenhouseEmbedUrl(greenhouseEmbedHostForHostname(host), greenhouseJobId, token);
     } catch {
       return undefined;
     }

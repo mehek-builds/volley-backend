@@ -1,5 +1,6 @@
 import { companyDomainFor } from './companyDomains';
 import { JOB_SOURCES } from './jobSources';
+import { GREENHOUSE_EMBED_HOST, buildGreenhouseEmbedUrl } from './greenhouseEmbedUrl';
 
 /**
  * Greenhouse boards served from the employer's OWN domain.
@@ -136,5 +137,5 @@ export function embeddedGreenhouseApplicationUrl(url: URL): string | undefined {
   if (!jobId) return undefined;
   const token = greenhouseBoardTokenForHost(url.hostname);
   if (!token) return undefined;
-  return `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(token)}&token=${jobId}`;
+  return buildGreenhouseEmbedUrl(GREENHOUSE_EMBED_HOST, jobId, token);
 }

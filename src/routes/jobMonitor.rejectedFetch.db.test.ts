@@ -117,6 +117,7 @@ async function sourceState(sourceId = SOURCE_ID) {
     last_error: schema.career_page_sources.last_error,
     last_poll_listed_count: schema.career_page_sources.last_poll_listed_count,
     last_poll_normalized_count: schema.career_page_sources.last_poll_normalized_count,
+    last_poll_constructed_count: schema.career_page_sources.last_poll_constructed_count,
   }).from(schema.career_page_sources).where(eq(schema.career_page_sources.id, sourceId));
   return row!;
 }
@@ -331,6 +332,118 @@ test('a partial action-URL drift is detected as a rejection spike against the pr
   assert.equal(afterRecovery.last_error, null);
   assert.equal(afterRecovery.last_poll_normalized_count, 60);
   assert.equal(await activeJobCount(SPIKE_SOURCE_ID), 60);
+});
+
+const CONSTRUCTED_SOURCE_ID = '92000000-0000-4000-8000-000000000006';
+const CONSTRUCTED_COMPANY = 'Meridian Robotics Company';
+const CONSTRUCTED_TOKEN = 'meridian-robotics';
+
+/** The same 60-posting board with `hosted` of the postings publishing a first-party absolute_url
+ *  and the rest publishing on the employer's own domain. Every posting normalizes either way; only
+ *  the SHAPE of the stored action URL differs, which is exactly the drift nothing else can see. */
+function constructedBoardPayload(hosted: number) {
+  const content = `<p>${'Design, build, and operate reliable robotics control software with the autonomy team. '.repeat(3)}</p>`;
+  return JSON.stringify({
+    jobs: Array.from({ length: 60 }, (_, index) => {
+      const id = String(6000 + index);
+      return {
+        id,
+        title: `Robotics Software Engineer ${id}`,
+        absolute_url: index < hosted
+          ? `https://job-boards.greenhouse.io/${CONSTRUCTED_TOKEN}/jobs/${id}`
+          : `https://careers.meridian-robotics.example/openings/?gh_jid=${id}`,
+        location: { name: 'Boulder, CO' },
+        company_name: CONSTRUCTED_COMPANY,
+        content,
+        updated_at: new Date().toISOString(),
+      };
+    }),
+  });
+}
+
+test('a board flipping from hosted job pages to constructed embed forms is detected as a construction spike', async () => {
+  /* THE DRIFT EVERY OTHER COUNT IN THIS FILE IS BLIND TO. Since the employer-hosted embed fallback,
+     a Greenhouse posting whose absolute_url fails validation is CONSTRUCTED from token + id rather
+     than dropped - so Greenhouse-wide URL-format drift normalizes all 60 postings, ingests all 60,
+     trips neither the fully-rejected guard nor the rejection-spike check, and the poll is clean by
+     every measure. What silently changed is that every posting_url is now a bare embed application
+     form instead of the readable hosted job page, in the listing and in the notification emails'
+     "view the original listing" links. */
+  const now = new Date();
+  await db.insert(schema.career_page_sources).values({
+    id: CONSTRUCTED_SOURCE_ID,
+    company_name: CONSTRUCTED_COMPANY,
+    ats_name: 'greenhouse',
+    board_token: CONSTRUCTED_TOKEN,
+    career_url: `https://job-boards.greenhouse.io/${CONSTRUCTED_TOKEN}`,
+    company_domain: `${CONSTRUCTED_TOKEN}.example`,
+    company_logo_url: `https://${CONSTRUCTED_TOKEN}.example/logo.png`,
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: now,
+    portal_company_name: CONSTRUCTED_COMPANY,
+    portal_name_mismatch: false,
+    enabled: true,
+  });
+
+  /* 1. A wholly hosted board: nothing constructed, baseline written, nothing to alert about. */
+  globalThis.fetch = async () => respond(constructedBoardPayload(60));
+  const first = await monitor.pollSource(await sourceRow(CONSTRUCTED_SOURCE_ID));
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.ok && first.constructed, 0);
+  assert.ok(first.ok && !('construction_spike' in first));
+  const afterFirst = await sourceState(CONSTRUCTED_SOURCE_ID);
+  assert.equal(afterFirst.last_poll_normalized_count, 60);
+  assert.equal(afterFirst.last_poll_constructed_count, 0);
+  assert.equal(afterFirst.last_error, null);
+
+  /* 2. The whole board's absolute_url format drifts off-host. Every count the previous work added
+        still reads clean - and that is the point. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  globalThis.fetch = async () => respond(constructedBoardPayload(0));
+  const spiked = await monitor.pollSource(await sourceRow(CONSTRUCTED_SOURCE_ID));
+  assert.equal(spiked.ok, true, JSON.stringify(spiked));
+  assert.equal(spiked.ok && spiked.rejected, 0,
+    'nothing was rejected: the fallback normalized every posting');
+  assert.ok(spiked.ok && !('rejection_spike' in spiked),
+    'the rejection-spike check cannot see this drift, which is why the construction count exists');
+  assert.equal(spiked.ok && spiked.constructed, 60);
+  assert.match(spiked.ok && spiked.construction_spike || '',
+    /Constructed action URLs jumped: 60 of 60 .* against 0 of 60/);
+  assert.equal(await activeJobCount(CONSTRUCTED_SOURCE_ID), 60,
+    'the board keeps working; the fallback is the reason this is detection only');
+
+  const afterSpike = await sourceState(CONSTRUCTED_SOURCE_ID);
+  assert.match(afterSpike.last_error ?? '', /Constructed action URLs jumped/,
+    'the spike must be queryable in career_page_sources.last_error');
+  assert.ok(afterSpike.last_successful_poll_at! > afterFirst.last_successful_poll_at!,
+    'a spiked poll is still a completed poll');
+  assert.equal(afterSpike.last_poll_constructed_count, 60);
+
+  /* 3. The rows really did change what they point at - the fault this alert is about. */
+  const [row] = await db.select({ posting_url: schema.monitored_jobs.posting_url })
+    .from(schema.monitored_jobs)
+    .where(eq(schema.monitored_jobs.source_id, CONSTRUCTED_SOURCE_ID))
+    .limit(1);
+  assert.match(row!.posting_url, /^https:\/\/job-boards\.greenhouse\.io\/embed\/job_app\?for=/);
+
+  /* 4. Steady at the new level is an employer-hosted board working as designed: no repeat alert. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const steady = await monitor.pollSource(await sourceRow(CONSTRUCTED_SOURCE_ID));
+  assert.equal(steady.ok, true);
+  assert.ok(steady.ok && !('construction_spike' in steady),
+    'a wholly constructed board is healthy at rest; only the MOVE is a fault');
+  assert.equal((await sourceState(CONSTRUCTED_SOURCE_ID)).last_error, null);
+
+  /* 5. Recovery to hosted pages is an improvement, not a spike. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  globalThis.fetch = async () => respond(constructedBoardPayload(60));
+  const recovered = await monitor.pollSource(await sourceRow(CONSTRUCTED_SOURCE_ID));
+  assert.equal(recovered.ok, true);
+  assert.ok(recovered.ok && !('construction_spike' in recovered));
+  const afterRecovery = await sourceState(CONSTRUCTED_SOURCE_ID);
+  assert.equal(afterRecovery.last_error, null);
+  assert.equal(afterRecovery.last_poll_constructed_count, 0);
 });
 
 const RENAME_SOURCE_ID = '92000000-0000-4000-8000-000000000004';

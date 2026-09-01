@@ -7,6 +7,12 @@ import {
   type NormalizedPay,
 } from './compensation';
 import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
+import {
+  GREENHOUSE_EMBED_HOST,
+  buildGreenhouseEmbedUrl,
+  greenhouseEmbedHostForHostname,
+  isGreenhouseEmbedApplicationUrl,
+} from './greenhouseEmbedUrl';
 
 // The boards the job monitor may poll.
 //
@@ -359,25 +365,23 @@ function strictSourceToken(
 }
 
 /**
- * Which regional embed host a constructed Greenhouse action URL should use. REGION ONLY: the
- * payload URL's content is never trusted, its host merely selects between two first-party
- * constants, because an EU-silo tenant's embed route does not exist on the US host (see the EU
- * hosts in GREENHOUSE_ACTION_HOSTS and the host preservation in canonicalMonitoredPortalUrl).
- * Anything unparseable or non-EU, including every employer-hosted custom domain, gets the default
- * host - the same one the board API that listed the posting answers from.
+ * Which regional embed host a constructed Greenhouse action URL should use, read off the payload
+ * URL. REGION ONLY: the payload URL's content is never trusted, its host merely selects between the
+ * first-party constants greenhouseEmbedHostForHostname owns, because an EU-silo tenant's embed
+ * route does not exist on the US host (see the EU hosts in GREENHOUSE_ACTION_HOSTS and the host
+ * preservation in canonicalMonitoredPortalUrl). Anything unparseable, including every
+ * employer-hosted custom domain, gets the default host - the same one the board API that listed the
+ * posting answers from.
  */
 function greenhouseEmbedHost(raw: unknown): string {
   if (typeof raw === 'string') {
     try {
-      const host = new URL(raw).hostname.toLowerCase();
-      if (host === 'boards.eu.greenhouse.io' || host === 'job-boards.eu.greenhouse.io') {
-        return 'job-boards.eu.greenhouse.io';
-      }
+      return greenhouseEmbedHostForHostname(new URL(raw).hostname);
     } catch {
       /* Unparseable payload URL: the default host below. */
     }
   }
-  return 'job-boards.greenhouse.io';
+  return GREENHOUSE_EMBED_HOST;
 }
 
 export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
@@ -422,7 +426,11 @@ export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): 
            here come from the token-scoped board API, where the 18 measured sub-7-digit ids are
            genuine postings. */
         if (!/^[1-9]\d{0,11}$/.test(id)) return [];
-        postingUrl = `https://${greenhouseEmbedHost(job.absolute_url)}/embed/job_app?for=${encodeURIComponent(expectedToken)}&token=${id}`;
+        postingUrl = buildGreenhouseEmbedUrl(
+          greenhouseEmbedHost(job.absolute_url),
+          id,
+          expectedToken,
+        );
       }
     }
     if (!id || !title || !postingUrl) return [];
@@ -922,6 +930,21 @@ export type SourceJobFetch = {
    * unpersisted adoption produces jobs that display but can never be applied to.
    */
   adopted_board_token?: string;
+  /**
+   * How many of `jobs` carry a CONSTRUCTED action URL - the bare Greenhouse embed application form
+   * built from token + id - rather than the readable hosted job page the payload's own absolute_url
+   * validated to. Greenhouse only; undefined everywhere else, because no other normalizer
+   * constructs.
+   *
+   * The construction fallback is what keeps an employer-hosted board working at all (see
+   * normalizeGreenhouseJobs), and it is deliberately invisible to the rejection counts: a
+   * constructed posting is normalized, not rejected. That is exactly why this count has to exist.
+   * Greenhouse-wide absolute_url format drift would now flip every hosted board from validated to
+   * constructed on polls recorded as clean successes - every posting_url quietly demoted from a job
+   * page to an application form, and every notification email's "view the original listing" link
+   * with it - and nothing else in this pipeline would move.
+   */
+  constructed_action_url_count?: number;
 };
 
 export type DetailFetchOptions = {
@@ -1693,9 +1716,16 @@ export async function fetchSourceJobBatch(
   let jobs: NormalizedJob[];
   let listedExternalIds: string[] | undefined;
   let adoptedBoardToken: string | undefined;
+  let constructedActionUrls: number | undefined;
   switch (source.ats_name) {
     case 'greenhouse': {
       jobs = normalizeGreenhouseJobs(payload, boardToken);
+      /* Read off the normalized rows rather than returned from the normalizer, so the count is of
+         the URLs actually STORED. A validated absolute_url canonicalizes to `/{token}/jobs/{id}`
+         and can never take this shape, so the two classes stay exactly complementary; the predicate
+         lives beside the builder that produced them for the same reason. */
+      constructedActionUrls = jobs
+        .filter((job) => isGreenhouseEmbedApplicationUrl(job.posting_url)).length;
       listedExternalIds = uniqueListedExternalIds(
         (payload as { jobs: unknown[] }).jobs,
         (raw) => externalIdentifier((raw as Record<string, unknown>).id),
@@ -1766,6 +1796,9 @@ export async function fetchSourceJobBatch(
     listed_external_ids: listedExternalIds ?? jobs.map((job) => job.external_id),
     preserve_external_ids: [],
     ...(adoptedBoardToken ? { adopted_board_token: adoptedBoardToken } : {}),
+    ...(constructedActionUrls === undefined
+      ? {}
+      : { constructed_action_url_count: constructedActionUrls }),
   };
 }
 

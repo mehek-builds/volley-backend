@@ -8,6 +8,7 @@ import {
   normalizeRecruiteeJobs,
   validatedBreezyPostingUrl,
 } from './jobMonitor';
+import { canonicalMonitoredPortalUrl } from './portalSubmission';
 
 const DESCRIPTION = 'Build and operate reliable production systems with the product engineering team.';
 
@@ -199,6 +200,91 @@ test('Recruitee adopts the tenant recruitee.com itself redirects to, and only th
     assert.deepEqual(fetched.listed_external_ids, ['303'], finalUrl || '(no response url)');
     assert.equal(fetched.adopted_board_token, undefined, finalUrl || '(no response url)');
   }
+});
+
+test('a constructed action URL is exactly what submission will later canonicalize it to', () => {
+  /* WHY THE TEMPLATE IS SHARED (lib/greenhouseEmbedUrl). The monitor STORES this URL and
+     canonicalMonitoredPortalUrl later demands it back; a one-character divergence between the two
+     spellings makes a stored posting canonicalize to undefined and become unappliable, which is
+     invisible until someone tries to apply. Pinned in both regions, because the EU silo has no
+     embed route on the US host. */
+  for (const [payloadUrl, id] of [
+    ['https://careers.acme.example/details/?gh_jid=101', '101'],
+    ['https://boards.eu.greenhouse.io/acme/jobs/101?utm_source=linkedin', '101'],
+  ] as const) {
+    const [job] = normalizeGreenhouseJobs(greenhouse(payloadUrl), 'acme');
+    assert.equal(
+      canonicalMonitoredPortalUrl(job.posting_url, 'greenhouse', 'acme', id),
+      job.posting_url,
+      payloadUrl,
+    );
+  }
+});
+
+test('the dispatcher counts how many Greenhouse action URLs it had to construct', async () => {
+  /* The construction fallback is invisible to every other count in the pipeline: a constructed
+     posting is NORMALIZED, so it never reaches the rejection counts or the fully-rejected guard.
+     What it changes is where the row points - a bare embed application form rather than the
+     readable hosted job page, in the board listing and in every notification email's "view the
+     original listing" link - so a board flipping from validated to constructed has to be visible
+     somewhere. pollSource compares this count against the persisted baseline. */
+  const board = (absoluteUrls: string[]) => async () => new Response(JSON.stringify({
+    jobs: absoluteUrls.map((absolute_url, index) => ({
+      id: 101 + index,
+      title: 'Platform Engineer',
+      absolute_url,
+      content: DESCRIPTION,
+    })),
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  const hosted = await fetchSourceJobBatch(
+    { ats_name: 'greenhouse', board_token: 'acme' },
+    board([
+      'https://job-boards.greenhouse.io/acme/jobs/101',
+      'https://job-boards.greenhouse.io/acme/jobs/102',
+    ]),
+  );
+  assert.equal(hosted.jobs.length, 2);
+  assert.equal(hosted.constructed_action_url_count, 0,
+    'a board whose payload URLs all validate constructs nothing');
+
+  /* The employer-hosted shape: normalized in full, and wholly constructed. Steady at this level it
+     is a healthy board; it is the MOVE to this level that pollSource alerts on. */
+  const employerHosted = await fetchSourceJobBatch(
+    { ats_name: 'greenhouse', board_token: 'acme' },
+    board([
+      'https://careers.acme.example/details/?gh_jid=101',
+      'https://careers.acme.example/details/?gh_jid=102',
+    ]),
+  );
+  assert.equal(employerHosted.jobs.length, 2,
+    'the fallback is what keeps an employer-hosted board alive, and it must stay that way');
+  assert.equal(employerHosted.constructed_action_url_count, 2);
+
+  const mixed = await fetchSourceJobBatch(
+    { ats_name: 'greenhouse', board_token: 'acme' },
+    board([
+      'https://job-boards.greenhouse.io/acme/jobs/101',
+      'https://careers.acme.example/details/?gh_jid=102',
+    ]),
+  );
+  assert.equal(mixed.constructed_action_url_count, 1);
+  /* Exactly complementary by construction: a validated absolute_url canonicalizes to
+     /{token}/jobs/{id} and can never take the embed shape the count matches on. */
+  assert.equal(mixed.jobs.length - mixed.constructed_action_url_count!, 1);
+
+  /* No other normalizer constructs, so no other provider reports a count to judge. */
+  const lever = await fetchSourceJobBatch(
+    { ats_name: 'lever', board_token: 'acme' },
+    async () => new Response(JSON.stringify([{
+      id: 'lever-job-1',
+      text: 'Platform Engineer',
+      hostedUrl: 'https://jobs.lever.co/acme/lever-job-1',
+      descriptionPlain: DESCRIPTION,
+      categories: {},
+    }]), { status: 200, headers: { 'content-type': 'application/json' } }),
+  );
+  assert.equal(lever.constructed_action_url_count, undefined);
 });
 
 test('the dispatcher lists Workable raw shortcodes even when every action URL is rejected', async () => {

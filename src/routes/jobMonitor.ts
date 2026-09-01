@@ -1268,9 +1268,9 @@ export function shouldKeepPostingsOnFullyRejectedFetch(
   return listedCount > 0 && normalizedCount === 0 && activeNow > 0;
 }
 
-/* The rejection-spike thresholds, exported so the test pins the numbers rather than inferring them.
+/* The action-URL spike thresholds, exported so the test pins the numbers rather than inferring them.
  *
- * A DELTA against the previous completed poll, never a fixed rejected-fraction: employer-hosted
+ * A DELTA against the previous completed poll, never a fixed fraction: employer-hosted
  * absolute_url boards (Stripe's and Databricks's shapes) are host-rejected at a steady rate BY
  * DESIGN, so "40% rejected" is a healthy Tuesday on one board and a five-alarm drift on another.
  * The only shape that is always a fault is the rate MOVING - the mixed-CDN version of the SpaceX
@@ -1289,19 +1289,41 @@ export function rejectedFromCounts(listedCount: number, normalizedCount: number)
 }
 
 /**
- * Whether this poll's rejection count (listed minus normalized) jumped against the stored baseline.
+ * Whether a per-poll subset count jumped against the stored baseline for that same subset.
  *
- * The baseline is scaled to the CURRENT list size before comparing, because what is steady about a
+ * The baseline is scaled to the CURRENT total before comparing, because what is steady about a
  * by-design host-rejected board is its rejection RATE, not its count: a board growing tenfold at an
  * unchanged 40% rejection rate has ten times the rejections and none of the drift this predicate
  * hunts. Judging raw counts across different list sizes would page on that growth.
  *
  * NULL (or empty, see below) baseline - a source that has never completed a listing poll since the
  * counts began persisting - never alerts: there is nothing to have jumped FROM, and the first
- * completed poll writes the baseline the next one is judged against. A zero previous list carries
- * no rate at all, which is also why pollSource never stores one. The fully-rejected case never
- * reaches this predicate; shouldKeepPostingsOnFullyRejectedFetch already refuses to let that poll
- * complete at all.
+ * completed poll writes the baseline the next one is judged against. A zero previous total carries
+ * no rate at all, which is also why pollSource never stores one.
+ *
+ * Both action-URL drift signals share this one comparison and these one pair of floors, because
+ * they are the same fault measured on either side of the same fallback: a posting whose payload URL
+ * stops validating is either dropped (a rejection, when its identity cannot mint an embed route) or
+ * silently demoted to a constructed embed form. A drift that moved one and not the other would
+ * still have to clear the same bar to be worth waking someone for.
+ */
+function subsetSpikeExceedsBaseline(
+  previousTotal: number | null,
+  previousSubset: number | null,
+  total: number,
+  subset: number,
+): boolean {
+  if (!previousTotal || previousSubset === null) return false;
+  const expected = Math.round((previousSubset / previousTotal) * total);
+  return subset - expected
+    >= Math.max(REJECTION_SPIKE_MIN_DELTA, Math.ceil(total * REJECTION_SPIKE_LISTED_FRACTION));
+}
+
+/**
+ * Whether this poll's rejection count (listed minus normalized) jumped against the stored baseline.
+ *
+ * The fully-rejected case never reaches this predicate; shouldKeepPostingsOnFullyRejectedFetch
+ * already refuses to let that poll complete at all.
  */
 export function rejectionSpikeExceedsBaseline(
   previousListedCount: number | null,
@@ -1309,14 +1331,48 @@ export function rejectionSpikeExceedsBaseline(
   listedCount: number,
   normalizedCount: number,
 ): boolean {
-  if (!previousListedCount || previousNormalizedCount === null) return false;
-  const expectedRejections = Math.round(
-    (rejectedFromCounts(previousListedCount, previousNormalizedCount) / previousListedCount)
-      * listedCount,
+  return subsetSpikeExceedsBaseline(
+    previousListedCount,
+    previousListedCount === null || previousNormalizedCount === null
+      ? null
+      : rejectedFromCounts(previousListedCount, previousNormalizedCount),
+    listedCount,
+    listedCount - normalizedCount,
   );
-  const rejected = listedCount - normalizedCount;
-  return rejected - expectedRejections
-    >= Math.max(REJECTION_SPIKE_MIN_DELTA, Math.ceil(listedCount * REJECTION_SPIKE_LISTED_FRACTION));
+}
+
+/**
+ * Whether this poll CONSTRUCTED materially more action URLs than the previous completed one.
+ *
+ * THE BLIND SPOT THE REJECTION COUNTS CANNOT SEE. Since the employer-hosted embed fallback, a
+ * Greenhouse posting whose absolute_url fails strict validation is no longer dropped: an action URL
+ * is constructed from the board token and job id (see normalizeGreenhouseJobs). That is what keeps
+ * ~62 employer-hosted boards alive, and it means Greenhouse-wide absolute_url format drift no longer
+ * trips the fully-rejected guard OR the rejection-spike check above - the postings all normalize, so
+ * the poll is clean by every count this file had.
+ *
+ * What silently changes is WHAT each row points at. A validated URL is the readable hosted job page;
+ * a constructed one is the bare embed application form. So a board flipping from mostly-validated to
+ * mostly-constructed demotes every posting_url on it, and every notification email's "view the
+ * original listing" link with it, on polls recorded as successes. Same delta-against-baseline
+ * reasoning as the rejections: a board that is 100% constructed every day is an employer-hosted
+ * board working exactly as designed, and only the RATE moving is evidence of drift.
+ *
+ * The denominator is the NORMALIZED count, not the listed count: a rejected posting has no action
+ * URL of either kind, so counting it in the denominator would dilute the very rate this measures.
+ */
+export function constructionSpikeExceedsBaseline(
+  previousNormalizedCount: number | null,
+  previousConstructedCount: number | null,
+  normalizedCount: number,
+  constructedCount: number,
+): boolean {
+  return subsetSpikeExceedsBaseline(
+    previousNormalizedCount,
+    previousConstructedCount,
+    normalizedCount,
+    constructedCount,
+  );
 }
 
 const DETAIL_CURSOR_PATTERN = /(?:^|\s)next_detail_cursor=(\d+)(?:\s|$)/;
@@ -2601,6 +2657,30 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
         + `of ${source.last_poll_listed_count} on the previous completed poll. The rejected rows were `
         + 'swept inactive on a poll recorded as a success; suspect provider URL-format drift.'
       : null;
+    /* THE HALF THE REJECTION COUNTS CANNOT SEE, same detection-only footing. A Greenhouse posting
+     * whose absolute_url fails validation is CONSTRUCTED rather than dropped, so Greenhouse-wide
+     * format drift now sails past both the fully-rejected guard and the spike above with every
+     * count clean - while every posting_url on the board is quietly demoted from the readable
+     * hosted job page to the bare embed application form, taking the notification emails'
+     * original-listing links with it. Only the RATE moving is evidence: a wholly constructed board
+     * is an employer-hosted board working exactly as designed. See constructionSpikeExceedsBaseline.
+     *
+     * Greenhouse only, because it is the only normalizer that constructs; undefined everywhere
+     * else, which stores nothing and judges nothing. */
+    const constructedCount = fetched.constructed_action_url_count ?? null;
+    const constructionSpikeMessage = constructedCount !== null
+      && constructionSpikeExceedsBaseline(
+        source.last_poll_normalized_count,
+        source.last_poll_constructed_count,
+        jobs.length,
+        constructedCount,
+      )
+      ? `Constructed action URLs jumped: ${constructedCount} of ${jobs.length} normalized postings `
+        + `fell back to the embed application form against ${source.last_poll_constructed_count} of `
+        + `${source.last_poll_normalized_count} on the previous completed poll. Those rows now point `
+        + 'at a bare form instead of the hosted job page, on a poll recorded as a success; suspect '
+        + 'provider URL-format drift.'
+      : null;
     try {
       await retryTransient(() => db.transaction(async (tx) => {
         await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
@@ -2738,9 +2818,20 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
           ...(rejectedCount === null || listedCount === 0 ? {} : {
             last_poll_listed_count: listedCount,
             last_poll_normalized_count: jobs.length,
+            /* The construction baseline moves with the counts it is a rate against, and only when
+               there is a rate to take: an all-rejected normalized list is 0 constructed of 0, which
+               would read as a jump from zero on the next real poll exactly as an empty list would.
+               Non-Greenhouse sources never reach this and keep their permanent NULL. */
+            ...(constructedCount === null || jobs.length === 0
+              ? {}
+              : { last_poll_constructed_count: constructedCount }),
           }),
-          /* Never both: a spike only exists on the single-fetch path, where detailStatus is null. */
-          last_error: rejectionSpikeMessage ?? detailStatus,
+          /* Never with detailStatus: a spike only exists on the single-fetch path, where that is
+             null. The two spikes CAN coincide - one drift can push some postings past validation
+             into construction and drop others whose identity cannot mint an embed route - and both
+             belong in last_error, because each names rows the other does not. */
+          last_error: [rejectionSpikeMessage, constructionSpikeMessage].filter(Boolean).join(' ')
+            || detailStatus,
           ...(portalName ? { portal_company_name: portalName } : {}),
           ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
           ...(agrees === false ? { sponsor_employer_id: null } : {}),
@@ -2779,7 +2870,12 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       listed: listedCount,
       preserved: fetched.preserve_external_ids.length,
       ...(rejectedCount === null ? {} : { rejected: rejectedCount }),
+      /* Reported on every Greenhouse poll, spike or not: how much of a board is reaching applicants
+         as a bare form rather than a job page is the operator's standing question, and the answer
+         is only legible next to `fetched`. */
+      ...(constructedCount === null ? {} : { constructed: constructedCount }),
       ...(rejectionSpikeMessage === null ? {} : { rejection_spike: rejectionSpikeMessage }),
+      ...(constructionSpikeMessage === null ? {} : { construction_spike: constructionSpikeMessage }),
       ...(fetched.detail_progress ? { detail_progress: fetched.detail_progress } : {}),
       ok: true as const,
       ...(agrees === false ? { portal_says: portalName } : {}),
@@ -4849,16 +4945,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
     const persistedFailures = await currentDrainPollFailures(drainStartedAt);
     const results = mergeCurrentDrainPollFailures(pollRun.results, persistedFailures);
-    /* A rejection spike is a SUCCESSFUL poll - the sweep committed, the queue advanced - so it can
+    /* An action-URL spike is a SUCCESSFUL poll - the sweep committed, the queue advanced - so it can
        never reach the failed count or the floor 5xx. Logged per source, because the drift it
-       detects (see rejectionSpikeExceedsBaseline) starts on one board and the whole point is to
-       see it before the fully-rejected guard, the floor, or a user does. */
+       detects (see rejectionSpikeExceedsBaseline and constructionSpikeExceedsBaseline) starts on one
+       board and the whole point is to see it before the fully-rejected guard, the floor, or a user
+       does. The construction half never fires the guard or the floor at all: those postings all
+       normalize, they just stop pointing at a readable job page. */
     for (const result of results) {
-      if ('rejection_spike' in result && result.rejection_spike) {
-        request.log.warn(
-          { sourceId: result.source_id, company: result.company },
-          result.rejection_spike,
-        );
+      const spikes = [
+        'rejection_spike' in result ? result.rejection_spike : null,
+        'construction_spike' in result ? result.construction_spike : null,
+      ];
+      for (const spike of spikes) {
+        if (spike) request.log.warn({ sourceId: result.source_id, company: result.company }, spike);
       }
     }
     const [remaining] = await db
