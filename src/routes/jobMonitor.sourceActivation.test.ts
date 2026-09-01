@@ -10,8 +10,11 @@ import {
   LOGO_VERIFICATION_GLOBAL_CONCURRENCY,
   LOGO_VERIFICATION_PROVIDER_CANDIDATES,
   LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
+  LOGO_VERIFICATION_RECRUITEE_CANDIDATES,
+  LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS,
   LOGO_VERIFICATION_REQUEST_CANDIDATES,
   LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
+  LOGO_VERIFICATION_START_INTERVALS_MS,
   LOGO_VERIFICATION_WORKABLE_CANDIDATES,
   LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
   LogoVerificationRequestTimeoutError,
@@ -22,6 +25,7 @@ import {
   runProviderAwareLogoQueue,
   sourceLogoIdentityMode,
 } from './jobMonitor';
+import { PROVIDER_START_INTERVALS_MS } from '../lib/jobPollScheduler';
 import { normalizeEmployerCertificationIdentity } from '../lib/jobCertificationFingerprint';
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 
@@ -85,11 +89,12 @@ test('monitoring reports candidate and activated discovery counts separately', (
   assert.match(source, /discoveredSources = discovery\.sources/);
 });
 
-test('logo verification bounds each provider and spaces Workable starts', async () => {
+test('logo verification bounds each provider and spaces every shared-limit provider', async () => {
   const candidates = [
     ...Array.from({ length: 6 }, (_, index) => ({ ats_name: 'greenhouse', index })),
     ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'lever', index })),
     ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'workable', index })),
+    ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'recruitee', index })),
     ...Array.from({ length: 3 }, (_, index) => ({ ats_name: 'crelate', index })),
   ];
   let clock = 0;
@@ -97,7 +102,7 @@ test('logo verification bounds each provider and spaces Workable starts', async 
   let maximumActive = 0;
   const activeByProvider = new Map<string, number>();
   const maximumByProvider = new Map<string, number>();
-  const workableStarts: number[] = [];
+  const startsByProvider = new Map<string, number[]>();
 
   await runProviderAwareLogoQueue(candidates, async (candidate) => {
     active += 1;
@@ -108,7 +113,9 @@ test('logo verification bounds each provider and spaces Workable starts', async 
       candidate.ats_name,
       Math.max(maximumByProvider.get(candidate.ats_name) ?? 0, providerActive),
     );
-    if (candidate.ats_name === 'workable') workableStarts.push(clock);
+    const starts = startsByProvider.get(candidate.ats_name) ?? [];
+    starts.push(clock);
+    startsByProvider.set(candidate.ats_name, starts);
     await new Promise<void>((resolve) => setImmediate(resolve));
     active -= 1;
     activeByProvider.set(candidate.ats_name, providerActive - 1);
@@ -121,16 +128,100 @@ test('logo verification bounds each provider and spaces Workable starts', async 
   assert.ok((maximumByProvider.get('greenhouse') ?? 0) <= LOGO_VERIFICATION_PROVIDER_CONCURRENCY);
   assert.ok((maximumByProvider.get('lever') ?? 0) <= LOGO_VERIFICATION_PROVIDER_CONCURRENCY);
   assert.equal(maximumByProvider.get('workable'), 1);
+  assert.equal(maximumByProvider.get('recruitee'), 1);
   assert.equal(maximumByProvider.get('crelate'), LOGO_VERIFICATION_CRELATE_CONCURRENCY);
-  assert.deepEqual(workableStarts, [
+  assert.deepEqual(startsByProvider.get('workable'), [
     0,
     LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
     LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS * 2,
   ]);
+  assert.deepEqual(
+    startsByProvider.get('recruitee'),
+    [
+      0,
+      LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS,
+      LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS * 2,
+    ],
+    'recruitee probes spend the same platform-wide budget the poll scheduler paces',
+  );
   assert.equal(
     clock,
-    LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS * 3,
+    Math.max(
+      LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS * 3,
+      LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS * 3,
+    ),
     'the response must retain the final cooldown before a subsequent HTTP pass can start',
+  );
+});
+
+test('a paced provider barrier never delays another provider', async () => {
+  const clockStarts: Array<{ ats_name: string; at: number }> = [];
+  let clock = 0;
+
+  await runProviderAwareLogoQueue([
+    { ats_name: 'recruitee', index: 0 },
+    { ats_name: 'recruitee', index: 1 },
+    { ats_name: 'workable', index: 0 },
+    { ats_name: 'workable', index: 1 },
+  ], async (candidate) => {
+    clockStarts.push({ ats_name: candidate.ats_name, at: clock });
+  }, {
+    startIntervalsMs: { workable: 400, recruitee: 700 },
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  assert.deepEqual(clockStarts.filter((start) => start.ats_name === 'workable').map((s) => s.at), [
+    0,
+    400,
+  ], 'a slower recruitee barrier must not hold back Workable');
+  assert.deepEqual(clockStarts.filter((start) => start.ats_name === 'recruitee').map((s) => s.at), [
+    0,
+    700,
+  ]);
+});
+
+test('an ats_name that collides with an Object member is not treated as paced', async () => {
+  /* career_page_sources.ats_name is unconstrained lowercase text and the logo candidate query has
+     no board allowlist, so the pacing lookup must not answer an inherited member and stall the
+     candidate while the route holds the shared advisory lock. */
+  const completed: string[] = [];
+  await runProviderAwareLogoQueue([
+    { ats_name: 'constructor', index: 0 },
+    { ats_name: 'constructor', index: 1 },
+    { ats_name: '__proto__', index: 0 },
+    { ats_name: '__proto__', index: 1 },
+  ], async (candidate) => {
+    completed.push(candidate.ats_name);
+  }, {
+    timeoutMs: 1_000,
+    now: () => 0,
+    sleep: async () => { throw new Error('an unpaced provider must never wait on a start barrier'); },
+  });
+
+  assert.deepEqual(completed.sort(), ['__proto__', '__proto__', 'constructor', 'constructor']);
+});
+
+test('the logo queue paces exactly the providers the poll scheduler paces, minus crelate', () => {
+  assert.deepEqual(Object.keys(LOGO_VERIFICATION_START_INTERVALS_MS).sort(), [
+    'recruitee',
+    'workable',
+  ]);
+  /* Crelate shares the same platform limit but needs no interval here: one candidate per request
+     (LOGO_VERIFICATION_CRELATE_CANDIDATES) at concurrency 1 leaves no second same-request start to
+     space, and the durable claim plus circuit breaker gate it across requests. */
+  assert.equal(LOGO_VERIFICATION_CRELATE_CANDIDATES, 1);
+  assert.equal(LOGO_VERIFICATION_CRELATE_CONCURRENCY, 1);
+  assert.deepEqual(
+    Object.keys(LOGO_VERIFICATION_START_INTERVALS_MS).sort(),
+    Object.keys(PROVIDER_START_INTERVALS_MS).filter((p) => p !== 'crelate').sort(),
+    'the two loops must agree on which providers share one platform-wide limit',
+  );
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.match(
+    source,
+    /start_interval_ms_by_provider: LOGO_VERIFICATION_START_INTERVALS_MS/,
+    'the response must report the map the queue actually paces by, not a hand-listed subset',
   );
 });
 
@@ -174,7 +265,7 @@ test('logo queue retains the final Workable barrier after an ordinary provider f
   }, {
     concurrency: 2,
     providerConcurrency: 2,
-    workableStartIntervalMs: 500,
+    startIntervalsMs: { workable: 500 },
     now: () => clock,
     sleep: async (milliseconds) => { clock += milliseconds; },
   }), /ordinary provider write failed/);
@@ -279,6 +370,26 @@ test('one degraded provider cannot make a logo request exceed its bounded candid
     Array.from({ length: 200 }, (_, index) => ({ ats_name: 'crelate', index })),
   );
   assert.equal(crelateOnly.length, LOGO_VERIFICATION_CRELATE_CANDIDATES);
+
+  const recruiteeOnly = boundedLogoVerificationCandidates(
+    Array.from({ length: 200 }, (_, index) => ({ ats_name: 'recruitee', index })),
+  );
+  assert.equal(recruiteeOnly.length, LOGO_VERIFICATION_RECRUITEE_CANDIDATES);
+});
+
+test('a fully degraded paced provider still fits inside the bounded request deadline', () => {
+  /* A paced family runs one candidate at a time, so its candidates are serial, not parallel. Worst
+     case per candidate: 3 attempts of two 10s-timeout fetches plus 1s + 5s of retry backoff. */
+  const worstCaseCandidateMs = 3 * 2 * 10_000 + 1_000 + 5_000;
+  for (const [provider, intervalMs] of Object.entries(LOGO_VERIFICATION_START_INTERVALS_MS)) {
+    const candidates = provider === 'workable'
+      ? LOGO_VERIFICATION_WORKABLE_CANDIDATES
+      : LOGO_VERIFICATION_RECRUITEE_CANDIDATES;
+    assert.ok(
+      candidates * (worstCaseCandidateMs + intervalMs) < LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
+      `a degraded ${provider} lane must not 503 the whole verify-logos request`,
+    );
+  }
 });
 
 test('Crelate 429s open the circuit and exhaust on the third consecutive attempt', () => {
