@@ -4820,6 +4820,8 @@ test('crelate identity controls are fixed fields, not questions, whatever label 
     { id: 'custom', question: 'Do you hold an active security clearance?', answer: 'No', portal_selector: '#clearance' },
   ];
   assert.deepEqual(normalizeStoredPortalQuestions(input, 'crelate'), [input[4]]);
+});
+
 /* A dial-code picker is answered from the number's own dial code, as a country name, whatever the
  * control's type. Measured on dsiinnovations.recruitee.com (2026-09-01): the form defaulted to
  * "United States", the resolver had no intent for the label, and the run stopped to ask her the
