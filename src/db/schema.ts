@@ -599,11 +599,31 @@ export const applications = pgTable('applications', {
   resume_source: text('resume_source').default('none').notNull(),
   resume_attached_at: timestamp('resume_attached_at', { withTimezone: true }),
   application_fingerprint: text('application_fingerprint').notNull(),
+  /* When the student took this row off their Tracker. NULL for every live application.
+   *
+   * A REMOVAL, NOT A DELETION, and the difference is forced by the schema rather than chosen for
+   * taste. Nine tables carry an application_id with NO foreign key - the submission attempt
+   * bindings and events, monetization_events, trial_answer_applications, posting distinctions,
+   * pending premium actions, user_documents.first_application_id - so a DELETE cannot cascade to
+   * them and would leave the attempt ledger pointing at a row that no longer exists. That ledger
+   * is what stops Litos submitting the same application twice, so orphaning it trades a tidy
+   * Tracker for a duplicate send to a real employer.
+   *
+   * Removal is therefore a filter, and the ledger, the billing events and the quota accounting all
+   * keep referring to a row that still exists. It is also reversible, which a delete is not:
+   * re-adding the same posting clears this stamp (see upsertCanonicalApplicationForUser) and the
+   * student gets their history back rather than a second row beside the one they cannot see. */
+  removed_at: timestamp('removed_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({
   userFingerprintUnique: uniqueIndex('applications_user_fingerprint_unique').on(t.user_id, t.application_fingerprint),
   userUpdatedIdx: index('applications_user_updated_idx').on(t.user_id, t.updated_at),
+  /* The Tracker's own query: live rows for one user, newest first. Partial, because the removed
+     rows are exactly what it never reads. */
+  userLiveUpdatedIdx: index('applications_user_live_updated_idx')
+    .on(t.user_id, t.updated_at)
+    .where(sql`${t.removed_at} is null`),
   legacyResumeUnique: uniqueIndex('applications_legacy_resume_unique')
     .on(t.legacy_generated_resume_id)
     .where(sql`${t.legacy_generated_resume_id} is not null`),

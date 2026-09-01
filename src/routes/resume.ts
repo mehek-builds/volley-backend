@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, sql } from 'drizzle-orm';
+import { eq, desc, and, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
@@ -1835,10 +1835,29 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // Neon's monthly transfer ceiling, and this is the payload the plan named next to it.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+    /* A resume built for an application the student has taken off their Tracker goes with it.
+       Removal is stamped on the canonical application, and generated_resumes is joined to it by
+       applications.legacy_generated_resume_id, so the exclusion is expressed here rather than
+       duplicated as a second flag that could disagree with the first. A resume with no canonical
+       application (an extension build, anything predating the canonical row) has nothing to be
+       removed by and is unaffected. */
+    const removedResumeIds = await db
+      .select({ id: applications.legacy_generated_resume_id })
+      .from(applications)
+      .where(and(
+        eq(applications.user_id, userId),
+        isNotNull(applications.removed_at),
+        isNotNull(applications.legacy_generated_resume_id),
+      ));
+    const removedIds = removedResumeIds
+      .map((row) => row.id)
+      .filter((id): id is string => Boolean(id));
     const latestRows = await db
       .select()
       .from(generated_resumes)
-      .where(eq(generated_resumes.user_id, userId))
+      .where(removedIds.length === 0
+        ? eq(generated_resumes.user_id, userId)
+        : and(eq(generated_resumes.user_id, userId), notInArray(generated_resumes.id, removedIds)))
       .orderBy(desc(generated_resumes.created_at))
       .limit(50);
     const query = request.query && typeof request.query === 'object'
