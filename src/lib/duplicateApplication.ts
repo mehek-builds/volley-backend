@@ -389,7 +389,16 @@ function ledgerTwin(
       && !attempt.postingIdentity.jobId
       && hasExactScope,
     ),
-    user_wide_scope: isRootAutofillOrphan && !hasExactScope,
+    /* A root autofill orphan with no exact URL scope is treated as user-wide: it could be any
+       posting, so the duplicate gate refuses every new send until it is resolved. But an orphan
+       that carries a normalized company|role is NOT identity-less - it names a company and role,
+       and comparePostings can decide it against the candidate like any other weak-identity row (a
+       different company|role is a different posting; an equal one is still caught as a duplicate).
+       Only a truly label-less orphan stays user-wide, so one confirmed application to a named
+       company can no longer fail-closed every unrelated new application. */
+    user_wide_scope: isRootAutofillOrphan
+      && !hasExactScope
+      && !attempt.postingIdentity.companyRole,
     tracker_available: Boolean(attempt.applicationId),
     submitted_at: submittedAt,
     unverified_at: unverifiedAt,
@@ -618,6 +627,19 @@ export function duplicateAmong(
           })
         )));
       if (repaired) continue;
+      /* Last comparable signal before a user-facing unidentifiable refusal: the normalized
+         company|role. The verdict reached basis null because the strong tiers could not be
+         compared - mismatched or one-sided ATS posting keys (a different Greenhouse tenant like
+         cresta vs verkada resolves to null here, not to a proven-different ats_posting), mismatched
+         job ids, or no shared tier at all. But if BOTH postings still name a company|role and those
+         DIFFER, they are different postings and cannot be duplicates: a confirmed application to one
+         company or role is not a prior submission of another, and re-sending this one cannot
+         duplicate an application the employer never received for it. Only a genuinely absent or
+         equal company|role leaves the unidentifiable hold standing (an equal one reaches this branch
+         only when the strong tiers were ambiguous, where staying careful is correct). */
+      if (mine.companyRole
+        && priorIdentity.companyRole
+        && mine.companyRole !== priorIdentity.companyRole) continue;
       unidentifiable ??= row;
       continue;
     }

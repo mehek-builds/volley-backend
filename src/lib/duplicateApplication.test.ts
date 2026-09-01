@@ -145,6 +145,29 @@ describe('what counts as the same posting', () => {
     const b = postingIdentity({ company: 'Akuna', role: AKUNA_ROLE }, AKUNA_DIRECT_URL);
     assert.deepEqual(comparePostings(a, b), { same: false, basis: null });
   });
+
+  test('two weak-identity postings with different company are proven different, not unknown', () => {
+    // No ATS posting key, no job id, no comparable URL: the only shared tier is company|role. A
+    // confirmed application to one company is not a prior submission of another, so this must read
+    // as a different posting rather than the null "cannot compare" that becomes an unidentifiable
+    // refusal and blocks every new weak-identity application.
+    const cresta = postingIdentity({ company: 'cresta', role: 'Data Science Intern (Customer Success)' }, undefined);
+    const verkada = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    assert.deepEqual(comparePostings(verkada, cresta), { same: false, basis: 'company_role' });
+  });
+
+  test('two weak-identity postings that are the same company and role still read as the same', () => {
+    // The exact posting re-sent must still be caught, so a real duplicate stays blocked.
+    const a = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    const b = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    assert.deepEqual(comparePostings(a, b), { same: true, basis: 'company_role' });
+  });
+
+  test('different roles at the same company are different postings', () => {
+    const frontend = postingIdentity({ company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' }, undefined);
+    const backend = postingIdentity({ company: 'Verkada', role: 'Backend Software Engineering Intern 2027' }, undefined);
+    assert.deepEqual(comparePostings(frontend, backend), { same: false, basis: 'company_role' });
+  });
 });
 
 describe('the verdict over a set of already-submitted applications', () => {
@@ -166,6 +189,29 @@ describe('the verdict over a set of already-submitted applications', () => {
 
   test('nothing submitted yet is clear, not unidentifiable', () => {
     assert.deepEqual(duplicateAmong(akunaContext(), AKUNA_DIRECT_URL, []), { kind: 'clear' });
+  });
+
+  test('a confirmed application to a different employer does not block one it cannot key-compare', () => {
+    // The prior went to cresta on Greenhouse; the candidate is Verkada on Greenhouse. Different
+    // tenants resolve to basis null (not a proven-different ats_posting), which would otherwise
+    // refuse as unidentifiable. The company|role guard recognizes them as different postings.
+    const cresta = submitted({
+      id: 'a1111111-1111-4111-8111-111111111111',
+      job_context: { company: 'cresta', role: 'Data Science Intern (Customer Success)' },
+      portal_url: 'https://job-boards.greenhouse.io/cresta/jobs/1',
+    });
+    const verdict = duplicateAmong(
+      { company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' },
+      'https://job-boards.greenhouse.io/verkada/jobs/2',
+      [cresta],
+    );
+    assert.equal(verdict.kind, 'clear');
+  });
+
+  test('a confirmed application to the SAME employer and role is still refused, not cleared', () => {
+    // The company|role guard must not clear a genuine same-posting retry. Same tenant, same key.
+    const verdict = duplicateAmong(akunaContext(), AKUNA_EMBED_URL, [submitted()]);
+    assert.equal(verdict.kind, 'duplicate');
   });
 
   test('legacy unverified-attempt prose blocks a modern retry as unverified', () => {

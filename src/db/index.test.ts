@@ -95,6 +95,44 @@ describe('Railway private PostgreSQL TLS', () => {
     }
   });
 
+  test('the proxy root cert env pins the CA and internal identity for non-internal hosts', () => {
+    const proxyUrl = 'postgresql://postgres:secret@centerbeam.proxy.rlwy.net:24539/railway';
+    const config = databaseConnectionConfig(proxyUrl, {
+      SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ROOT_CA,
+    });
+    assert.equal(config.connectionString, proxyUrl);
+    assert.equal(config.ssl?.rejectUnauthorized, true);
+    assert.equal(config.ssl?.ca, `${ROOT_CA.trim()}\n`);
+    assert.equal(typeof config.ssl?.checkServerIdentity, 'function');
+    const resolved = resolveConfig(config).ssl as { checkServerIdentity?: unknown };
+    assert.equal(typeof resolved.checkServerIdentity, 'function');
+  });
+
+  test('the proxy path refuses URL TLS parameters and stays inert without the env var', () => {
+    for (const parameter of ['sslmode=no-verify', 'sslrootcert=%2Ftmp%2Fca.pem']) {
+      assert.throws(
+        () =>
+          databaseConnectionConfig(
+            `postgresql://postgres:secret@centerbeam.proxy.rlwy.net:24539/railway?${parameter}`,
+            { SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ROOT_CA },
+          ),
+        /must not set/,
+      );
+    }
+    const inert = databaseConnectionConfig(
+      'postgresql://postgres:secret@centerbeam.proxy.rlwy.net:24539/railway',
+      {},
+    );
+    assert.equal(
+      inert.connectionString,
+      'postgresql://postgres:secret@centerbeam.proxy.rlwy.net:24539/railway?sslmode=verify-full',
+    );
+    const local = databaseConnectionConfig('postgresql://postgres:password@localhost:5432/dev', {
+      SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ROOT_CA,
+    });
+    assert.equal(local.ssl, undefined);
+  });
+
   test('the Railway CA is not applied to Neon', () => {
     const config = databaseConnectionConfig('postgresql://u:p@h.neon.tech/d?sslmode=require', {
       DATABASE_SSL_ROOT_CERT: 'malformed and intentionally ignored',

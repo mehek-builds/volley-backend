@@ -296,8 +296,20 @@ export function comparePostings(a: PostingIdentity, b: PostingIdentity):
       ? { same: true, basis: 'job_id' } as const
       : { same: false, basis: null } as const;
   }
-  if (a.companyRole && b.companyRole && a.companyRole === b.companyRole) {
-    return { same: true, basis: 'company_role' } as const;
+  if (a.companyRole && b.companyRole) {
+    /* Both postings carry a normalized company|role. Equal is the same posting. DIFFERENT is two
+       genuinely different postings, which cannot be duplicates of each other: a confirmed
+       application to one company or role is not a prior submission of another, and re-sending this
+       one cannot duplicate an application the employer never received for it. Returning a
+       proven-different verdict here, instead of the null "cannot compare" the duplicate gate
+       escalates to an UNIDENTIFIABLE refusal, is what stops a legacy weak-identity attempt (a
+       backfilled submission to a different company, say) from blocking every new application whose
+       own posting has no verified submission on record. The strong identifiers above (postingKey,
+       jobId) are still tried first, so this only decides the weak-identity fallback, and an equal
+       company|role still returns `same` so a real re-send of the exact posting stays blocked. */
+    return a.companyRole === b.companyRole
+      ? { same: true, basis: 'company_role' } as const
+      : { same: false, basis: 'company_role' } as const;
   }
   return { same: false, basis: null };
 }

@@ -101,9 +101,32 @@ test('Greenhouse accepts its own gh_jid tracking suffix and canonicalizes it awa
     'https://boards.greenhouse.io/acme/jobs/101?gh_jid=101&utm_source=linkedin',
     'https://boards.greenhouse.io/acme/jobs/101?gh_jid=101&gh_jid=101',
     'https://boards.greenhouse.io/acme/jobs/101?gh_src=abc123',
+    /* Truthy url.search whose searchParams iterate nothing - not the declared parameter. */
+    'https://boards.greenhouse.io/acme/jobs/101?&&&',
   ]) {
     assert.deepEqual(normalizeGreenhouseJobs(greenhouse(url), 'acme'), [], url);
   }
+});
+
+test('the dispatcher lists Workable raw shortcodes even when every action URL is rejected', async () => {
+  /* Workable was the one single-fetch provider deriving listed_external_ids from the normalized
+     jobs, so a board whose URLs all failed validation read as an EMPTY board (listedCount 0) and
+     bypassed the fully-rejected-fetch guard in pollSource. The raw shortcode list keeps the two
+     facts separate: the board listed postings, and none of them survived. */
+  const fetched = await fetchSourceJobBatch(
+    { ats_name: 'workable', board_token: 'acme' },
+    async () => new Response(JSON.stringify({
+      name: 'Acme',
+      jobs: [
+        { shortcode: 'AB12CD', title: 'Platform Engineer', url: 'https://careers.acme.example/j/AB12CD' },
+        { shortcode: 'AB12CD', title: 'Platform Engineer', url: 'https://careers.acme.example/j/AB12CD' },
+        { shortcode: 'EF34GH', title: 'Data Engineer', url: 'https://careers.acme.example/j/EF34GH' },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }),
+  );
+  assert.deepEqual(fetched.listed_external_ids, ['AB12CD', 'EF34GH']);
+  assert.deepEqual(fetched.jobs, []);
+  assert.deepEqual(fetched.preserve_external_ids, []);
 });
 
 test('Lever binds both posting and apply URLs to one host, tenant, and external ID', () => {

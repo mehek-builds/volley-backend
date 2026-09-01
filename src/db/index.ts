@@ -1,5 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { X509Certificate } from 'node:crypto';
+import * as tls from 'node:tls';
+import type { PeerCertificate } from 'node:tls';
 import { Client, Pool } from 'pg';
 import * as schema from './schema';
 import { isPassThroughQueryCall, withReadOnlyRetry } from './readOnlyRetry';
@@ -141,7 +143,11 @@ export function sslOptionForHost(local: boolean): undefined | { rejectUnauthoriz
 
 export type DatabaseConnectionConfig = {
   connectionString: string;
-  ssl: undefined | { rejectUnauthorized: true; ca?: string };
+  ssl: undefined | {
+    rejectUnauthorized: true;
+    ca?: string;
+    checkServerIdentity?: (host: string, cert: PeerCertificate) => Error | undefined;
+  };
 };
 
 /**
@@ -202,6 +208,33 @@ export function databaseConnectionConfig(
     !url.hostname.toLowerCase().endsWith('.railway.internal') ||
     url.searchParams.getAll('host').length !== 0
   ) {
+    /* Off-container operator path through Railway's public TCP proxy, mirroring the TLS posture of
+     * the migration scripts (documented in apply-submission-authority-revision-schema.mjs): the
+     * proxy presents the private root-ca with SAN [localhost, postgres.railway.internal], which no
+     * public trust root can verify, so the pinned root plus an identity check against the internal
+     * name is the strongest verification that proxy can pass. STRICTLY ADDITIVE: the env var is a
+     * GitHub secret and is never set on deployed services, so their behavior is untouched. The URL
+     * must stay free of TLS parameters and keep no sslmode, because a parsed connection-string mode
+     * overwrites this explicit ssl object (see the withVerifiedSslMode comment above). */
+    const proxyRootCert = env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT?.trim();
+    if (proxyRootCert && url) {
+      for (const parameter of [...CONNECTION_STRING_TLS_PARAMETERS, 'sslmode']) {
+        if (url.searchParams.has(parameter)) {
+          throw new Error(
+            `A proxy DATABASE_URL with SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT must not set the ${parameter} query parameter`,
+          );
+        }
+      }
+      return {
+        connectionString: value,
+        ssl: {
+          rejectUnauthorized: true,
+          ca: validatedRailwayRootCertificate(proxyRootCert),
+          checkServerIdentity: (_host, cert) =>
+            tls.checkServerIdentity('postgres.railway.internal', cert),
+        },
+      };
+    }
     return {
       connectionString: withVerifiedSslMode(value),
       ssl: sslOptionForHost(false),

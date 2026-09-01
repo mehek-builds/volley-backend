@@ -92,19 +92,28 @@ function respond(body: string) {
   return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
-async function sourceState() {
+async function sourceState(sourceId = SOURCE_ID) {
   const [row] = await db.select({
     last_polled_at: schema.career_page_sources.last_polled_at,
     last_successful_poll_at: schema.career_page_sources.last_successful_poll_at,
     last_error: schema.career_page_sources.last_error,
-  }).from(schema.career_page_sources).where(eq(schema.career_page_sources.id, SOURCE_ID));
+    last_poll_listed_count: schema.career_page_sources.last_poll_listed_count,
+    last_poll_normalized_count: schema.career_page_sources.last_poll_normalized_count,
+  }).from(schema.career_page_sources).where(eq(schema.career_page_sources.id, sourceId));
   return row!;
 }
 
-async function activeJobCount() {
+/** The row exactly as the drain query hands it to pollSource, baseline counts included. */
+async function sourceRow(sourceId: string) {
+  const [row] = await db.select().from(schema.career_page_sources)
+    .where(eq(schema.career_page_sources.id, sourceId));
+  return row!;
+}
+
+async function activeJobCount(sourceId = SOURCE_ID) {
   const rows = await db.select({ is_active: schema.monitored_jobs.is_active })
     .from(schema.monitored_jobs)
-    .where(eq(schema.monitored_jobs.source_id, SOURCE_ID));
+    .where(eq(schema.monitored_jobs.source_id, sourceId));
   return rows.filter((row) => row.is_active).length;
 }
 
@@ -137,6 +146,9 @@ test('a fully rejected or aborted list fetch preserves the board and lands in la
   const afterSuccess = await sourceState();
   assert.equal(afterSuccess.last_error, null);
   assert.ok(afterSuccess.last_successful_poll_at);
+  assert.equal(afterSuccess.last_poll_listed_count, 2,
+    'a completed poll must persist the rejection baseline');
+  assert.equal(afterSuccess.last_poll_normalized_count, 2);
   const [stored] = await db.select({ posting_url: schema.monitored_jobs.posting_url })
     .from(schema.monitored_jobs)
     .where(eq(schema.monitored_jobs.external_id, '4001'));
@@ -163,6 +175,9 @@ test('a fully rejected or aborted list fetch preserves the board and lands in la
     afterSuccess.last_successful_poll_at?.getTime(),
     'a fully rejected fetch must not mint success evidence',
   );
+  assert.equal(afterRejected.last_poll_listed_count, 2,
+    'a guard fault must not poison the rejection baseline');
+  assert.equal(afterRejected.last_poll_normalized_count, 2);
 
   /* 3. An aborted list fetch - the shape a large board takes when its transfer exceeds the list
      budget - must also record a queryable last_error rather than vanish. */
@@ -188,4 +203,135 @@ test('a fully rejected or aborted list fetch preserves the board and lands in la
   assert.equal(recovered.ok, true);
   assert.equal(await activeJobCount(), 2);
   assert.equal((await sourceState()).last_error, null);
+});
+
+const SPIKE_SOURCE_ID = '92000000-0000-4000-8000-000000000002';
+const SPIKE_COMPANY = 'Orbital Data Company';
+const SPIKE_TOKEN = 'orbital-data';
+
+/** A 60-posting board where `badUrls` of the absolute_urls have drifted to a rejected host. */
+function largeBoardPayload(badUrls: number) {
+  const content = `<p>${'Design, build, and operate reliable data-platform software with the platform team. '.repeat(3)}</p>`;
+  return JSON.stringify({
+    jobs: Array.from({ length: 60 }, (_, index) => {
+      const id = String(5000 + index);
+      return {
+        id,
+        title: `Data Platform Engineer ${id}`,
+        absolute_url: index < badUrls
+          ? `https://careers.orbital-data.example/jobs/${id}?gh_jid=${id}`
+          : `https://boards.greenhouse.io/${SPIKE_TOKEN}/jobs/${id}?gh_jid=${id}`,
+        location: { name: 'Austin, TX' },
+        company_name: SPIKE_COMPANY,
+        content,
+        updated_at: new Date().toISOString(),
+      };
+    }),
+  });
+}
+
+test('a partial action-URL drift is detected as a rejection spike against the previous poll', async () => {
+  /* The accepted gap in the fully-rejected guard, end to end: when MOST but not all of a board
+     fails action-URL validation (a new query param rolling through mixed CDN caches), the poll
+     completes as a success and sweeps the rejected rows. The sweep stands - one survivor is real
+     list evidence - but the drift must land in last_error and the poll result, judged as a DELTA
+     against the persisted baseline so a board's steady by-design host rejections never page. */
+  const now = new Date();
+  await db.insert(schema.career_page_sources).values({
+    id: SPIKE_SOURCE_ID,
+    company_name: SPIKE_COMPANY,
+    ats_name: 'greenhouse',
+    board_token: SPIKE_TOKEN,
+    career_url: `https://job-boards.greenhouse.io/${SPIKE_TOKEN}`,
+    company_domain: `${SPIKE_TOKEN}.example`,
+    company_logo_url: `https://${SPIKE_TOKEN}.example/logo.png`,
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: now,
+    portal_company_name: SPIKE_COMPANY,
+    portal_name_mismatch: false,
+    enabled: true,
+  });
+
+  /* 1. First completed poll writes the baseline and, having none to compare against, never alerts. */
+  globalThis.fetch = async () => respond(largeBoardPayload(0));
+  const first = await monitor.pollSource(await sourceRow(SPIKE_SOURCE_ID));
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.ok && first.rejected, 0);
+  assert.ok(first.ok && !('rejection_spike' in first));
+  const afterFirst = await sourceState(SPIKE_SOURCE_ID);
+  assert.equal(afterFirst.last_poll_listed_count, 60);
+  assert.equal(afterFirst.last_poll_normalized_count, 60);
+  assert.equal(afterFirst.last_error, null);
+  assert.equal(await activeJobCount(SPIKE_SOURCE_ID), 60);
+
+  /* 2. Half the board drifts to a rejected host: still a SUCCESS, still swept, but now visible. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  globalThis.fetch = async () => respond(largeBoardPayload(30));
+  const spiked = await monitor.pollSource(await sourceRow(SPIKE_SOURCE_ID));
+  assert.equal(spiked.ok, true, JSON.stringify(spiked));
+  assert.equal(spiked.ok && spiked.rejected, 30);
+  assert.match(spiked.ok && spiked.rejection_spike || '', /Action-URL rejections jumped: 30 of 60/);
+  const afterSpike = await sourceState(SPIKE_SOURCE_ID);
+  assert.match(afterSpike.last_error ?? '', /Action-URL rejections jumped/,
+    'the spike must be queryable in career_page_sources.last_error');
+  assert.ok(afterSpike.last_successful_poll_at! > afterFirst.last_successful_poll_at!,
+    'a spiked poll is still a completed poll');
+  assert.equal(afterSpike.last_poll_listed_count, 60);
+  assert.equal(afterSpike.last_poll_normalized_count, 30);
+  assert.equal(await activeJobCount(SPIKE_SOURCE_ID), 30,
+    'the sweep is not second-guessed; detection only');
+
+  /* 3. The same shape again is the new steady baseline: no repeat alert, and the error clears. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const steady = await monitor.pollSource(await sourceRow(SPIKE_SOURCE_ID));
+  assert.equal(steady.ok, true);
+  assert.ok(steady.ok && !('rejection_spike' in steady),
+    'an unchanged rejection count must not alert again');
+  assert.equal((await sourceState(SPIKE_SOURCE_ID)).last_error, null);
+
+  /* 4. A guard-preserved fault never becomes the baseline. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  globalThis.fetch = async () => respond(largeBoardPayload(60));
+  const fullyRejected = await monitor.pollSource(await sourceRow(SPIKE_SOURCE_ID));
+  assert.equal(fullyRejected.ok, false);
+  const afterGuard = await sourceState(SPIKE_SOURCE_ID);
+  assert.equal(afterGuard.last_poll_listed_count, 60);
+  assert.equal(afterGuard.last_poll_normalized_count, 30,
+    'the fully-rejected guard must leave the baseline where the last completed poll put it');
+
+  /* 5. Recovery is an improvement against that baseline, not a spike. */
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  globalThis.fetch = async () => respond(largeBoardPayload(0));
+  const recovered = await monitor.pollSource(await sourceRow(SPIKE_SOURCE_ID));
+  assert.equal(recovered.ok, true);
+  assert.ok(recovered.ok && !('rejection_spike' in recovered));
+  const afterRecovery = await sourceState(SPIKE_SOURCE_ID);
+  assert.equal(afterRecovery.last_error, null);
+  assert.equal(afterRecovery.last_poll_normalized_count, 60);
+  assert.equal(await activeJobCount(SPIKE_SOURCE_ID), 60);
+});
+
+test('an empty completed poll never writes a 0/0 baseline for later polls to spike against', async () => {
+  /* A brand-new board with nothing listed and nothing live slips PAST the empty-fetch guard (there
+     is nothing to preserve) and completes as a success. That poll must not store a zero baseline:
+     the next real poll of a steadily host-rejected board would read its by-design rejections as a
+     jump from zero and page on a healthy day one. */
+  const EMPTY_SOURCE_ID = '92000000-0000-4000-8000-000000000003';
+  await db.insert(schema.career_page_sources).values({
+    id: EMPTY_SOURCE_ID,
+    company_name: 'Quiet Board Company',
+    ats_name: 'greenhouse',
+    board_token: 'quiet-board',
+    career_url: 'https://job-boards.greenhouse.io/quiet-board',
+    enabled: true,
+  });
+  globalThis.fetch = async () => respond(JSON.stringify({ jobs: [] }));
+  const emptyPoll = await monitor.pollSource(await sourceRow(EMPTY_SOURCE_ID));
+  assert.equal(emptyPoll.ok, true, JSON.stringify(emptyPoll));
+  const afterEmpty = await sourceState(EMPTY_SOURCE_ID);
+  assert.ok(afterEmpty.last_successful_poll_at, 'a truly empty new board is a completed poll');
+  assert.equal(afterEmpty.last_poll_listed_count, null,
+    'an empty list carries no rejection rate and must not become the baseline');
+  assert.equal(afterEmpty.last_poll_normalized_count, null);
 });

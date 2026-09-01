@@ -74,6 +74,10 @@ const BASE_ENTRIES: Entry[] = [
   ['SoFi', 'greenhouse', 'sofi'],
   ['Carta', 'greenhouse', 'carta'],
   ['Betterment', 'greenhouse', 'betterment'],
+  /* Marqeta left Greenhouse: their `marqeta` board token began returning 404 on 2026-09-01. Their
+     careers site now applies through jobs.ashbyhq.com/marqeta-inc, and the Ashby posting API answered
+     41 postings for `marqeta-inc` the same day, every one naming Marqeta in its description. */
+  ['Marqeta', 'ashby', 'marqeta-inc'],
   ['Gemini', 'greenhouse', 'gemini'],
   ['Ramp', 'ashby', 'ramp'],
 
