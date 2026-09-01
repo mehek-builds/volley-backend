@@ -188,11 +188,29 @@ const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(
  * and stays as fail-closed as before, and a projection read failure also attaches nothing - the
  * gate then blocks, which is exactly today's behaviour, never an unauthorised send.
  */
+/**
+ * The only review statuses from which the dashboard can offer a FIRST employer send, i.e. the only
+ * states where this envelope changes anything. Every other status either has an attempt open or is
+ * actively opening one, so the projection could never be `none` and the helper would pay a
+ * projection transaction (and its per-user `pg_advisory_xact_lock`) on every poll of a live fill
+ * only to attach nothing. Skipping there is behaviour-identical and keeps the polling hot path off
+ * the submission-attempt lock.
+ */
+const FIRST_SEND_REVIEW_STATUSES = new Set([
+  'resume_ready',
+  'questions_ready',
+  'ready_to_submit',
+  'needs_attention',
+  'failed',
+]);
+
 async function unattemptedPacketSubmissionAuthority(
   userId: string,
   packetId: string,
+  reviewStatus: string,
   log: FastifyRequest['log'],
 ): Promise<{ submission_authority?: ReturnType<typeof submissionAuthorityEnvelopeForUnattemptedPacket> }> {
+  if (!FIRST_SEND_REVIEW_STATUSES.has(reviewStatus)) return {};
   try {
     const projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
     const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
@@ -2418,13 +2436,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           application_id: row.id,
           review: reviewWithoutPassiveHandoffUrl(responseReview),
           manual_handoff_available: manualHandoffAvailable(responseReview),
-          ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, request.log)),
+          ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, responseReview.status, request.log)),
         });
       }
       return reply.send({
         application_id: row.id,
         review: next,
-        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, request.log)),
+        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, next.status, request.log)),
       });
     },
   );
@@ -3267,7 +3285,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(202).send({
           application_id: row.id,
           review: review ?? current,
-          ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, request.log)),
+          ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, (review ?? current).status, request.log)),
         });
       }
       const processed = await processSubmissionApplication(row.id, fastify);
@@ -3351,7 +3369,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         documents: storedDocuments(row),
         handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
-        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, request.log)),
+        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, review.status, request.log)),
       });
     },
   );

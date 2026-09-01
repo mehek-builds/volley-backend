@@ -21,7 +21,7 @@ function routeSlice(from: string, to: string): string {
   return applications.slice(start, end);
 }
 
-const SPREAD = /\.\.\.\(await unattemptedPacketSubmissionAuthority\(request\.jwtPayload!\.userId, row\.id, request\.log\)\)/;
+const SPREAD = /\.\.\.\(await unattemptedPacketSubmissionAuthority\(request\.jwtPayload!\.userId, row\.id, [^,]+\.status, request\.log\)\)/;
 
 test('GET /applications/:id/submission carries the unattempted-packet authority envelope', () => {
   const slice = routeSlice("'/applications/:id/submission'", "'/applications/:id/submission/handoff-complete'");
@@ -52,4 +52,7 @@ test('the helper is fail-closed: same envelope builder as /resume/history, nothi
   assert.match(helper, /catch \(error\) \{[\s\S]*?return \{\};/);
   // And an absent envelope attaches nothing, so a packet with attempt history is untouched.
   assert.match(helper, /envelope \? \{ submission_authority: envelope \} : \{\}/);
+  // Statuses with an attempt open (or opening) skip the projection transaction entirely, keeping
+  // the dashboard's fill-run polling off the per-user submission-attempt advisory lock.
+  assert.match(helper, /if \(!FIRST_SEND_REVIEW_STATUSES\.has\(reviewStatus\)\) return \{\};/);
 });
