@@ -4778,6 +4778,50 @@ test('the employer-named question now resolves to an option on the employer list
   );
 });
 
+/* Crelate's built-in candidate controls are the fixed pass's, never questions. Measured on The
+ * Maven Group (application 305dae5e, 2026-09-01): "enter first name firstname firstname" was
+ * question 1 of 3 on the review screen. */
+test('crelate identity controls are fixed fields, not questions, whatever label discovery welded', () => {
+  const welded = [
+    ['enter first name firstname firstname', '#firstName'],
+    ['enter last name lastname lastname', '#lastName'],
+    ['enter email address email email', '#email'],
+    ['enter phone number phone phone', '#phone'],
+    ['enter first name firstname firstname', 'input#firstName[name="firstName"]'],
+    ['enter email address email email', 'input[name="email"]'],
+    // The direct-Playwright discovery script emits tag[id="..."], never #id.
+    ['enter first name firstname firstname', 'input[id="firstName"]'],
+  ] as const;
+  for (const [label, selector] of welded) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl('crelate', {
+      label,
+      selector,
+      durableSelector: selector,
+    }), true, `${selector} is a fixed control`);
+  }
+  // A custom crelate question with an employer-owned selector stays a question.
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('crelate', {
+    label: 'Do you hold an active security clearance?',
+    selector: '#clearance',
+    durableSelector: '#clearance',
+  }), false);
+  // Another family's #email is not claimed by crelate's rule.
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('breezy', {
+    label: 'enter email address email email',
+    selector: '#email',
+    durableSelector: '#email',
+  }), false);
+
+  const input = [
+    { id: 'first', question: 'enter first name firstname firstname', answer: '', portal_selector: '#firstName' },
+    { id: 'last', question: 'enter last name lastname lastname', answer: '', portal_selector: '#lastName' },
+    { id: 'email', question: 'enter email address email email', answer: '', portal_selector: '#email' },
+    { id: 'phone', question: 'enter phone number phone phone', answer: '+12135746270', portal_selector: '#phone' },
+    { id: 'custom', question: 'Do you hold an active security clearance?', answer: 'No', portal_selector: '#clearance' },
+  ];
+  assert.deepEqual(normalizeStoredPortalQuestions(input, 'crelate'), [input[4]]);
+});
+
 /* A dial-code picker is answered from the number's own dial code, as a country name, whatever the
  * control's type. Measured on dsiinnovations.recruitee.com (2026-09-01): the form defaulted to
  * "United States", the resolver had no intent for the label, and the run stopped to ask her the
@@ -4809,4 +4853,38 @@ test('a country calling code question is answered from the phone number on the p
     resolveKnownAnswer('phone number with country code +1 201-555-0123', 'text', ap, undefined),
     { value: '+12135746270' },
   );
+});
+
+test('comeet, zoho recruit and bullhorn identity controls are fixed fields too', () => {
+  const cases = [
+    ['comeet', 'input[name="firstName"]'],
+    ['comeet', 'input[name="websiteUrl"]'],
+    ['zoho_recruit', 'input[name="First_Name"]'],
+    ['zoho_recruit', 'input[name="Email"]'],
+    ['zoho_recruit', 'input[name="phone"]'],
+    ['bullhorn', 'input[formcontrolname="firstName"]'],
+    ['bullhorn', 'input[name="lastName"]'],
+    ['bullhorn', '#email'],
+  ] as const;
+  for (const [portal, selector] of cases) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl(portal, {
+      label: 'first name firstname',
+      selector,
+      durableSelector: selector,
+    }), true, `${portal} ${selector}`);
+  }
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('comeet', {
+    label: 'Why us?',
+    selector: 'textarea[name="motivation"]',
+    durableSelector: 'textarea[name="motivation"]',
+  }), false);
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('bullhorn', {
+    label: 'Desired salary',
+    selector: 'input[formcontrolname="salary"]',
+    durableSelector: 'input[formcontrolname="salary"]',
+  }), false);
+  assert.deepEqual(normalizeStoredPortalQuestions([
+    { id: 'a', question: 'first name firstname', answer: '', portal_selector: 'input[name="First_Name"]' },
+    { id: 'b', question: 'Why us?', answer: 'Because', portal_selector: 'textarea[name="motivation"]' },
+  ], 'zoho_recruit').map((q) => q.id), ['b']);
 });

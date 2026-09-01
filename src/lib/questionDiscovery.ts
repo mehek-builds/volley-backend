@@ -6732,6 +6732,38 @@ function recruiteeFixedCandidateSelector(selector: string | null | undefined): b
     || /^input\[id=(?:"|')?input-candidate\.(?:name|email|phone)(?:-[\w-]+)?(?:"|')?\]$/i.test(normalized);
 }
 
+/* CRELATE'S FOUR BUILT-IN CANDIDATE CONTROLS, which the fixed pass fills by selector
+ * (CRELATE_FIRST_NAME_SELECTOR and siblings in lib/portalSubmission.ts: input#firstName,
+ * input#lastName, input#email, input#phone). Discovery captures them too, under labels welded from
+ * placeholder, name and id ("enter first name firstname firstname"), and with no crelate entry in
+ * either exclusion they became questions: The Maven Group, application 305dae5e, 2026-09-01, asked
+ * her to type her own first name, last name and email address as "1 of 3", and the phone was both
+ * answered as a question and filled by the fixed pass. Same shape as the Recruitee and Pinpoint
+ * rules above: the fixed pass owns the control, so it is never a question. */
+function crelateFixedCandidateSelector(selector: string | null | undefined): boolean {
+  const normalized = selector?.trim() ?? '';
+  if (!normalized) return false;
+  return /^(?:input)?#(?:firstName|lastName|email|phone)(?:\[name=(?:"|')?(?:firstName|lastName|email|phone)(?:"|')?\])?$/.test(normalized)
+    || /^(?:input)?\[name=(?:"|')?(?:firstName|lastName|email|phone)(?:"|')?\]$/.test(normalized)
+    || /^(?:input)?\[id=(?:"|')?(?:firstName|lastName|email|phone)(?:"|')?\]$/.test(normalized);
+}
+
+/* THE SAME RULE FOR THE THREE FAMILIES WHOSE FIXED PASS FILLS BY NAME. Comeet fills
+ * input[name="firstName"|"lastName"|"email"|"phone"|"websiteUrl"]; Zoho Recruit accepts both the
+ * First_Name and firstName spellings; Bullhorn fills by formcontrolname or name. None of them had
+ * an exclusion either, the latent copy of the Crelate defect above. */
+const NAMED_IDENTITY_CONTROL = /^(?:firstName|lastName|email|phone|First_Name|Last_Name|Email|Phone|websiteUrl)$/;
+
+function namedIdentityControlSelector(selector: string | null | undefined): boolean {
+  const normalized = selector?.trim() ?? '';
+  if (!normalized) return false;
+  const match = normalized.match(
+    /^(?:input)?\[(?:name|id|formcontrolname)=(?:"([^"]+)"|'([^']+)'|([^\]"']+))\]$/,
+  ) ?? normalized.match(/^(?:input)?#([A-Za-z_][\w-]*)$/);
+  const name = match?.[1] ?? match?.[2] ?? match?.[3] ?? '';
+  return NAMED_IDENTITY_CONTROL.test(name);
+}
+
 function pinpointFixedApplicationSelector(selector: string | null | undefined): boolean {
   const normalized = selector?.trim() ?? '';
   if (!normalized) return false;
@@ -6764,6 +6796,14 @@ export function discoveredFieldIsFixedPortalProfileControl(
     return pinpointFixedApplicationSelector(field.durableSelector)
       || pinpointFixedApplicationSelector(field.selector);
   }
+  if (portal === 'crelate') {
+    return crelateFixedCandidateSelector(field.durableSelector)
+      || crelateFixedCandidateSelector(field.selector);
+  }
+  if (portal === 'comeet' || portal === 'zoho_recruit' || portal === 'bullhorn') {
+    return namedIdentityControlSelector(field.durableSelector)
+      || namedIdentityControlSelector(field.selector);
+  }
   return false;
 }
 
@@ -6787,6 +6827,9 @@ export function normalizeStoredPortalQuestions<T extends {
     if ((portal === 'recruitee' || portal === 'manual_recruitee')
       && recruiteeFixedCandidateSelector(question.portal_selector)) continue;
     if (portal === 'pinpoint' && pinpointFixedApplicationSelector(question.portal_selector)) continue;
+    if (portal === 'crelate' && crelateFixedCandidateSelector(question.portal_selector)) continue;
+    if ((portal === 'comeet' || portal === 'zoho_recruit' || portal === 'bullhorn')
+      && namedIdentityControlSelector(question.portal_selector)) continue;
     const reviewLabel = normalizeReviewQuestionLabel(label);
     if (!reviewLabel) continue;
     const key = reviewLabel.toLowerCase();
