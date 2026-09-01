@@ -3944,18 +3944,34 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     /* The production logo gate needs the same weighted inventory, split by the exact employer
        board that proves identity. Company name alone is insufficient: Block is the canonical
        example, where guessing the name finds block.co while its Greenhouse board proves block.xyz.
-       Only returned to the explicit counts=true measurement request. */
+       Only returned to the explicit counts=true measurement request.
+
+       The verifier's evidence rides along per source. The coverage check used to prove coverage
+       by driving the website's live resolver once per source, and 64 concurrent resolutions
+       through one container flaked a different ~14% of lookups on every run (measured 2026-09-01:
+       83.20% then 86.33% with ZERO overlap between the two runs' miss lists, while every named
+       miss resolved serially). Handing the check the evidence URL lets it probe the asset itself,
+       which is the fact the gate exists to prove, at whatever concurrency the CDNs tolerate. */
     const companyLogoSources = facetQuery?.counts === 'true'
       ? await db
         .select({
           company_name: monitored_jobs.company_name,
           career_url: career_page_sources.career_url,
+          company_logo_url: career_page_sources.company_logo_url,
+          company_domain: career_page_sources.company_domain,
+          logo_verification_status: career_page_sources.logo_verification_status,
           rows: sql<number>`count(*)::int`,
         })
         .from(monitored_jobs)
         .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
         .where(where)
-        .groupBy(monitored_jobs.company_name, career_page_sources.career_url)
+        .groupBy(
+          monitored_jobs.company_name,
+          career_page_sources.career_url,
+          career_page_sources.company_logo_url,
+          career_page_sources.company_domain,
+          career_page_sources.logo_verification_status,
+        )
         .orderBy(sql`count(*) desc`)
       : null;
 
