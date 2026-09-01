@@ -191,6 +191,29 @@ describe('the verdict over a set of already-submitted applications', () => {
     assert.deepEqual(duplicateAmong(akunaContext(), AKUNA_DIRECT_URL, []), { kind: 'clear' });
   });
 
+  test('a confirmed application to a different employer does not block one it cannot key-compare', () => {
+    // The prior went to cresta on Greenhouse; the candidate is Verkada on Greenhouse. Different
+    // tenants resolve to basis null (not a proven-different ats_posting), which would otherwise
+    // refuse as unidentifiable. The company|role guard recognizes them as different postings.
+    const cresta = submitted({
+      id: 'a1111111-1111-4111-8111-111111111111',
+      job_context: { company: 'cresta', role: 'Data Science Intern (Customer Success)' },
+      portal_url: 'https://job-boards.greenhouse.io/cresta/jobs/1',
+    });
+    const verdict = duplicateAmong(
+      { company: 'Verkada', role: 'Frontend Software Engineering Intern 2027' },
+      'https://job-boards.greenhouse.io/verkada/jobs/2',
+      [cresta],
+    );
+    assert.equal(verdict.kind, 'clear');
+  });
+
+  test('a confirmed application to the SAME employer and role is still refused, not cleared', () => {
+    // The company|role guard must not clear a genuine same-posting retry. Same tenant, same key.
+    const verdict = duplicateAmong(akunaContext(), AKUNA_EMBED_URL, [submitted()]);
+    assert.equal(verdict.kind, 'duplicate');
+  });
+
   test('legacy unverified-attempt prose blocks a modern retry as unverified', () => {
     const url = 'https://jobs.ashbyhq.com/deepgram/dc8693b5-72ce-4ca3-ab15-9c8434d35da1/application';
     const context = {

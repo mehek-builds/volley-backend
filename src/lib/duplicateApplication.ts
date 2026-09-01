@@ -627,6 +627,19 @@ export function duplicateAmong(
           })
         )));
       if (repaired) continue;
+      /* Last comparable signal before a user-facing unidentifiable refusal: the normalized
+         company|role. The verdict reached basis null because the strong tiers could not be
+         compared - mismatched or one-sided ATS posting keys (a different Greenhouse tenant like
+         cresta vs verkada resolves to null here, not to a proven-different ats_posting), mismatched
+         job ids, or no shared tier at all. But if BOTH postings still name a company|role and those
+         DIFFER, they are different postings and cannot be duplicates: a confirmed application to one
+         company or role is not a prior submission of another, and re-sending this one cannot
+         duplicate an application the employer never received for it. Only a genuinely absent or
+         equal company|role leaves the unidentifiable hold standing (an equal one reaches this branch
+         only when the strong tiers were ambiguous, where staying careful is correct). */
+      if (mine.companyRole
+        && priorIdentity.companyRole
+        && mine.companyRole !== priorIdentity.companyRole) continue;
       unidentifiable ??= row;
       continue;
     }
