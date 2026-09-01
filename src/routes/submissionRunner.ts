@@ -51,6 +51,7 @@ import {
   isManagedStratusProvider,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
+  MANAGED_PREPARE_FILL_DEADLINE_MS,
   managedBrowserTerminalResultId,
   managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
@@ -7000,10 +7001,22 @@ async function prepareManaged(
   // An array rather than a nullable local so the assignment inside the catch callback is visible to
   // the code below it; TypeScript does not narrow across a closure it cannot prove ran.
   const discoveryFailures: string[] = [];
+  /* scanCorrelation on every prepare-path run that touches the page, because stratus's
+   * correlation-required policy classifies ANY mutation as boundary-capable, not just submits.
+   * The discovery pass fills the fixed fields before it reads, so without a correlation the very
+   * first provider call of a managed fill is refused with SUBMISSION_ATTEMPT_REQUIRED - measured
+   * live on the first post-cutover fill, application e4b0420c (OpenAI, Ashby, 2026-09-01), where
+   * this .catch swallowed the refusal as a discovery failure and the uncorrelated fill run below
+   * then failed the whole packet with the same sentence. A prepare run truly cannot submit (no
+   * allowSubmit, no final action, both enforced server-side), so the ephemeral scan pair is the
+   * correct correlation; the DURABLE attempt stays what it means - claimSubmission's ledger row,
+   * opened only when a submit-capable run is about to launch. The widened deadline covers
+   * stratus's own 270s run budget: these are the two big runs of the prepare path. */
   const discoveryResult = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
+    { scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS },
   )
     .catch((error: unknown) => {
       // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
@@ -7121,11 +7134,13 @@ async function prepareManaged(
         : label.match(/^closed_control:(.+)$/)?.[1];
       return id ? [id] : [];
     }))];
+    // Probe clicks classify as mutations; the same ephemeral correlation the posting-questions
+    // pre-scan carries (postingQuestions.ts), at the standard read-scan deadline.
     const result = await runManagedBrowserWithAccountFence(
       row.user_id,
       applicationUrl,
       actions,
-      { screenshot: false },
+      { screenshot: false, scanCorrelation: true },
     )
       .catch((error: unknown) => {
         const reason = describeDiscoveryFailure(error);
@@ -7616,10 +7631,14 @@ async function prepareManaged(
     progress_stage: 'Filling your answers',
     progress_updated_at: new Date().toISOString(),
   }));
+  // The fill run mutates the form and never submits (buildManagedPortalActions without `submit`
+  // builds no final action), so it carries the same ephemeral scan correlation as the discovery
+  // pass above, at the same widened deadline. See the discovery call for the full argument.
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
+    { scanCorrelation: true, scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS },
   );
   const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
   if (actionDiagnostics.length > 0) {
@@ -9603,11 +9622,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         && isWorkablePhoneReadbackAssertionLabel(error.assertionLabel)
         && managedApplicationUsesAtomicSubmitV4(portal, applicationUrl)) {
         try {
+          // The evidence run's cookie-decline click classifies as a mutation, so it needs the
+          // ephemeral scan correlation too; its extracts alone would not.
           const evidenceRun = await runManagedBrowserWithAccountFence(
             row.user_id,
             applicationUrl,
             buildWorkablePhoneEvidenceActions(),
-            { screenshot: false },
+            { screenshot: false, scanCorrelation: true },
           );
           error.attachEvidence(workablePhoneEvidenceSummary(evidenceRun));
         } catch (evidenceError) {

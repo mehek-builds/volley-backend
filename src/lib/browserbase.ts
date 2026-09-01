@@ -1214,6 +1214,26 @@ async function managedStratusAuthorization(signal?: AbortSignal): Promise<{
 const MANAGED_READ_SCAN_DEADLINE_MS = 240_000;
 
 /**
+ * The employer-action window for a prepare-path fill or discovery run. These runs are bigger than a
+ * discover-plus-probe read: up to 120 actions including document uploads, and stratus caps its own
+ * run execution at 270s (MANAGED_RUN_TIMEOUT_MS). A 240s client deadline would abort a run stratus
+ * was still legitimately finishing, losing the response to a fill that already happened on the
+ * employer page. 290s strictly covers stratus's own budget and stays under the 300s provider
+ * maximum with 10s of latency headroom.
+ */
+export const MANAGED_PREPARE_FILL_DEADLINE_MS = 290_000;
+
+/**
+ * The action types stratus classifies as read-only (its READ_ONLY_ACTIONS set). Every other action
+ * type is a mutation of the employer page, and under stratus's correlation-required policy - the
+ * DEFAULT policy; compat is an explicit rollout state - a mutating run without a submissionAttempt
+ * is refused at the provider with SUBMISSION_ATTEMPT_REQUIRED. Keep this set in lockstep with
+ * stratus-browser-cloud src/managed-browser.js.
+ */
+export const MANAGED_READ_ONLY_ACTION_TYPES: ReadonlySet<ManagedBrowserAction['type']> =
+  new Set(['waitForSelector', 'extract', 'requireCapability', 'discover']);
+
+/**
  * The correlation a MUTATING READ SCAN carries, distinct in every way from a submission's durable
  * correlation. A submission derives its attempt from the durable submission-attempt ledger (a real
  * DB row bound to a packet) and sends allowSubmit; this is a fresh, throwaway UUID triple with no
@@ -1222,7 +1242,10 @@ const MANAGED_READ_SCAN_DEADLINE_MS = 240_000;
  * echo it back so the result is provably the one this call asked for. It never mints a terminal
  * result, because a read scan is not a submission.
  */
-export function managedReadScanCorrelation(nowMs: number = Date.now()): {
+export function managedReadScanCorrelation(
+  nowMs: number = Date.now(),
+  deadlineMs: number = MANAGED_READ_SCAN_DEADLINE_MS,
+): {
   submissionAttempt: ManagedSubmissionAttempt;
   providerDeadlineAt: string;
 } {
@@ -1232,7 +1255,7 @@ export function managedReadScanCorrelation(nowMs: number = Date.now()): {
       claimId: randomUUID(),
       executionId: randomUUID(),
     },
-    providerDeadlineAt: new Date(nowMs + MANAGED_READ_SCAN_DEADLINE_MS).toISOString(),
+    providerDeadlineAt: new Date(nowMs + deadlineMs).toISOString(),
   };
 }
 
@@ -1252,14 +1275,26 @@ export async function runManagedBrowser(
     providerDeadlineAt?: string;
     timeoutMs?: number;
     /**
-     * Correlate this run as a READ SCAN whose actions mutate the page (option-probe clicks) but that
-     * never submits. Under stratus correlationRequired, any mutation needs a submissionAttempt and a
-     * providerDeadlineAt; a read scan supplies a fresh ephemeral pair (see managedReadScanCorrelation)
-     * so the probe clicks are accepted and contained, WITHOUT the submit-only durable-terminal-result
-     * assertion. It is a usage error to combine this with allowSubmit or requestContinuation: a scan
-     * is by definition not a submission.
+     * Correlate this run as a NON-SUBMIT MUTATION: a run whose actions change the employer page
+     * (option-probe clicks, a prepare-path fill of the form) but that never sends anything to the
+     * employer - no allowSubmit, no final action, no continuation, all of which stratus enforces
+     * server-side regardless of what the correlation claims. Under stratus correlationRequired, any
+     * mutation needs a submissionAttempt and a providerDeadlineAt; this supplies a fresh ephemeral
+     * pair (see managedReadScanCorrelation) so the mutations are accepted and bound to this exact
+     * call, WITHOUT the submit-only durable-terminal-result assertion. The DURABLE attempt from the
+     * submission ledger remains reserved for submit-capable runs (managedApplicationSubmitOptions):
+     * an attempt row means "an employer may have been sent this packet", which is never true here.
+     * It is a usage error to combine this with allowSubmit or requestContinuation: a run that can
+     * submit must carry its durable attempt instead.
      */
     scanCorrelation?: boolean;
+    /**
+     * Employer-action window for the ephemeral scan pair, defaulting to the 240s read-scan window.
+     * Prepare-path fill and discovery runs pass MANAGED_PREPARE_FILL_DEADLINE_MS because they can
+     * legitimately run to stratus's own 270s budget. Only meaningful with scanCorrelation; minted at
+     * dispatch time inside the account fence, so a lock wait never erodes the window.
+     */
+    scanDeadlineMs?: number;
   } = {},
 ): Promise<ManagedBrowserResult> {
   if (options.timeoutMs !== undefined) assertManagedBrowserTimeout(options.timeoutMs, 'Managed Stratus run');
@@ -1268,18 +1303,40 @@ export async function runManagedBrowser(
   if (scanCorrelated && submitCorrelated) {
     throw new Error('A managed read-scan correlation cannot also release a submission or request a continuation');
   }
+  if (options.scanDeadlineMs !== undefined && !scanCorrelated) {
+    throw new Error('A managed scan deadline is only meaningful on a scan-correlated run');
+  }
   // A read scan mints its own ephemeral correlation unless the caller pinned an exact pair (tests do).
   const scanPair = scanCorrelated && (options.submissionAttempt == null || options.providerDeadlineAt == null)
-    ? managedReadScanCorrelation()
+    ? managedReadScanCorrelation(Date.now(), options.scanDeadlineMs)
     : null;
   const providerDeadlineAt = managedProviderDeadline(
     options.providerDeadlineAt ?? scanPair?.providerDeadlineAt,
     submitCorrelated || scanCorrelated,
   );
   const effectiveTimeoutMs = managedProviderRequestTimeoutMs(options.timeoutMs, providerDeadlineAt);
+  const outboundActions = normalizeStratusActions(actions);
+  /* THE GUARD THAT WOULD HAVE CAUGHT THE FIRST POST-CUTOVER MANAGED FILL, at home instead of in an
+   * employer-facing run. Application e4b0420c (OpenAI, Ashby, 2026-09-01): the prepare-path fill
+   * launched with no correlation at all, stratus's required mode refused it with
+   * SUBMISSION_ATTEMPT_REQUIRED, and the packet failed fail-closed with a sentence about durable
+   * attempts that no backend code had ever decided to omit - the launch site simply predated the
+   * policy. Stratus classifies ANY mutating action as boundary-capable, not just submits, so the
+   * question "does this run need correlation" is answerable right here from the outbound action
+   * list. Refusing locally turns the next uncorrelated call site into a loud test failure rather
+   * than a prod refusal, and spends neither an OIDC token nor a provider session on a run stratus
+   * is certain to reject. Classified on the OUTBOUND list, after optional invalid-selector actions
+   * are dropped, because that is the exact list stratus will classify. */
+  const uncorrelatedMutation = !submitCorrelated && !scanCorrelated
+    && outboundActions.find((action) => !MANAGED_READ_ONLY_ACTION_TYPES.has(action.type));
+  if (uncorrelatedMutation) {
+    throw new Error(
+      'A managed run whose actions mutate the employer page requires a durable submission attempt '
+      + `or a scan correlation; first mutating action: ${uncorrelatedMutation.type}`,
+    );
+  }
   const signal = effectiveTimeoutMs === undefined ? undefined : AbortSignal.timeout(effectiveTimeoutMs);
   const { baseUrl, headers } = await managedStratusAuthorization(signal);
-  const outboundActions = normalizeStratusActions(actions);
   const expectedSubmissionAttempt = managedSubmissionAttempt(
     options.submissionAttempt ?? scanPair?.submissionAttempt,
     submitCorrelated || scanCorrelated,
