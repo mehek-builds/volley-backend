@@ -67,7 +67,7 @@ import {
   type ActionPostingRow,
 } from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
-import { leadAlignmentIssues, selectJdAlignedLead } from '../engine/leadAlignment';
+import { leadAlignmentIssues, selectJdAlignedLead, type LeadFallbackDecision } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import {
   repairHistoryReviewPortalFromMonitoredJob,
@@ -930,7 +930,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let spec: ResumeSpec | undefined;
     let specIssues: string[] = [];
     let leadIssues: string[] = [];
-    let leadSelectionIssues: string[] = [];
+    /* Set when this posting and this resume share no citable evidence and the lead was ordered by
+       rankLeadWithoutCitation instead. It is a WARNING, never an issue: see the 422 below for what
+       treating it as an issue did to onboarding. */
+    let leadFallback: LeadFallbackDecision | null = null;
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
 
@@ -975,7 +978,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                * the model output has been grounded to the bank and before any renderer sees it.
                * The model's proposed lead_alignment is deliberately replaced, not trusted. */
               const selected = selectJdAlignedLead(policed, jdText, { company: body.company, role: body.role });
-              leadSelectionIssues = selected.issues;
+              leadFallback = selected.fallback;
               return selected.spec;
             } catch (err) {
               lastErr = err;
@@ -1036,12 +1039,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       if (priorityEntry) {
         specIssues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
       }
-      /* The deterministic selector's inability to find supported evidence is a hard packet defect,
-         not permission to preserve model or chronological order. Otherwise verify the citation it
-         produced against the same frozen JD before rendering. */
-      leadIssues = leadSelectionIssues.length > 0
-        ? leadSelectionIssues
-        : leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+      /* Verify the citation the selector produced against the same frozen JD before rendering.
+         When it produced none because none exists, this returns empty and the ordering it fell back
+         to stands - the selector no longer reports that as an issue, so a retry is never spent
+         asking the model to find evidence that is not in either document. */
+      leadIssues = leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
       specIssues.push(...leadIssues);
       specWarnings = [
         ...result.warnings,
@@ -1107,13 +1109,27 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * supporting bullet changed. */
     const finalLeadSelection = selectJdAlignedLead(spec, jdText, { company: body.company, role: body.role });
     spec = finalLeadSelection.spec;
-    leadIssues = finalLeadSelection.issues.length > 0
-      ? finalLeadSelection.issues
-      : leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+    leadFallback = finalLeadSelection.fallback;
+    leadIssues = leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
+    /* SAID, NOT SPENT. An uncitable lead used to reach the 422 below and cost the student the whole
+       build - in onboarding, their one free build - over the absence of a shared word. It is now a
+       line on the review screen naming the entry that led and why, next to the omissions the
+       renderer already reports. The 422 still stands for what it was written for: a citation that
+       is present and wrong. */
+    if (leadFallback) {
+      fastify.log.info(
+        { userId, company: body.company, lead: leadFallback.entry_org, overlap: leadFallback.jd_overlap_terms },
+        'lead fit is unscoreable against this posting; ordered by relevance, recency and substance',
+      );
+      specWarnings = [
+        ...specWarnings,
+        { entry: leadFallback.entry_org, bullet: '', flags: [leadFallback.reason] },
+      ];
+    }
     if (leadIssues.length > 0) {
       fastify.log.error(
         { userId, company: body.company, issues: leadIssues },
-        'resume blocked before rendering because no JD-supported lead experience could be chosen',
+        'resume blocked before rendering because the lead citation does not hold against this posting',
       );
       return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
         error: 'Litos could not prove which experience should lead this resume, so it was not attached.',
