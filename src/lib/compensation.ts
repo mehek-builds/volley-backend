@@ -337,6 +337,90 @@ const TYPE_SYNONYMS: [RegExp, string][] = [
   [/contract|temporary|^temp$|fixed[-\s]?term|short[-\s]?term|agency/i, 'Contract'],
 ];
 
+/* THE SECOND PASS, for a value that states a type AND something else in the same string.
+ *
+ * The rules above are anchored, so they only fire when the employer's field says the type and
+ * nothing but the type. That is most of Ashby and Lever and none of the rest of the catalogue.
+ * Measured against live prod 2026-09-01: 875 distinct values on 41,933 active postings fell past
+ * them and were passed through verbatim, which is how a tile came to read `fulltime_permanent`.
+ *
+ * WHAT WAS ACTUALLY IN THERE, and why one more anchored rule per spelling was never going to work:
+ *   - Recruitee posts a CODE, not a word: fulltime_permanent (11,164), fulltime_fixed_term (3,550),
+ *     parttime_fixed_term (1,886), parttime_permanent (1,683), parttime_minijob (206).
+ *   - Most boards post the type with a payroll or site qualifier welded on: "Salaried, full-time"
+ *     (3,961), "Hourly, full-time" (1,312), "Full Time Hybrid" (922), "Clinical Part Time" (1,005).
+ *   - Non-English boards post it in their own language: CDI, Temps plein, Vollzeit, Deeltijds,
+ *     Tiempo Completo, Tempo integral, CLT, Efetivo, On-roll, En planilla, 正社員, 정규직.
+ * That is an open set of decorations around a closed set of types, so this pass reads the SIGNAL
+ * out of the noise instead of trying to enumerate the noise.
+ *
+ * PRECEDENCE IS THE WHOLE DESIGN:
+ *   Volunteer, then Internship, then Apprenticeship, then the hours rules, then Contract.
+ *
+ * WHEN A VALUE STATES BOTH HOURS AND TENURE, THE HOURS WIN. `fulltime_fixed_term` states two facts
+ * and only one of them fits a category, so the question is which one to keep. It is the hours, for
+ * a reason that is about the reader rather than the taxonomy: BOTH filters this board runs are
+ * hours filters. targetingConditions matches `employment_type ~* 'full.?time'` and matchingRoleType
+ * sets isNonFullTime from the same word, and ROLE_TYPES is internship / co-op / new-grad /
+ * full-time with no contract entry at all. So a posting typed Contract is not moved to a different
+ * filter, it leaves targeting entirely. Reading the tenure half instead of the hours half dropped
+ * 3,676 live postings out of every user's full-time matches with nothing able to recover them,
+ * 3,550 of those the German and Austrian `fulltime_fixed_term`, where a befristet contract is
+ * ordinary full-time employment rather than gig work.
+ *
+ * A value that states ONLY tenure still lands on Contract: Freelance, Per Diem, PRN, Casual,
+ * Seasonal, Interim, Locum, 1099. Nothing there says how many hours, so there is no hours fact to
+ * prefer. That is also why Lever's bare "Fixed Term" is untouched - it is caught by the anchored
+ * rule above, which is the right answer precisely because it carries no hours.
+ *
+ * Part-time sits above Full-time so that "Permanent Part-Time" is not read as
+ * permanent-therefore-full-time.
+ *
+ * STILL FALLS THROUGH TO PASS-THROUGH. A value with no signal at all is returned unchanged, exactly
+ * as before, so the audit property the verify:classification gate depends on is unchanged: nothing
+ * an employer said is discarded here. 4,391 postings still carry an unrecognised value, and reading
+ * that list is the point - it is almost entirely departments ("Sales", "Engineering"), seniority
+ * ("Mid Level"), work arrangement ("Remote", "Hybrid", "Homeoffice") and literal "Other", none of
+ * which are employment types and none of which this pass should be taught to guess at.
+ */
+
+/* Stripped BEFORE the separators are, because these are job titles carrying an instruction to the
+   reader, and the bare word "salary" inside them otherwise reads as a full-time signal. Live:
+   "Coach & Cocurricular (See Salary Details for information)" and two more, 55 postings. */
+const SALARY_DETAIL_NOISE = /see salary details[^)]*/gi;
+
+/* Underscores, slashes, pipes, dashes and brackets all separate a type from its decoration on some
+   board, so they are flattened to spaces and the signals below can rely on word boundaries. This
+   is what turns Recruitee's `fulltime_fixed_term` into something `fixed ?term` can see. */
+function flattenTypeValue(raw: string): string {
+  return raw
+    .replace(SALARY_DETAIL_NOISE, ' ')
+    .replace(/[_/|,\-\u2013\u2014:()[\]]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const COMPOUND_TYPES: [RegExp, string][] = [
+  [/volunteer|voluntari/i, 'Volunteer'],
+  /* "Student" and "Working Student" are the German-board spelling of a working-student placement,
+     and stage/stagiair/praktikum/becario/tirocinio are the same fact in five other languages. */
+  [/\bintern(ship)?s?\b|\bco ?op\b|praktik|werkstudent|working student|\bstudent\b|stagiair|stagiaire|\bstage\b|becari|pasant|tirocini|est[a\u00e1]gi|scholarship/i, 'Internship'],
+  [/apprentice|ausbildung|lehrling|alternan/i, 'Apprenticeship'],
+  /* Stated as BOTH ("Full-time or Part-time", 964 postings across its spellings). One flat category
+     has to be chosen and Full-time is the one the employer is certainly offering, so the posting
+     stays reachable from the Full-time filter rather than vanishing from both. */
+  [/(full ?time|\bft\b|\bpt\b|part ?time)[^a-z]{0,4}(or|and|&)?[^a-z]{0,4}(part ?time|\bpt\b|\bft\b|full ?time)/i, 'Full-time'],
+  [/part ?time|teilzeit|deeltijd|temps partiel|tiempo parcial|meia jornada|minijob|\bpt\b/i, 'Part-time'],
+  /* The tail here is the world's payroll vocabulary for "permanent staff job": CDI (France), CLT and
+     Efetivo (Brazil), On-roll (India), En planilla (LatAm), W2 (US), 正社員 (Japan), 정규직 (Korea). */
+  [/full ?time|vollzeit|voltijd|temps plein|tiempo completo|jornada completa|tempo integral|tempo pieno|\u6b63\u793e\u54e1|\uc815\uaddc\uc9c1|permanent|\bcdi\b|\bfte?\b|\bclt\b|efetivo|on ?roll|en planilla|\bw2\b|direct hire|salaried|salary|indefinido|dur[e\u00e9]e ind[e\u00e9]termin[e\u00e9]e/i, 'Full-time'],
+  /* LAST, so it only answers for a value that never said how many hours.
+     NOT "probation" and NOT a bare "contingent": a probationary period and a grant-contingent
+     posting are both normally permanent jobs, and reading them as contracts mistyped 30 live
+     postings ("PH: Professional Class - Probation", "Contingent on Award"). */
+  [/contract|freelance|\btemp\b|temporary|temporaire|tempor[a\u00e1]ri|seasonal|interim|per ?diem|\bprn\b|casual|\b1099\b|fixed ?term|locum|consultant|on ?call|\bagency\b|contingent worker|maternity cover|\bcdd\b|variable hour/i, 'Contract'],
+];
+
 /**
  * One product word for a type that arrived in any of a dozen spellings.
  *
@@ -354,6 +438,10 @@ export function normalizeEmploymentType(value: string | undefined): string | und
   if (!raw) return undefined;
   for (const [pattern, type] of TYPE_SYNONYMS) {
     if (pattern.test(raw)) return type;
+  }
+  const flattened = flattenTypeValue(raw);
+  for (const [pattern, type] of COMPOUND_TYPES) {
+    if (pattern.test(flattened)) return type;
   }
   return raw;
 }
