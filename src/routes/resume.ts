@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, sql } from 'drizzle-orm';
+import { eq, desc, and, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
@@ -1122,9 +1122,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       priorityEntryId: priorityEntry?.id,
       allowSparsePriority: recentReview?.continue_with_found === true,
       allowSparseAll: spec.generation_method === 'local_fallback',
-      onDropped: ({ org, bullets }) =>
+      /* Two causes, two sentences. "Add another bullet" is the fix for a thin entry and a dead
+         end for a duplicated one: an entry emptied by the dedupe has every bullet already on the
+         page under another heading, so a fourth bullet changes nothing and the student would be
+         sent round a loop. Say what actually happened instead. */
+      onDropped: ({ org, bullets, reason }) =>
         droppedForLength.push(
-          `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
+          reason === 'already_printed'
+            ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
+            : `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
         ),
     });
     /* Grounding and the bullet-floor repair can remove or add evidence after the first selection.
@@ -1835,17 +1841,44 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // Neon's monthly transfer ceiling, and this is the payload the plan named next to it.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+    /* A resume built for an application the student has taken off their Tracker goes with it.
+       Removal is stamped on the canonical application, and generated_resumes is joined to it by
+       applications.legacy_generated_resume_id, so the exclusion is expressed here rather than
+       duplicated as a second flag that could disagree with the first. A resume with no canonical
+       application (an extension build, anything predating the canonical row) has nothing to be
+       removed by and is unaffected. */
+    const removedResumeIds = await db
+      .select({ id: applications.legacy_generated_resume_id })
+      .from(applications)
+      .where(and(
+        eq(applications.user_id, userId),
+        isNotNull(applications.removed_at),
+        isNotNull(applications.legacy_generated_resume_id),
+      ));
+    const removedIds = removedResumeIds
+      .map((row) => row.id)
+      .filter((id): id is string => Boolean(id));
     const latestRows = await db
       .select()
       .from(generated_resumes)
-      .where(eq(generated_resumes.user_id, userId))
+      .where(removedIds.length === 0
+        ? eq(generated_resumes.user_id, userId)
+        : and(eq(generated_resumes.user_id, userId), notInArray(generated_resumes.id, removedIds)))
       .orderBy(desc(generated_resumes.created_at))
       .limit(50);
     const query = request.query && typeof request.query === 'object'
       ? request.query as Record<string, unknown>
       : {};
     const requestedId = requestedResumeLookupId(latestRows, query.application);
-    const requestedRows = requestedId
+    /* THE EXACT LOOKUP HAS TO HONOUR THE SAME EXCLUSION, and it is the more dangerous of the two.
+       requestedResumeLookupId returns an id precisely when that id is NOT in latestRows, so
+       filtering a removed resume out of latestRows GUARANTEES its id passes that test. An unfiltered
+       lookup here would therefore fetch exactly the resumes the filter above just removed, and
+       includeRequestedResumeInHistory prepends the result - putting the removed packet back at the
+       TOP of the Tracker, strictly more often than before the filter existed. Reached by any stale
+       ?application= URL: a second tab, a bookmark, the back button, or a reload of the page that was
+       open when the row was removed. */
+    const requestedRows = requestedId && !removedIds.some((id) => id.toLowerCase() === requestedId.toLowerCase())
       ? await db
         .select()
         .from(generated_resumes)

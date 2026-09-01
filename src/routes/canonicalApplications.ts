@@ -7,6 +7,8 @@ import { db, withDedicatedDatabase } from '../db';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import {
   application_artifacts,
+  application_submission_attempt_bindings,
+  application_submission_attempt_events,
   application_submission_events,
   applications,
   artifact_versions,
@@ -462,6 +464,12 @@ export async function upsertCanonicalApplicationForUser(input: {
       resume_attached: Boolean(resumeSourceRow),
       resume_source: resumeSourceRow?.resume_source ?? 'none',
       resume_attached_at: resumeSourceRow?.resume_attached_at ?? null,
+      /* ADDING THE POSTING AGAIN IS THE UNDO. This upsert reuses the existing row for a posting
+         the student already has, and a removed row is still that row - so without this clear, a
+         student who removed an application and then added the same job back would get a row they
+         could not see, on a fingerprint that stops a second one being created. Reviving it also
+         returns the history attached to it rather than starting them at zero. */
+      removed_at: null,
       created_at: new Date(Math.min(...merged.map((row) => row.created_at.getTime()))),
       updated_at: new Date(Math.max(Date.now(), ...merged.map((row) => row.updated_at.getTime()))),
     }).where(and(eq(applications.id, winner.id), eq(applications.user_id, input.userId))).returning();
@@ -516,6 +524,12 @@ function fillHandoffResponse(row: typeof applications.$inferSelect) {
   };
 }
 
+/* A tracker stage that means the employer already has it. Kept beside the removal route rather
+   than imported from the projection module, which exports its own copy for a different question:
+   there "terminal" decides whether to keep polling, here it decides whether the student is allowed
+   to hide the evidence of a send. Same values today, and they are allowed to diverge. */
+const REMOVAL_BLOCKING_TRACKER_STAGES = new Set(['applied', 'interview', 'offer', 'closed']);
+
 async function ownedApplication(request: FastifyRequest, reply: FastifyReply) {
   const parsed = paramsSchema.safeParse(request.params);
   if (!parsed.success) {
@@ -537,12 +551,120 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
   fastify.get('/applications', { preHandler: requireAuth }, async (request, reply) => {
     const parsed = listSchema.safeParse(request.query ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid application list request' });
-    const rows = await db.select().from(applications).where(eq(
-      applications.user_id,
-      request.jwtPayload!.userId,
+    /* Removed rows are excluded HERE rather than in the client, because this one route feeds the
+       Tracker, the dashboard and the extension alike, and a client-side filter would hide a row on
+       one surface and show it on the next. */
+    const rows = await db.select().from(applications).where(and(
+      eq(applications.user_id, request.jwtPayload!.userId),
+      isNull(applications.removed_at),
     )).orderBy(desc(applications.updated_at)).limit(parsed.data.limit);
     return reply.header('Cache-Control', 'private, no-store').send({
       applications: rows.map(applicationResponse),
+    });
+  });
+
+  /**
+   * TAKE AN APPLICATION OFF THE TRACKER.
+   *
+   * Until this existed there was no way for a student to undo a row they did not mean to create,
+   * on any surface: the only DELETE routes in the product were for cover letters, documents, email
+   * connections and the entire account. A mistyped link, a job opened to look at, a build run to
+   * try something - each left a permanent row.
+   *
+   * IT IS A STAMP, NOT A DELETE, and the schema forces that rather than it being a preference.
+   * Nine tables carry an application_id with no foreign key, so a DELETE cannot cascade to them:
+   * application_submission_attempt_bindings and _events, monetization_events,
+   * trial_answer_applications, application_posting_distinctions, pending_premium_actions,
+   * user_documents.first_application_id. The first two are the attempt ledger, which is what stops
+   * Litos sending the same application to the same employer twice. Deleting the row it points at
+   * would trade a tidy Tracker for a duplicate send to a real employer, and the billing events and
+   * the trial accounting would start referring to an application that no longer exists.
+   *
+   * WHAT MAY BE REMOVED: only an application that never reached an employer. The check is made
+   * against the ledger and the lifecycle rather than against submission_state alone, because
+   * submission_state is a projection and the ledger is the record. Anything with an attempt
+   * binding, an attempt event, a submission event, a non-not_started submission state or a
+   * terminal tracker stage is refused with 409 and a reason the client can show. That refusal is
+   * the point: "remove" must never be a way to make a sent application disappear from the history
+   * that proves it was sent.
+   *
+   * Idempotent: removing an already-removed application answers 200 with the same body, so a
+   * double click or a retried request is not an error.
+   */
+  fastify.post('/applications/:id/remove', { preHandler: requireAuth }, async (request, reply) => {
+    const application = await ownedApplication(request, reply);
+    if (!application) return reply;
+    if (application.removed_at) {
+      return reply.header('Cache-Control', 'private, no-store').send({
+        application: applicationResponse(application),
+        removed: true,
+        already_removed: true,
+      });
+    }
+
+    const blockers: string[] = [];
+    if (application.submission_state !== 'not_started') {
+      blockers.push(`submission_state is "${application.submission_state}"`);
+    }
+    if (REMOVAL_BLOCKING_TRACKER_STAGES.has(application.tracker_state)) {
+      blockers.push(`tracker_state is "${application.tracker_state}"`);
+    }
+    /* The ledger is consulted directly. A projection can be rebuilt or lag; these rows are the
+       durable evidence that a send was attempted, and one of them is enough to refuse. */
+    const [bindings, attemptEvents, submissionEvents] = await Promise.all([
+      db.select({ attemptId: application_submission_attempt_bindings.attempt_id })
+        .from(application_submission_attempt_bindings)
+        .where(and(
+          eq(application_submission_attempt_bindings.user_id, request.jwtPayload!.userId),
+          eq(application_submission_attempt_bindings.application_id, application.id),
+        )).limit(1),
+      db.select({ id: application_submission_attempt_events.id })
+        .from(application_submission_attempt_events)
+        .where(and(
+          eq(application_submission_attempt_events.user_id, request.jwtPayload!.userId),
+          eq(application_submission_attempt_events.application_id, application.id),
+        )).limit(1),
+      db.select({ id: application_submission_events.id })
+        .from(application_submission_events)
+        .where(eq(application_submission_events.application_id, application.id)).limit(1),
+    ]);
+    if (bindings.length > 0) blockers.push('a submission attempt is on record');
+    if (attemptEvents.length > 0) blockers.push('a submission attempt event is on record');
+    if (submissionEvents.length > 0) blockers.push('a submission event is on record');
+
+    if (blockers.length > 0) {
+      return reply.status(409).send({
+        error: 'This application has already been sent or is being sent, so Litos is keeping it on your Tracker.',
+        code: 'application_not_removable',
+        blockers,
+      });
+    }
+
+    /* Conditional on still being unremoved and still not_started, so two concurrent requests, or a
+       send that claims the row between the checks above and this write, cannot both win. */
+    const [removed] = await db.update(applications)
+      .set({ removed_at: new Date(), updated_at: new Date() })
+      .where(and(
+        eq(applications.id, application.id),
+        eq(applications.user_id, request.jwtPayload!.userId),
+        eq(applications.submission_state, 'not_started'),
+        isNull(applications.removed_at),
+      )).returning();
+    if (!removed) {
+      return reply.status(409).send({
+        error: 'This application changed while Litos was removing it. Reload your Tracker and try again.',
+        code: 'application_not_removable',
+        blockers: ['the application changed during removal'],
+      });
+    }
+    request.log.info(
+      { userId: request.jwtPayload!.userId, applicationId: application.id, company: application.company_name },
+      'application removed from the tracker',
+    );
+    return reply.header('Cache-Control', 'private, no-store').send({
+      application: applicationResponse(removed),
+      removed: true,
+      already_removed: false,
     });
   });
 

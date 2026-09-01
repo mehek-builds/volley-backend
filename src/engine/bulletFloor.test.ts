@@ -58,12 +58,14 @@ test('one bullet is still never enough', () => {
 test('a dropped entry is named, with the fix, rather than silently vanishing', () => {
   /* The half that makes the floor honest. Before this the job was simply absent and the only thing
      that knew why - one more bullet - was the code. */
-  const dropped: { org: string; bullets: number }[] = [];
+  const dropped: { org: string; bullets: number; reason: string }[] = [];
   const spec = { experience: [entry('Campus Lab', ['Built a thing.'])] } as never;
   enforceExperienceBulletFloor(spec, [bank('Campus Lab', ['Built a thing.'])], {
     onDropped: (info) => dropped.push(info),
   });
-  assert.deepEqual(dropped, [{ org: 'Campus Lab', bullets: 1 }]);
+  /* `reason` distinguishes this from the entry the cross-entry dedupe empties, where "add another
+     bullet" is a dead end rather than the fix. This one really is short. */
+  assert.deepEqual(dropped, [{ org: 'Campus Lab', bullets: 1, reason: 'below_floor' }]);
 });
 
 test('an entry topped up from the bank to two is kept, not dropped', () => {

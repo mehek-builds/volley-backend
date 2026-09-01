@@ -1103,24 +1103,56 @@ export function validateResumeSpec(
     }
   }
 
-  // Entry-level near-duplicate check (pressure_test.py's entry_overlaps): two bullets in the
-  // same entry restating the same point via high content-word overlap.
-  for (const entry of spec.experience) {
-    for (let i = 0; i < entry.bullets.length; i++) {
-      for (let j = i + 1; j < entry.bullets.length; j++) {
-        const a = contentWords(entry.bullets[i]);
-        const b = contentWords(entry.bullets[j]);
-        if (a.size === 0 || b.size === 0) continue;
-        const intersection = [...a].filter((w) => b.has(w)).length;
-        const union = new Set([...a, ...b]).size;
-        const jaccard = intersection / union;
-        if (jaccard >= 0.3) {
-          warnings.push({
-            entry: entry.org,
-            bullet: entry.bullets[i],
-            flags: [`overlaps bullet ${j + 1} (${Math.round(jaccard * 100)}% shared words)`],
-          });
-        }
+  /* Near-duplicate check (pressure_test.py's entry_overlaps): two bullets restating the same point
+   * via high content-word overlap.
+   *
+   * ACROSS ENTRIES AS WELL AS WITHIN ONE, which it was not until 2026-09-01. The loop used to be
+   * `for (const entry of spec.experience)` with an inner pair loop over that entry's own bullets,
+   * so a pair sharing 30% of its words inside one entry was flagged while a pair sharing 100% of
+   * its words across two entries passed in silence. A live resume printed the same three sentences
+   * under EXPERIENCE and again under PROJECTS without raising anything here.
+   *
+   * The rule this check encodes - a resume does not say the same thing twice - was never about
+   * entry boundaries; the scope was just an artefact of how it was written. Flattening the pair
+   * loop over every bullet on the resume is the whole fix.
+   *
+   * REPORTING ONLY, deliberately, and it stays that way even for a 100% match. The deterministic
+   * drop for an exact repeat lives in engine/resumePolicy.ts enforceExperienceBulletFloor, which
+   * runs after this and can also see the bank top-up. Two mechanisms racing to remove the same
+   * bullet would make it impossible to say from a packet which one acted, and this one runs early
+   * enough that dropping here would hide the duplicate from the retry feedback the model needs. */
+  /* `index` is the bullet's position WITHIN ITS OWN ENTRY, carried alongside because the flattened
+     position means nothing to a reader looking at one heading on the page.
+
+     `entryIndex` is the ENTRY's position, and it is what identifies an entry here - not the org.
+     Using the org would have been wrong for exactly the resume this check was extended to catch:
+     the two Tonee entries share an org and differ only by title and type, so an org comparison
+     called them one entry and reported a cross-section repeat as "overlaps bullet 1", pointing the
+     reader at a bullet that is not under that heading. */
+  const allBullets = spec.experience.flatMap((entry, entryIndex) =>
+    entry.bullets.map((bullet, index) => ({ org: entry.org, bullet, index, entryIndex })),
+  );
+  for (let i = 0; i < allBullets.length; i++) {
+    for (let j = i + 1; j < allBullets.length; j++) {
+      const a = contentWords(allBullets[i].bullet);
+      const b = contentWords(allBullets[j].bullet);
+      if (a.size === 0 || b.size === 0) continue;
+      const intersection = [...a].filter((w) => b.has(w)).length;
+      const union = new Set([...a, ...b]).size;
+      const jaccard = intersection / union;
+      if (jaccard >= 0.3) {
+        /* Naming the other entry matters now that the pair can span two of them: "overlaps bullet
+           2" is actionable when both are under one heading and meaningless when the other bullet is
+           in a different section of the page. */
+        const sameEntry = allBullets[i].entryIndex === allBullets[j].entryIndex;
+        const where = sameEntry
+          ? `bullet ${allBullets[j].index + 1}`
+          : `a bullet under "${allBullets[j].org}"`;
+        warnings.push({
+          entry: allBullets[i].org,
+          bullet: allBullets[i].bullet,
+          flags: [`overlaps ${where} (${Math.round(jaccard * 100)}% shared words)`],
+        });
       }
     }
   }
