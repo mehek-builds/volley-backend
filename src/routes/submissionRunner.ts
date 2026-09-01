@@ -51,6 +51,7 @@ import {
   isManagedStratusProvider,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
+  MANAGED_PREPARE_FILL_OPTIONS,
   MANAGED_PREPARE_SCAN_OPTIONS,
   managedBrowserTerminalResultId,
   managedBrowserTerminalFailureError,
@@ -7726,12 +7727,15 @@ async function prepareManaged(
    *
    * The widened window rather than the read-scan default: this and the discovery pass are the two
    * big runs of the prepare path (up to 120 actions including document uploads), so they are the
-   * two that can legitimately reach stratus's own run budget. See MANAGED_PREPARE_SCAN_OPTIONS. */
+   * two that can legitimately reach stratus's own run budget. See MANAGED_PREPARE_SCAN_OPTIONS.
+   *
+   * FILL options, not the shared scan options: this is the one run whose missing screenshot is
+   * fatal below, so it is the one run that asks stratus to wait for the capture. */
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
-    MANAGED_PREPARE_SCAN_OPTIONS,
+    MANAGED_PREPARE_FILL_OPTIONS,
   );
   const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
   if (actionDiagnostics.length > 0) {

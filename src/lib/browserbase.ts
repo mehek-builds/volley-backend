@@ -1258,6 +1258,25 @@ export const MANAGED_PREPARE_SCAN_OPTIONS = Object.freeze({
 });
 
 /**
+ * The prepare-path FILL run, and only it: the same correlation as the discovery pass plus the
+ * one thing the fill needs that discovery does not, a preview screenshot the host is willing to
+ * wait for.
+ *
+ * The stratus runner publishes the terminal result first (the authority moment must not wait on
+ * pixels) and captures the screenshot afterwards, so an immediate artifact read races the writer
+ * and loses on any long page. Measured live 2026-09-01: two complete seven-question Breezy fills,
+ * both failed here on "did not return a preview screenshot" while the capture was still rendering.
+ * stratus-browser-cloud #137 adds an opt-in, bounded wait for exactly that race, keyed on the
+ * literal `screenshotWait: true` and taken only for an unpressed result through clean absence; a
+ * caller that does not say the word keeps the immediate single read. The fill is the one run whose
+ * missing screenshot is fatal (submissionRunner throws on it), so it is the one run that asks.
+ */
+export const MANAGED_PREPARE_FILL_OPTIONS = Object.freeze({
+  ...MANAGED_PREPARE_SCAN_OPTIONS,
+  screenshotWait: true as const,
+});
+
+/**
  * The correlation a MUTATING READ SCAN carries, distinct in every way from a submission's durable
  * correlation. A submission derives its attempt from the durable submission-attempt ledger (a real
  * DB row bound to a packet) and sends allowSubmit; this is a fresh, throwaway UUID triple with no
@@ -1291,6 +1310,12 @@ export async function runManagedBrowser(
   actions: ManagedBrowserAction[],
   options: {
     screenshot?: boolean;
+    /**
+     * Ask stratus to wait (bounded, clean-absence only, never for a pressed result) for the
+     * preview screenshot the runner captures after publishing its result. Sent only as the
+     * literal true, which is the only value stratus honours; see MANAGED_PREPARE_FILL_OPTIONS.
+     */
+    screenshotWait?: boolean;
     allowSubmit?: boolean;
     requestContinuation?: boolean;
     continuationCheckpoint?: boolean;
@@ -1387,6 +1412,7 @@ export async function runManagedBrowser(
       url: portalUrl,
       actions: outboundActions,
       screenshot: options.screenshot ?? true,
+      ...(options.screenshotWait === true ? { screenshotWait: true } : {}),
       allowSubmit: options.allowSubmit === true,
       ...(expectedSubmissionAttempt ? { submissionAttempt: expectedSubmissionAttempt } : {}),
       ...(providerDeadlineAt ? { providerDeadlineAt } : {}),

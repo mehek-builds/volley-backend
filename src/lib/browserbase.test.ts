@@ -10,6 +10,7 @@ import {
   getManagedBrowserTerminalResult,
   isBrowserbaseConfigured,
   MANAGED_PREPARE_FILL_DEADLINE_MS,
+  MANAGED_PREPARE_FILL_OPTIONS,
   MANAGED_PREPARE_SCAN_OPTIONS,
   MANAGED_READ_ONLY_ACTION_TYPES,
   MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
@@ -2187,4 +2188,51 @@ test('managed Stratus Greenhouse builder payloads are selector-safe after normal
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('only the prepare fill run asks stratus to wait for its preview screenshot, and only as the literal true', async () => {
+  /* stratus #137 honours `screenshotWait` only when it is exactly `true`, and litos-api's prepare
+     fill is the one run whose missing screenshot is fatal (submissionRunner throws on it), so the
+     fill options say the word and the shared scan options, which the discovery pass and every
+     read scan use, do not. Pinned on the wire, because the runner side of this contract cannot
+     see which caller forgot. */
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const sentBodies: Record<string, unknown>[] = [];
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      sentBodies.push(body);
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application',
+          url: 'https://portal.example/apply',
+          text: '',
+          discovered: [],
+          submissionAttempt: body.submissionAttempt,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await runManagedBrowser('https://portal.example/apply', [], MANAGED_PREPARE_FILL_OPTIONS);
+    await runManagedBrowser('https://portal.example/apply', [], MANAGED_PREPARE_SCAN_OPTIONS);
+    await runManagedBrowser('https://portal.example/apply', [], { ...MANAGED_PREPARE_SCAN_OPTIONS, screenshotWait: false });
+    assert.equal(sentBodies.length, 3);
+    assert.equal(sentBodies[0].screenshotWait, true, 'the fill run asks for the wait');
+    assert.equal(sentBodies[0].screenshot, true, 'and still wants the screenshot itself');
+    assert.equal('screenshotWait' in sentBodies[1], false, 'the discovery pass and read scans do not');
+    assert.equal('screenshotWait' in sentBodies[2], false, 'false is never sent, only the literal true');
+    // The fill options are the scan options plus the flag: same correlation, same widened window.
+    assert.equal(MANAGED_PREPARE_FILL_OPTIONS.scanCorrelation, true);
+    assert.equal(MANAGED_PREPARE_FILL_OPTIONS.scanDeadlineMs, MANAGED_PREPARE_FILL_DEADLINE_MS);
+    assert.equal(MANAGED_PREPARE_FILL_OPTIONS.scanDeadlineMs, MANAGED_PREPARE_SCAN_OPTIONS.scanDeadlineMs);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
 });
