@@ -818,3 +818,40 @@ test('the fallback reorders entries and writes no text', () => {
   assert.deepEqual(identity(after), identity(before));
   assert.equal(after.experience.length, before.experience.length);
 });
+
+test('the fallback reason names the rank that actually beat the runner-up', () => {
+  /* The asks are in consulting register and no bullet can cite one, so this reaches the fallback.
+     The robotics language sits in a blurb, which is not an ask: Alpha shares none of it, Bravo and
+     Charlie share exactly the same words. Charlie therefore wins on RECENCY alone.
+
+     Reading the runner-up as the first non-winner in SPEC order compared Charlie against Alpha
+     instead of against Bravo, saw an overlap of 3 against 0, and told the student Charlie led on
+     language - a rank that separated nothing between the two entries that were actually close. */
+  const jd = `Associate Consultant
+
+About us
+We tune kinematics for warehouse robots every day.
+
+What you'll do
+- Partner with senior stakeholders to scope engagements and shape recommendations.
+- Facilitate workshops and synthesize findings into executive-ready narratives.
+
+What we're looking for
+- Pursuing a bachelor's degree.`;
+  const context = { company: 'Acme', role: 'Associate Consultant' };
+  assert.ok(leadRequirementCandidates(jd, context).length > 0, 'must reach the fallback, not the no-ask branch');
+
+  const shared = 'Tuned kinematics for a warehouse robot.';
+  const selected = selectJdAlignedLead(spec({
+    experience: [
+      { type: 'job', org: 'Alpha Ledger', title: 'Analyst', date_range: 'Jan 2020 - Mar 2020', bullets: ['Reconciled ledger rows nightly.'] },
+      { type: 'job', org: 'Bravo Robotics', title: 'Engineer', date_range: 'Jan 2021 - Mar 2021', bullets: [shared] },
+      { type: 'job', org: 'Charlie Robotics', title: 'Engineer', date_range: 'Jan 2025 - Present', bullets: [shared] },
+    ],
+  }, jd), jd, context);
+
+  assert.equal(selected.spec.lead_alignment, null);
+  assert.equal(selected.spec.experience[0]?.org, 'Charlie Robotics');
+  assert.match(selected.fallback?.reason ?? '', /most recent experience/);
+  assert.doesNotMatch(selected.fallback?.reason ?? '', /closest match/);
+});

@@ -440,14 +440,21 @@ export function rankLeadWithoutCitation(spec: ResumeSpec, jdText: string): JdLea
       bulletChars: entry.bullets.join(' ').length,
     };
   });
-  const best = [...ranked].sort((a, b) => (
+  /* Sorted once and read twice. The runner-up must be the SECOND-PLACE entry under this exact
+     order, not merely some other entry: leadFallbackReason names the first rank on which the winner
+     beats it, and reading an arbitrary entry there makes it name a rank that decided nothing. With
+     entries [Alpha (no overlap), Bravo (2021, shares the posting's words), Charlie (Present, shares
+     the same words)], Charlie beats Bravo on RECENCY alone, but compared against Alpha it looks
+     like a language win and the student was told so. */
+  const ordered = [...ranked].sort((a, b) => (
     b.overlap.length - a.overlap.length
     || b.endDate - a.endDate
     || b.bulletCount - a.bulletCount
     || b.bulletChars - a.bulletChars
     || a.entryIndex - b.entryIndex
-  ))[0]!;
-  const runnerUp = ranked.find((item) => item.entryIndex !== best.entryIndex);
+  ));
+  const best = ordered[0]!;
+  const runnerUp = ordered[1];
   const experience = best.entryIndex === 0
     ? [...spec.experience]
     : [

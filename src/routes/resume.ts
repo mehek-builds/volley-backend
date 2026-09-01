@@ -930,9 +930,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let spec: ResumeSpec | undefined;
     let specIssues: string[] = [];
     let leadIssues: string[] = [];
-    /* Set when this posting and this resume share no citable evidence and the lead was ordered by
-       rankLeadWithoutCitation instead. It is a WARNING, never an issue: see the 422 below for what
-       treating it as an issue did to onboarding. */
+    /* Set by the FINAL reselect, after grounding and the bullet floor, when this posting and this
+       resume share no citable evidence and the lead was ordered by rankLeadWithoutCitation instead.
+       It is a WARNING, never an issue: see the 422 below for what treating it as an issue did to
+       onboarding. */
     let leadFallback: LeadFallbackDecision | null = null;
     let specWarnings: ReturnType<typeof validateResumeSpec>['warnings'] = [];
     let atsCoverage = 0;
@@ -977,8 +978,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
               /* Ordering is decided from supported text on both sides of this exact packet, after
                * the model output has been grounded to the bank and before any renderer sees it.
                * The model's proposed lead_alignment is deliberately replaced, not trusted. */
+              /* `selected.fallback` is deliberately dropped here. Grounding and the bullet floor
+                 below can still remove the evidence this pass ranked on, so the only fallback that
+                 describes the document the student receives is the one from the final reselect. */
               const selected = selectJdAlignedLead(policed, jdText, { company: body.company, role: body.role });
-              leadFallback = selected.fallback;
               return selected.spec;
             } catch (err) {
               lastErr = err;
