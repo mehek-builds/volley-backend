@@ -86,12 +86,75 @@ test('base resume rescue fills missing entries in a partial experience bank', ()
   };
 
   const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
-    type: 'job',
     org: 'Tonee',
     title: 'AI Engineer',
   }]);
 
   assert.deepEqual(missing.map((entry) => entry.org), ['Cinematica Labs']);
+});
+
+/* One venture is one bank row whichever section it prints under.
+ *
+ * The bank already holding Tonee as a `project` used to admit the base resume's `job` copy of it,
+ * because the identity check opened by comparing types. The account then carried two rows for one
+ * venture and /resume/generate selected both, printing the same bullets under EXPERIENCE and
+ * PROJECTS. Pinned with the real production shape: user a18f774b carried exactly this pair. */
+test('a venture already banked as a project is not re-seeded as a job', () => {
+  const spec: ResumeSpec = {
+    school: '',
+    degree: '',
+    grad_date: '',
+    coursework: '',
+    education_position: 'top',
+    experience: [
+      {
+        type: 'job',
+        org: 'Tonee - AI Texting Tone Detector',
+        title: 'AI Engineer',
+        date_range: 'September 2025 - Present',
+        bullets: ['Shipped a consumer mobile app end to end.'],
+      },
+    ],
+    skills: [],
+  };
+
+  const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    org: 'Tonee - AI Texting Tone Detector',
+    title: 'AI Engineer',
+  }]);
+
+  assert.deepEqual(missing, []);
+});
+
+/* Two genuinely different roles at one organisation stay two rows. This is the case the type
+   comparison was accidentally protecting, and it has to survive its removal: a promotion, or two
+   lab positions at one university, is an ordinary resume shape that engine/resumeValidate.ts goes
+   to some trouble to keep apart. Title is what separates them. */
+test('a second distinct role at one organisation is still seeded', () => {
+  const spec: ResumeSpec = {
+    school: '',
+    degree: '',
+    grad_date: '',
+    coursework: '',
+    education_position: 'top',
+    experience: [
+      {
+        type: 'job',
+        org: 'Department of Biology',
+        title: 'Research Assistant',
+        date_range: '2026 - Present',
+        bullets: ['Ran assays for a protein folding study.'],
+      },
+    ],
+    skills: [],
+  };
+
+  const missing = missingBankEntriesFromResumeSpec(spec, userId, [{
+    org: 'Department of Biology',
+    title: 'Lab Technician',
+  }]);
+
+  assert.deepEqual(missing.map((entry) => entry.title), ['Research Assistant']);
 });
 
 test('resume, answer, cover letter, gap evidence, and profile-bank reads use the approved-resume rescue path', () => {

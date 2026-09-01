@@ -467,28 +467,86 @@ export function enforceExperienceBulletFloor(
     onDropped?: (entry: { org: string; bullets: number }) => void;
   } = {},
 ): ResumeSpec {
+  /* SHARED ACROSS EVERY ENTRY, which is the difference between this and the per-entry set it
+     replaced. A resume prints one sentence once. The old set was constructed inside this callback,
+     so it deduplicated within an entry and was blind between them, and a bullet already printed
+     under EXPERIENCE could be printed again under PROJECTS.
+
+     That is not hypothetical: on 2026-09-01 a live /resume/generate emitted "Tonee - AI Texting
+     Tone Detector" twice, once as a `project` titled AI Engineer and once as a `job` titled
+     Founder, same date range, carrying the same three bullets. resumeRender splits entries into
+     sections by `type`, so the student's one-page resume printed each of those sentences under two
+     different headings. The root cause was two bank rows for one venture and is fixed at ingestion
+     (routes/profile.ts dropRestatedBankEntries, db/experienceBank.ts identity); this is the
+     backstop, and it is the half that also protects the accounts whose bank rows were already
+     written before that fix existed.
+
+     THE FLOOR IS THE RIGHT PLACE, not pruneUngroundedContent, even though that function is where
+     entries are dropped. Both routes run the floor AFTER the pruner, and the floor tops entries up
+     out of `bullet_variants` - so a dedupe in the pruner would be undone moments later by a
+     top-up reading the duplicate venture's identical variant list. Deduplicating here covers the
+     model's own output and the top-up in one pass.
+
+     KEEP-FIRST, so the surviving copy is the one the model ranked highest. `lead_alignment` cites
+     the first entry by org and quotes one of its bullets as evidence, so promoting a later entry
+     over an earlier one would leave that citation pointing at content no longer in position one. */
+  const printed = new Set<string>();
+  const bulletKey = (bullet: string) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
   const experience = spec.experience.flatMap((entry) => {
     const source = matchingBankEntry(entry, bank);
     const variants = (Array.isArray(source?.bullet_variants) ? source.bullet_variants : [])
       .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
       .map((bullet) => bullet.trim());
-    const bullets = [...entry.bullets];
-    const normalized = new Set(bullets.map((bullet) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
+    /* Seeded from what earlier entries actually kept, and merged back only at the end. Recording
+       into `printed` as bullets are collected would reserve keys for bullets the maxBulletsPerEntry
+       slice below then throws away, and a later entry repeating one of those would be dropped for
+       colliding with a sentence no reader ever sees. */
+    const taken = new Set(printed);
+    const bullets: string[] = [];
+    for (const bullet of entry.bullets) {
+      const key = bulletKey(bullet);
+      /* An empty key is punctuation with no words in it. It cannot be "already printed" in any
+         meaningful sense and must not collapse two such bullets into one, so it is passed through
+         to the length checks below rather than tracked. */
+      if (key && taken.has(key)) continue;
+      if (key) taken.add(key);
+      bullets.push(bullet);
+    }
     for (const variant of variants) {
       if (bullets.length >= RESUME_CONTENT_LIMITS.minBulletsPerEntry) break;
-      const key = variant.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-      if (!key || normalized.has(key)) continue;
-      normalized.add(key);
+      const key = bulletKey(variant);
+      if (!key || taken.has(key)) continue;
+      taken.add(key);
       bullets.push(variant);
     }
     const sparsePriority = Boolean(
       options.allowSparsePriority && source?.id && source.id === options.priorityEntryId,
     );
+    /* ZERO BULLETS DROPS UNCONDITIONALLY, ahead of every sparse allowance.
+     *
+     * The allowances exist to keep a REAL entry that is merely thin - a one-bullet job during a
+     * provider outage is worth showing the student for review. An entry with nothing left under it
+     * is a different object: a company name, a title and a date range floating above white space,
+     * which reads to a human as a broken resume and to a parser as an employment record with no
+     * duties. pruneUngroundedContent refuses to emit one for exactly this reason, and before the
+     * cross-entry dedupe above there was no way to reach that state here. Now there is: an entry
+     * whose every bullet was already printed under an earlier heading empties completely, and
+     * `allowSparseAll` would otherwise have waved the empty shell through. */
+    if (bullets.length === 0) {
+      options.onDropped?.({ org: entry.org, bullets: 0 });
+      return [];
+    }
     if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority && !options.allowSparseAll) {
       options.onDropped?.({ org: entry.org, bullets: bullets.length });
       return [];
     }
-    return [{ ...entry, bullets: bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry) }];
+    const kept = bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);
+    for (const bullet of kept) {
+      const key = bulletKey(bullet);
+      if (key) printed.add(key);
+    }
+    return [{ ...entry, bullets: kept }];
   });
   return { ...spec, experience };
 }

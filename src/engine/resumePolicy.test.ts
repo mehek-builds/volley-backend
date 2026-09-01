@@ -354,6 +354,130 @@ test('the backstop uses the matching role when one organization has multiple rol
   );
 });
 
+/* THE BACKSTOP FOR ACCOUNTS WHOSE BANK WAS ALREADY POISONED.
+ *
+ * The ingestion fixes (routes/profile.ts dropRestatedBankEntries, db/experienceBank.ts identity)
+ * stop a second row being written for one venture, but they do nothing for the rows written before
+ * they existed. Measured on production 2026-09-01, three accounts carried a pair of same-org rows
+ * with byte-identical bullet arrays, and one of them reached a live resume: Tonee printed as a
+ * `project` titled AI Engineer and again as a `job` titled Founder, same date range, same three
+ * sentences, split across PROJECTS and EXPERIENCE by the renderer. */
+test('a bullet already printed under an earlier entry is not printed again', () => {
+  const shared = [
+    'Shipped consumer mobile app end-to-end; designed feature set and UX in Figma for 100+ users',
+    'Conducted 47 user interviews and analyzed 8,300+ behavioral data points across three markets',
+    'Evaluated 3 technical architectures and cut mobile inference latency from 2.3s to 0.1s',
+  ];
+  const project = bankEntry('p', 'project', 'Tonee - AI Texting Tone Detector', 'AI Engineer', shared);
+  const job = bankEntry('j', 'job', 'Tonee - AI Texting Tone Detector', 'Founder', shared);
+  const input = rawSpec();
+  input.experience = [
+    { type: 'project', org: 'Tonee - AI Texting Tone Detector', title: 'AI Engineer', date_range: '2025 - Present', bullets: [...shared] },
+    { type: 'job', org: 'Tonee - AI Texting Tone Detector', title: 'Founder', date_range: '2025 - Present', bullets: [...shared] },
+  ];
+
+  const result = enforceExperienceBulletFloor(input, [project, job]);
+  assert.equal(result.experience.length, 1, 'the wholly duplicated entry is dropped, not left empty');
+  assert.equal(result.experience[0].title, 'AI Engineer', 'keep-first, so lead_alignment still cites entry one');
+  const printed = result.experience.flatMap((entry) => entry.bullets);
+  assert.equal(new Set(printed).size, printed.length, 'no sentence is printed twice');
+});
+
+/* Punctuation is typography, not a different claim. The two production copies of the Tonee latency
+   bullet differed by ONE character: an em dash on the project row where the job row had a comma. */
+test('a repeat differing only in punctuation still counts as already printed', () => {
+  const withDash = 'Evaluated 3 technical architectures and cut inference latency from 2.3s to 0.1s - enabling real-time use';
+  const withComma = 'Evaluated 3 technical architectures and cut inference latency from 2.3s to 0.1s, enabling real-time use';
+  const others = [
+    'Shipped consumer mobile app end-to-end; designed feature set and UX in Figma for 100+ users',
+    'Conducted 47 user interviews and analyzed 8,300+ behavioral data points across three markets',
+  ];
+  const first = bankEntry('a', 'project', 'Tonee', 'AI Engineer', [withDash, ...others]);
+  const second = bankEntry('b', 'job', 'Tonee', 'Founder', [withComma, ...others]);
+  const input = rawSpec();
+  input.experience = [
+    { type: 'project', org: 'Tonee', title: 'AI Engineer', date_range: '2025 - Present', bullets: [withDash, others[0]] },
+    { type: 'job', org: 'Tonee', title: 'Founder', date_range: '2025 - Present', bullets: [withComma, others[1]] },
+  ];
+
+  const result = enforceExperienceBulletFloor(input, [first, second]);
+  const printed = result.experience.flatMap((entry) => entry.bullets);
+  assert.equal(
+    printed.filter((bullet) => bullet.includes('2.3s to 0.1s')).length,
+    1,
+    'the comma copy is the same sentence as the dash copy',
+  );
+});
+
+/* The top-up reads bullet_variants, so a duplicated venture's second row can refill exactly what
+   the dedupe just removed. The shared set has to cover the top-up as well as the model's output. */
+test('the bullet top-up cannot re-add a sentence an earlier entry already printed', () => {
+  const shared = [
+    'Shipped consumer mobile app end-to-end; designed feature set and UX in Figma for 100+ users',
+    'Conducted 47 user interviews and analyzed 8,300+ behavioral data points across three markets',
+    'Evaluated 3 technical architectures and cut mobile inference latency from 2.3s to 0.1s',
+  ];
+  const first = bankEntry('a', 'job', 'Tonee', 'Founder', shared);
+  const second = bankEntry('b', 'project', 'Tonee', 'AI Engineer', shared);
+  const input = rawSpec();
+  input.experience = [
+    { type: 'job', org: 'Tonee', title: 'Founder', date_range: '2025 - Present', bullets: [...shared] },
+    // One bullet, so the floor will try to top this entry up out of its own bank row.
+    { type: 'project', org: 'Tonee', title: 'AI Engineer', date_range: '2025 - Present', bullets: [shared[0]] },
+  ];
+
+  const result = enforceExperienceBulletFloor(input, [first, second]);
+  const printed = result.experience.flatMap((entry) => entry.bullets);
+  assert.equal(new Set(printed).size, printed.length);
+});
+
+/* An entry emptied by the dedupe is a heading over white space, which pruneUngroundedContent
+   refuses to emit for the same reason. The sparse allowances exist for a thin REAL entry and must
+   not wave an empty shell through. */
+test('provider-outage continuity still drops an entry the dedupe emptied', () => {
+  const shared = ['Shipped consumer mobile app end-to-end; designed the feature set and UX in Figma'];
+  const first = bankEntry('a', 'job', 'Tonee', 'Founder', shared);
+  const second = bankEntry('b', 'project', 'Tonee', 'AI Engineer', shared);
+  const input = rawSpec();
+  input.experience = [
+    { type: 'job', org: 'Tonee', title: 'Founder', date_range: '2025 - Present', bullets: [...shared] },
+    { type: 'project', org: 'Tonee', title: 'AI Engineer', date_range: '2025 - Present', bullets: [...shared] },
+  ];
+
+  const dropped: { org: string; bullets: number }[] = [];
+  const result = enforceExperienceBulletFloor(input, [first, second], {
+    allowSparseAll: true,
+    onDropped: (entry) => dropped.push(entry),
+  });
+  assert.equal(result.experience.length, 1);
+  assert.deepEqual(dropped, [{ org: 'Tonee', bullets: 0 }], 'the emptied entry is reported, not silently gone');
+});
+
+/* Two genuinely different entries keep every one of their bullets. The dedupe keys on the sentence,
+   never on the org, so an ordinary resume is untouched by it. */
+test('distinct bullets at one organisation all survive', () => {
+  const analystBullets = [
+    'Analyzed customer interviews and translated findings into launch priorities for the team',
+    'Built weekly dashboards that tracked activation across three onboarding paths',
+  ];
+  const managerBullets = [
+    'Led eight engineers across platform and infrastructure projects',
+    'Launched an incident review process across two technical teams',
+  ];
+  const analyst = bankEntry('a', 'job', 'Acme Labs', 'Data Analyst', analystBullets);
+  const manager = bankEntry('m', 'job', 'Acme Labs', 'Engineering Manager', managerBullets);
+  const input = rawSpec();
+  input.experience = [
+    { type: 'job', org: 'Acme Labs', title: 'Data Analyst', date_range: '2024 - 2025', bullets: [...analystBullets] },
+    { type: 'job', org: 'Acme Labs', title: 'Engineering Manager', date_range: '2025 - Present', bullets: [...managerBullets] },
+  ];
+
+  const result = enforceExperienceBulletFloor(input, [analyst, manager]);
+  assert.equal(result.experience.length, 2);
+  assert.deepEqual(result.experience[0].bullets, analystBullets);
+  assert.deepEqual(result.experience[1].bullets, managerBullets);
+});
+
 test('only an explicitly continued recent entry may remain sparse', () => {
   const input = rawSpec();
   const sourceBullets = BANK[0].bullet_variants as string[];

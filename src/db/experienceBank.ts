@@ -19,7 +19,10 @@ export function bankEntriesFromResumeSpec(spec: ResumeSpec, userId: string): New
     .filter((entry) => (entry.bullet_variants as string[]).length > 0);
 }
 
-type ExistingBankIdentity = Pick<ExperienceBankEntry, 'type' | 'org' | 'title'>;
+/* Org and title, and NOT type: see the note inside missingBankEntriesFromResumeSpec for why a
+   differing type is a rendering disagreement about one entry rather than a second entry. Narrowed
+   rather than left carrying an unused field, so the next reader cannot conclude type still votes. */
+type ExistingBankIdentity = Pick<ExperienceBankEntry, 'org' | 'title'>;
 
 function normalizedBankIdentity(value: string | null | undefined): string {
   return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -34,7 +37,19 @@ export function missingBankEntriesFromResumeSpec(
     const candidateOrg = normalizedBankIdentity(candidate.org);
     const candidateTitle = normalizedBankIdentity(candidate.title);
     return !existing.some((entry) => {
-      if (entry.type !== candidate.type) return false;
+      /* TYPE IS NOT PART OF AN ENTRY'S IDENTITY, and treating it as one seeded duplicates.
+       *
+       * This used to open with `if (entry.type !== candidate.type) return false`, so a bank
+       * already holding Tonee as a `project` did not suppress the same Tonee arriving from the
+       * base resume as a `job`: same org, same title, same sentences, admitted as a new row
+       * because one word of metadata differed. The student then had two bank rows for one
+       * venture, /resume/generate selected both, and resumeRender split them across EXPERIENCE
+       * and PROJECTS - printing the same bullet twice on a one-page resume.
+       *
+       * Org and title already answer "is this the same entry". `type` answers "which section
+       * does it print under", which is a rendering decision the parse and the base resume
+       * routinely disagree about for one venture, and disagreement there is precisely the case
+       * this filter exists to collapse rather than to wave through. */
       if (normalizedBankIdentity(entry.org) !== candidateOrg) return false;
       const entryTitle = normalizedBankIdentity(entry.title);
       return !candidateTitle || !entryTitle || candidateTitle === entryTitle;

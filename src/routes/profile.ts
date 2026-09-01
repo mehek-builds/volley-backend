@@ -584,7 +584,67 @@ export function bankEntriesFrom(parsed: ParsedProfile, userId: string) {
     }));
   // bullet_variants is .notNull() and the PUT route requires min(1); an entry with no text is
   // not groundable anyway, so it is dropped rather than seeded as an empty shell.
-  return [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
+  const seeded = [...jobs, ...projects, ...leadership].filter((e) => e.bullet_variants.length > 0);
+  return dropRestatedBankEntries(seeded);
+}
+
+/* One venture recorded under two headings is ONE bank row, not two.
+ *
+ * A resume that lists the same venture under both "Experience" and "Projects" is an ordinary
+ * layout choice, and the parse records it faithfully: the org lands in `parsed.experience` AND in
+ * `parsed.projects`, so this function used to emit a job row and a project row carrying the same
+ * sentences. Nothing downstream could tell those apart from two genuine roles, so /resume/generate
+ * selected both, resumeRender split them across EXPERIENCE and PROJECTS by `type`, and the student
+ * shipped a one-page resume printing the same bullet twice under two headings.
+ *
+ * Measured on production 2026-09-01: three accounts carried a pair like this with byte-identical
+ * bullet arrays - ParcelFox (job + leadership, both "Co-Founder and Chief Operating Officer"),
+ * Michigan Solar Car (leadership + job, both "Hardware Team Lead") and Tonee (project + job, both
+ * "AI Engineer"). The Tonee pair reached a live resume.
+ *
+ * SUBSET, NOT "SHARES A BULLET", and that narrowness is the whole point. Two roles at one employer
+ * is a real and supported resume shape - a promotion, two lab positions at one university - and
+ * engine/resumeValidate.ts goes to some trouble to keep those apart (see the `taken` set in
+ * matchBankEntry). Genuine dual roles describe different work, so their bullet sets differ; an
+ * entry whose every bullet is already on an earlier entry at the same org is not a second role,
+ * it is the same role written down twice. Dropping on a single shared sentence would delete the
+ * junior half of a real promotion.
+ *
+ * ORDER IS PRECEDENCE. jobs lead the concatenation above, so a duplicated venture is kept as the
+ * job - the stronger claim, and the one an employer reads the EXPERIENCE section for - and the
+ * project or leadership restatement is what goes.
+ */
+function dropRestatedBankEntries<T extends { type: string; org: string; bullet_variants: string[] }>(
+  entries: T[],
+): T[] {
+  const kept: T[] = [];
+  for (const entry of entries) {
+    const org = normalizedBankOrg(entry.org);
+    const bullets = new Set(entry.bullet_variants.map(normalizedBankBullet));
+    const restated = kept.some((existing) => {
+      if (normalizedBankOrg(existing.org) !== org) return false;
+      const existingBullets = new Set(existing.bullet_variants.map(normalizedBankBullet));
+      return [...bullets].every((bullet) => existingBullets.has(bullet));
+    });
+    if (!restated) kept.push(entry);
+  }
+  return kept;
+}
+
+/* Org identity for the de-dup above, and deliberately the SAME normalisation
+   db/experienceBank.ts uses: punctuation folded away, so the en dash in "Tonee - AI Texting Tone
+   Detector" and the hyphen in "Tonee - AI Texting Tone Detector" are one org. Those two spellings
+   of one venture are exactly what a single parse produced, because the projects section and the
+   experience section of the same PDF were transcribed independently. */
+function normalizedBankOrg(value: string | null | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/* Bullet identity, folded the same way. Punctuation has to go: the two copies of the Tonee
+   latency bullet differed by ONE character - an em dash on the project row where the job row had
+   a comma - which is a difference in typography, not in what the student did. */
+function normalizedBankBullet(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 /* A resume header printed in capitals is a typographic choice, not a name.
