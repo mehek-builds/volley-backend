@@ -788,6 +788,17 @@ export interface LeadAlignmentOptions {
    *  them. Both sides call leadRequirementCandidates with the same inputs or the closed list the
    *  model was shown is not the closed list it is judged against. */
   context?: JdContext;
+  /**
+   * The spec was never tailored to this posting: it is the student's approved main resume, rendered
+   * as-is by the managed prepare path (spec._managed_prepare.resume_source === 'main_resume').
+   * Its lead entry is her own standing order, not a claim about this job, and no model was ever
+   * asked to cite one, so a MISSING citation is not a defect here. A PRESENT citation is still
+   * judged in full: if something did write one, it has to be true. Measured live 2026-09-01: every
+   * "Prepare in Litos" packet on a posting with a stated requirement was refused at submit-request
+   * with "lead_alignment is missing", so the composer's primary action produced packets that could
+   * never be sent. Callers derive this from the stored spec through packetIsUntailoredMainResume.
+   */
+  untailored?: boolean;
 }
 
 /**
@@ -826,6 +837,7 @@ export function leadAlignmentIssues(
      left to fix and nothing to hand back to the model. Same treatment, same reason, as the
      no-supported-ask branch directly above. */
   if (!alignment) {
+    if (options.untailored) return [];
     return citableLeadCandidateExists(spec, asks)
       ? ['lead_alignment is missing: name the posting requirement the first experience entry proves']
       : [];

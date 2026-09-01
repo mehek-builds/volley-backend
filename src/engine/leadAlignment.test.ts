@@ -102,6 +102,21 @@ test('a missing justification is reported so the retry loop can ask for one', ()
   assert.match(issues[0], /lead_alignment is missing/);
 });
 
+test('an untailored main-resume packet owes no citation, but a present one is still judged', () => {
+  // Nothing cited, posting has asks, a citable candidate exists: refused when tailored, fine when not.
+  assert.match(leadAlignmentIssues(spec({}), JD)[0], /lead_alignment is missing/);
+  assert.deepEqual(leadAlignmentIssues(spec({}), JD, { untailored: true }), []);
+  // A citation that names the wrong entry is wrong on either provenance.
+  const wrong = spec({
+    lead_alignment: {
+      entry_org: 'Traeco - AI Agent Cost Infrastructure',
+      requirement: 'Experience shipping a consumer product end to end',
+      evidence: TONEE.bullets[0],
+    },
+  });
+  assert.ok(leadAlignmentIssues(wrong, JD, { untailored: true }).some((issue) => /entry_org/.test(issue)));
+});
+
 test('a single-entry resume still needs evidence for why it leads this job', () => {
   assert.match(leadAlignmentIssues(spec({ experience: [TONEE] }), JD)[0], /lead_alignment is missing/);
 });

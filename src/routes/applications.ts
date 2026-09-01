@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { deleteObjects, objectStorageUsesRailway, putObject } from '../lib/objectStorage';
+import { packetIsUntailoredMainResume } from '../lib/managedPrepare';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -693,6 +694,7 @@ export function applicationLeadAlignmentIssues(stored: StoredSpec, company?: str
   if (!review?.jd_text) return ['This application has no frozen job description for its lead-experience citation.'];
   return leadAlignmentIssues(editableResumeSpec(stored), review.jd_text, {
     context: { company, role: review.role },
+    untailored: packetIsUntailoredMainResume(stored),
   });
 }
 
@@ -767,7 +769,10 @@ export async function preSendResumeVerificationIssues(
   const visual = validateResumeVisualLayout(rendered.layout);
   const parsedPdf = await extractPdfText(rendered.buffer);
   return [
-    ...leadAlignmentIssues(rendered.spec, review.jd_text, { context: { company, role: review.role } }),
+    ...leadAlignmentIssues(rendered.spec, review.jd_text, {
+      context: { company, role: review.role },
+      untailored: packetIsUntailoredMainResume(stored),
+    }),
     ...visual.issues,
     ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
     ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
@@ -2260,6 +2265,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          is present and does not hold. */
       const editedLeadIssues = leadAlignmentIssues(edited, review.jd_text, {
         context: { company: applicationCompany(row), role: review.role },
+        untailored: packetIsUntailoredMainResume(stored),
       });
       validation.issues.push(...editedLeadIssues);
       if (validation.issues.length > 0) {
@@ -2278,6 +2284,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const pdfIssues = [
         ...leadAlignmentIssues(rendered.spec, review.jd_text, {
           context: { company: applicationCompany(row), role: review.role },
+          untailored: packetIsUntailoredMainResume(stored),
         }),
         ...visual.issues,
         ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,

@@ -192,6 +192,15 @@ function managedPrepareMetadata(spec: unknown): ManagedPrepareMetadata | null {
   return raw as ManagedPrepareMetadata;
 }
 
+/* Whether a stored packet is the student's main resume rendered as-is by this path, in any phase.
+ * Read by the lead-citation gates: such a packet was never tailored to its posting and owes no
+ * lead citation (see LeadAlignmentOptions.untailored). Provenance is the metadata this path wrote,
+ * never inferred from the spec's shape. */
+export function packetIsUntailoredMainResume(spec: unknown): boolean {
+  const raw = record(record(spec)?._managed_prepare);
+  return raw?.version === MANAGED_PREPARE_VERSION && raw.resume_source === 'main_resume';
+}
+
 function managedPrepareReservationMetadata(spec: unknown): ManagedPrepareReservationMetadata | null {
   const raw = record(record(spec)?._managed_prepare);
   if (!raw
