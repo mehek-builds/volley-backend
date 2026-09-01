@@ -102,6 +102,17 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
  *    The line that decides an addition is whether an already-admitted verb means the same thing.
  *    "maintained" and "selected" were considered under this rule and left out: nothing on the list
  *    means what they mean, and both describe custody rather than an act.
+ *
+ * 6. ONE MORE SYNONYM, found on Mehek's own resume 2026-09-01 when the send gate refused an Exa
+ *    packet at /start step 6: "Aggregated 350+ survey responses and POS analytics into a roadmap".
+ *    compiled, consolidated, collected and synthesized are all admitted, and aggregating survey
+ *    responses into a roadmap is precisely what those four words describe, so rejecting this one
+ *    was the same coin toss finding 3 named. Added against those twins:
+ *      aggregated <- compiled, consolidated, collected, synthesized
+ *
+ *    The other two bullets refused in that same run were NOT a vocabulary gap - "Driving" and
+ *    "Facilitating" are the participles of verbs already on this list - and they are fixed by tense
+ *    derivation instead. See participleStems below.
  */
 export const STRONG_VERBS = new Set(
   `built shipped designed engineered developed led drove owned launched analyzed
@@ -124,7 +135,8 @@ debugged refactored migrated
 recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated
 characterized
 rewrote backtested resequenced reordered restructured
-mapped cleaned annotated defined prioritized`
+mapped cleaned annotated defined prioritized
+aggregated`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -194,8 +206,11 @@ const IRREGULAR_PAST: Record<string, string> = {
  * denylist with its own opinions. */
 const DERIVATION_BLOCKED = new Set(['found']);
 
-function pastTenseCandidates(word: string): string[] {
-  if (DERIVATION_BLOCKED.has(word)) return [word];
+/* The past-tense forms of ONE present-tense stem. Split out of pastTenseCandidates so the present
+ * participle below can reuse the identical spelling rules: "facilitating" has to reach `facilitated`
+ * by exactly the route "facilitate" does, or the two tenses drift and the gate answers differently
+ * depending on which one a student happened to write. */
+function regularPastForms(word: string): string[] {
   const irregular = IRREGULAR_PAST[word];
   const out = irregular ? [word, irregular] : [word];
   if (word.endsWith('e')) out.push(`${word}d`); // measure -> measured, synthesize -> synthesized
@@ -209,6 +224,58 @@ function pastTenseCandidates(word: string): string[] {
    * ship, plan, stop and map are four - leaving the branch dead while its own comment named "plan"
    * as the example. Verified: "Ship weekly releases" was rejected while `shipped` sat on the list. */
   if (/^[a-z]{0,4}[^aeiou][aeiou][^aeiouwxy]$/.test(word)) out.push(`${word}${word.slice(-1)}ed`);
+  return out;
+}
+
+/* THE PRESENT PARTICIPLE, which is the tense a CURRENT role is written in.
+ *
+ * The comment on pastTenseCandidates already settled that a CV written in the present tense is not
+ * breaking the hard rule, it is describing a job the student still holds - and then only handled the
+ * present SIMPLE. The participle, which is the far more common way a resume writes a current role,
+ * was never derived at all. Measured 2026-09-01 on Mehek's own resume at /start step 6, on an Exa
+ * Software Engineer Intern packet, where the send gate refused three bullets at once:
+ *
+ *     "Driving full SDLC for iMessage add-on..."          <- `drive` -> `drove` is on the list
+ *     "Facilitating cross-functional collaboration..."    <- `facilitated` is ON the list, verbatim
+ *
+ * Both openers are the participle of a verb the gate already calls strong, on the one entry dated
+ * "September 2025 - Present". So was every other admitted verb in that tense: building, leading,
+ * managing, designing and owning were all rejected while built, led, managed, designed and owned sat
+ * on the list. The cost is the one this file keeps re-learning: a rejected opener is not merely
+ * flagged, the model rewrites the bullet to satisfy the gate, so the gate was quietly re-tensing
+ * every current role a student wrote - and when a build shipped anyway, the send gate refused the
+ * finished packet with a note telling her to rewrite her own correct English.
+ *
+ * WIDENS BY TENSE ONLY, NEVER BY VOCABULARY, the same discipline as the derivation above: a stem is
+ * only ever an extra candidate, and every candidate still has to land on STRONG_VERBS. Verified
+ * against the weak verbs this file deliberately keeps out - assisting, answering, helping,
+ * supporting, participating, attending, working, engaging, maintaining and selecting all still fail,
+ * because assisted, answered, helped, supported, participated, attended, worked, engaged, maintained
+ * and selected are all still absent from the list.
+ *
+ * DERIVATION_BLOCKED is deliberately NOT consulted here, and that is the one place the two tenses
+ * legitimately differ. It exists to stop the bullet "Found and fixed 12 defects" riding in on
+ * `founded`, because *found* is ambiguous: past of "find", present of "found a company". The
+ * participle is not ambiguous. "Finding" derives to `finded`, which is on no list; only "Founding"
+ * reaches `founded`, and founding a company is the real act the list admits it for.
+ */
+function participleStems(word: string): string[] {
+  // Three characters of stem minimum: the shortest admitted verbs are three letters (add, cut, run,
+  // win), so "adding" and "cutting" are the floor and nothing shorter can reach the list anyway.
+  if (!word.endsWith('ing') || word.length < 6) return [];
+  const stem = word.slice(0, -3);
+  // building -> build, and facilitating -> facilitate: English drops the silent "e" before "-ing",
+  // so both the bare stem and the stem with its "e" put back are candidates.
+  const stems = [stem, `${stem}e`];
+  // The mirror of the doubled-consonant rule above: shipping -> ship, running -> run, cutting -> cut.
+  if (/([^aeiou])\1$/.test(stem)) stems.push(stem.slice(0, -1));
+  return stems;
+}
+
+function pastTenseCandidates(word: string): string[] {
+  if (DERIVATION_BLOCKED.has(word)) return [word];
+  const out = regularPastForms(word);
+  for (const stem of participleStems(word)) out.push(...regularPastForms(stem));
 
   /* COMMONWEALTH SPELLINGS OF THE SAME VERB, because this list is written in American English and
    * a student who writes British English is not writing a weak bullet.
@@ -231,15 +298,22 @@ function pastTenseCandidates(word: string): string[] {
    * Generated rather than enumerated: a list of pairs drifts the moment a verb is added, and these
    * are only ever EXTRA candidates. `some()` decides the answer, so a variant that is not a word
    * simply never matches and nothing is admitted that was not already on the list. */
-  for (const variant of [
-    word.replace(/ised$/, 'ized'),
-    word.replace(/isation$/, 'ization'),
-    word.replace(/ysed$/, 'yzed'),
-    word.replace(/lled$/, 'led'),
-    word.replace(/logued$/, 'loged'),
-    word.replace(/lling$/, 'ling'),
-  ]) {
-    if (variant !== word) out.push(variant);
+  /* Over every candidate rather than only the opening word, because the participle derivation now
+   * produces candidates of its own and a Commonwealth participle has to reach the same twin its
+   * past tense does: "modelling" -> stem "model" -> `modelled` -> `modeled`, and "analysing" ->
+   * "analyse" -> `analysed` -> `analyzed`. Spelling the loop over `word` alone left those two on
+   * the wrong side of a fix this file had already made for `modelled` and `analysed`. */
+  for (const candidate of [...out]) {
+    for (const variant of [
+      candidate.replace(/ised$/, 'ized'),
+      candidate.replace(/isation$/, 'ization'),
+      candidate.replace(/ysed$/, 'yzed'),
+      candidate.replace(/lled$/, 'led'),
+      candidate.replace(/logued$/, 'loged'),
+      candidate.replace(/lling$/, 'ling'),
+    ]) {
+      if (variant !== candidate) out.push(variant);
+    }
   }
   return out;
 }
