@@ -370,8 +370,27 @@ export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): 
         /* Greenhouse's own tracking suffix, and only with this job's exact id. See exactActionUrl. */
         new Map([['gh_jid', id]]),
       );
-      if (!action) return [];
-      postingUrl = action.canonical;
+      if (action) {
+        postingUrl = action.canonical;
+      } else {
+        /* EMPLOYER-HOSTED (EMBEDDED) BOARDS. Many Greenhouse tenants publish absolute_url on their
+           own domain ("https://careers.abarcahealth.com/details/?gh_jid=7823013003" - Abarca,
+           Hello Heart, Two Chairs, Suki; ~62 such boards resolve in greenhouseEmbeddedBoards.ts).
+           That URL is payload data on an arbitrary host and is never trusted or stored - but the
+           POSTING is real, because it came from the token-scoped board API this module just asked.
+           Dropping it silently darkened 17 boards permanently (surfaced by the fully-rejected
+           guard, 2026-09-01).
+           So when the payload URL fails strict validation, the action URL is CONSTRUCTED from the
+           only two facts that matter and are already validated: our own board token and the board
+           API's numeric job id. The shape is Greenhouse's first-party embed route - exactly what
+           canonicalMonitoredPortalUrl produces for every stored Greenhouse job at submission time
+           (see greenhouseEmbeddedBoards.embeddedGreenhouseApplicationUrl), so the apply path is the
+           already-proven one. Nothing from absolute_url survives into the row either way.
+           Non-numeric ids stay dropped: a constructed URL is only as sound as its parts, and every
+           live Greenhouse id is a plain global counter (measured across 26,702 ids). */
+        if (!/^[1-9]\d{0,11}$/.test(id)) return [];
+        postingUrl = `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(expectedToken)}&token=${id}`;
+      }
     }
     if (!id || !title || !postingUrl) return [];
     const location = text((job.location as Record<string, unknown> | undefined)?.name);
@@ -1588,6 +1607,26 @@ function uniqueListedExternalIds(
   return [...new Set(records.map(identity).filter((id): id is string => Boolean(id)))];
 }
 
+/**
+ * The tenant slug a followed Recruitee list fetch actually landed on, or null for anything that is
+ * not exactly a first-party `https://{slug}.recruitee.com/api/offers/` URL. Deliberately strict:
+ * the adopted slug goes through the same executable-token normalization as a configured one, so a
+ * redirect to any other host, path, or shape changes nothing.
+ */
+function recruiteeTenantFromFinalUrl(finalUrl: string): string | null {
+  if (!finalUrl) return null;
+  let url: URL;
+  try {
+    url = new URL(finalUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.pathname !== '/api/offers/') return null;
+  const match = /^([a-z0-9](?:[a-z0-9-]{0,198}[a-z0-9])?)\.recruitee\.com$/.exec(url.hostname.toLowerCase());
+  if (!match) return null;
+  return normalizeExecutableAtsBoardToken('recruitee', match[1]);
+}
+
 export async function fetchSourceJobBatch(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch = fetch,
@@ -1649,7 +1688,17 @@ export async function fetchSourceJobBatch(
       break;
     }
     case 'recruitee': {
-      jobs = normalizeRecruiteeJobs(payload, boardToken);
+      /* RENAMED RECRUITEE TENANTS. When a company renames its Recruitee subdomain, the old
+         tenant's list endpoint answers 302 to the new one (billwerk -> frisbii, graphcms ->
+         hygraph, gtn -> elan; 36 live boards measured 2026-09-01), fetch follows it, and every
+         offer in hand then belongs to the NEW tenant - so validating against the configured token
+         rejected the entire board on every poll. The redirect is recruitee.com's own https
+         statement about where the tenant lives now, and the adopted token is constrained to the
+         same first-party host shape and slug rules as a configured one, so cross-provider or
+         lookalike redirects fall back to the configured token and fail validation exactly as
+         before. Injected test fetchers whose Response carries no url also fall back. */
+      const redirectedToken = recruiteeTenantFromFinalUrl(response.url);
+      jobs = normalizeRecruiteeJobs(payload, redirectedToken ?? boardToken);
       listedExternalIds = uniqueListedExternalIds(
         (payload as { offers: unknown[] }).offers,
         (raw) => externalIdentifier((raw as Record<string, unknown>).id),
@@ -1661,8 +1710,11 @@ export async function fetchSourceJobBatch(
   return {
     jobs,
     /* The raw provider identity list remains authoritative for the empty-board guard and closure.
-       A row with a malformed action URL is listed but intentionally absent from jobs, so it is
-       deactivated instead of receiving ingest_eligible=true or making a nonempty board look empty. */
+       For Lever, Ashby, Workable, and Recruitee a row with a malformed action URL is listed but
+       intentionally absent from jobs, so it is deactivated instead of receiving
+       ingest_eligible=true or making a nonempty board look empty. Greenhouse is the exception:
+       its action URL is constructed from token + id (see normalizeGreenhouseJobs), so only a
+       malformed IDENTITY excludes a listed posting there. */
     listed_external_ids: listedExternalIds ?? jobs.map((job) => job.external_id),
     preserve_external_ids: [],
   };

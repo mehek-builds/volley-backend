@@ -21,12 +21,29 @@ export const POLL_START_RESERVE_MS = 60_000;
 export const WORKABLE_START_INTERVAL_MS = 1_100;
 
 /**
- * Workable applies its limit across requests, not across one scheduler invocation. Key the
- * process-wide barrier by the clock function so production calls share Date.now while tests can
- * use isolated deterministic clocks. Every start re-reads this map, which also coordinates
- * overlapping invocations in the same worker process.
+ * PROVIDERS WHOSE PUBLIC API SHARES ONE PLATFORM-WIDE LIMIT ACROSS EVERY TENANT.
+ *
+ * Workable documents its limit (10 calls per 10 seconds). Recruitee and Crelate do not document
+ * one, but both serve every tenant from shared platform infrastructure and both proved the limit
+ * empirically on 2026-09-01: one 400-source drain at full concurrency left 71 Recruitee and 19
+ * Crelate sources on HTTP 429, and the 19 Crelate boards had NEVER completed a poll since crelate
+ * support shipped - a chronic starvation, not a transient burst. All three reuse Workable's
+ * measured interval; a provider that later documents a real limit gets its own entry.
  */
-const nextWorkableStartByClock = new WeakMap<() => number, number>();
+export const PROVIDER_START_INTERVALS_MS: Readonly<Record<string, number>> = {
+  workable: WORKABLE_START_INTERVAL_MS,
+  recruitee: WORKABLE_START_INTERVAL_MS,
+  crelate: WORKABLE_START_INTERVAL_MS,
+};
+
+/**
+ * A paced provider applies its limit across requests, not across one scheduler invocation. Key the
+ * process-wide barriers by the clock function so production calls share Date.now while tests can
+ * use isolated deterministic clocks. Every start re-reads this map, which also coordinates
+ * overlapping invocations in the same worker process. One barrier per provider family: Workable's
+ * cooldown must not delay a Recruitee start.
+ */
+const nextPacedStartByClock = new WeakMap<() => number, Map<string, number>>();
 
 type PollSource = { ats_name: string };
 
@@ -34,6 +51,7 @@ type PollQueueOptions = {
   concurrency?: number;
   timeBudgetMs?: number;
   workableStartIntervalMs?: number;
+  providerStartIntervalsMs?: Readonly<Record<string, number>>;
   startReserveMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -71,10 +89,10 @@ export async function retryTransient<T>(
  * Poll a mixed provider queue without letting one invocation consume the full function lifetime.
  *
  * Ordinary sources run concurrently because each request goes to a different employer board.
- * Workable is different: all account requests share one public API limit, documented as 10 calls
- * per 10 seconds. Only one Workable request is started every 1.1 seconds, leaving a small margin.
- * Sources left when the time budget expires keep their old last_polled_at and therefore remain at
- * the front of the next oldest-first database selection.
+ * The paced providers (see PROVIDER_START_INTERVALS_MS) are different: every tenant's requests
+ * share one platform-wide public API limit, so only one request per family is started each
+ * interval, with each family pacing independently. Sources left when the time budget expires keep
+ * their old last_polled_at and therefore remain at the front of the next oldest-first selection.
  */
 export async function pollSourcesWithinBudget<TSource extends PollSource, TResult>(
   sources: readonly TSource[],
@@ -83,15 +101,40 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
 ) {
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? POLL_CONCURRENCY));
   const timeBudgetMs = options.timeBudgetMs ?? POLL_TIME_BUDGET_MS;
-  const workableStartIntervalMs = options.workableStartIntervalMs ?? WORKABLE_START_INTERVAL_MS;
+  const providerIntervals: Record<string, number> = {
+    ...PROVIDER_START_INTERVALS_MS,
+    ...(options.providerStartIntervalsMs ?? {}),
+    ...(options.workableStartIntervalMs !== undefined
+      ? { workable: options.workableStartIntervalMs }
+      : {}),
+  };
   const startReserveMs = options.startReserveMs
     ?? Math.min(POLL_START_RESERVE_MS, Math.max(0, timeBudgetMs / 4));
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => {
     setTimeout(resolve, milliseconds);
   }));
-  const ordinary = sources.filter((source) => source.ats_name !== 'workable');
-  const workable = sources.filter((source) => source.ats_name === 'workable');
+  const ordinary = sources.filter((source) => providerIntervals[source.ats_name] === undefined);
+  const paced = new Map<string, TSource[]>();
+  for (const source of sources) {
+    if (providerIntervals[source.ats_name] === undefined) continue;
+    const queue = paced.get(source.ats_name);
+    if (queue) queue.push(source);
+    else paced.set(source.ats_name, [source]);
+  }
+  const pacedRemaining = () => {
+    for (const queue of paced.values()) if (queue.length > 0) return true;
+    return false;
+  };
+  const nextStartFor = (family: string) => nextPacedStartByClock.get(now)?.get(family);
+  const setNextStartFor = (family: string, at: number) => {
+    let barriers = nextPacedStartByClock.get(now);
+    if (!barriers) {
+      barriers = new Map();
+      nextPacedStartByClock.set(now, barriers);
+    }
+    barriers.set(family, at);
+  };
   const resultSlots: Array<{ settled: boolean; value?: TResult }> = [];
   const active = new Set<Promise<void>>();
   const allStarted: Promise<void>[] = [];
@@ -125,42 +168,51 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
     allStarted.push(task);
   };
 
-  const waitForWorkableStartBarrier = async () => {
+  const waitForPacedStartBarriers = async () => {
     while (true) {
-      const nextWorkableStart = nextWorkableStartByClock.get(now);
-      if (nextWorkableStart === undefined) return;
-      const wait = nextWorkableStart - now();
+      const barriers = nextPacedStartByClock.get(now);
+      if (!barriers || barriers.size === 0) return;
+      let latest = -Infinity;
+      for (const at of barriers.values()) latest = Math.max(latest, at);
+      const wait = latest - now();
       if (wait <= 0) return;
       await sleep(wait);
     }
   };
 
-  while ((ordinary.length > 0 || workable.length > 0) && firstError === noError) {
+  while ((ordinary.length > 0 || pacedRemaining()) && firstError === noError) {
     while (active.size < concurrency && now() < startDeadline && firstError === noError) {
       const currentTime = now();
-      const nextWorkableStart = nextWorkableStartByClock.get(now) ?? currentTime;
-      if (workable.length > 0 && currentTime >= nextWorkableStart) {
-        const source = workable.shift()!;
-        nextWorkableStartByClock.set(now, currentTime + workableStartIntervalMs);
-        startPoll(source);
-        continue;
+      let startedPaced = false;
+      for (const [family, queue] of paced) {
+        if (queue.length === 0) continue;
+        if (currentTime < (nextStartFor(family) ?? currentTime)) continue;
+        setNextStartFor(family, currentTime + providerIntervals[family]);
+        startPoll(queue.shift()!);
+        startedPaced = true;
+        break;
       }
+      if (startedPaced) continue;
       const source = ordinary.shift();
       if (!source) break;
       startPoll(source);
     }
 
     if (firstError !== noError || now() >= startDeadline) break;
-    if (ordinary.length === 0 && workable.length === 0) break;
+    if (ordinary.length === 0 && !pacedRemaining()) break;
 
     if (active.size >= concurrency) {
       await Promise.race(active);
       continue;
     }
 
-    if (ordinary.length === 0 && workable.length > 0) {
-      const nextWorkableStart = nextWorkableStartByClock.get(now) ?? now();
-      const wait = Math.min(nextWorkableStart - now(), startDeadline - now());
+    if (ordinary.length === 0 && pacedRemaining()) {
+      let soonestStart = Infinity;
+      for (const [family, queue] of paced) {
+        if (queue.length === 0) continue;
+        soonestStart = Math.min(soonestStart, nextStartFor(family) ?? now());
+      }
+      const wait = Math.min(soonestStart - now(), startDeadline - now());
       if (wait <= 0) continue;
       await sleep(wait);
       continue;
@@ -172,9 +224,9 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   // A caller can release its distributed lock as soon as this function settles. Wait for every
   // started request, including siblings of a rejected request, before returning or rethrowing.
   await Promise.allSettled(allStarted);
-  // Hold that lock through the final provider cooldown too. This keeps the boundary safe even if
-  // the next invocation lands in a fresh process that cannot see the in-memory barrier.
-  await waitForWorkableStartBarrier();
+  // Hold that lock through the final provider cooldowns too. This keeps the boundary safe even if
+  // the next invocation lands in a fresh process that cannot see the in-memory barriers.
+  await waitForPacedStartBarriers();
   if (firstError !== noError) throw firstError;
 
   const results = resultSlots.map((slot) => {

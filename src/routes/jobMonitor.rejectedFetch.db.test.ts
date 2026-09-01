@@ -88,6 +88,24 @@ function greenhousePayload(absoluteUrl: (id: string) => string) {
   });
 }
 
+/* Since the employer-hosted embed fallback, a Greenhouse action URL alone can no longer reject a
+   posting - only a malformed IDENTITY can (a non-numeric id has no embed route). This is the
+   payload shape that still fully rejects: same two listed postings, ids that cannot mint a URL. */
+function identityDriftedPayload() {
+  const content = `<p>${'Design, build, and operate reliable launch-control software with the flight software team. '.repeat(3)}</p>`;
+  return JSON.stringify({
+    jobs: ['drifted-4001', 'drifted-4002'].map((id) => ({
+      id,
+      title: `Flight Software Engineer ${id}`,
+      absolute_url: `https://careers.launch-systems.example/jobs/${id}`,
+      location: { name: 'Hawthorne, CA' },
+      company_name: COMPANY,
+      content,
+      updated_at: new Date().toISOString(),
+    })),
+  });
+}
+
 function respond(body: string) {
   return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
 }
@@ -156,11 +174,10 @@ test('a fully rejected or aborted list fetch preserves the board and lands in la
     'the tracking suffix must be canonicalized away before storage');
 
   /* 2. A provider drift that rejects every listed posting must not wipe those two rows, and must
-     be queryable instead of finishing as a clean poll. */
+     be queryable instead of finishing as a clean poll. Since the embed fallback, employer-hosted
+     URLs INGEST for Greenhouse, so full rejection here means identity drift. */
   await new Promise((resolve) => setTimeout(resolve, 5));
-  globalThis.fetch = async () => respond(greenhousePayload(
-    (id) => `https://careers.launch-systems.example/jobs/${id}?gh_jid=${id}`,
-  ));
+  globalThis.fetch = async () => respond(identityDriftedPayload());
   const rejected = await monitor.pollSource({ ...source, last_error: afterSuccess.last_error });
   assert.equal(rejected.ok, false);
   assert.match(rejected.ok === false ? rejected.error : '', /none survived normalization/);
@@ -209,17 +226,21 @@ const SPIKE_SOURCE_ID = '92000000-0000-4000-8000-000000000002';
 const SPIKE_COMPANY = 'Orbital Data Company';
 const SPIKE_TOKEN = 'orbital-data';
 
-/** A 60-posting board where `badUrls` of the absolute_urls have drifted to a rejected host. */
-function largeBoardPayload(badUrls: number) {
+/** A 60-posting board where `drifted` of the postings carry identities that reject normalization.
+ *  (Since the embed fallback, an off-host absolute_url alone no longer rejects a Greenhouse
+ *  posting; a non-numeric id is the rejection class the spike detector still guards there.) */
+function largeBoardPayload(drifted: number) {
   const content = `<p>${'Design, build, and operate reliable data-platform software with the platform team. '.repeat(3)}</p>`;
   return JSON.stringify({
     jobs: Array.from({ length: 60 }, (_, index) => {
-      const id = String(5000 + index);
+      const id = index < drifted ? `drifted-${5000 + index}` : String(5000 + index);
       return {
         id,
         title: `Data Platform Engineer ${id}`,
-        absolute_url: index < badUrls
-          ? `https://careers.orbital-data.example/jobs/${id}?gh_jid=${id}`
+        /* Drifted rows also publish off-host, because a first-party hosted URL matching the id
+           would validate regardless of the id's shape; rejection needs both halves to fail. */
+        absolute_url: index < drifted
+          ? `https://careers.orbital-data.example/jobs/${id}`
           : `https://boards.greenhouse.io/${SPIKE_TOKEN}/jobs/${id}?gh_jid=${id}`,
         location: { name: 'Austin, TX' },
         company_name: SPIKE_COMPANY,

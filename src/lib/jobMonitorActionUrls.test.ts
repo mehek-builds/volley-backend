@@ -72,8 +72,15 @@ test('strict provider normalization emits only canonical first-party action rout
   assert.equal(recruiteeJob.apply_url, 'https://acme.recruitee.com/o/platform-engineer/c/new');
 });
 
-test('Greenhouse drops off-host, cross-tenant, cross-job, and unsupported action URLs', () => {
+test('Greenhouse never stores a payload URL that fails strict validation; it constructs the embed route', () => {
+  /* Employer-hosted (embedded) Greenhouse boards publish absolute_url on their own domain, and a
+     hostile payload can put anything at all in that field. Neither survives into the row: the
+     action URL falls back to the first-party embed route built from our own token and the board
+     API's numeric id, which is the same canonical shape submission already produces for every
+     stored Greenhouse job. 17 employer-hosted boards were permanently dark under the old
+     drop-the-posting rule. */
   for (const url of [
+    'https://careers.acme.example/details/?gh_jid=101',
     'https://attacker.example/acme/jobs/101',
     'https://job-boards.greenhouse.io.evil.example/acme/jobs/101',
     'https://job-boards.greenhouse.io/other/jobs/101',
@@ -81,8 +88,21 @@ test('Greenhouse drops off-host, cross-tenant, cross-job, and unsupported action
     'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=101',
     'https://job-boards.greenhouse.io/acme/jobs/101?source=custom',
   ]) {
-    assert.deepEqual(normalizeGreenhouseJobs(greenhouse(url), 'acme'), [], url);
+    const [job] = normalizeGreenhouseJobs(greenhouse(url), 'acme');
+    assert.equal(job?.posting_url, 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=101', url);
+    assert.equal(job?.apply_url, job?.posting_url, url);
   }
+
+  /* The constructed URL is only as sound as its parts: a non-numeric id has no embed route, so
+     that posting is dropped exactly as before. */
+  assert.deepEqual(normalizeGreenhouseJobs({
+    jobs: [{
+      id: 'not-a-counter',
+      title: 'Platform Engineer',
+      absolute_url: 'https://careers.acme.example/details/?gh_jid=101',
+      content: DESCRIPTION,
+    }],
+  }, 'acme'), []);
 });
 
 test('Greenhouse accepts its own gh_jid tracking suffix and canonicalizes it away', () => {
@@ -96,6 +116,8 @@ test('Greenhouse accepts its own gh_jid tracking suffix and canonicalizes it awa
   assert.equal(job.posting_url, 'https://boards.greenhouse.io/acme/jobs/101');
   assert.equal(job.apply_url, job.posting_url);
 
+  /* Any other query shape distrusts the whole payload URL: the posting keeps the constructed
+     embed route rather than the decorated hosted one. */
   for (const url of [
     'https://boards.greenhouse.io/acme/jobs/101?gh_jid=999',
     'https://boards.greenhouse.io/acme/jobs/101?gh_jid=101&utm_source=linkedin',
@@ -104,7 +126,54 @@ test('Greenhouse accepts its own gh_jid tracking suffix and canonicalizes it awa
     /* Truthy url.search whose searchParams iterate nothing - not the declared parameter. */
     'https://boards.greenhouse.io/acme/jobs/101?&&&',
   ]) {
-    assert.deepEqual(normalizeGreenhouseJobs(greenhouse(url), 'acme'), [], url);
+    const [decorated] = normalizeGreenhouseJobs(greenhouse(url), 'acme');
+    assert.equal(decorated?.posting_url, 'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=101', url);
+  }
+});
+
+test('Recruitee adopts the tenant recruitee.com itself redirects to, and only that', async () => {
+  /* A renamed Recruitee subdomain answers 302 from {old}.recruitee.com/api/offers/ to
+     {new}.recruitee.com/api/offers/, and fetch follows it - so the offers in hand belong to the
+     new tenant and validated as zero against the configured token (36 live boards, 2026-09-01).
+     The final response URL is recruitee.com's own statement of the tenant's home. */
+  const offers = { offers: [{
+    id: 303,
+    slug: 'platform-engineer',
+    title: 'Platform Engineer',
+    careers_url: 'https://frisbii.recruitee.com/o/platform-engineer',
+    description: DESCRIPTION,
+  }] };
+  const respondFrom = (finalUrl: string) => {
+    const response = new Response(JSON.stringify(offers), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+    Object.defineProperty(response, 'url', { value: finalUrl });
+    return response;
+  };
+
+  const renamed = await fetchSourceJobBatch(
+    { ats_name: 'recruitee', board_token: 'billwerk' },
+    async () => respondFrom('https://frisbii.recruitee.com/api/offers/'),
+  );
+  assert.equal(renamed.jobs.length, 1);
+  assert.equal(renamed.jobs[0].posting_url, 'https://frisbii.recruitee.com/o/platform-engineer');
+
+  /* Anything that is not exactly a first-party offers URL falls back to the configured token, so
+     the new-tenant offers fail validation exactly as before the adoption existed. */
+  for (const finalUrl of [
+    'https://frisbii.recruitee.com.evil.example/api/offers/',
+    'https://attacker.example/api/offers/',
+    'https://frisbii.recruitee.com/somewhere-else/',
+    'http://frisbii.recruitee.com/api/offers/',
+    '',
+  ]) {
+    const fetched = await fetchSourceJobBatch(
+      { ats_name: 'recruitee', board_token: 'billwerk' },
+      async () => respondFrom(finalUrl),
+    );
+    assert.deepEqual(fetched.jobs, [], finalUrl || '(no response url)');
+    assert.deepEqual(fetched.listed_external_ids, ['303'], finalUrl || '(no response url)');
   }
 });
 
@@ -195,14 +264,24 @@ test('Breezy accepts only the exact posting or one slug segment for the verified
 });
 
 test('the source-aware dispatcher keeps invalid action IDs in the raw list but never in jobs', async () => {
+  /* A Greenhouse posting whose IDENTITY is malformed (a non-numeric id cannot mint an embed route,
+     and its payload URL failed validation) stays listed but absent from jobs, so pollSource
+     deactivates it instead of granting ingest_eligible=true. */
   const fetched = await fetchSourceJobBatch(
     { ats_name: 'greenhouse', board_token: 'acme' },
-    async () => new Response(JSON.stringify(greenhouse('https://attacker.example/acme/jobs/101')), {
+    async () => new Response(JSON.stringify({
+      jobs: [{
+        id: 'not-a-counter',
+        title: 'Platform Engineer',
+        absolute_url: 'https://attacker.example/acme/jobs/not-a-counter',
+        content: DESCRIPTION,
+      }],
+    }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     }),
   );
-  assert.deepEqual(fetched.listed_external_ids, ['101']);
+  assert.deepEqual(fetched.listed_external_ids, ['not-a-counter']);
   assert.deepEqual(fetched.jobs, []);
   assert.deepEqual(fetched.preserve_external_ids, []);
 });

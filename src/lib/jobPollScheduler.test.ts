@@ -4,6 +4,7 @@ import {
   POLL_SEGMENT_SIZE,
   POLL_SOURCE_LIMIT,
   pollSourcesWithinBudget,
+  PROVIDER_START_INTERVALS_MS,
   retryTransient,
   WORKABLE_START_INTERVAL_MS,
 } from './jobPollScheduler';
@@ -51,6 +52,45 @@ test('replenishes an ordinary polling slot without waiting for the whole active 
   completions.get(2)!();
   const outcome = await outcomePromise;
   assert.equal(outcome.attempted, 3);
+});
+
+test('Recruitee and Crelate share the paced-provider roster with Workable', () => {
+  /* Both proved their shared platform limit empirically on 2026-09-01: one full-concurrency drain
+     left 71 Recruitee and 19 Crelate sources on HTTP 429, and the 19 Crelate boards had NEVER
+     completed a poll - chronic starvation, not a burst. */
+  assert.deepEqual(Object.keys(PROVIDER_START_INTERVALS_MS).sort(), ['crelate', 'recruitee', 'workable']);
+  for (const interval of Object.values(PROVIDER_START_INTERVALS_MS)) {
+    assert.equal(interval, WORKABLE_START_INTERVAL_MS);
+  }
+});
+
+test('spaces Recruitee and Crelate starts within each family while families stay independent', async () => {
+  let clock = 0;
+  const starts: Array<[string, number]> = [];
+  const sources = [
+    { ats_name: 'recruitee', index: 0 },
+    { ats_name: 'crelate', index: 1 },
+    { ats_name: 'recruitee', index: 2 },
+    { ats_name: 'crelate', index: 3 },
+    { ats_name: 'greenhouse', index: 4 },
+  ];
+  const outcome = await pollSourcesWithinBudget(sources, async (source) => {
+    starts.push([source.ats_name, clock]);
+    return source.index;
+  }, {
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  assert.equal(outcome.attempted, 5);
+  const startTimes = (family: string) => starts
+    .filter(([name]) => name === family)
+    .map(([, at]) => at);
+  /* One start per family per interval - and Recruitee's cooldown must not delay Crelate's first
+     start, or the pacing would serialize the whole paced portion of a segment. */
+  assert.deepEqual(startTimes('recruitee'), [0, WORKABLE_START_INTERVAL_MS]);
+  assert.deepEqual(startTimes('crelate'), [0, WORKABLE_START_INTERVAL_MS]);
+  assert.deepEqual(startTimes('greenhouse'), [0], 'ordinary sources are never paced');
 });
 
 test('spaces Workable request starts beyond the shared provider limit', async () => {
