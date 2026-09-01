@@ -1864,7 +1864,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ? request.query as Record<string, unknown>
       : {};
     const requestedId = requestedResumeLookupId(latestRows, query.application);
-    const requestedRows = requestedId
+    /* THE EXACT LOOKUP HAS TO HONOUR THE SAME EXCLUSION, and it is the more dangerous of the two.
+       requestedResumeLookupId returns an id precisely when that id is NOT in latestRows, so
+       filtering a removed resume out of latestRows GUARANTEES its id passes that test. An unfiltered
+       lookup here would therefore fetch exactly the resumes the filter above just removed, and
+       includeRequestedResumeInHistory prepends the result - putting the removed packet back at the
+       TOP of the Tracker, strictly more often than before the filter existed. Reached by any stale
+       ?application= URL: a second tab, a bookmark, the back button, or a reload of the page that was
+       open when the row was removed. */
+    const requestedRows = requestedId && !removedIds.some((id) => id.toLowerCase() === requestedId.toLowerCase())
       ? await db
         .select()
         .from(generated_resumes)

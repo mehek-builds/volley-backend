@@ -66,6 +66,8 @@ export async function syncCanonicalApplicationRow(
     const [updated] = await executor.update(applications).set({
       submission_state: confirmedSubmissionLifecycle.submissionState,
       tracker_state: confirmedSubmissionLifecycle.trackerState,
+      // Same rule as the projection write below: a confirmed send is always visible.
+      removed_at: null,
       updated_at: new Date(),
     }).where(and(
       eq(applications.id, current.id),
@@ -178,6 +180,20 @@ export async function syncCanonicalApplicationRow(
       resume_attached: receiptResumeAttached,
       resume_source: receiptResumeSource,
       resume_attached_at: receiptResumeAttachedAt,
+      /* ANYTHING THAT REACHED AN EMPLOYER IS VISIBLE, WITHOUT EXCEPTION.
+       *
+       * Removal refuses an application that is being sent, but it cannot refuse one that is not
+       * being sent YET: a client holding a cached application id - the extension is the obvious
+       * one - can press Send after the row was taken off the Tracker. Without this, that send
+       * succeeds and the row keeps its removed stamp, so a real submission to a real employer
+       * exists that the student can never see on any surface. That is the precise outcome the
+       * removal guard exists to prevent, arrived at from the other side.
+       *
+       * Clearing it here rather than refusing the send is deliberate. Refusing would break an
+       * in-flight send over a bookkeeping flag, and the student's intent when they press Send is
+       * not in doubt. It is the same rule as reviving on re-add: if it comes back, it comes back
+       * visible. */
+      removed_at: null,
       updated_at: new Date(),
     }).where(and(
       eq(applications.id, current.id),

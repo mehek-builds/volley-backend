@@ -198,3 +198,30 @@ test('adding the same posting again brings a removed application back', async ()
   assert.equal(again.application.removed_at, null, 'and it must come back rather than stay hidden');
   assert.ok((await listCompanies()).includes(created.application.id));
 });
+
+test('a send revives a removed application so nothing sent is ever invisible', async () => {
+  /* Removal refuses an application that is BEING sent, but cannot refuse one not being sent yet: a
+     client holding a cached id (the extension) can press Send afterwards. Without the revive, that
+     produces a real submission to a real employer with the removed stamp still set, which no
+     surface would ever show. */
+  const { syncCanonicalApplicationRow } = await import('../lib/canonicalApplicationSync');
+  const resumeId = randomUUID();
+  await backendDb.insert(schema.generated_resumes).values({
+    id: resumeId,
+    user_id: USER_ID,
+    job_context: { role: 'Test Role', company: 'Test Co' },
+    spec: {},
+    resume_object_key: `users/${USER_ID}/resumes/${resumeId}.pdf`,
+  });
+  const id = await makeApplication({ legacy_generated_resume_id: resumeId });
+  assert.equal((await remove(id)).statusCode, 200);
+  assert.equal((await listCompanies()).includes(id), false);
+
+  /* The no-postingIdentity arm: it resolves the row by legacy_generated_resume_id and writes the
+     confirmed lifecycle. That is the shortest real path from "a send landed" to the row update. */
+  await syncCanonicalApplicationRow({ userId: USER_ID, packetId: resumeId }, backendDb);
+
+  const [row] = await backendDb.select().from(schema.applications).where(eq(schema.applications.id, id));
+  assert.equal(row.removed_at, null, 'a sent application must come back onto the tracker');
+  assert.ok((await listCompanies()).includes(id));
+});
