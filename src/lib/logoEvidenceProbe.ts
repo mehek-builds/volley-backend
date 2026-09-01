@@ -5,12 +5,16 @@
  * where a wrong call silently moves the verdict.
  *
  * The standard is "what the website's tile can actually render", copied from the logo route in
- * role-quick-website (lib/company-logo-source.ts): a real image content type or recognisable
- * magic bytes, and for an .ico specifically, an embedded PNG. Half of the .ico files in the wild
- * hold raw DIB bitmaps; the route cannot decode those in a request and deliberately drops them,
- * so an evidence URL serving one is a posting that renders a monogram, and this check must say
- * so rather than counting the bytes as a logo. Gensyn's favicon.ico was the live example on
- * 2026-09-01: verified evidence, real bytes, no PNG inside, monogram on the board.
+ * role-quick-website (app/api/company-logo/route.ts): a real image content type or recognisable
+ * magic bytes.
+ *
+ * ICO COUNTS, INCLUDING A RAW DIB CONTAINER, and it did not always. Half of the .ico files in
+ * the wild hold DIB bitmaps rather than an embedded PNG, and the route used to drop those, so
+ * this check refused them too and named the class honestly (Gensyn on 2026-09-01: verified
+ * evidence, real bytes, no PNG inside, monogram on the board). role-quick-website#477 then
+ * changed the route to serve such a container as image/x-icon, which browsers draw, so the
+ * measurement follows the shipped behaviour rather than the behaviour it was written against.
+ * A rule about what a reader sees has to track what the reader is actually sent.
  */
 
 export type EvidenceSource = {
@@ -48,15 +52,30 @@ export function icoContainsPng(buf: Uint8Array): boolean {
  */
 export function servableImageType(contentType: string | null, bytes: Uint8Array): string | null {
   const claimed = (contentType ?? '').split(';')[0].trim().toLowerCase();
-  const isIcoShaped = bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01
-    && bytes[3] === 0x00;
-  if (claimed === 'image/x-icon' || claimed === 'image/vnd.microsoft.icon' || isIcoShaped) {
-    return icoContainsPng(bytes) ? 'image/png' : null;
+  /* Type 1 is an icon and type 2 a cursor. The verifier accepts both and the store keeps both,
+     so refusing type 2 here would call an asset we serve unrenderable (review finding). */
+  const isIcoShaped = bytes[0] === 0x00 && bytes[1] === 0x00
+    && (bytes[2] === 0x01 || bytes[2] === 0x02) && bytes[3] === 0x00;
+  /* Keyed on the BYTES being a real ICO container, never on the claimed type alone. A bot wall
+     answering an icon request with a 200 and an HTML login page, which is the common shape here,
+     labels it whatever it likes; trusting that label would count the wall as a logo. Inside a
+     real container: the embedded PNG when there is one, the container itself when there is not,
+     since the route prefers the former and serves the latter and both reach the tile. */
+  if (isIcoShaped) return icoContainsPng(bytes) ? 'image/png' : 'image/x-icon';
+  if (claimed === 'image/x-icon' || claimed === 'image/vnd.microsoft.icon') {
+    /* Claimed an icon and is not one. It may still be an honestly recognisable image under a
+       wrong header, so fall through to the magic checks below rather than accepting the claim. */
+    return sniffImageBytes(bytes);
   }
   if (claimed.startsWith('image/')) {
     if (claimed.includes('svg')) return 'image/svg+xml';
     return claimed;
   }
+  return sniffImageBytes(bytes);
+}
+
+/** The type these bytes are on their own evidence, ignoring whatever the response claimed. */
+function sniffImageBytes(bytes: Uint8Array): string | null {
   if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
   if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
   if (bytes[0] === 0x47 && bytes[1] === 0x49) return 'image/gif';

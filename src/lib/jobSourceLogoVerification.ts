@@ -5,8 +5,13 @@ import {
   isTransientLogoVerificationReason,
   logoVerificationErrorReason,
 } from './logoVerificationRetry';
+import type { DurableHomepageLogoPersister } from './durableAtsLogo';
 
 export const VERIFIED_HOMEPAGE_LOGO_METHOD = 'homepage_identity_and_logo_asset';
+/* The same proof, served from our own storage instead of the employer's. Distinct so the method
+   column keeps saying where the bytes a job seeker receives actually come from. */
+export const VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD =
+  'homepage_identity_and_logo_asset_durable_copy';
 
 export type LogoVerificationCandidate = {
   company_name: string;
@@ -14,7 +19,11 @@ export type LogoVerificationCandidate = {
 };
 
 export type LogoVerificationResult =
-  | { verified: true; company_logo_url: string; method: typeof VERIFIED_HOMEPAGE_LOGO_METHOD }
+  | {
+    verified: true;
+    company_logo_url: string;
+    method: typeof VERIFIED_HOMEPAGE_LOGO_METHOD | typeof VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD;
+  }
   | { verified: false; reason: string };
 
 type ResolveHost = (hostname: string) => Promise<string[]>;
@@ -23,6 +32,12 @@ type VerificationOptions = {
   fetcher?: typeof fetch;
   resolveHost?: ResolveHost;
   signal?: AbortSignal;
+  /* Given bytes this verifier has already fetched and signature-checked, keep a copy and answer
+     with our own URL. Optional so every existing caller and test keeps its current behaviour. */
+  persistDurableLogo?: DurableHomepageLogoPersister;
+  /* Called when a copy was attempted and refused. A store outage otherwise looks exactly like
+     this feature not existing: coverage simply stops improving, with nothing to read. */
+  onDurableCopyFailure?: (reason: string) => void;
 };
 
 const USER_AGENT = 'LitosCompanyLogoVerifier/1.0';
@@ -452,6 +467,37 @@ export async function verifyCatalogSourceLogo(
           signal,
         );
         if (hasImageSignature(image.bytes, image.contentType)) {
+          /* KEEP THE BYTES WE JUST PROVED, when a store is wired.
+           *
+           * Proving an asset and then persisting the employer's URL assumes everyone else can
+           * fetch what this verifier fetched, and for a real class of employers that is false:
+           * measured 2026-09-01, D.A. Davidson, Truecaller and Life Trading each answered here
+           * and refused the website, CI and the public, so the row said verified and rendered a
+           * monogram. Our own copy makes the mark independent of that employer's WAF, geo rules
+           * and hotlink policy.
+           *
+           * It also lifts the query-string restriction below, for these assets only: that rule
+           * exists because a signed or cache-busting URL expires, and an expiring URL is exactly
+           * what a copy stops being. A store that fails or refuses the type (SVG) falls through
+           * to the remote URL, so this can only add coverage, never remove it. */
+          if (options.persistDurableLogo) {
+            try {
+              const durableUrl = await options.persistDurableLogo({
+                company_domain: domain,
+                bytes: image.bytes,
+                content_type: image.contentType,
+              });
+              return {
+                verified: true,
+                company_logo_url: durableUrl,
+                method: VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD,
+              };
+            } catch (error) {
+              /* Storage said no. The employer's own URL is still proven, so fall through, but
+                 say so: silence here is indistinguishable from the store not being wired. */
+              options.onDurableCopyFailure?.(logoVerificationErrorReason(error));
+            }
+          }
           /* A signed or cache-busting query can expire. Do not prove one URL and persist a
              different guessed path, and do not put an ephemeral asset into every job response. */
           if (!iconUrl.search && iconUrl.toString().length <= 4000) {

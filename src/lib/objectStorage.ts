@@ -41,13 +41,29 @@ export type PublicLogoPutDependencies = {
 };
 
 /* This tenant grammar intentionally matches normalizeExecutableAtsBoardToken's path-segment
-   branch: 1 to 128 lowercase ASCII slug characters, with punctuation only in the interior. */
-const PUBLIC_LOGO_KEY_RE = /^company-logos\/(rippling)\/([a-z0-9](?:[a-z0-9._~-]{0,126}[a-z0-9])?)\/([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
+   branch: 1 to 128 lowercase ASCII slug characters, with punctuation only in the interior. The
+   same grammar admits a bare employer domain, which is what the `homepage` provider stores under.
+ *
+ * TWO PROVIDERS, ONE REASON EACH. `rippling` copies an asset whose first-party URL EXPIRES.
+ * `homepage` copies one the employer's own infrastructure refuses to serve to anybody but the
+ * verifier: measured 2026-09-01, D.A. Davidson, Truecaller and Life Trading all answer the
+ * verifier (which reaches them from the API's egress) and 403 or time out for the website, for
+ * CI, and for the public, so their rows rendered a monogram while their evidence said verified.
+ * Both cases are the same shape of problem, an asset that is proven but not durably servable, so
+ * both take the same remedy: keep the bytes we already proved.
+ *
+ * SVG IS DELIBERATELY ABSENT. The homepage lane will prove an SVG (its signature check accepts
+ * one), but an SVG served from our OWN origin is a script that runs when the URL is opened
+ * directly, and this store's whole purpose is to serve from our origin. An SVG asset keeps its
+ * remote URL, which is exactly what it does today. `ico` is here because it is inert, and because
+ * it is what the WAF-blocked class overwhelmingly serves. */
+const PUBLIC_LOGO_KEY_RE = /^company-logos\/(rippling|homepage)\/([a-z0-9](?:[a-z0-9._~-]{0,126}[a-z0-9])?)\/([a-f0-9]{64})\.(png|jpg|gif|webp|ico)$/;
 const PUBLIC_LOGO_CONTENT_TYPES = new Map([
   ['png', 'image/png'],
   ['jpg', 'image/jpeg'],
   ['gif', 'image/gif'],
   ['webp', 'image/webp'],
+  ['ico', 'image/x-icon'],
 ]);
 const PUBLIC_LOGO_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const PUBLIC_LOGO_CACHE_SECONDS = 365 * 24 * 60 * 60;
