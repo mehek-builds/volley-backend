@@ -51,6 +51,7 @@ import {
   isManagedStratusProvider,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
+  MANAGED_PREPARE_SCAN_OPTIONS,
   managedBrowserTerminalResultId,
   managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
@@ -7000,20 +7001,28 @@ async function prepareManaged(
   // An array rather than a nullable local so the assignment inside the catch callback is visible to
   // the code below it; TypeScript does not narrow across a closure it cannot prove ran.
   const discoveryFailures: string[] = [];
+  /* scanCorrelation on every prepare-path run that touches the page, because stratus's
+   * correlation-required policy classifies ANY mutation as boundary-capable, not just submits.
+   * The discovery pass fills the fixed fields before it reads, so without a correlation the very
+   * first provider call of a managed fill is refused with SUBMISSION_ATTEMPT_REQUIRED - measured
+   * live on the first post-cutover fill, application e4b0420c (OpenAI, Ashby, 2026-09-01), where
+   * this .catch swallowed the refusal as a discovery failure and the uncorrelated fill run below
+   * then failed the whole packet with the same sentence. A prepare run truly cannot submit (no
+   * allowSubmit, no final action, both enforced server-side), so the ephemeral scan pair is the
+   * correct correlation; the DURABLE attempt stays what it means - claimSubmission's ledger row,
+   * opened only when a submit-capable run is about to launch.
+   *
+   * This pass runs FIRST, which is why its uncorrelated form was the worst of the four: it fails
+   * closed before the option-probe and fill runs are ever reached, and the .catch below files the
+   * refusal as a discovery failure, so the applicant is told the form's questions could not be read
+   * rather than that a correlation was missing. The widened window is for the two big runs of the
+   * prepare path (this and the fill), which are the two that can legitimately reach stratus's own
+   * run budget. See MANAGED_PREPARE_SCAN_OPTIONS for why it is 280s and not more. */
   const discoveryResult = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
-    // buildManagedDiscoveryActions fills the fixed fields before asking stratus's `discover` action
-    // to scan the page, so this is a mutation - it types into the form - even though it never
-    // presses submit. Under stratus correlationRequired every mutating run needs a submissionAttempt
-    // and providerDeadline or it is refused with "A durable submissionAttempt is required for every
-    // submit-capable or continuable run". This pass runs FIRST, so without the ephemeral scan
-    // correlation it fails closed before the option-probe and fill runs (which already carry it) are
-    // ever reached, and the whole application stops before anything is shown or sent. scanCorrelation
-    // mints the throwaway {submissionAttempt, providerDeadline} pair for exactly this case - a
-    // mutation that is not a submission - the same way the pre-scan, option-probe and fill do.
-    { scanCorrelation: true },
+    MANAGED_PREPARE_SCAN_OPTIONS,
   )
     .catch((error: unknown) => {
       // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
@@ -7137,7 +7146,8 @@ async function prepareManaged(
       actions,
       // Option-probe clicks open dropdowns to read their choices: a mutation that never submits, so
       // it needs the same ephemeral scan correlation as the fill and the pre-scan, or stratus
-      // correlationRequired refuses it for lacking a submissionAttempt.
+      // correlationRequired refuses it for lacking a submissionAttempt. The standard read-scan
+      // window is right for a probe batch: it is far smaller than a full fill.
       { screenshot: false, scanCorrelation: true },
     )
       .catch((error: unknown) => {
@@ -7629,19 +7639,23 @@ async function prepareManaged(
     progress_stage: 'Filling your answers',
     progress_updated_at: new Date().toISOString(),
   }));
+  /* This prepare run fills the employer form and screenshots it for review; it never presses
+   * submit (buildManagedPortalActions was called without `submit`, so there is no confirmAndSubmit
+   * and no allowSubmit). But typing into the form is a mutation, and under stratus
+   * correlationRequired every mutating run needs a submissionAttempt and providerDeadline or it is
+   * refused with "A durable submissionAttempt is required for every submit-capable or continuable
+   * run". scanCorrelation mints the ephemeral throwaway pair for exactly this case - a mutation
+   * that is not a submission - the same way the posting-question pre-scans already do. Without it
+   * the fill fails closed and nothing is ever shown or sent.
+   *
+   * The widened window rather than the read-scan default: this and the discovery pass are the two
+   * big runs of the prepare path (up to 120 actions including document uploads), so they are the
+   * two that can legitimately reach stratus's own run budget. See MANAGED_PREPARE_SCAN_OPTIONS. */
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
-    // This prepare run fills the employer form and screenshots it for review; it never presses
-    // submit (buildManagedPortalActions was called without `submit`, so there is no confirmAndSubmit
-    // and no allowSubmit). But typing into the form is a mutation, and under stratus
-    // correlationRequired every mutating run needs a submissionAttempt and providerDeadline or it is
-    // refused with "A durable submissionAttempt is required for every submit-capable or continuable
-    // run". scanCorrelation mints the ephemeral throwaway pair for exactly this case - a mutation
-    // that is not a submission - the same way the posting-question pre-scans already do. Without it
-    // the fill fails closed and nothing is ever shown or sent.
-    { scanCorrelation: true },
+    MANAGED_PREPARE_SCAN_OPTIONS,
   );
   const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
   if (actionDiagnostics.length > 0) {
@@ -9625,11 +9639,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         && isWorkablePhoneReadbackAssertionLabel(error.assertionLabel)
         && managedApplicationUsesAtomicSubmitV4(portal, applicationUrl)) {
         try {
+          // The evidence run's cookie-decline click classifies as a mutation, so it needs the
+          // ephemeral scan correlation too; its extracts alone would not.
           const evidenceRun = await runManagedBrowserWithAccountFence(
             row.user_id,
             applicationUrl,
             buildWorkablePhoneEvidenceActions(),
-            { screenshot: false },
+            { screenshot: false, scanCorrelation: true },
           );
           error.attachEvidence(workablePhoneEvidenceSummary(evidenceRun));
         } catch (evidenceError) {

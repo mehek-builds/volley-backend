@@ -9,6 +9,9 @@ import {
   continueManagedBrowser,
   getManagedBrowserTerminalResult,
   isBrowserbaseConfigured,
+  MANAGED_PREPARE_FILL_DEADLINE_MS,
+  MANAGED_PREPARE_SCAN_OPTIONS,
+  MANAGED_READ_ONLY_ACTION_TYPES,
   MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
   MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
@@ -333,6 +336,132 @@ test('a read scan refuses to double as a submission and still verifies the corre
       ),
       /did not match its durable submission attempt/i,
     );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('an uncorrelated managed run that mutates the employer page is refused before any provider call', async () => {
+  /* The first live post-cutover managed fill, application e4b0420c (OpenAI, Ashby, 2026-09-01):
+   * the prepare-path fill launched with no correlation at all, stratus's correlation-required mode
+   * (the DEFAULT) refused it with SUBMISSION_ATTEMPT_REQUIRED, and every managed fill in the
+   * 25-board campaign failed fail-closed. Stratus classifies ANY mutating action as
+   * boundary-capable, so the launch site can know it needs a correlation from its own action list.
+   * This guard turns the next uncorrelated call site into a local failure that spends neither a
+   * token nor a provider session. */
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let fetchCalls = 0;
+  let sentBody: Record<string, unknown> | null = null;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      fetchCalls += 1;
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        run: { title: 'Application', url: 'https://portal.example/apply', text: '' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [
+        { type: 'fill', selector: '#first_name', text: 'Mehek' },
+      ]),
+      /requires a durable submission attempt or a scan correlation.*first mutating action: fill/i,
+    );
+    assert.equal(fetchCalls, 0, 'the refusal must happen before the provider is called');
+    // Read-only runs (the jobExtract shape) stay legal without any correlation: stratus does not
+    // require an attempt for them, and they must not start minting throwaway ones.
+    const readOnly = await runManagedBrowser('https://portal.example/apply', [
+      { type: 'waitForSelector', selector: '.litos-jd-extract-render-delay-noop', timeout: 5000, optional: true },
+      { type: 'extract', selector: 'body' },
+    ]);
+    assert.equal(readOnly.title, 'Application');
+    assert.equal(fetchCalls, 1);
+    // ABSENCE ON THE WIRE, not merely a passing run. If a later refactor made the scan pair
+    // unconditional, every jobExtract and probe read would start sending throwaway attempt UUIDs to
+    // stratus, and a test that only checked the run succeeded would stay green through it.
+    assert.equal('submissionAttempt' in sentBody!, false, 'a read must send no correlation');
+    assert.equal('providerDeadlineAt' in sentBody!, false, 'a read must send no provider deadline');
+    // A LOCAL CHANGE-DETECTOR, NOT A LOCKSTEP PROOF. The invariant that matters lives in
+    // stratus-browser-cloud's READ_ONLY_ACTIONS; nothing here can see that repo, so this catches an
+    // accidental edit to the set and cannot catch drift from stratus.
+    assert.deepEqual(
+      [...MANAGED_READ_ONLY_ACTION_TYPES].sort(),
+      ['discover', 'extract', 'requireCapability', 'waitForSelector'],
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('a prepare-path fill widens its scan deadline to cover the provider run budget', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let sentBody: Record<string, unknown> | null = null;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application',
+          url: 'https://portal.example/apply',
+          text: '',
+          submissionAttempt: sentBody.submissionAttempt,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const before = Date.now();
+    await runManagedBrowser(
+      'https://portal.example/apply',
+      [{ type: 'fill', selector: '#first_name', text: 'Mehek' }],
+      MANAGED_PREPARE_SCAN_OPTIONS,
+    );
+    const body = sentBody as unknown as { allowSubmit?: unknown; providerDeadlineAt?: string };
+    assert.equal(body.allowSubmit, false, 'a prepare fill must never release a submission');
+    /* THE TWO CLOCKS STRATUS DERIVES FROM THIS ONE VALUE, and why 280s is a ceiling rather than a
+     * preference. The sandbox acts until deadline minus its 10s response margin; the host waits for
+     * the result only min(270s, deadline minus 2s). A deadline above 280s puts the sandbox's window
+     * past the host's wait, so a fill finishing in that band has already touched the employer form
+     * and gets discarded as RUN_TIMED_OUT. At exactly 280s the sandbox window equals stratus's own
+     * 270s run budget, which is the largest window that can actually produce a result. */
+    const remainingMs = Date.parse(body.providerDeadlineAt!) - before;
+    assert.ok(remainingMs > 275_000 && remainingMs <= 280_000, `deadline out of bounds: ${remainingMs}ms`);
+    assert.equal(MANAGED_PREPARE_FILL_DEADLINE_MS, 280_000);
+    assert.ok(
+      MANAGED_PREPARE_FILL_DEADLINE_MS - 10_000 <= 270_000,
+      'the sandbox action window must not outlast the provider host wait',
+    );
+    // A widened deadline without the scan correlation is a usage error, not a silent no-op.
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], { scanDeadlineMs: MANAGED_PREPARE_FILL_DEADLINE_MS }),
+      /only meaningful on a scan-correlated run/i,
+    );
+    // A window computed down to zero (or past the provider maximum) is a configuration bug and must
+    // say so, rather than minting an expired deadline that reads as a provider timeout downstream.
+    for (const scanDeadlineMs of [0, -1, 12_000, 300_001, 1.5]) {
+      await assert.rejects(
+        runManagedBrowser(
+          'https://portal.example/apply',
+          [{ type: 'fill', selector: '#first_name', text: 'Mehek' }],
+          { scanCorrelation: true, scanDeadlineMs },
+        ),
+        /more than 12 seconds and at most 5 minutes/i,
+        `scanDeadlineMs ${scanDeadlineMs} must be refused`,
+      );
+    }
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
@@ -940,30 +1069,47 @@ test('managed Stratus posts bounded actions to the private production run endpoi
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example/';
-  let captured: { url?: string; key?: string | null; body?: unknown } = {};
+  let captured: { url?: string; key?: string | null; body?: Record<string, unknown> } = {};
   globalThis.fetch = (async (input, init) => {
     captured = {
       url: String(input),
       key: new Headers(init?.headers).get('X-Stratus-API-Key'),
-      body: JSON.parse(String(init?.body)),
+      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
     };
-    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: 'https://portal.example/complete',
+      text: 'Thank you',
+      submissionAttempt: captured.body?.submissionAttempt,
+    } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }) as typeof fetch;
-  const result = await runManagedBrowser('https://portal.example/apply', [{ type: 'fill', selector: '#email', value: 'person@example.com' }]);
+  // A fill mutates the employer page, so the launch must carry a correlation to be legal at all
+  // (runManagedBrowser refuses it locally otherwise; stratus's required mode would refuse it at
+  // the provider). The ephemeral scan pair is the non-submit correlation.
+  const result = await runManagedBrowser(
+    'https://portal.example/apply',
+    [{ type: 'fill', selector: '#email', value: 'person@example.com' }],
+    { scanCorrelation: true },
+  );
   assert.equal(result.title, 'Complete');
   assert.equal(captured.url, 'https://stratus.example/api/run');
   assert.equal(captured.key, 'private-key');
-  assert.deepEqual(captured.body, {
+  const body = { ...captured.body } as Record<string, unknown>;
+  assert.match((body.submissionAttempt as { runId: string }).runId, MANAGED_UUID);
+  assert.equal(typeof body.providerDeadlineAt, 'string');
+  delete body.submissionAttempt;
+  delete body.providerDeadlineAt;
+  assert.deepEqual(body, {
     url: 'https://portal.example/apply',
     actions: [{ type: 'fill', selector: '#email', value: 'person@example.com' }],
     screenshot: true,
-    // A caller that says nothing gets a run that CANNOT submit. Asserted on the wire, not on the
-    // option object, because the default has to survive the serialization to be worth anything, and
-    // because this is the line that would have stopped a fill run putting three real applications in
-    // front of three real employers on 2026-08-08.
+    // A caller that does not say allowSubmit gets a run that CANNOT submit, correlated or not.
+    // Asserted on the wire, not on the option object, because the default has to survive the
+    // serialization to be worth anything, and because this is the line that would have stopped a
+    // fill run putting three real applications in front of three real employers on 2026-08-08.
     allowSubmit: false,
     fullPage: true,
     waitUntil: 'domcontentloaded',
@@ -1180,10 +1326,15 @@ test('managed Stratus converts label fills into selector-backed fill actions', a
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example/';
-  let captured: { body?: { actions?: Array<Record<string, unknown>> } } = {};
+  let captured: { body?: { actions?: Array<Record<string, unknown>>; submissionAttempt?: unknown } } = {};
   globalThis.fetch = (async (_input, init) => {
     captured = { body: JSON.parse(String(init?.body)) };
-    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: 'https://portal.example/complete',
+      text: 'Thank you',
+      submissionAttempt: captured.body?.submissionAttempt,
+    } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -1196,7 +1347,7 @@ test('managed Stratus converts label fills into selector-backed fill actions', a
     label: 'first_name_label',
     optional: true,
     timeout: 10000,
-  }]);
+  }], { scanCorrelation: true });
 
   assert.deepEqual(captured.body?.actions?.map((action) => action.type), ['fillByLabelText']);
   const action = captured.body?.actions?.[0];
@@ -1484,7 +1635,7 @@ test('managed Stratus selector errors include a sanitized outbound action audit'
     runManagedBrowser('https://portal.example/apply', [
       { type: 'fill', selector: '#email', value: 'private@example.com', label: 'email' },
       { type: 'discover', label: 'discover_questions' },
-    ]),
+    ], { scanCorrelation: true }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /Each selector must be a non-empty string/);
@@ -1556,10 +1707,15 @@ test('managed Stratus drops optional invalid selectors and rejects required inva
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example';
-  let captured: { body?: { actions?: Array<Record<string, unknown>> } } = {};
+  let captured: { body?: { actions?: Array<Record<string, unknown>>; submissionAttempt?: unknown } } = {};
   globalThis.fetch = (async (_input, init) => {
     captured = { body: JSON.parse(String(init?.body)) };
-    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: 'https://portal.example/complete',
+      text: 'Thank you',
+      submissionAttempt: captured.body?.submissionAttempt,
+    } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -1568,7 +1724,7 @@ test('managed Stratus drops optional invalid selectors and rejects required inva
   await runManagedBrowser('https://portal.example/apply', [
     { type: 'fillByLabelText', text: '', value: 'Taylor', label: 'optional_empty_label', optional: true },
     { type: 'fill', selector: '#email', value: 'person@example.com', label: 'email' },
-  ]);
+  ], { scanCorrelation: true });
 
   assert.deepEqual(captured.body?.actions, [
     { type: 'fill', selector: '#email', value: 'person@example.com', label: 'email' },
@@ -1922,14 +2078,19 @@ test('managed Stratus Greenhouse builder payloads are selector-safe after normal
   const applicationUrl = 'https://job-boards.greenhouse.io/embed/job_app?for=akunacapital&token=8018893';
   const capturedBodies: Array<{ actions?: Array<Record<string, unknown>> }> = [];
   globalThis.fetch = (async (_input, init) => {
-    const body = JSON.parse(String(init?.body)) as { actions?: Array<Record<string, unknown>> };
+    const body = JSON.parse(String(init?.body)) as {
+      actions?: Array<Record<string, unknown>>;
+      submissionAttempt?: unknown;
+    };
     capturedBodies.push(body);
     const submits = body.actions?.some((action) => action.type === 'confirmAndSubmit') ?? false;
     return new Response(JSON.stringify({ run: {
       title: 'Complete',
       url: submits ? 'https://portal.example/complete' : applicationUrl,
       text: 'Thank you',
+      submissionAttempt: body.submissionAttempt,
       ...(submits ? {
+        terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID },
         capabilities: [MANAGED_EXACT_PAGE_URL_CAPABILITY],
         exactPageUrlProof: {
           expected: applicationUrl,
@@ -1981,8 +2142,14 @@ test('managed Stratus Greenhouse builder payloads are selector-safe after normal
     questions: [{ question: 'Why this role?', answer: 'I enjoy full stack engineering.' }],
   };
 
-  await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions('greenhouse', packet));
-  await runManagedBrowser(applicationUrl, buildManagedPortalActions('greenhouse', packet, true, applicationUrl));
+  // The discovery pass mutates (it fills fixed fields), so it carries the ephemeral scan pair; the
+  // submit run carries the durable-attempt submit options, exactly as the runner launches them.
+  await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions('greenhouse', packet), { scanCorrelation: true });
+  await runManagedBrowser(applicationUrl, buildManagedPortalActions('greenhouse', packet, true, applicationUrl), {
+    allowSubmit: true,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    providerDeadlineAt: managedProviderDeadlineAt(),
+  });
 
   assert.equal(capturedBodies.length, 2);
   for (const body of capturedBodies) {
