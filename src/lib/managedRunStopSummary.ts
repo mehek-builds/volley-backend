@@ -37,6 +37,15 @@ export type ManagedRunStopDetail = {
 export type ManagedRunStopSummary = { sentence: string; detail: ManagedRunStopDetail };
 
 const OUTCOME_KEY = /^[a-z][a-z0-9_-]{0,39}$/i;
+/* The runner's own enum words for the three states the sentence quotes; anything else folds to
+   "other", the same way an unexpected action outcome does, so nothing page-derived can ever ride
+   into the sentence even if a future runner widened a field. */
+const HUMAN_VERIFICATION_KINDS = new Set(['security_code']);
+const SUBMIT_STATES = new Set(['confirmed', 'rejected', 'unknown', 'not_attempted']);
+const REQUIRED_FIELD_STATUSES = new Set(['confirmed', 'blocked']);
+const enumWord = (value: unknown, allowed: Set<string>): string | null => (
+  typeof value === 'string' ? (allowed.has(value) ? value : 'other') : null
+);
 
 function countBy(values: readonly string[]): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -45,7 +54,7 @@ function countBy(values: readonly string[]): Record<string, number> {
 }
 
 function bucket(count: number): string {
-  if (count <= 0) return 'none';
+  if (count <= 0) return 'no';
   if (count === 1) return 'one';
   return 'several';
 }
@@ -65,12 +74,10 @@ export function managedRunStopSummary(result: Partial<ManagedBrowserResult> | nu
     filledFields: Array.isArray(result?.filledFields) ? result.filledFields.length : 0,
     blockerCount,
     skippedCount,
-    humanVerification: result?.humanVerification?.kind ?? null,
+    humanVerification: enumWord(result?.humanVerification?.kind, HUMAN_VERIFICATION_KINDS),
     submitPressed: submit?.pressed === true,
-    submitState: typeof submit?.state === 'string' ? submit.state : null,
-    requiredFieldConfirmation: typeof result?.requiredFieldConfirmation?.status === 'string'
-      ? result.requiredFieldConfirmation.status
-      : null,
+    submitState: enumWord(submit?.state, SUBMIT_STATES),
+    requiredFieldConfirmation: enumWord(result?.requiredFieldConfirmation?.status, REQUIRED_FIELD_STATUSES),
     blockedSubmits: typeof result?.blockedSubmits === 'number' ? result.blockedSubmits : 0,
     actionOutcomes,
     exactPageUrlProof: Boolean(result?.exactPageUrlProof?.beforeActions),

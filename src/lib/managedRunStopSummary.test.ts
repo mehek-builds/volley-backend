@@ -8,7 +8,7 @@ const LABEL = 'question_date:0:2:date of birth';
 test('a run that never rendered says so, instead of hiding behind the missing preview', () => {
   const { sentence, detail } = managedRunStopSummary({ title: '', url: 'https://x.breezy.hr/p/1', text: '' });
   assert.equal(detail.textLength, 0);
-  assert.match(sentence, /^the page never rendered, none fields filled/u);
+  assert.match(sentence, /^the page never rendered, no fields filled/u);
   const { error, detail: errorDetail } = previewScreenshotMissing({ title: '', url: 'https://x.breezy.hr/p/1', text: '' });
   assert.match(error.message, /^Stratus managed browser did not return a preview screenshot; the run reported: the page never rendered/u);
   assert.equal(errorDetail.textLength, 0);
@@ -58,8 +58,21 @@ test('the sentence is the same for two runs that stopped the same way, so they s
   assert.notEqual(a.detail.textLength, b.detail.textLength);
 });
 
+test('an unknown enum word folds to other, never to the page', () => {
+  const { sentence, detail } = managedRunStopSummary({
+    text: 'x',
+    humanVerification: { kind: 'SECRET KIND' as never, fieldCount: 1, sentTo: null },
+    submitOutcome: { pressed: true, state: 'SECRET STATE' as never },
+    requiredFieldConfirmation: { version: 2, status: 'SECRET STATUS' as never, passes: [] } as never,
+  });
+  assert.equal(detail.humanVerification, 'other');
+  assert.equal(detail.submitState, 'other');
+  assert.equal(detail.requiredFieldConfirmation, 'other');
+  assert.equal(sentence.includes('SECRET'), false);
+});
+
 test('a null result summarises without throwing', () => {
   const { sentence, detail } = managedRunStopSummary(null);
   assert.equal(detail.blockerCount, 0);
-  assert.equal(sentence, 'the page never rendered, none fields filled');
+  assert.equal(sentence, 'the page never rendered, no fields filled');
 });
