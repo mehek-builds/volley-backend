@@ -7888,8 +7888,41 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
  * list comes back with its real choices instead of a guess. Roughly 25 actions on Greenhouse and
  * one everywhere else, against buildManagedDiscoveryActions' 120-action budget.
  */
+/* The read scan navigates with waitUntil:'domcontentloaded' (browserbase.ts, chosen for the runtime
+ * budget), which fires the moment the HTML is parsed - BEFORE a React ATS has executed its JS and
+ * rendered its application form. On an Ashby posting the initial HTML carries zero form controls
+ * (measured live 2026-09-01: the raw HTML had 0 inputs/selects/textareas while the rendered form had
+ * 28), so `discover` walked an empty DOM and returned nothing -> discovery_status 'form_not_reached'
+ * -> the onboarding pre-scan read nothing, on every SPA-based board (Greenhouse ships its form in the
+ * initial HTML, which is why it was the only family that ever scanned 'ok'). The submit path already
+ * waits for its form (greenhouse_application_form_ready, workable_application_form_ready); the read
+ * path did not. So wait, bounded and optional, for the FIRST real form control to render before
+ * discovering. Generic on purpose - the scan runs for every family - and it excludes hidden/button
+ * inputs so a lone submit button or a react-select backing field does not satisfy it early. */
+const PRESCRIPT_FORM_READY_SELECTOR = [
+  'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"])',
+  'textarea',
+  'select',
+  '[role="combobox"]',
+  '[role="radio"]',
+  '[role="checkbox"]',
+  '[role="listbox"]',
+  '[role="textbox"]',
+  '[contenteditable="true"]',
+].join(', ');
+
 export function buildManagedPrescriptActions(portal: SupportedPortal): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [];
+  // Wait for the application form to actually render before reading it. Optional so a genuinely
+  // form-less page (or one slower than the budget) still falls through to discover rather than
+  // erroring; discover then reads whatever is there.
+  actions.push({
+    type: 'waitForSelector',
+    selector: PRESCRIPT_FORM_READY_SELECTOR,
+    label: 'prescript_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
   // Round one warms the async option fetches; see pushManagedReactSelectOptionProbeActions for why
   // the read that matters is round two, after `discover` has walked the DOM.
   pushManagedReactSelectOptionProbeActions(actions, portal, 1);
