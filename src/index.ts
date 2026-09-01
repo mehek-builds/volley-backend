@@ -41,6 +41,7 @@ import { applicationFromJobRoutes } from './routes/applicationFromJob';
 import { managedPrepareRoutes } from './routes/managedPrepare';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { autopilotMatcherRoutes } from './routes/autopilotMatcher';
+import { reconcileSubmissionConfirmationsRoutes } from './routes/reconcileSubmissionConfirmations';
 import { captchaStallRoutes } from './routes/captchaStalls';
 import { jobExtractRoutes } from './routes/jobExtract';
 import { postingQuestionsRoutes } from './routes/postingQuestions';
@@ -476,6 +477,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(autopilotMatcherRoutes);
+  await fastify.register(reconcileSubmissionConfirmationsRoutes);
   await fastify.register(jobExtractRoutes);
   await fastify.register(postingQuestionsRoutes);
   await fastify.register(jobMonitorRoutes);
