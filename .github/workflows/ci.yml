@@ -179,8 +179,13 @@ jobs:
   # the script had printed a single line. If the board grows enough that the heartbeat lines show
   # honest progress running past this, raise it with the measurement rather than trimming it back.
     timeout-minutes: 20
-    # No schedule gate, unlike its neighbours: the hourly cron exists to catch logo drift that only
-    # a live measurement can see, and `changes` resolves to true for a schedule event.
+    # No schedule gate, unlike its neighbours: the DAILY cron above exists to catch logo drift that
+    # only a live measurement can see, and `changes` resolves to true for a schedule event, so this
+    # is the one job a scheduled run actually executes (its neighbours all skip). The comment here
+    # said "hourly" until 2026-09-01, left behind when the schedule moved to daily for the billing
+    # reason recorded at the top of this file, and it is worth being exact: somebody reading it
+    # will otherwise wait an hour for a run that comes tomorrow. GitHub also delays scheduled
+    # workflows under load, so the 07:17 UTC spec has been observed firing after 12:00 UTC.
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
