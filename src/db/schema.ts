@@ -1937,6 +1937,16 @@ export const career_page_sources = pgTable('career_page_sources', {
   // successful first-party list observation from the exact worker drain it is certifying.
   last_successful_poll_at: timestamp('last_successful_poll_at', { withTimezone: true }),
   last_error: text('last_error'),
+  // The last successful poll's raw list size and how many of those postings survived normalization,
+  // written together and only by a poll that completed its sweep-and-upsert (guard-preserved polls
+  // never touch them, so a fault cannot poison the baseline). Their difference is the per-poll
+  // rejection count, and the next poll compares its own rejections against it: employer-hosted
+  // absolute_url boards (Stripe, Databricks shapes) are host-rejected at a steady baseline BY
+  // DESIGN, so only a jump versus this baseline - a provider format drift sweeping most of a board
+  // on a poll recorded as a success - is a fault. NULL means no completed poll under this code yet,
+  // which deliberately reads as "no baseline, never alert". See rejectionSpikeExceedsBaseline.
+  last_poll_listed_count: integer('last_poll_listed_count'),
+  last_poll_normalized_count: integer('last_poll_normalized_count'),
   // Set when this company has an H-1B filing record (see sponsor_employers). NULL means either
   // "checked, nothing found" or "never checked" - the difference is visible in the generated data
   // file, and a test asserts every board company appears there, so it cannot silently be the
