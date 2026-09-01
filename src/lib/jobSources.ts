@@ -74,7 +74,6 @@ const BASE_ENTRIES: Entry[] = [
   ['SoFi', 'greenhouse', 'sofi'],
   ['Carta', 'greenhouse', 'carta'],
   ['Betterment', 'greenhouse', 'betterment'],
-  ['Marqeta', 'greenhouse', 'marqeta'],
   ['Gemini', 'greenhouse', 'gemini'],
   ['Ramp', 'ashby', 'ramp'],
 
