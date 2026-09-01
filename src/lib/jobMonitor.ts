@@ -351,6 +351,28 @@ function strictSourceToken(
     : normalizeExecutableAtsBoardToken(provider, boardToken);
 }
 
+/**
+ * Which regional embed host a constructed Greenhouse action URL should use. REGION ONLY: the
+ * payload URL's content is never trusted, its host merely selects between two first-party
+ * constants, because an EU-silo tenant's embed route does not exist on the US host (see the EU
+ * hosts in GREENHOUSE_ACTION_HOSTS and the host preservation in canonicalMonitoredPortalUrl).
+ * Anything unparseable or non-EU, including every employer-hosted custom domain, gets the default
+ * host - the same one the board API that listed the posting answers from.
+ */
+function greenhouseEmbedHost(raw: unknown): string {
+  if (typeof raw === 'string') {
+    try {
+      const host = new URL(raw).hostname.toLowerCase();
+      if (host === 'boards.eu.greenhouse.io' || host === 'job-boards.eu.greenhouse.io') {
+        return 'job-boards.eu.greenhouse.io';
+      }
+    } catch {
+      /* Unparseable payload URL: the default host below. */
+    }
+  }
+  return 'job-boards.greenhouse.io';
+}
+
 export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
   const jobs = (payload as { jobs?: unknown[] } | null)?.jobs;
   if (!Array.isArray(jobs)) throw new Error('Greenhouse board returned an invalid jobs payload');
@@ -370,8 +392,31 @@ export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): 
         /* Greenhouse's own tracking suffix, and only with this job's exact id. See exactActionUrl. */
         new Map([['gh_jid', id]]),
       );
-      if (!action) return [];
-      postingUrl = action.canonical;
+      if (action) {
+        postingUrl = action.canonical;
+      } else {
+        /* EMPLOYER-HOSTED (EMBEDDED) BOARDS. Many Greenhouse tenants publish absolute_url on their
+           own domain ("https://careers.abarcahealth.com/details/?gh_jid=7823013003" - Abarca,
+           Hello Heart, Two Chairs, Suki; ~62 such boards resolve in greenhouseEmbeddedBoards.ts).
+           That URL is payload data on an arbitrary host and is never trusted or stored - but the
+           POSTING is real, because it came from the token-scoped board API this module just asked.
+           Dropping it silently darkened 17 boards permanently (surfaced by the fully-rejected
+           guard, 2026-09-01).
+           So when the payload URL fails strict validation, the action URL is CONSTRUCTED from the
+           only two facts that matter and are already validated: our own board token and the board
+           API's numeric job id. The shape is Greenhouse's first-party embed route - exactly what
+           canonicalMonitoredPortalUrl produces for every stored Greenhouse job at submission time
+           (see greenhouseEmbeddedBoards.embeddedGreenhouseApplicationUrl), so the apply path is the
+           already-proven one. Nothing from absolute_url survives into the row either way.
+           Non-numeric ids stay dropped: a constructed URL is only as sound as its parts, and every
+           live Greenhouse id is a plain global counter (measured across 26,702 ids). The 7-digit
+           floor GREENHOUSE_JOB_ID applies in greenhouseEmbeddedBoards is deliberately NOT applied
+           here: that floor is an embed-detection heuristic for arbitrary company pages, and ids
+           here come from the token-scoped board API, where the 18 measured sub-7-digit ids are
+           genuine postings. */
+        if (!/^[1-9]\d{0,11}$/.test(id)) return [];
+        postingUrl = `https://${greenhouseEmbedHost(job.absolute_url)}/embed/job_app?for=${encodeURIComponent(expectedToken)}&token=${id}`;
+      }
     }
     if (!id || !title || !postingUrl) return [];
     const location = text((job.location as Record<string, unknown> | undefined)?.name);
@@ -862,6 +907,14 @@ export type SourceJobFetch = {
   listed_external_ids: string[];
   preserve_external_ids: string[];
   detail_progress?: DetailFetchProgress;
+  /**
+   * The first-party tenant slug this fetch actually validated against, when the provider itself
+   * redirected the list request away from the configured token (a renamed Recruitee subdomain).
+   * The caller must PERSIST this on the source row: the stored posting URLs live on the adopted
+   * host, and the submission-time canonicalizer binds them to the source's configured token, so an
+   * unpersisted adoption produces jobs that display but can never be applied to.
+   */
+  adopted_board_token?: string;
 };
 
 export type DetailFetchOptions = {
@@ -1588,6 +1641,31 @@ function uniqueListedExternalIds(
   return [...new Set(records.map(identity).filter((id): id is string => Boolean(id)))];
 }
 
+/**
+ * The tenant slug a followed Recruitee list fetch actually landed on, or null for anything that is
+ * not exactly a first-party `https://{slug}.recruitee.com/api/offers/` URL on default port with no
+ * credentials - the same rejections every other first-party URL check in this file makes.
+ * normalizeExecutableAtsBoardToken is the single slug authority (DNS-label rules), exactly as for
+ * a configured token, so a redirect to any other host, path, or shape changes nothing.
+ */
+function recruiteeTenantFromFinalUrl(finalUrl: string): string | null {
+  if (!finalUrl) return null;
+  let url: URL;
+  try {
+    url = new URL(finalUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port
+    || url.pathname !== '/api/offers/') return null;
+  const host = url.hostname.toLowerCase();
+  const suffix = '.recruitee.com';
+  if (!host.endsWith(suffix)) return null;
+  const slug = host.slice(0, -suffix.length);
+  if (!slug || slug.includes('.')) return null;
+  return normalizeExecutableAtsBoardToken('recruitee', slug);
+}
+
 export async function fetchSourceJobBatch(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch = fetch,
@@ -1607,6 +1685,7 @@ export async function fetchSourceJobBatch(
   const payload = await response.json();
   let jobs: NormalizedJob[];
   let listedExternalIds: string[] | undefined;
+  let adoptedBoardToken: string | undefined;
   switch (source.ats_name) {
     case 'greenhouse': {
       jobs = normalizeGreenhouseJobs(payload, boardToken);
@@ -1649,7 +1728,18 @@ export async function fetchSourceJobBatch(
       break;
     }
     case 'recruitee': {
-      jobs = normalizeRecruiteeJobs(payload, boardToken);
+      /* RENAMED RECRUITEE TENANTS. When a company renames its Recruitee subdomain, the old
+         tenant's list endpoint answers 302 to the new one (billwerk -> frisbii, graphcms ->
+         hygraph, gtn -> elan; 36 live boards measured 2026-09-01), fetch follows it, and every
+         offer in hand then belongs to the NEW tenant - so validating against the configured token
+         rejected the entire board on every poll. The redirect is recruitee.com's own https
+         statement about where the tenant lives now, and the adopted token is constrained to the
+         same first-party host shape and slug rules as a configured one, so cross-provider or
+         lookalike redirects fall back to the configured token and fail validation exactly as
+         before. Injected test fetchers whose Response carries no url also fall back. */
+      const redirectedToken = recruiteeTenantFromFinalUrl(response.url);
+      if (redirectedToken && redirectedToken !== boardToken) adoptedBoardToken = redirectedToken;
+      jobs = normalizeRecruiteeJobs(payload, adoptedBoardToken ?? boardToken);
       listedExternalIds = uniqueListedExternalIds(
         (payload as { offers: unknown[] }).offers,
         (raw) => externalIdentifier((raw as Record<string, unknown>).id),
@@ -1661,10 +1751,14 @@ export async function fetchSourceJobBatch(
   return {
     jobs,
     /* The raw provider identity list remains authoritative for the empty-board guard and closure.
-       A row with a malformed action URL is listed but intentionally absent from jobs, so it is
-       deactivated instead of receiving ingest_eligible=true or making a nonempty board look empty. */
+       For Lever, Ashby, Workable, and Recruitee a row with a malformed action URL is listed but
+       intentionally absent from jobs, so it is deactivated instead of receiving
+       ingest_eligible=true or making a nonempty board look empty. Greenhouse is the exception:
+       its action URL is constructed from token + id (see normalizeGreenhouseJobs), so only a
+       malformed IDENTITY excludes a listed posting there. */
     listed_external_ids: listedExternalIds ?? jobs.map((job) => job.external_id),
     preserve_external_ids: [],
+    ...(adoptedBoardToken ? { adopted_board_token: adoptedBoardToken } : {}),
   };
 }
 
