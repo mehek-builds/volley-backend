@@ -517,10 +517,11 @@ test('Recruitee ships a code, not a word, and the code is still an employment ty
   assert.equal(normalizeEmploymentType('fulltime_permanent'), 'Full-time');    // 11,164 live
   assert.equal(normalizeEmploymentType('parttime_permanent'), 'Part-time');    //  1,683 live
   assert.equal(normalizeEmploymentType('parttime_minijob'), 'Part-time');      //    206 live
-  // Fixed term is a contract however many hours it runs, which is the same call the anchored rule
-  // above already makes for "Full Time Contractor".
-  assert.equal(normalizeEmploymentType('fulltime_fixed_term'), 'Contract');    //  3,550 live
-  assert.equal(normalizeEmploymentType('parttime_fixed_term'), 'Contract');    //  1,886 live
+  // The code states hours AND tenure, and the hours are the half both filters run on, so they win.
+  // Reading these as Contract dropped 3,550 postings out of every full-time match with no role type
+  // able to recover them - see the hours-win test below.
+  assert.equal(normalizeEmploymentType('fulltime_fixed_term'), 'Full-time');   //  3,550 live
+  assert.equal(normalizeEmploymentType('parttime_fixed_term'), 'Part-time');   //  1,886 live
 });
 
 test('a payroll or site qualifier welded onto the type does not hide the type', () => {
@@ -552,15 +553,39 @@ test('the type survives being said in another language', () => {
 });
 
 test('precedence holds when a value carries more than one signal', () => {
-  // Contract above hours, or `fulltime_fixed_term` reads as a permanent full-time job.
-  assert.equal(normalizeEmploymentType('Seasonal, full-time'), 'Contract');
-  assert.equal(normalizeEmploymentType('Temps plein - Temporaire'), 'Contract');
-  assert.equal(normalizeEmploymentType('Full Time - 1099'), 'Contract');
   // Part-time above full-time, or "Permanent Part-Time" reads as permanent-therefore-full-time.
   assert.equal(normalizeEmploymentType('Permanent Part-Time'), 'Part-time');
   assert.equal(normalizeEmploymentType('Part Time Permanent - Team Member (Retail)'), 'Part-time');
   // Internship above everything: a paid full-time summer placement is still an internship.
   assert.equal(normalizeEmploymentType('Full time - intern'), 'Internship');
+});
+
+test('when a value states both hours and tenure, the hours win', () => {
+  /* BOTH filters this board runs are hours filters - targetingConditions matches
+     `employment_type ~* 'full.?time'` and matchingRoleType sets isNonFullTime from the same word -
+     and ROLE_TYPES has no contract entry, so a posting typed Contract leaves targeting rather than
+     moving to another filter. Reading the tenure half here cost 3,676 live postings their
+     full-time matches with nothing able to bring them back. */
+  assert.equal(normalizeEmploymentType('fulltime_fixed_term'), 'Full-time');   // 3,550 live
+  assert.equal(normalizeEmploymentType('Full Time - 1099'), 'Full-time');      //    64 live
+  assert.equal(normalizeEmploymentType('Per Diem, Part-Time or Full Time'), 'Full-time'); // 36
+  assert.equal(normalizeEmploymentType('Seasonal, full-time'), 'Full-time');   //     8 live
+  assert.equal(normalizeEmploymentType('PT Temp/Seasonal'), 'Part-time');      //    91 live
+  assert.equal(normalizeEmploymentType('Part-time (Seasonal)'), 'Part-time');  //     6 live
+});
+
+test('a value that states only tenure is still a contract', () => {
+  // Nothing here says how many hours, so there is no hours fact to prefer.
+  for (const value of ['Freelance', 'Per Diem', 'PRN', 'Casual', 'Seasonal', 'Interim', 'Locum',
+    '1099', 'Contingent Worker', 'Maternity Cover', 'Casual Seasonal']) {
+    assert.equal(normalizeEmploymentType(value), 'Contract', value);
+  }
+  /* Lever's bare "Fixed Term" is untouched by the hours rule, and is right to be: it is caught by
+     the anchored pass above precisely because it carries no hours. */
+  assert.equal(normalizeEmploymentType('Fixed Term'), 'Contract');
+  assert.equal(normalizeEmploymentType('Short Term'), 'Contract');
+  // And the oldest guard of all still holds, from the anchored pass.
+  assert.equal(normalizeEmploymentType('Full Time Contractor'), 'Contract');
 });
 
 test('a posting offered as either full or part time stays reachable from a filter', () => {
