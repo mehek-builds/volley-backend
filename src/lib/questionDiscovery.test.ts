@@ -2669,6 +2669,11 @@ test('a label merely containing a profile keyword is not grounds to answer it wi
   assert.equal(classifyField('Select country calling code: united states'), 'phone_country');
   assert.equal(classifyField('Country code'), 'phone_country');
   assert.equal(classifyField('Phone country code'), 'phone_country');
+  assert.equal(classifyField('Telephone country code'), 'phone_country');
+  // The run sees the live control type and the refresh sees 'text'; both must say the same thing.
+  assert.equal(classifyField('Country code', 'tel'), 'phone_country');
+  assert.equal(classifyField('Country code', 'text'), 'phone_country');
+  assert.equal(classifyField('Phone number', 'tel'), 'phone');
   assert.equal(classifyField('phone number with country code +1 201-555-0123'), 'phone');
   assert.equal(classifyField('State / Province'), 'address_state');
   assert.equal(classifyField('City'), 'address_city');

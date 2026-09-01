@@ -23,13 +23,14 @@
 
 /**
  * A label asking WHICH CODE, not which number. "Select country calling code", "Country code",
- * "Phone country code", "International dialling code (e.g. +1)". A label that asks for the phone
+ * "Phone country code", "Telephone country code" (Workable's own aria-label), "Mobile country
+ * code", "Choose country code", "International dialling code (e.g. +1)". A label that asks for the phone
  * number and merely mentions its code ("phone number with country code +1 201-555-0123", the
  * teamtailor placeholder) is the phone field and must stay with the phone rule, which is why the
  * bare "country code" form has to open the label and "phone number" is refused outright.
  */
 export const CALLING_CODE_QUESTION =
-  /\b(?:country\s+|phone\s+|international\s+)?(?:calling|dial(?:l?ing)?)\s+code\b|^\s*(?:(?:please\s+)?select\s+(?:your\s+|a\s+)?|your\s+)?(?:phone\s+)?country\s+code\b/i;
+  /\b(?:country\s+|phone\s+|international\s+)?(?:calling|dial(?:l?ing)?)\s+code\b|^\s*(?:what\s+is\s+your\s+|(?:please\s+)?(?:select|choose|enter|pick)\s+(?:your\s+|a\s+)?|your\s+)?(?:(?:tele)?phone\s+|mobile\s+|cell(?:ular)?\s+)?country\s+code\b/i;
 
 const PHONE_NUMBER_ITSELF = /\b(?:phone|mobile|cell(?:ular)?|telephone)\s+numbers?\b/i;
 

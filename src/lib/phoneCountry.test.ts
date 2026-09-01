@@ -23,6 +23,12 @@ test('a label asking which code is a calling-code question; one asking for the n
   assert.equal(isCallingCodeQuestion('Please select your country code'), true);
   assert.equal(isCallingCodeQuestion('International dialling code (e.g. +1)'), true);
   assert.equal(isCallingCodeQuestion('Dial code'), true);
+  assert.equal(isCallingCodeQuestion('Telephone country code'), true);
+  assert.equal(isCallingCodeQuestion('What is your telephone country code?'), true);
+  assert.equal(isCallingCodeQuestion('Mobile country code'), true);
+  assert.equal(isCallingCodeQuestion('Choose country code'), true);
+  assert.equal(isCallingCodeQuestion('Enter country code'), true);
+  assert.equal(isCallingCodeQuestion('Phone number country code'), false);
   // The teamtailor placeholder label asks for the number and only mentions its code.
   assert.equal(isCallingCodeQuestion('phone number with country code +1 201-555-0123'), false);
   assert.equal(isCallingCodeQuestion('Mobile number (include country code)'), false);

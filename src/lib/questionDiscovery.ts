@@ -5338,12 +5338,17 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
    * broad rule could still reach the label - and "are you 18+ years of age?" must never be
    * classified as a date of birth, an availability date or anything else. */
   if (AGE_ATTESTATION_QUESTION.test(l)) return null;
-  if (type === 'tel') return 'phone';
-  /* A DIAL-CODE PICKER WANTS THE COUNTRY THE NUMBER BELONGS TO, and it is asked before the phone
-   * rule because "phone country code" names the code, not the number. RESIDENCE_QUESTION already
-   * refuses every "country code" form so that a picker is never answered with where she lives; this
-   * is the intent that answers it instead. See lib/phoneCountry.ts for the measured case. */
+  /* A DIAL-CODE PICKER WANTS THE COUNTRY THE NUMBER BELONGS TO, and it is asked before BOTH phone
+   * rules: before the label rule because "phone country code" names the code, not the number, and
+   * before the tel-type escape because the refresh resolves every question as 'text' and the two
+   * sides must agree (a tel box labelled "Country code" answered "phone" by the run and
+   * "phone_country" by the refresh is the packet_stale deadlock documented below). A tel box that
+   * gets a country name rejects it in the open, which the run reports; the flip never does.
+   * RESIDENCE_QUESTION already refuses every "country code" form so that a picker is never
+   * answered with where she lives; this is the intent that answers it instead. See
+   * lib/phoneCountry.ts for the measured case. */
   if (isCallingCodeQuestion(l)) return 'phone_country';
+  if (type === 'tel') return 'phone';
   /* A LABEL THAT ASKS FOR A PHONE NUMBER IS THE PHONE FIELD, whatever type the caller knows about.
    *
    * The escape above only fires for callers that saw the live control. refreshKnownQuestionAnswers
