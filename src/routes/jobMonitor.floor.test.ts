@@ -88,9 +88,22 @@ test('the logo gate measures every counted row against its exact employer board'
   const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
   const gate = readFileSync('scripts/check-logo-coverage.mjs', 'utf8');
   assert.match(route, /company_logo_sources: companyLogoSources/);
-  assert.match(route, /groupBy\(monitored_jobs\.company_name, career_page_sources\.career_url\)/);
+  /* Grouped per source pair, with the verifier's evidence riding along. The evidence columns sit
+     in the GROUP BY (they are functionally dependent on the source row, so the granularity stays
+     one row per company-board pair), and they are what lets the coverage check probe the proven
+     asset instead of driving the live resolver 10,000 times, see check-logo-coverage.mjs. */
+  assert.match(
+    route,
+    /groupBy\(\s*monitored_jobs\.company_name,\s*career_page_sources\.career_url,\s*career_page_sources\.company_logo_url,\s*career_page_sources\.company_domain,\s*career_page_sources\.logo_verification_status,\s*\)/,
+  );
+  assert.match(route, /company_logo_url: career_page_sources\.company_logo_url/);
+  assert.match(route, /logo_verification_status: career_page_sources\.logo_verification_status/);
   assert.match(gate, /miss: '404'/, 'a monogram must not pass as a verified logo');
   assert.match(gate, /Every surfaced posting has a verified company logo/);
+  /* The measurement must not regress to resolver-only: the evidence probe is what keeps the
+     check's failures from being its own load (two 2026-09-01 runs missed disjoint sets). */
+  assert.match(gate, /probeEvidenceUrl/);
+  assert.match(gate, /servableImageType/);
 });
 
 test('the scheduled catalog includes reviewed sources and deduplicated operator overrides', () => {
