@@ -241,7 +241,12 @@ const BASE_ENTRIES: Entry[] = [
   // Startups (81 boards, ~2273 postings)
   ['Harvey', 'ashby', 'harvey'],
   ['ElevenLabs', 'ashby', 'elevenlabs'],
-  ['Clickhouse', 'greenhouse', 'clickhouse'],
+  /* ClickHouse left Greenhouse: their `clickhouse` board token began returning 404 on 2026-09-01,
+     while a live board such as stripe still answers 200. They now post through
+     jobs.ashbyhq.com/clickhouse, whose Ashby posting API answered 173 postings the same day and
+     names ClickHouse throughout. Re-pointed rather than retired, so the inventory survives the
+     move, which is the same call made for Marqeta earlier that day. */
+  ['Clickhouse', 'ashby', 'clickhouse'],
   ['decagon', 'ashby', 'decagon'],
   ['LangChain', 'ashby', 'langchain'],
   ['Vercel', 'greenhouse', 'vercel'],
