@@ -168,6 +168,13 @@ const statements = [
   `create unique index if not exists "applications_legacy_resume_unique" on "applications" ("legacy_generated_resume_id") where "legacy_generated_resume_id" is not null`,
   `create unique index if not exists "applications_user_fingerprint_unique" on "applications" ("user_id", "application_fingerprint")`,
   `create index if not exists "applications_user_updated_idx" on "applications" ("user_id", "updated_at")`,
+  /* Taking a row off the Tracker is a stamp, not a delete: nine tables carry an application_id with
+     no foreign key, the attempt ledger among them, and that ledger is what stops a second send to
+     the same employer. See applications.removed_at in schema.ts and
+     scripts/apply-application-removal-migration.mjs, which applies this same pair on its own for an
+     already-migrated production database. */
+  `alter table "applications" add column if not exists "removed_at" timestamp with time zone`,
+  `create index if not exists "applications_user_live_updated_idx" on "applications" ("user_id", "updated_at") where "removed_at" is null`,
   `create table if not exists "artifact_versions" (
     "id" uuid primary key default gen_random_uuid(), "artifact_id" uuid not null references "artifacts"("id") on delete cascade,
     "version_number" integer not null, "generation_source" text not null, "job_context" jsonb,

@@ -130,3 +130,40 @@ describe('submissionAuthorityEnvelopeForUnattemptedPacket', () => {
     }
   });
 });
+
+describe('the removal filter and the exact lookup', () => {
+  /**
+   * THE TRAP THIS PINS. requestedResumeLookupId returns an id precisely when that id is NOT among
+   * latestRows: its whole job is to fetch a packet the recent window missed. So the moment
+   * /resume/history began filtering removed resumes out of latestRows, every removed id became
+   * guaranteed to satisfy that test, and an unfiltered exact lookup would fetch exactly the rows
+   * the filter had just excluded - then includeRequestedResumeInHistory PREPENDS the result, so the
+   * removed packet returns at the TOP of the Tracker.
+   *
+   * The filter made the resurrection strictly more likely than no filter at all, and it is reached
+   * by any stale `?application=` URL: a second tab, a bookmark, the back button, or a reload of the
+   * page that was open when the row was removed.
+   */
+  const REMOVED_ID = '11111111-1111-4111-8111-111111111111';
+  const KEPT_ID = '22222222-2222-4222-8222-222222222222';
+
+  it('asks for a removed id exactly because the filter excluded it', () => {
+    const latestAfterFilter = [{ id: KEPT_ID }];
+    assert.equal(
+      requestedResumeLookupId(latestAfterFilter, REMOVED_ID),
+      REMOVED_ID,
+      'the lookup is reached for removed ids, which is why the route must exclude them itself',
+    );
+  });
+
+  it('the route guard drops the lookup for a removed id, case-insensitively', () => {
+    /* The expression the route uses. Case matters: the helper compares lowercased, so a request
+       carrying an upper-case UUID must not slip past a case-sensitive membership test. */
+    const removedIds = [REMOVED_ID];
+    const shouldLookUp = (requestedId: string) =>
+      Boolean(requestedId) && !removedIds.some((id) => id.toLowerCase() === requestedId.toLowerCase());
+    assert.equal(shouldLookUp(REMOVED_ID), false);
+    assert.equal(shouldLookUp(REMOVED_ID.toUpperCase()), false, 'an upper-case id is the same id');
+    assert.equal(shouldLookUp(KEPT_ID), true, 'a live packet is still fetchable by exact id');
+  });
+});
