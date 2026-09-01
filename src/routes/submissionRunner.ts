@@ -15,6 +15,7 @@ import {
   users,
 } from '../db/schema';
 import { getEntitlementSnapshot } from '../lib/entitlements';
+import { previewScreenshotMissingError } from '../lib/managedRunStopSummary';
 import { confirmedPacketPipelineProjection } from '../lib/canonicalApplicationLifecycle';
 import {
   normalizeManagedFormSnapshot,
@@ -7745,7 +7746,15 @@ async function prepareManaged(
       actionDiagnostics,
     }, 'Managed provider-owned question action diagnostics');
   }
-  if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
+  if (!result.screenshot) {
+    /* The refusal is litos-api's, not the run's, so the run's own account rides on it. Measured
+       live 2026-09-01: this threw two seconds after the fill was requested, three runs in a row,
+       and the stored error named only the missing preview while whatever stopped the run in two
+       seconds stayed invisible. See lib/managedRunStopSummary.ts. */
+    const error = previewScreenshotMissingError(result);
+    fastify.log.error({ applicationId: row.id, portal, stop: error.stop.detail }, 'Managed fill returned no preview screenshot');
+    throw error;
+  }
   /* A value Litos typed that the run then never accounted for.
    *
    * Measured on DRW, 2026-08-08: `question:legal first name` was a single fill of "Mehek" into a
