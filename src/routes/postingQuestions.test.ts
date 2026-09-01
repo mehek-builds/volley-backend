@@ -45,8 +45,10 @@ test('the read-only scan is a fraction of the submission-time discovery pass', (
   assert.ok(prescript.length < buildManagedDiscoveryActions('greenhouse', packet).length);
 });
 
-test('a portal with no react-select comboboxes costs one action', () => {
-  assert.deepEqual(buildManagedPrescriptActions('lever').map((action) => action.type), ['discover']);
+test('a portal with no react-select comboboxes waits for the form, then discovers it', () => {
+  // Two actions now: the form-ready wait (so an SPA board's form has rendered before we read it),
+  // then discover. A no-combobox portal adds no option-probe rounds around them.
+  assert.deepEqual(buildManagedPrescriptActions('lever').map((action) => action.type), ['waitForSelector', 'discover']);
 });
 
 test('dynamic role probing stays off unless this exact Stratus result advertises the role wire', () => {

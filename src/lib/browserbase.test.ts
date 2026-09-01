@@ -299,6 +299,26 @@ test('a mutating read scan correlates its probe clicks yet requires no submit te
   }
 });
 
+test('the read scan waits for the application form to render before discovering it', () => {
+  /* REGRESSION GUARD (2026-09-01). The scan navigates at waitUntil:'domcontentloaded', which fires
+     before a React ATS (Ashby, and every other SPA board) has rendered its form. Measured live: the
+     Ashby raw HTML carried 0 form controls while the rendered form had 28. Without a form-ready wait,
+     discover walked an empty DOM and returned nothing -> discovery_status 'form_not_reached' -> the
+     onboarding pre-scan read nothing on every SPA board (only server-rendered Greenhouse scanned ok).
+     The wait must exist and must precede discover. */
+  for (const portal of ['ashby', 'greenhouse', 'lever', 'workable'] as const) {
+    const actions = buildManagedPrescriptActions(portal);
+    const readyAt = actions.findIndex((a) =>
+      a.type === 'waitForSelector' && (a as { label?: string }).label === 'prescript_application_form_ready');
+    const discoverAt = actions.findIndex((a) => a.type === 'discover');
+    assert.ok(readyAt !== -1, `${portal}: the scan must wait for the form to render`);
+    assert.ok(discoverAt !== -1 && readyAt < discoverAt, `${portal}: the form-ready wait must precede discover`);
+    const ready = actions[readyAt] as { optional?: boolean; selector?: string };
+    assert.equal(ready.optional, true, `${portal}: the wait is optional so a form-less page still falls through`);
+    assert.match(String(ready.selector), /input|textarea|combobox/, `${portal}: it waits for a real form control`);
+  }
+});
+
 test('a read scan refuses to double as a submission and still verifies the correlation echo', async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
