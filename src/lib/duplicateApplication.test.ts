@@ -8,9 +8,11 @@ import {
   duplicateApplicationReason,
   duplicateApplicationResponse,
   isLegacyUnverifiedAttemptReason,
+  ledgerTwin,
   postingIdentity,
   type SubmittedTwinRow,
 } from './duplicateApplication';
+import type { BlockingSubmissionAttempt } from './submissionAttemptLedger';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
 
 /* THE MEASUREMENT THESE TESTS ARE WRITTEN AGAINST.
@@ -238,6 +240,42 @@ describe('the verdict over a set of already-submitted applications', () => {
     assert.deepEqual(attentionCategoriesForReasons([verdict.reason]), ['unverified_submission']);
   });
 
+  test('an opened-only attempt still blocks, but is not described as a press', () => {
+    // A legacy_backfill attempt that only reached attempt_opened - no boundary authorized, no press,
+    // no confirmation. It must still fail closed (a second application cannot be withdrawn), but the
+    // sentence must not claim Litos pressed Send when nothing in evidence shows a send.
+    const verdict = duplicateAmong(akunaContext(), AKUNA_DIRECT_URL, [submitted({
+      submitted_at: null,
+      unverified_at: '2026-08-27T14:11:35.408Z',
+      unverified_send_evidence: 'opened',
+    })]);
+
+    assert.equal(verdict.kind, 'duplicate');
+    if (verdict.kind !== 'duplicate') return;
+    assert.equal(verdict.match.certainty, 'unverified');
+    assert.equal(verdict.match.send_evidence, 'opened');
+    // Honest: no false press, but the same fail-closed refusal and the same resolution path.
+    assert.doesNotMatch(verdict.reason, /already pressed Send/i);
+    assert.match(verdict.reason, /does not know whether this application went through/i);
+    assert.match(verdict.reason, /could make it two/i);
+    // Still the must-not-retry bucket, exactly like the pressed sentence.
+    assert.deepEqual(attentionCategoriesForReasons([verdict.reason]), ['unverified_submission']);
+  });
+
+  test('a real unverified press keeps the pressed-Send sentence', () => {
+    const verdict = duplicateAmong(akunaContext(), AKUNA_DIRECT_URL, [submitted({
+      submitted_at: null,
+      unverified_at: '2026-08-27T14:11:35.408Z',
+      unverified_send_evidence: 'pressed',
+    })]);
+
+    assert.equal(verdict.kind, 'duplicate');
+    if (verdict.kind !== 'duplicate') return;
+    assert.equal(verdict.match.certainty, 'unverified');
+    assert.match(verdict.reason, /already pressed Send/i);
+    assert.deepEqual(attentionCategoriesForReasons([verdict.reason]), ['unverified_submission']);
+  });
+
   test('a packet that shares no key with anything submitted says so', () => {
     const verdict = duplicateAmong({}, undefined, [submitted()]);
     assert.equal(verdict.kind, 'unidentifiable');
@@ -414,5 +452,52 @@ describe('every path that can write status submitted is behind the guard', () =>
     assert.match(gate, /duplicate\.reason/);
     assert.match(gate, /attention_categories:[\s\S]{0,300}'duplicate_application'/);
     assert.match(gate, /'needs_attention'/);
+  });
+});
+
+describe('ledgerTwin translates the attempt retry-safety reason into send evidence', () => {
+  const blockingAttempt = (
+    retrySafety: Extract<BlockingSubmissionAttempt['retrySafety'], { kind: 'blocked_unverified' }>,
+  ): BlockingSubmissionAttempt => ({
+    attemptId: '23f289d6-f68b-4f90-ab6f-b3951b11f242',
+    parentAttemptId: null,
+    userId: 'a18f774b-0000-4000-8000-000000000000',
+    packetId: '9f1d9e52-06b0-4786-baa6-201d3422104a',
+    applicationId: '222d70a6-6f4b-4293-b752-4252c768482f',
+    source: 'legacy_backfill',
+    operation: 'initial_submission',
+    postingIdentity: {
+      postingKey: null,
+      jobId: null,
+      companyRole: 'notion|software engineer intern',
+      company: 'Notion',
+      role: 'Software Engineer Intern (Summer 2027)',
+      portalUrl: 'https://jobs.ashbyhq.com/notion',
+      portalIdentity: null,
+    },
+    retrySafety,
+  });
+
+  test("an attempt that only opened is 'opened', not a press", () => {
+    const row = ledgerTwin(blockingAttempt({
+      kind: 'blocked_unverified',
+      attemptId: '23f289d6-f68b-4f90-ab6f-b3951b11f242',
+      at: '2026-08-27T14:11:35.408Z',
+      reason: 'opened',
+    }));
+    assert.equal(row.unverified_send_evidence, 'opened');
+    assert.equal(row.unverified_at, '2026-08-27T14:11:35.408Z');
+  });
+
+  test("a boundary-authorized attempt is a real 'pressed' send", () => {
+    const row = ledgerTwin(blockingAttempt({
+      kind: 'blocked_unverified',
+      attemptId: '23f289d6-f68b-4f90-ab6f-b3951b11f242',
+      at: '2026-08-27T14:11:35.408Z',
+      reason: 'boundary_authorized',
+      leaseId: 'lease-1',
+      expiresAt: '2026-08-27T14:41:35.408Z',
+    }));
+    assert.equal(row.unverified_send_evidence, 'pressed');
   });
 });
