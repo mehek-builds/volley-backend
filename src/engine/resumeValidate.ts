@@ -318,13 +318,26 @@ function pastTenseCandidates(word: string): string[] {
   return out;
 }
 
-export function startsWithStrongVerb(bullet: string): boolean {
+/* Does this bullet OPEN with one of these verbs, in any tense or spelling this file admits?
+ *
+ * One implementation for both verb sets, because they were answering differently about the same
+ * word. The hard gate ran the opener through the tense derivation; the ownership check below
+ * compared the raw first word against a past-tense-only list, so once participles cleared the hard
+ * gate, "Leading a design review each sprint" passed as a strong opener and was then warned for
+ * having no ownership signal while "Led a design review each sprint" was not. Same verb, same
+ * bullet, two verdicts, decided by a tense the applicant chose because the role is current.
+ */
+function opensWithVerbFrom(bullet: string, verbs: ReadonlySet<string>): boolean {
   const first = firstWordOf(bullet);
   if (!first) return false;
   // "co-" inherits the base verb's strength: co-authoring a paper is as real as authoring one.
   const base = first.startsWith('co-') ? first.slice(3) : first;
   if (!base) return false;
-  return pastTenseCandidates(base).some((form) => STRONG_VERBS.has(form));
+  return pastTenseCandidates(base).some((form) => verbs.has(form));
+}
+
+export function startsWithStrongVerb(bullet: string): boolean {
+  return opensWithVerbFrom(bullet, STRONG_VERBS);
 }
 
 /** Bullets in a spec that break the rule, as "Org: verb" strings for prompt feedback. */
@@ -1066,13 +1079,11 @@ export function validateResumeSpec(
 
       const words = bullet.trim().split(/\s+/);
       const nWords = words.length;
-      const first = firstWordOf(bullet);
       // The one shared implementation of the hard rule (see startsWithStrongVerb above), so the
       // validator, both generation prompts, the base build's retry and the /start editor can never
       // disagree about what counts as a strong opener.
       const isAction = startsWithStrongVerb(bullet);
-      const isInitiative =
-        INITIATIVE_VERBS.has(first) || (first.startsWith('co-') && INITIATIVE_VERBS.has(first.slice(3)));
+      const isInitiative = opensWithVerbFrom(bullet, INITIATIVE_VERBS);
       const hasMetric = METRIC_RE.test(bullet);
       const andCount = (bullet.toLowerCase().match(/\band\b/g) ?? []).length;
       const hits = [...contentWords(bullet)].filter((w) => kw.has(w)).length;

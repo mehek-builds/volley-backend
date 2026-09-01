@@ -166,6 +166,60 @@ describe('the whole packet clears the send gate, not just the helper', () => {
   });
 });
 
+describe('the ownership warning reads the same verb the hard gate does', () => {
+  /* Found reviewing this change. The hard gate ran the opener through the tense derivation and the
+   * ownership check compared the raw first word against a past-tense-only INITIATIVE_VERBS, so the
+   * moment participles cleared the hard gate they started collecting a warning their past tense
+   * never got: "Leading a design review each sprint" passed as a strong opener and was then told it
+   * had no ownership signal, while "Led a design review each sprint" was not. Two verdicts on one
+   * bullet, decided by the tense the applicant chose because the role is current - the same drift
+   * this file exists to remove, one check below the one it fixed. */
+  const spec = (bullet: string): ResumeSpec => ({
+    school: 'University of Southern California',
+    degree: 'BS Computer Science',
+    grad_date: 'December 2027',
+    coursework: '',
+    experience: [{
+      type: 'job',
+      org: 'Tonee',
+      title: 'Founder',
+      date_range: 'September 2025 - Present',
+      bullets: [bullet, 'Shipped a weekly release train across two client teams and one vendor.'],
+    }],
+    skills: [],
+  });
+  const flagsFor = (bullet: string) =>
+    validateResumeSpec(spec(bullet), '', [])
+      .warnings.filter((warning) => warning.bullet === bullet)
+      .flatMap((warning) => warning.flags);
+
+  for (const [participle, past] of [
+    ['Leading', 'Led'],
+    ['Owning', 'Owned'],
+    ['Building', 'Built'],
+    ['Designing', 'Designed'],
+  ] as const) {
+    test(`"${participle}" carries the same ownership verdict as "${past}"`, () => {
+      const sentence = (verb: string) => `${verb} a cross-functional design review with engineering each sprint`;
+      assert.deepEqual(
+        flagsFor(sentence(participle)),
+        flagsFor(sentence(past)),
+        `"${participle}" and "${past}" are the same verb and must get the same warnings`,
+      );
+      assert.ok(!flagsFor(sentence(participle)).includes('no-ownership-signal'));
+    });
+  }
+
+  test('a bullet with no ownership verb at all still gets the warning', () => {
+    /* The property is agreement between tenses, not the absence of the warning, so this pins that
+       the check still fires on what it was written for. */
+    assert.ok(
+      flagsFor('Documented the weekly reporting process for two client teams each Monday')
+        .includes('no-ownership-signal'),
+    );
+  });
+});
+
 describe('the generators are told the present tense is approved', () => {
   /* The gate accepting both tenses is only half of it. Both prompts hand the model a past-tense
    * verb list and a rule that outranks verbatim reuse, so without this line the model keeps
