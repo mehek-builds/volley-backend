@@ -11,6 +11,7 @@ import {
   type ManagedBrowserResult,
 } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
+import { countryForPhoneField } from './phoneCountry';
 import { applicantChoseStoredAnswer } from './applicantAnswer';
 import { derivationIsCurrent, optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
 import {
@@ -980,53 +981,6 @@ function nationalPhoneForCountryCodeField(phone: string | undefined): string | u
   if (!dialCode) return phone;
   const national = digits.slice(dialCode.length);
   return national || phone;
-}
-
-const DIAL_CODE_COUNTRY_LABELS: Record<string, string> = {
-  '1': 'United States',
-  '7': 'Russia',
-  '20': 'Egypt',
-  '27': 'South Africa',
-  '30': 'Greece',
-  '31': 'Netherlands',
-  '32': 'Belgium',
-  '33': 'France',
-  '34': 'Spain',
-  '36': 'Hungary',
-  '39': 'Italy',
-  '40': 'Romania',
-  '41': 'Switzerland',
-  '43': 'Austria',
-  '44': 'United Kingdom',
-  '45': 'Denmark',
-  '46': 'Sweden',
-  '47': 'Norway',
-  '48': 'Poland',
-  '49': 'Germany',
-  '52': 'Mexico',
-  '55': 'Brazil',
-  '60': 'Malaysia',
-  '61': 'Australia',
-  '62': 'Indonesia',
-  '63': 'Philippines',
-  '65': 'Singapore',
-  '81': 'Japan',
-  '82': 'South Korea',
-  '86': 'China',
-  '90': 'Turkey',
-  '91': 'India',
-  '92': 'Pakistan',
-  '971': 'United Arab Emirates',
-};
-
-function countryForPhoneField(phone: string | undefined, fallbackCountry: string | undefined): string | undefined {
-  if (!phone) return fallbackCountry;
-  const digits = phone.trim().startsWith('+') ? phone.replace(/\D/g, '') : '';
-  if (!digits) return fallbackCountry;
-  const dialCode = Object.keys(DIAL_CODE_COUNTRY_LABELS)
-    .filter((code) => digits.startsWith(code))
-    .sort((a, b) => b.length - a.length)[0];
-  return dialCode ? DIAL_CODE_COUNTRY_LABELS[dialCode] : fallbackCountry;
 }
 
 /* THE DIAL CODE THAT WAS WRITTEN TWICE.
