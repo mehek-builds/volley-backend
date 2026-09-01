@@ -443,3 +443,25 @@ test('scheduled transient logo failures remain in completion evidence without a 
   assert.match(source, /scheduled_crelate_circuit_sources: scheduledCrelateCircuitSources/);
   assert.match(source, /nextCrelateRetryAt/);
 });
+
+test('the reconciliation disables retired sources and reports them', () => {
+  /* The catalog sync is additive and preserves disabled state, so it can add a re-pointed board
+     but can never take the dead one away. Retirement therefore needs its own pass, applied
+     WITHOUT preserveExistingDisabled (disabling is the point) and BEFORE the operator channel
+     (so an operator can still deliberately restore one). `retired` was a declared-but-always-empty
+     array in the drain response until this landed, which is why three dead boards polled on
+     unnoticed. */
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const catalogSync = source.indexOf('upsertSources(scheduledSources, { preserveExistingDisabled: true })');
+  const retirementPass = source.indexOf('upsertSources(RETIRED_JOB_SOURCES)');
+  const operatorPass = source.indexOf('upsertSources(operatorConfiguredSources)');
+  assert.ok(catalogSync > 0 && retirementPass > 0 && operatorPass > 0);
+  assert.ok(retirementPass > catalogSync, 'retirement runs after the additive catalog sync');
+  assert.ok(retirementPass < operatorPass, 'an operator can still restore a retired source');
+  assert.doesNotMatch(
+    source.slice(retirementPass, retirementPass + 120),
+    /preserveExistingDisabled/,
+    'the retirement pass must actually disable, not preserve',
+  );
+  assert.match(source, /const retired = RETIRED_JOB_SOURCES\.map/, 'the response reports what was retired');
+});

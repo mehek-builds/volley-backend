@@ -35,7 +35,7 @@ import {
   type JobSourceInput,
   type SupportedJobBoard,
 } from '../lib/jobMonitor';
-import { JOB_SOURCES } from '../lib/jobSources';
+import { JOB_SOURCES, RETIRED_JOB_SOURCES } from '../lib/jobSources';
 import { discoverJobSources, type JobSourceDiscoveryResult } from '../lib/jobSourceDiscovery';
 import { CATALOG_DOMAIN_CANDIDATE_METHOD, catalogBrandedJobSources } from '../lib/jobSourceBrandCatalog';
 import {
@@ -4962,11 +4962,22 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const scheduledSources = mergeJobSources(discoveredAndBranded, JOB_SOURCES);
     const operatorConfiguredSources = configuredSources();
     await upsertSources(scheduledSources, { preserveExistingDisabled: true });
+    /* Retirement is explicit, because the sync above cannot express it. That sync is additive: a
+       source deleted from the catalog keeps its enabled row and goes on polling a board that no
+       longer exists (measured 2026-09-01: three such rows, one still holding 121 active
+       postings). RETIRED_JOB_SOURCES carries enabled:false, which disables the row and
+       deactivates its postings through the same path an operator would use.
+
+       Applied WITHOUT preserveExistingDisabled, since disabling is the entire point, and applied
+       BEFORE the operator channel so an operator can still deliberately restore one. */
+    if (RETIRED_JOB_SOURCES.length > 0) await upsertSources(RETIRED_JOB_SOURCES);
     /* Runtime configuration is an operator channel, not publisher discovery. Apply it separately
        so enabled=true can deliberately restore a reviewed source after the additive catalog sync
        has preserved its disabled state. */
     if (operatorConfiguredSources.length > 0) await upsertSources(operatorConfiguredSources);
-    const retired: string[] = [];
+    /* Reported so a retirement is visible in the drain response rather than inferred. This was a
+       declared-but-never-populated empty array until 2026-09-01. */
+    const retired = RETIRED_JOB_SOURCES.map((source) => `${source.ats_name}/${source.board_token}`);
     const pollEligible = pollingSourceEligibilityPredicate();
     const [[sourceCount], [pollEligibleSourceCount]] = await Promise.all([
       db
