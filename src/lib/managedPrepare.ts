@@ -15,7 +15,6 @@ import {
   profiles,
   users,
 } from '../db/schema';
-import { educationFrom } from '../engine/resumePolicy';
 import { renderResumePdf, type ContactHeader } from '../engine/resumeRender';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import type { ResumeRow } from '../routes/submissionRunner';
@@ -41,6 +40,7 @@ import { createPdfGenerationBinding } from './pdfGenerationBinding';
 import { detectPortal, portalApplicationUrl, type SubmissionPacket } from './portalSubmission';
 import { resumeEmailForUpload } from './resumeEmail';
 import { linkGeneratedPacketToCanonicalApplication } from './resumeArtifactVersions';
+import { MAIN_RESUME_PROFILE_COLUMNS, mainResumeOfRecordFor } from './mainResumeOfRecord';
 
 const MANAGED_PREPARE_VERSION = 'managed_prepare_v1' as const;
 
@@ -154,39 +154,6 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-/* The main resume as the product will state its EDUCATION, before it is rendered into a packet.
- *
- * profiles.base_resume_json is the spec the student approved on /start, or the parse of the PDF she
- * uploaded, frozen at that moment. profiles.parsed_json is the education of record: it is what
- * GET /profile serves, what the dashboard's "Edit parsed details" writes, and what BOTH drift
- * guards compare a packet against (engine/resumeValidate.ts educationDriftIssues on the unattended
- * send path, and the site's education-drift banner on the review screen). Measured 2026-09-02 on a
- * real account: the uploaded PDF still printed "May 2027" and a business-administration degree
- * while the profile said "May 2028" and computer science, so every packet this route prepared was
- * born already refused. The banner asked her to hand-fix the education line on each application,
- * and an unattended send would have stopped on the same three fields.
- *
- * So the packet is rendered with the record's school, degree and graduation date, exactly as
- * educationFrom derives them (grad_date, else the bare grad_year), because the rendered PDF is the
- * copy an employer keeps and it must agree with the fields the student typed. A BLANK record field
- * leaves the base resume's line alone: blank means "not on record", and erasing a degree from a
- * resume because a profile box was never filled would be the same contradiction pointed the other
- * way. Nothing else on the resume is touched; tailoring is a different route.
- *
- * The main-resume digest is taken over THIS spec, so an education edit on the profile produces a
- * fresh immutable packet instead of replaying the stale one. */
-const MAIN_RESUME_EDUCATION_OF_RECORD = ['school', 'degree', 'grad_date'] as const;
-
-export function mainResumeOfRecord(baseResume: ResumeSpec, parsed: unknown): ResumeSpec {
-  const education = educationFrom(parsed);
-  const next: ResumeSpec = { ...baseResume };
-  for (const field of MAIN_RESUME_EDUCATION_OF_RECORD) {
-    const value = education[field]?.trim() ?? '';
-    if (value) next[field] = value;
-  }
-  return next;
 }
 
 function mainResumeContactHeader(
@@ -498,20 +465,23 @@ export async function prepareManagedApplication(
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(eq(monitored_jobs.id, input.jobId))
       .limit(1),
-    db.select({
-      baseResume: profiles.base_resume_json,
-      parsed: profiles.parsed_json,
-    }).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1),
+    db.select(MAIN_RESUME_PROFILE_COLUMNS).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1),
     db.select({ email: users.email }).from(users).where(eq(users.id, input.userId)).limit(1),
   ]);
 
   if (!posting || !posting.active || !posting.sourceEnabled) {
     return prepareError(404, 'managed_job_not_found', 'This monitored job is no longer available.');
   }
-  if (!profile?.baseResume) {
+  const baseResume = mainResumeOfRecordFor(profile);
+  if (!baseResume) {
     return prepareError(409, 'main_resume_missing', 'Build your main resume before preparing this application.');
   }
-  const baseResume = mainResumeOfRecord(normalizeSpec(profile.baseResume), profile.parsed);
+  /* The same bar /resume/base and /resume/generate hold (missingRequiredEducation): a record with
+     no school or degree prints a blank line, and a blank line is not a resume an employer should
+     receive. Refused here, before any packet or canonical row exists, with the box to fill named. */
+  if (!baseResume.school.trim() || !baseResume.degree.trim()) {
+    return prepareError(422, 'main_resume_education_missing', 'Your profile has no school or degree on record. Add them under Documents, then prepare this application again.');
+  }
   const mainResumeDigest = packetAuditSha256(baseResume);
   const jdText = posting.description.trim();
   if (!jdText) return prepareError(422, 'managed_job_description_missing', 'This job has no description to review.');
@@ -558,21 +528,19 @@ export async function prepareManagedApplication(
       eq(applications.id, applicationId),
       eq(applications.user_id, input.userId),
     )).limit(1);
-    const [currentProfile] = await tx.select({
-      baseResume: profiles.base_resume_json,
-      parsed: profiles.parsed_json,
-    }).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1);
+    const [currentProfile] = await tx.select(MAIN_RESUME_PROFILE_COLUMNS).from(profiles)
+      .where(eq(profiles.user_id, input.userId)).limit(1);
     const [currentAccount] = await tx.select({ email: users.email })
       .from(users).where(eq(users.id, input.userId)).limit(1);
     if (!currentApplication) {
       return prepareError(409, 'managed_application_changed', 'The application changed before its packet could be prepared.');
     }
-    if (!currentProfile?.baseResume) {
+    const currentBaseResume = mainResumeOfRecordFor(currentProfile);
+    if (!currentBaseResume) {
       return prepareError(409, 'main_resume_missing', 'Build your main resume before preparing this application.');
     }
-    const currentBaseResume = mainResumeOfRecord(normalizeSpec(currentProfile.baseResume), currentProfile.parsed);
     if (packetAuditSha256(currentBaseResume) !== mainResumeDigest) {
-      return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
+      return prepareError(409, 'main_resume_changed', 'Your main resume or your education details changed while Litos was preparing it. Try again.');
     }
 
     const candidates = await tx.select().from(generated_resumes).where(and(
@@ -926,16 +894,14 @@ export async function prepareManagedApplication(
           eq(applications.id, applicationId),
           eq(applications.user_id, input.userId),
         )).limit(1);
-        const [currentProfile] = await tx.select({
-          baseResume: profiles.base_resume_json,
-          parsed: profiles.parsed_json,
-        }).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1);
+        const [currentProfile] = await tx.select(MAIN_RESUME_PROFILE_COLUMNS).from(profiles)
+          .where(eq(profiles.user_id, input.userId)).limit(1);
         if (!currentApplication) {
           return prepareError(409, 'managed_application_changed', 'The application changed before its packet could be committed.');
         }
-        if (!currentProfile?.baseResume
-          || packetAuditSha256(mainResumeOfRecord(normalizeSpec(currentProfile.baseResume), currentProfile.parsed)) !== mainResumeDigest) {
-          return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
+        const committedMainResume = mainResumeOfRecordFor(currentProfile);
+        if (!committedMainResume || packetAuditSha256(committedMainResume) !== mainResumeDigest) {
+          return prepareError(409, 'main_resume_changed', 'Your main resume or your education details changed while Litos was preparing it. Try again.');
         }
         if (currentApplication.submission_state === 'submitted'
           || currentApplication.tracker_state === 'applied') {
@@ -1051,16 +1017,14 @@ export async function prepareManagedApplication(
       eq(applications.id, applicationId),
       eq(applications.user_id, input.userId),
     )).limit(1);
-    const [currentProfile] = await tx.select({
-      baseResume: profiles.base_resume_json,
-      parsed: profiles.parsed_json,
-    }).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1);
+    const [currentProfile] = await tx.select(MAIN_RESUME_PROFILE_COLUMNS).from(profiles)
+      .where(eq(profiles.user_id, input.userId)).limit(1);
     if (!currentRow || !currentApplication) {
       return prepareError(409, 'managed_application_changed', 'The application changed before its packet could be committed.');
     }
-    if (!currentProfile?.baseResume
-      || packetAuditSha256(mainResumeOfRecord(normalizeSpec(currentProfile.baseResume), currentProfile.parsed)) !== mainResumeDigest) {
-      return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
+    const completedMainResume = mainResumeOfRecordFor(currentProfile);
+    if (!completedMainResume || packetAuditSha256(completedMainResume) !== mainResumeDigest) {
+      return prepareError(409, 'main_resume_changed', 'Your main resume or your education details changed while Litos was preparing it. Try again.');
     }
 
     const alreadyCompleted = exactManagedReview(currentRow, applicationId);

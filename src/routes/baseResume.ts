@@ -24,6 +24,7 @@ import {
   type CandidateEducation,
 } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
+import { mainResumeOfRecord } from '../lib/mainResumeOfRecord';
 import {
   findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
@@ -285,8 +286,12 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       resumeEmailForUpload(profile.parsed_json, request.jwtPayload!.email),
     );
     try {
+      /* The employer-facing copy prints the education of record, exactly as the managed prepare
+         path does (lib/mainResumeOfRecord.ts): this route has no drift guard in front of it, so a
+         verbatim render was the one path that could still hand an employer a graduation date the
+         profile had since corrected. */
       const rendered = await renderResumePdf(
-        profile.base_resume_json as ResumeSpec,
+        mainResumeOfRecord(profile.base_resume_json as ResumeSpec, profile.parsed_json),
         contact,
         'General application resume',
       );
