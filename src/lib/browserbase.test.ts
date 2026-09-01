@@ -2224,6 +2224,10 @@ test('only the prepare fill run asks stratus to wait for its preview screenshot,
     assert.equal(sentBodies[0].screenshot, true, 'and still wants the screenshot itself');
     assert.equal('screenshotWait' in sentBodies[1], false, 'the discovery pass and read scans do not');
     assert.equal('screenshotWait' in sentBodies[2], false, 'false is never sent, only the literal true');
+    // The fill options are the scan options plus the flag: same correlation, same widened window.
+    assert.equal(MANAGED_PREPARE_FILL_OPTIONS.scanCorrelation, true);
+    assert.equal(MANAGED_PREPARE_FILL_OPTIONS.scanDeadlineMs, MANAGED_PREPARE_FILL_DEADLINE_MS);
+    assert.equal(MANAGED_PREPARE_FILL_OPTIONS.scanDeadlineMs, MANAGED_PREPARE_SCAN_OPTIONS.scanDeadlineMs);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.STRATUS_API_KEY;

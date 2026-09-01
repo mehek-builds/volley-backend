@@ -40,8 +40,10 @@ function callSiteAt(source: string, anchor: string, occurrence = 0): string {
 test('every prepare-path managed mutation carries an ephemeral scan correlation', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
 
-  // The two big runs share one named options constant, so the correlation policy for a prepare run
-  // has a single definition rather than a literal per call site.
+  // The two big runs launch from named options constants, so the correlation policy for a prepare
+  // run has a single definition rather than a literal per call site. The fill's constant is the
+  // scan constant plus the one flag the fill alone needs (screenshotWait, pinned in
+  // browserbase.test.ts to keep the scan correlation and the widened window intact).
   const discovery = callSiteAt(runner, 'buildManagedDiscoveryActions(portal, packet)');
   assert.match(
     discovery,
@@ -51,8 +53,13 @@ test('every prepare-path managed mutation carries an ephemeral scan correlation'
   const fill = callSiteAt(runner, 'managedActionsWithExactPageUrl(fillActions, applicationUrl)');
   assert.match(
     fill,
-    /MANAGED_PREPARE_SCAN_OPTIONS/,
-    'the prepare fill mutates the form without submitting, so it must launch with the prepare scan options',
+    /MANAGED_PREPARE_FILL_OPTIONS/,
+    'the prepare fill mutates the form without submitting and needs its preview, so it must launch with the prepare fill options',
+  );
+  assert.doesNotMatch(
+    discovery,
+    /MANAGED_PREPARE_FILL_OPTIONS/,
+    'the discovery pass treats its screenshot as optional, so it must not ask stratus to wait for one',
   );
 
   // Probe-sized mutations keep the standard read-scan window; they only need the correlation.
