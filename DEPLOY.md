@@ -558,9 +558,48 @@ exact resolution.
 
 ## Shipping a change
 
-**Merging to `main` deploys production.** The Vercel project is connected to
-`mehek-builds/volley-backend` with `main` as the production branch, so a merged PR builds and
-promotes on its own. Nothing needs to be run by hand.
+**Merging to `main` deploys production, on Railway now.** `litos-api` and `litos-job-worker` are
+both connected to `mehek-builds/volley-backend` with `main` as the production branch, so a merged
+PR builds and promotes on its own. Nothing needs to be run by hand. The Vercel notes below are the
+same rule for the platform this migrated off, and are kept because the failure mode repeated.
+
+### The same silence happened again, on Railway, on 2026-09-01
+
+The Vercel incident recorded below (project `link` was `null`, pushes to `main` deployed nothing,
+PRs #151 and #153 merged without shipping) recurred with a different provider. `litos-api`,
+`litos-job-worker` and the website's `litos-web` had **no repo source at all**: production was
+being shipped by `railway up` directory uploads from whichever working tree a session happened to
+have open, so merges built nothing and prod sat on an image with no commit provenance. It surfaced
+when a merged website PR did not reach production. All four services (including `litos-stratus`)
+are connected now.
+
+Check the deployment list, not the merge, and not the API's answer:
+
+```bash
+railway deployment list --service litos-api --json   # read meta.commitHash and meta.branch
+```
+
+A build for your merge commit should exist within seconds. Two traps this cost us:
+
+- **`railway up` is now harmful, not redundant.** It replaces the repo build with a CLI image that
+  has no commit hash, so `main` looks deployed while production runs something else. To recover:
+  `railway deployment redeploy --service <svc> --environment production --from-source --yes`.
+  Plain `redeploy` re-ships the clobbering image, so `--from-source` is the whole point.
+- **A `serviceInstanceDeploy` GraphQL mutation returns `true` even when it does nothing**, which is
+  what it does when there is no repo source. "I triggered a deploy and the API said OK" is not
+  evidence that a deploy happened. Only the deployment list is.
+
+### One merge deploys two services, so migrate before you merge
+
+`litos-api` and `litos-job-worker` build from the **same commit** and promote simultaneously, with
+no way to hold one back. Nothing in either start command runs migrations (`npm start` is
+`node dist/index.js`, the worker is `node scripts/run-job-monitor-worker.mjs`), so schema changes
+stay manual, as documented above.
+
+The order that follows is: **run the migration against production first, then merge.** Merging a
+schema-dependent change first puts code that expects new columns onto two services at once, before
+anything has created them. This is the one ordering constraint that got tighter when the services
+were connected; before, a hand-run `railway up` was the implicit gate.
 
 That connection was missing between an unknown date and 2026-08-04: the project's `link` was
 `null`, so pushes to `main` deployed nothing and production silently sat on whatever commit was
