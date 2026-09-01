@@ -173,7 +173,11 @@ test('a dozen board spellings become one product word', () => {
 
 test('an unrecognized employer value is passed through, not discarded', () => {
   // It came from the employer's own field, so it is a fact about the posting even when this list
-  // has not seen it before.
+  // has not seen it before. These are the real live values the compound pass deliberately does not
+  // guess at: a department, a seniority band and a work arrangement are not employment types.
+  assert.equal(normalizeEmploymentType('Investment Banking'), 'Investment Banking');
+  assert.equal(normalizeEmploymentType('Mid-Senior Level'), 'Mid-Senior Level');
+  assert.equal(normalizeEmploymentType('Homeoffice'), 'Homeoffice');
   assert.equal(normalizeEmploymentType('Volunteer'), 'Volunteer');
   assert.equal(normalizeEmploymentType('   '), undefined);
   assert.equal(normalizeEmploymentType(undefined), undefined);
@@ -500,4 +504,118 @@ test('employers keep inventing new spellings of full-time', () => {
   assert.equal(normalizeEmploymentType('Permanent'), 'Full-time');               // Lever
   // And the anchor still holds where it matters.
   assert.equal(normalizeEmploymentType('Full Time Contractor'), 'Contract');
+});
+
+/* THE COMPOUND PASS. Every value below is VERBATIM from prod on 2026-09-01, with the posting count
+ * it carried, because the whole point of this pass is that it was measured rather than imagined.
+ * The counts are what makes the priority obvious: `fulltime_permanent` alone was 11,164 tiles
+ * reading like a database column. */
+
+test('Recruitee ships a code, not a word, and the code is still an employment type', () => {
+  // The value that started this: 18,489 live postings across the five codes, every one of them
+  // rendering the raw code on the tile and matching none of the five filters.
+  assert.equal(normalizeEmploymentType('fulltime_permanent'), 'Full-time');    // 11,164 live
+  assert.equal(normalizeEmploymentType('parttime_permanent'), 'Part-time');    //  1,683 live
+  assert.equal(normalizeEmploymentType('parttime_minijob'), 'Part-time');      //    206 live
+  // The code states hours AND tenure, and the hours are the half both filters run on, so they win.
+  // Reading these as Contract dropped 3,550 postings out of every full-time match with no role type
+  // able to recover them - see the hours-win test below.
+  assert.equal(normalizeEmploymentType('fulltime_fixed_term'), 'Full-time');   //  3,550 live
+  assert.equal(normalizeEmploymentType('parttime_fixed_term'), 'Part-time');   //  1,886 live
+});
+
+test('a payroll or site qualifier welded onto the type does not hide the type', () => {
+  assert.equal(normalizeEmploymentType('Salaried, full-time'), 'Full-time');   //  3,961 live
+  assert.equal(normalizeEmploymentType('Hourly, full-time'), 'Full-time');     //  1,312 live
+  assert.equal(normalizeEmploymentType('Full Time Hybrid'), 'Full-time');      //    922 live
+  assert.equal(normalizeEmploymentType('Clinical Part Time'), 'Part-time');    //  1,005 live
+  assert.equal(normalizeEmploymentType('Hourly, part-time'), 'Part-time');     //    893 live
+  assert.equal(normalizeEmploymentType('Full Time - Exempt'), 'Full-time');
+  assert.equal(normalizeEmploymentType('Regular Full-Time'), 'Full-time');
+});
+
+test('the type survives being said in another language', () => {
+  for (const value of ['Vollzeit', 'Temps plein', 'Tiempo Completo', 'Tempo integral',
+    'Tempo pieno', 'Voltijds', 'A tiempo completo', 'Jornada Completa',
+    'Contrat a duree indeterminee', '正社員', '시니어/정규직']) {
+    assert.equal(normalizeEmploymentType(value), 'Full-time', value);
+  }
+  for (const value of ['Teilzeit', 'Deeltijds', 'Temps partiel']) {
+    assert.equal(normalizeEmploymentType(value), 'Part-time', value);
+  }
+  // The world's payroll shorthand for a permanent staff job.
+  for (const value of ['CDI', 'CLT', 'Efetivo', 'On-roll', 'En planilla', 'W2', 'FTE',
+    'Direct Hire']) {
+    assert.equal(normalizeEmploymentType(value), 'Full-time', value);
+  }
+  assert.equal(normalizeEmploymentType("Stage de fin d'etudes"), 'Internship');
+  assert.equal(normalizeEmploymentType('Working Student'), 'Internship');
+});
+
+test('precedence holds when a value carries more than one signal', () => {
+  // Part-time above full-time, or "Permanent Part-Time" reads as permanent-therefore-full-time.
+  assert.equal(normalizeEmploymentType('Permanent Part-Time'), 'Part-time');
+  assert.equal(normalizeEmploymentType('Part Time Permanent - Team Member (Retail)'), 'Part-time');
+  // Internship above everything: a paid full-time summer placement is still an internship.
+  assert.equal(normalizeEmploymentType('Full time - intern'), 'Internship');
+});
+
+test('when a value states both hours and tenure, the hours win', () => {
+  /* BOTH filters this board runs are hours filters - targetingConditions matches
+     `employment_type ~* 'full.?time'` and matchingRoleType sets isNonFullTime from the same word -
+     and ROLE_TYPES has no contract entry, so a posting typed Contract leaves targeting rather than
+     moving to another filter. Reading the tenure half here cost 3,676 live postings their
+     full-time matches with nothing able to bring them back. */
+  assert.equal(normalizeEmploymentType('fulltime_fixed_term'), 'Full-time');   // 3,550 live
+  assert.equal(normalizeEmploymentType('Full Time - 1099'), 'Full-time');      //    64 live
+  assert.equal(normalizeEmploymentType('Per Diem, Part-Time or Full Time'), 'Full-time'); // 36
+  assert.equal(normalizeEmploymentType('Seasonal, full-time'), 'Full-time');   //     8 live
+  assert.equal(normalizeEmploymentType('PT Temp/Seasonal'), 'Part-time');      //    91 live
+  assert.equal(normalizeEmploymentType('Part-time (Seasonal)'), 'Part-time');  //     6 live
+});
+
+test('a value that states only tenure is still a contract', () => {
+  // Nothing here says how many hours, so there is no hours fact to prefer.
+  for (const value of ['Freelance', 'Per Diem', 'PRN', 'Casual', 'Seasonal', 'Interim', 'Locum',
+    '1099', 'Contingent Worker', 'Maternity Cover', 'Casual Seasonal']) {
+    assert.equal(normalizeEmploymentType(value), 'Contract', value);
+  }
+  /* Lever's bare "Fixed Term" is untouched by the hours rule, and is right to be: it is caught by
+     the anchored pass above precisely because it carries no hours. */
+  assert.equal(normalizeEmploymentType('Fixed Term'), 'Contract');
+  assert.equal(normalizeEmploymentType('Short Term'), 'Contract');
+  // And the oldest guard of all still holds, from the anchored pass.
+  assert.equal(normalizeEmploymentType('Full Time Contractor'), 'Contract');
+});
+
+test('a posting offered as either full or part time stays reachable from a filter', () => {
+  // 964 live postings say both. One flat category has to be chosen, and Full-time is the one the
+  // employer is certainly offering.
+  for (const value of ['Full-time or Part-time', 'Full Time/Part Time', 'Full-Time or Part-Time',
+    'Part Time, Full Time', 'Full-Time & Part-Time', 'Pt or FT']) {
+    assert.equal(normalizeEmploymentType(value), 'Full-time', value);
+  }
+});
+
+test('a word that only looks like a signal is not read as one', () => {
+  // Each of these was mistyped by an earlier draft of the compound pass, and each is live.
+  // A probationary period is a permanent job, not a contract.
+  assert.equal(normalizeEmploymentType('PH:  Professional Class - Probation'),
+    'PH:  Professional Class - Probation');
+  // Grant-contingent, not a contingent worker.
+  assert.equal(normalizeEmploymentType('Contingent on Award'), 'Contingent on Award');
+  // "See Salary Details" is an instruction to the reader, not the word "salary".
+  assert.equal(normalizeEmploymentType('Coach & Cocurricular (See Salary Details for information)'),
+    'Coach & Cocurricular (See Salary Details for information)');
+  // But a value that genuinely states the type alongside that instruction still resolves.
+  assert.equal(
+    normalizeEmploymentType('Lunch Assistant (Part Time - See Salary Details for information)'),
+    'Part-time',
+  );
+});
+
+test('the compound pass never overrides a title that says internship', () => {
+  // resolveEmploymentType's one exception has to keep winning over the newly-understood field.
+  assert.equal(resolveEmploymentType('ML Research Intern', 'fulltime_permanent'), 'Internship');
+  assert.equal(resolveEmploymentType('Senior Backend Engineer', 'fulltime_permanent'), 'Full-time');
 });
