@@ -7125,7 +7125,10 @@ async function prepareManaged(
       row.user_id,
       applicationUrl,
       actions,
-      { screenshot: false },
+      // Option-probe clicks open dropdowns to read their choices: a mutation that never submits, so
+      // it needs the same ephemeral scan correlation as the fill and the pre-scan, or stratus
+      // correlationRequired refuses it for lacking a submissionAttempt.
+      { screenshot: false, scanCorrelation: true },
     )
       .catch((error: unknown) => {
         const reason = describeDiscoveryFailure(error);
@@ -7620,6 +7623,15 @@ async function prepareManaged(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
+    // This prepare run fills the employer form and screenshots it for review; it never presses
+    // submit (buildManagedPortalActions was called without `submit`, so there is no confirmAndSubmit
+    // and no allowSubmit). But typing into the form is a mutation, and under stratus
+    // correlationRequired every mutating run needs a submissionAttempt and providerDeadline or it is
+    // refused with "A durable submissionAttempt is required for every submit-capable or continuable
+    // run". scanCorrelation mints the ephemeral throwaway pair for exactly this case - a mutation
+    // that is not a submission - the same way the posting-question pre-scans already do. Without it
+    // the fill fails closed and nothing is ever shown or sent.
+    { scanCorrelation: true },
   );
   const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
   if (actionDiagnostics.length > 0) {
