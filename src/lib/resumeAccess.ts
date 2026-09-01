@@ -319,10 +319,19 @@ export function readDownloadToken(token: string, now = Date.now()): DownloadToke
     }
     if (payload.n !== undefined && typeof payload.n !== 'string') return null;
     if (now > payload.exp) return null;
-    // Defence in depth: a token is only ever minted for a key inside its own user's prefix, so
-    // a payload claiming otherwise means the key derivation or the mint path is compromised.
-    // Refuse rather than serve one user's file under another's token.
-    if (!payload.k.startsWith(resumePrefix(payload.u))) return null;
+    // Defence in depth: a token is only ever minted for a key inside its own USER'S prefix, so a
+    // payload claiming otherwise means the key derivation or the mint path is compromised. Refuse
+    // rather than serve one user's file under another's token.
+    //
+    // Scoped to userBlobPrefix (users/<id>/), NOT resumePrefix (users/<id>/resumes/). The endpoint
+    // serves every document Litos mints a token for, and those live under several sibling folders:
+    // resumes/ (tailored resumes and cover letters), documents/ (documentStore), and
+    // managed-main-resumes/ (managedPrepare). The resumes/-only check silently 403'd the last two -
+    // measured live 2026-09-01: a "Prepare in Litos" packet renders its resume under
+    // users/<id>/managed-main-resumes/... , so its exact-PDF download failed with 403 and the fill
+    // was blocked on "Litos could not load the exact PDF". The user-scoped prefix still blocks every
+    // cross-user key while admitting the owner's own documents.
+    if (!payload.k.startsWith(userBlobPrefix(payload.u))) return null;
     return payload;
   } catch {
     return null;
