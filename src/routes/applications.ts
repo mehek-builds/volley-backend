@@ -3300,6 +3300,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         review: reviewWithoutPassiveHandoffUrl(responseReview),
         manual_handoff_available: manualHandoffAvailable(responseReview),
         cover_letter: storedCoverLetter(responseRow),
+        /* Not only the contention 202 above: a run can end here having opened NO attempt at all - a
+         * packet-drift hold parks the row `needs_attention` before the atomic claim, with the
+         * ledger still empty (observed live 2026-09-01 on packet f04623c3: projection `none`,
+         * retry safety `no_evidence`, after "how Litos reaches this employer" drift). The dashboard
+         * installs THIS response as its submission state, so without the envelope the next approve
+         * quarantines a packet the ledger says was never attempted. The helper's own status gate
+         * and none/no_evidence rule keep every response for a genuinely opened attempt unchanged. */
+        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, responseReview.status, request.log)),
       });
     },
   );
