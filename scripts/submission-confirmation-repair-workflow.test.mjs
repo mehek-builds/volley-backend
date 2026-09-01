@@ -19,6 +19,9 @@ test('confirmation repair workflow is exact, frozen, dry-run-first, and replay v
   assert.match(workflow, /\.submission_authority\.revision\.ready == true/u);
   assert.match(workflow, /--user-id "\$REPAIR_USER_ID"/u);
   assert.match(workflow, /--application-id "\$REPAIR_APPLICATION_ID"/u);
+  assert.match(workflow, /legacy_attempt_id:/u);
+  assert.match(workflow, /REPAIR_LEGACY_ATTEMPT_ID: \$\{\{ inputs\.legacy_attempt_id \}\}/u);
+  assert.match(workflow, /--legacy-attempt-id "\$REPAIR_LEGACY_ATTEMPT_ID"/u);
   assert.match(workflow, /if: inputs\.apply/u);
   assert.match(workflow, /\.status == "eligible" or \.status == "already_applied"/u);
   assert.match(workflow, /\.status == "applied" or \.status == "already_applied"/u);
