@@ -1009,7 +1009,20 @@ export function validateResumeSpec(
   declaredSkills?: string[] | null,
   education?: CandidateEducation,
   targetRole?: string,
-  options: { allowedSingleBulletEntries?: ExperienceBankEntry[] } = {},
+  options: {
+    allowedSingleBulletEntries?: ExperienceBankEntry[];
+    /* THE PACKET IS HER OWN MAIN RESUME, NOT A GENERATION. The skills-grounding hard issue below
+     * exists to stop the generator importing JD vocabulary into the skills line ("never add a
+     * skill because the JD asks for it"). On an untailored main-resume packet no generator ran:
+     * the skills line is the document she uploaded, printed verbatim, and the declared list is a
+     * second store of the same fact that nothing reconciles. Measured live 2026-09-01 (Hudson River
+     * Trading, application 4a79eec1): the uploaded resume carried "wireframing", "mobile UX",
+     * "feature documentation" and "behavioral data", the declared list did not, and the packet
+     * that had just passed the audit was refused at approve for four skills she wrote herself.
+     * Off-list skills on such a packet stay visible as warnings; they are never a refusal. Every
+     * other rule here still applies unchanged, and a tailored packet is judged exactly as before. */
+    untailored?: boolean;
+  } = {},
 ): ValidationResult {
   const issues: string[] = [];
   const warnings: BulletFlag[] = [];
@@ -1210,7 +1223,7 @@ export function validateResumeSpec(
     // A rename the model emits against the prompt's ban must surface as a hard issue and drive the
     // retry, whose feedback line below already tells it the fix (use the list verbatim).
     const ungroundedSkills = findUngroundedSkills(spec.skills, bank, declaredSkills);
-    if (declaredSkills?.length) {
+    if (declaredSkills?.length && !options.untailored) {
       for (const skill of ungroundedSkills) {
         issues.push(`grounding: skill "${skill}" is not in the student's skills list; never add a skill because the JD asks for it`);
       }

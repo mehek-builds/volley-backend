@@ -817,3 +817,48 @@ test('it agrees with the gate the other way: what it flags, the gate rejects', (
 test('a spec with no experience does not throw', () => {
   assert.deepEqual(overlongBullets({ ...spec([]), experience: undefined } as unknown as ResumeSpec), []);
 });
+
+/* Her own main resume is not a generation. The declared list and the uploaded document are two
+ * stores of the same fact; when they drift (Hudson River Trading, application 4a79eec1,
+ * 2026-09-01: four skills she wrote on her own resume were missing from the declared list), the
+ * generator's skills gate must not refuse the document she uploaded. It stays a warning there and
+ * a hard issue on every tailored packet. */
+test('an untailored main-resume packet is not refused for skills off the declared list', () => {
+  const declared = ['Python', 'TypeScript', 'SQL'];
+  const uploaded = { ...spec([{
+    org: 'Northwind Labs',
+    title: 'Software Engineer Intern',
+    date_range: '2024',
+    bullets: [
+      'Built an internal analytics dashboard used by the growth team',
+      'Shipped a caching layer that cut page load time by 30%',
+    ],
+  }]), skills: ['Python', 'wireframing', 'mobile UX'] };
+
+  const tailored = validateResumeSpec(uploaded, 'We want wireframing and mobile UX', BANK, declared);
+  assert.deepEqual(
+    tailored.issues.filter((issue) => issue.startsWith('grounding: skill')),
+    [
+      'grounding: skill "wireframing" is not in the student\'s skills list; never add a skill because the JD asks for it',
+      'grounding: skill "mobile UX" is not in the student\'s skills list; never add a skill because the JD asks for it',
+    ],
+  );
+
+  const own = validateResumeSpec(uploaded, 'We want wireframing and mobile UX', BANK, declared, undefined, undefined, { untailored: true });
+  assert.equal(own.issues.some((issue) => issue.startsWith('grounding: skill')), false);
+  assert.deepEqual(
+    own.warnings.filter((warning) => warning.flags.includes('ungrounded-skill')).map((warning) => warning.bullet),
+    ['wireframing', 'mobile UX'],
+  );
+  // Every other rule is untouched by the flag: an invented employer is still a hard issue.
+  const invented = validateResumeSpec(
+    { ...uploaded, experience: [{ org: 'Nowhere Inc', title: 'Engineer', date_range: '2024', bullets: ['Built an internal analytics dashboard used by the growth team'] }] },
+    '',
+    BANK,
+    declared,
+    undefined,
+    undefined,
+    { untailored: true },
+  );
+  assert.ok(invented.issues.some((issue) => issue.startsWith('grounding: experience entry')));
+});

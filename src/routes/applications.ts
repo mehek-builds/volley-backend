@@ -752,6 +752,10 @@ export async function preSendResumeVerificationIssues(
   const bank = await readExperienceBankOrSeedFromBaseResume(userId);
   const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
   const parsed = profileRows[0]?.parsed_json as ParsedProfileForResume | undefined;
+  /* One provenance read for both generator gates on this packet: the lead citation (below, and
+   * applicationLeadAlignmentIssues above) and the skills-grounding rule. See validateResumeSpec's
+   * `untailored` option for why her own uploaded document is not judged as a generation. */
+  const untailored = packetIsUntailoredMainResume(stored);
   const validation = validateResumeSpec(
     spec,
     review.jd_text,
@@ -761,6 +765,7 @@ export async function preSendResumeVerificationIssues(
     review.role,
     {
       allowedSingleBulletEntries: allowedSparseEntriesForApplicationEdit(parsed, bank),
+      untailored,
     },
   );
   if (validation.issues.length > 0) return validation.issues;
@@ -771,7 +776,7 @@ export async function preSendResumeVerificationIssues(
   return [
     ...leadAlignmentIssues(rendered.spec, review.jd_text, {
       context: { company, role: review.role },
-      untailored: packetIsUntailoredMainResume(stored),
+      untailored,
     }),
     ...visual.issues,
     ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
