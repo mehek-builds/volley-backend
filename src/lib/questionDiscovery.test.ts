@@ -4789,6 +4789,8 @@ test('crelate identity controls are fixed fields, not questions, whatever label 
     ['enter phone number phone phone', '#phone'],
     ['enter first name firstname firstname', 'input#firstName[name="firstName"]'],
     ['enter email address email email', 'input[name="email"]'],
+    // The direct-Playwright discovery script emits tag[id="..."], never #id.
+    ['enter first name firstname firstname', 'input[id="firstName"]'],
   ] as const;
   for (const [label, selector] of welded) {
     assert.equal(discoveredFieldIsFixedPortalProfileControl('crelate', {
@@ -4849,4 +4851,38 @@ test('a country calling code question is answered from the phone number on the p
     resolveKnownAnswer('phone number with country code +1 201-555-0123', 'text', ap, undefined),
     { value: '+12135746270' },
   );
+});
+
+test('comeet, zoho recruit and bullhorn identity controls are fixed fields too', () => {
+  const cases = [
+    ['comeet', 'input[name="firstName"]'],
+    ['comeet', 'input[name="websiteUrl"]'],
+    ['zoho_recruit', 'input[name="First_Name"]'],
+    ['zoho_recruit', 'input[name="Email"]'],
+    ['zoho_recruit', 'input[name="phone"]'],
+    ['bullhorn', 'input[formcontrolname="firstName"]'],
+    ['bullhorn', 'input[name="lastName"]'],
+    ['bullhorn', '#email'],
+  ] as const;
+  for (const [portal, selector] of cases) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl(portal, {
+      label: 'first name firstname',
+      selector,
+      durableSelector: selector,
+    }), true, `${portal} ${selector}`);
+  }
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('comeet', {
+    label: 'Why us?',
+    selector: 'textarea[name="motivation"]',
+    durableSelector: 'textarea[name="motivation"]',
+  }), false);
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('bullhorn', {
+    label: 'Desired salary',
+    selector: 'input[formcontrolname="salary"]',
+    durableSelector: 'input[formcontrolname="salary"]',
+  }), false);
+  assert.deepEqual(normalizeStoredPortalQuestions([
+    { id: 'a', question: 'first name firstname', answer: '', portal_selector: 'input[name="First_Name"]' },
+    { id: 'b', question: 'Why us?', answer: 'Because', portal_selector: 'textarea[name="motivation"]' },
+  ], 'zoho_recruit').map((q) => q.id), ['b']);
 });
