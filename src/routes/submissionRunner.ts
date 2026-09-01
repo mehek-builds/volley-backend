@@ -15,7 +15,7 @@ import {
   users,
 } from '../db/schema';
 import { getEntitlementSnapshot } from '../lib/entitlements';
-import { previewScreenshotMissingError } from '../lib/managedRunStopSummary';
+import { previewScreenshotMissing } from '../lib/managedRunStopSummary';
 import { confirmedPacketPipelineProjection } from '../lib/canonicalApplicationLifecycle';
 import {
   normalizeManagedFormSnapshot,
@@ -7751,8 +7751,8 @@ async function prepareManaged(
        live 2026-09-01: this threw two seconds after the fill was requested, three runs in a row,
        and the stored error named only the missing preview while whatever stopped the run in two
        seconds stayed invisible. See lib/managedRunStopSummary.ts. */
-    const error = previewScreenshotMissingError(result);
-    fastify.log.error({ applicationId: row.id, portal, stop: error.stop.detail }, 'Managed fill returned no preview screenshot');
+    const { error, detail } = previewScreenshotMissing(result);
+    fastify.log.error({ applicationId: row.id, portal, stop: detail }, 'Managed fill returned no preview screenshot');
     throw error;
   }
   /* A value Litos typed that the run then never accounted for.
