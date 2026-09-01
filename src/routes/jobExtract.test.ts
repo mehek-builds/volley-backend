@@ -552,3 +552,81 @@ describe('findMonitoredJobDescription', () => {
     }
   });
 });
+
+describe('jobDescriptionSourceUrl on the boards whose form lives on its own route', () => {
+  test('reads a Crelate application link from its posting page', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://jobs.crelate.com/portal/themavengroup/job/apply/wtmao1bfqg9te5b5jo5jknskxo'),
+      'https://jobs.crelate.com/portal/themavengroup/job/wtmao1bfqg9te5b5jo5jknskxo',
+    );
+  });
+
+  test('reads a Recruitee application link from its offer page', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://dsiinnovations.recruitee.com/o/junior-automation-engineer/c/new?utm_source=x'),
+      'https://dsiinnovations.recruitee.com/o/junior-automation-engineer',
+    );
+  });
+
+  test('reads Teamtailor and Pinpoint application links from their postings', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://tixtrack.teamtailor.com/jobs/8287889-sr-software-engineer-ii-remote-us/applications/new'),
+      'https://tixtrack.teamtailor.com/jobs/8287889-sr-software-engineer-ii-remote-us',
+    );
+    assert.equal(
+      jobDescriptionSourceUrl('https://aplayers.na.teamtailor.com/jobs/690836-senior-software-engineer-frontend/applications/new/'),
+      'https://aplayers.na.teamtailor.com/jobs/690836-senior-software-engineer-frontend',
+    );
+    assert.equal(
+      jobDescriptionSourceUrl('https://coforma.pinpointhq.com/en/postings/4a295089-e9c6-4adf-8e7b-be9d2e8ba3c3/applications/new'),
+      'https://coforma.pinpointhq.com/en/postings/4a295089-e9c6-4adf-8e7b-be9d2e8ba3c3',
+    );
+  });
+
+  test('reads a Breezy application link from its posting', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager/apply#form'),
+      'https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager',
+    );
+  });
+
+  test('leaves the posting pages of those boards alone, and a stray path on those hosts untouched', () => {
+    for (const posting of [
+      'https://jobs.crelate.com/portal/themavengroup/job/wtmao1bfqg9te5b5jo5jknskxo',
+      'https://dsiinnovations.recruitee.com/o/junior-automation-engineer',
+      'https://tixtrack.teamtailor.com/jobs/8287889-sr-software-engineer-ii-remote-us',
+      'https://confluence.pinpointhq.com/postings/c7fe935e-f408-4892-a204-dfd7fd2f70d8',
+      'https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager',
+      'https://acme.recruitee.com/careers',
+      'https://jobs.crelate.com/portal/canonrecruiting/job/apply/general',
+      'https://www.pinpointhq.com/postings/demo/applications/new',
+      'https://app.teamtailor.com/jobs/1-demo/applications/new',
+    ]) {
+      assert.equal(jobDescriptionSourceUrl(posting), posting);
+    }
+  });
+
+  test('the inventory lookup keys carry the posting page for an apply link on those boards', () => {
+    const keys = monitoredInventoryLookupKeys('https://jobs.crelate.com/portal/themavengroup/job/apply/wtmao1bfqg9te5b5jo5jknskxo');
+    assert.ok(keys.includes('https://jobs.crelate.com/portal/themavengroup/job/wtmao1bfqg9te5b5jo5jknskxo'));
+  });
+});
+
+describe('monitoredJobDescriptionMatch carries the posting identity', () => {
+  test('a matched inventory row answers with its company and title beside the text', () => {
+    const job = {
+      external_id: '12345',
+      apply_url: 'https://boards.greenhouse.io/acme/jobs/12345',
+      posting_url: 'https://boards.greenhouse.io/acme/jobs/12345',
+      title: '  Software Engineer, Intern ',
+      company_name: ' Acme ',
+      description: 'Requirements: Python. You will build dependable services.',
+      ats_name: 'greenhouse',
+      board_token: 'acme',
+    };
+    const match = monitoredJobDescriptionMatch('https://boards.greenhouse.io/acme/jobs/12345', job);
+    assert.ok(match);
+    assert.equal(match.pageTitle, 'Software Engineer, Intern');
+    assert.equal(match.companyName, 'Acme');
+  });
+});
