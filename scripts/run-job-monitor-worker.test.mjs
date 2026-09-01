@@ -534,6 +534,46 @@ test('a logo queue that will not drain yields so polling is not starved', async 
   assert.equal(sequence.length, 0, 'the drain must reach its final recount');
 });
 
+test('a restart does not hand a stuck drain a fresh grace period', async () => {
+  /* waited_ms is measured from process start, so without the drain-age check every redeploy resets
+     the deadline. Measured: the deploy that shipped the deadline restarted the worker onto a drain
+     already 36 hours old and put it back to zero. A worker that restarts even occasionally could
+     wait forever in deadline-sized slices and never once reach the deadline. */
+  const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
+  const logoPath = '/internal/job-monitor/verify-logos?limit=100';
+  const stuck = () => ({
+    path: logoPath,
+    response: logos(false, { retryAfterMs: 60_000, scheduledTransientSources: 1 }),
+  });
+  const sequence = [
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
+    stuck(),
+    stuck(),
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+  ];
+  const requester = sequenceRequester(sequence);
+  const sleeps = [];
+  const { logger, messages } = silentLogger();
+
+  const result = await runCompleteDrain({
+    config: { ...testConfig(), logoDrainDeadlineMs: 60 * 60_000 },
+    requestJson: requester.requestJson,
+    sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
+    logger,
+    /* A FRESH process: the clock never advances, so waited_ms stays 0 and only the drain's own age
+       can expire the deadline. The drain is a day older than the budget. */
+    now: () => new Date(Date.parse(DRAIN_STARTED_AT) + (24 * 60 * 60_000)),
+    drainStartedAt: DRAIN_STARTED_AT,
+  });
+
+  assert.equal(result.certified, true);
+  const yielded = messages.error.find((entry) => entry.event === 'logo_drain_deadline_reached');
+  assert.ok(yielded, 'a drain older than the deadline must yield on the first check after a restart');
+  assert.equal(yielded.yielded_on, 'drain_age', 'the age, not the in-process wait, is what expired');
+  assert.equal(yielded.waited_ms, 0, 'a fresh process has waited no time at all - that is the point');
+  assert.deepEqual(sleeps, [], 'an already-expired drain must not be waited on for another cycle');
+});
+
 test('an absent logo deadline means no deadline, never a NaN one', async () => {
   /* Math.min against an undefined setting yields NaN, which would turn a bounded wait into an
      immediate spin. testConfig has no logoDrainDeadlineMs, so this is that case. */
