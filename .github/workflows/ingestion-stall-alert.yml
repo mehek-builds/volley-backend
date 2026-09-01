@@ -1,0 +1,95 @@
+# IS THE BOARD STILL BEING FED?
+#
+# Nothing answered that question until 2026-09-01, when ingestion stopped for seven and a half
+# hours and the only reason anyone noticed was Mehek asking why a job tile showed a raw database
+# code.
+#
+# WHY THE EXISTING SIGNALS MISSED IT. Every other check watches whether a RUN failed. The worker had
+# not failed: it sat in a logo-verification retry loop on a drain 39 hours old, reporting SUCCESS,
+# logging no errors, and polling nothing. A green worker and a dead board look identical from
+# outside, so a process-shaped check can never see this. This one asks the board itself how fresh it
+# is, which stays true no matter which component is at fault or how healthy that component believes
+# itself to be.
+#
+# THE FAILURE IS THE ALERT, which is the same mechanism strong-match-notifications.yml relies on.
+# Worth being honest about its limit: job-monitor.yml failed on every scheduled run for days in
+# August and nobody noticed, so a red workflow is only an alert if someone reads it. This job is
+# deliberately narrow - one question, one line of output - so that a red run here means exactly one
+# thing and is worth opening.
+name: ingestion-stall-alert
+
+on:
+  schedule:
+    # Every 30 minutes. The check is a single indexed aggregate, so the cost is negligible, and a
+    # tighter cadence keeps the gap between "the board died" and "someone can know" under an hour.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      threshold_minutes:
+        description: Minutes of ingestion silence to treat as stalled (default 180)
+        required: false
+        type: string
+
+concurrency:
+  group: ingestion-stall-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask the board how fresh it is
+        env:
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          API_BASE: ${{ secrets.LITOS_API_BASE }}
+          THRESHOLD: ${{ inputs.threshold_minutes }}
+        run: |
+          set -euo pipefail
+
+          # FAIL CLOSED ON MISSING CONFIG. An empty secret would otherwise curl a nonsense URL, and
+          # a check that cannot reach the board must never be mistaken for a board that is healthy.
+          if [ -z "${INTERNAL_CRON_SECRET}" ] || [ -z "${API_BASE}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET and LITOS_API_BASE must both be set on this repository."
+            exit 1
+          fi
+
+          threshold="${THRESHOLD:-180}"
+          response_file="$(mktemp)"
+
+          # Three attempts, because a cold start or a mid-deploy window is not a stalled board and
+          # must not page anyone. Only a completed HTTP exchange ends the loop.
+          http_status=""
+          for attempt in 1 2 3; do
+            if http_status=$(curl -sS \
+              --connect-timeout 15 \
+              --max-time 60 \
+              -o "${response_file}" \
+              -w '%{http_code}' \
+              -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+              -H 'Accept: application/json' \
+              "${API_BASE}/internal/job-monitor/ingestion-health?threshold_minutes=${threshold}"); then
+              break
+            fi
+            http_status=""
+            [ "${attempt}" -lt 3 ] && sleep 20
+          done
+
+          if [ -z "${http_status}" ] || [ "${http_status}" != "200" ]; then
+            echo "::error::Ingestion health check did not answer (status '${http_status:-none}'). The board's freshness is UNKNOWN, which is not the same as healthy."
+            cat "${response_file}" || true
+            exit 1
+          fi
+
+          jq '.' "${response_file}"
+
+          stalled=$(jq -r '.stalled' "${response_file}")
+          minutes=$(jq -r '.staleness_minutes // "unknown"' "${response_file}")
+          newest=$(jq -r '.newest_seen_at // "never"' "${response_file}")
+
+          if [ "${stalled}" != "false" ]; then
+            echo "::error::JOB INGESTION HAS STALLED. Newest posting seen ${minutes} minutes ago (${newest}), threshold ${threshold} minutes. The board is not being fed. Check the litos-job-worker logs: the 2026-09-01 cause was a logo queue that could not drain holding the poll cycle open."
+            exit 1
+          fi
+
+          echo "Ingestion healthy: newest posting seen ${minutes} minutes ago (${newest}), threshold ${threshold} minutes."
