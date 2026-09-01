@@ -1895,6 +1895,20 @@ export async function accountRequiresSponsor(userId: string | undefined): Promis
   return sponsorOnlyBoardRequired({ declaredAtOnboarding: row.declared, settingEnabled: row.setting });
 }
 
+/* Whether this account has finished onboarding. The dashboard-only assisted board is gated on this:
+ * a guest (no userId) or a signed-in account still in setup is, by definition, in the onboarding
+ * flow, which must only ever show fully autonomous jobs. Server-enforced, never a client flag, so
+ * "onboarding is autonomous-only" cannot be turned off from the browser. */
+export async function accountOnboardingComplete(userId: string | undefined): Promise<boolean> {
+  if (!userId) return false;
+  const [row] = await db
+    .select({ completedAt: users.onboarding_completed_at })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return Boolean(row?.completedAt);
+}
+
 export async function accountJobTargeting(userId: string | undefined): Promise<JobTargeting> {
   if (!userId) return normalizeTargeting(null);
   const [row] = await db.select().from(targeting).where(eq(targeting.user_id, userId)).limit(1);
@@ -2920,6 +2934,16 @@ function isUnitedStatesLocation(location: string): boolean {
   return location.trim().toLowerCase() === 'united states';
 }
 
+/* The pollable boards that are NOT autonomous: assisted-tier families that Litos fills but hands off
+ * the final human-check + send (currently just rippling, Cloudflare-Turnstile-gated on submit).
+ * Derived from the two classification lists so it can never drift from them, and empty is a valid
+ * state (no assisted boards). boardConditions surfaces these ONLY when a caller opts in with
+ * includeAssisted, which the shared /jobs route sets solely for signed-in, onboarding-completed
+ * accounts (the dashboard). Onboarding and guests always get the autonomous-only board. */
+export const ASSISTED_SURFACED_FAMILIES: readonly string[] = POLLABLE_JOB_BOARDS.filter(
+  (board) => !(AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(board),
+);
+
 export function boardConditions(f: {
   q?: string;
   title?: string;
@@ -2931,14 +2955,22 @@ export function boardConditions(f: {
   targeting?: JobTargeting;
   requireVerifiedEvidence?: boolean;
   asOf?: Date;
+  /* Opt-in ONLY. Absent/false keeps the historical autonomous-only board, which every caller but the
+     dashboard browse relies on (the onboarding pin, the build route, strong-match emails, the floor
+     metrics). When true, the assisted tier is added, so the dashboard can show fill-and-handoff jobs
+     alongside the ones Litos submits end to end. */
+  includeAssisted?: boolean;
 }) {
   const logoEvidence = f.asOf
     ? verifiedLogoEvidencePredicate(f.asOf)
     : verifiedLogoEvidencePredicate();
+  const surfacedFamilies = f.includeAssisted
+    ? [...AUTONOMOUS_PORTAL_FAMILIES, ...ASSISTED_SURFACED_FAMILIES]
+    : [...AUTONOMOUS_PORTAL_FAMILIES];
   const conditions: SQL[] = [
     eq(monitored_jobs.is_active, true),
     eq(career_page_sources.enabled, true),
-    inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    inArray(career_page_sources.ats_name, surfacedFamilies),
     /* A first-party board that identifies a different employer is not verified inventory. */
     eq(career_page_sources.portal_name_mismatch, false),
     freshnessPredicate(f.asOf),
@@ -3114,13 +3146,19 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     /* OR, never override. The account's standing answer can only ever ADD the filter, so a request
        that omits the parameter (or sends sponsor_only=false) cannot unfilter the board of someone
        who declared at onboarding that they need sponsorship. */
-    const [accountSponsorOnly, jobTargeting, resumeFacts] = await Promise.all([
+    const [accountSponsorOnly, jobTargeting, resumeFacts, onboardingComplete] = await Promise.all([
       accountRequiresSponsor(request.jwtPayload?.userId),
       accountJobTargeting(request.jwtPayload?.userId),
       studentResumeFacts(request.jwtPayload?.userId),
+      accountOnboardingComplete(request.jwtPayload?.userId),
     ]);
     const { resumeText, degree: candidateDegree } = resumeFacts;
     const sponsorOnly = accountSponsorOnly || parsed.data.sponsor_only === 'true';
+    /* The dashboard fill-and-handoff tier. Assisted boards (rippling) are surfaced ONLY to accounts
+       that have finished onboarding; guests and in-setup accounts get the autonomous-only board, so
+       the onboarding flow only ever shows jobs Litos can submit end to end. Server-side, not a client
+       flag. */
+    const includeAssisted = onboardingComplete;
     // Only surface jobs Litos can carry all the way to a confirmation on its own.
     //
     // Belt and braces with the compile-time constraint on SupportedJobBoard, and it earns its keep:
@@ -3143,6 +3181,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       relax_targeting: relaxTargeting,
       targeting: relaxTargeting ? null : jobTargeting,
       verified_evidence_gate: publicVerifiedEvidenceGateEnabled(),
+      /* Part of the hash so a cursor issued for the autonomous-only board can never be replayed
+         against the assisted board (or vice versa): the two are different result sets. */
+      include_assisted: includeAssisted,
     }) : null;
     const cursorSecret = cursorMode ? jobBoardCursorSigningSecret() : null;
     if (cursorMode && !cursorSecret) {
@@ -3176,6 +3217,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       sponsorOnly,
       targeting: relaxTargeting ? undefined : jobTargeting,
       asOf: cursorAsOf ?? undefined,
+      includeAssisted,
     });
     const pageConditions = cursorAsOf
       ? [...conditions, lte(monitored_jobs.first_seen_at, cursorAsOf)]
@@ -3203,6 +3245,13 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       posted_at: monitored_jobs.posted_at,
       first_seen_at: monitored_jobs.first_seen_at,
       ats_name: career_page_sources.ats_name,
+      /* 'autonomous' = Litos submits this end to end; 'assisted' = Litos fills the form and hands the
+         final human-check + send to the student (rippling's Cloudflare Turnstile). Derived from the
+         source family so the client never re-derives the classification, and it only ever reads
+         'assisted' when includeAssisted let an assisted row through in the first place. */
+      submit_mode: ASSISTED_SURFACED_FAMILIES.length
+        ? sql<'autonomous' | 'assisted'>`case when ${inArray(career_page_sources.ats_name, [...ASSISTED_SURFACED_FAMILIES])} then 'assisted' else 'autonomous' end`
+        : sql<'autonomous' | 'assisted'>`'autonomous'`,
       /* The company's OWN careers page, which is the only field here that can carry the company's
          own domain. Every other URL on the row points at the job board: apply_url and posting_url
          are all ATS-hosted, including Workable, so a client deriving a company identity from either gets
