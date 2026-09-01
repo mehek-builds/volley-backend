@@ -2666,6 +2666,15 @@ test('a label merely containing a profile keyword is not grounds to answer it wi
   assert.equal(classifyField('School'), 'school');
   assert.equal(classifyField('Current university'), 'school');
   assert.equal(classifyField('Phone number'), 'phone');
+  assert.equal(classifyField('Select country calling code: united states'), 'phone_country');
+  assert.equal(classifyField('Country code'), 'phone_country');
+  assert.equal(classifyField('Phone country code'), 'phone_country');
+  assert.equal(classifyField('Telephone country code'), 'phone_country');
+  // The run sees the live control type and the refresh sees 'text'; both must say the same thing.
+  assert.equal(classifyField('Country code', 'tel'), 'phone_country');
+  assert.equal(classifyField('Country code', 'text'), 'phone_country');
+  assert.equal(classifyField('Phone number', 'tel'), 'phone');
+  assert.equal(classifyField('phone number with country code +1 201-555-0123'), 'phone');
   assert.equal(classifyField('State / Province'), 'address_state');
   assert.equal(classifyField('City'), 'address_city');
   assert.equal(classifyField('Please re-confirm the university you currently attend'), 'school');
@@ -4809,4 +4818,35 @@ test('crelate identity controls are fixed fields, not questions, whatever label 
     { id: 'custom', question: 'Do you hold an active security clearance?', answer: 'No', portal_selector: '#clearance' },
   ];
   assert.deepEqual(normalizeStoredPortalQuestions(input, 'crelate'), [input[4]]);
+/* A dial-code picker is answered from the number's own dial code, as a country name, whatever the
+ * control's type. Measured on dsiinnovations.recruitee.com (2026-09-01): the form defaulted to
+ * "United States", the resolver had no intent for the label, and the run stopped to ask her the
+ * one question her profile answers in full. The refresh resolves every question with the 'text'
+ * type, so the value must not depend on the type or the packet_stale deadlock documented at the
+ * phone rule returns. */
+test('a country calling code question is answered from the phone number on the profile', () => {
+  const ap = { phone: '+12135746270', address_country: 'United Arab Emirates' };
+  assert.deepEqual(
+    resolveKnownAnswer('select country calling code: united states', 'combobox', ap, undefined),
+    { value: 'United States' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('select country calling code: united states', 'text', ap, undefined),
+    { value: 'United States' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Country code', 'select', { phone: '+971567417451' }, undefined),
+    { value: 'United Arab Emirates' },
+  );
+  // No dial code on the number: the country she lives in is where a local number is dialled from.
+  assert.deepEqual(
+    resolveKnownAnswer('Country code', 'select', { phone: '2135746270', address_country: 'United States' }, undefined),
+    { value: 'United States' },
+  );
+  assert.equal(resolveKnownAnswer('Country code', 'select', {}, undefined), null);
+  // The residence rule still never claims a picker, and the phone rule still owns the number.
+  assert.deepEqual(
+    resolveKnownAnswer('phone number with country code +1 201-555-0123', 'text', ap, undefined),
+    { value: '+12135746270' },
+  );
 });

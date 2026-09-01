@@ -107,6 +107,7 @@ export type ResolvedProfileField = {
  * profileBackedBlockerLabels reports on.
  */
 export const PROFILE_BACKED_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
+  'phone_country',
   'school',
   'degree',
   'major',
