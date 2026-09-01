@@ -34,9 +34,12 @@ test('POST /applications/:id/review responses carry the envelope on both exits',
   assert.equal(sites, 2, 'the contention 202 and the success response both attach the envelope');
 });
 
-test('submit-request contention 202 carries the envelope', () => {
+test('submit-request 202s carry the envelope on both exits', () => {
   const slice = routeSlice("'/applications/:id/submit-request'", "'/applications/:id/submission/channels'");
-  assert.match(slice, SPREAD);
+  // The contention 202 AND the end-of-run 202: a packet-drift hold ends the run through the main
+  // 202 with no attempt opened, so that response must also carry the unattempted-packet envelope.
+  const sites = slice.split('unattemptedPacketSubmissionAuthority(').length - 1;
+  assert.equal(sites, 2, 'the contention 202 and the end-of-run 202 both attach the envelope');
 });
 
 test('the helper is fail-closed: same envelope builder as /resume/history, nothing on read failure', () => {
