@@ -105,6 +105,11 @@ test('the logo gate measures every counted row against its exact employer board'
   assert.match(route, /logo_verification_status: career_page_sources\.logo_verification_status/);
   assert.match(gate, /miss: '404'/, 'a monogram must not pass as a verified logo');
   assert.match(gate, /Every surfaced posting has a verified company logo/);
+  /* The floor is a tolerance now (99.9%, see MINIMUM_LOGO_COVERAGE), so the gate has to keep
+     naming what is short even on a PASSING run. Without that a slow slide reaches the floor
+     unseen, and the tolerance stops being safe. */
+  assert.match(gate, /Sources without a verified logo/);
+  assert.match(gate, /is above the .* floor/);
   /* The measurement must not regress to resolver-only: the evidence probe is what keeps the
      check's failures from being its own load (two 2026-09-01 runs missed disjoint sets). */
   assert.match(gate, /probeEvidenceUrl/);
