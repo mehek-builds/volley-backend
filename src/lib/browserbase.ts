@@ -1,6 +1,6 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { getVercelOidcToken } from '@vercel/oidc';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   exactFinalSubmitChooserPolicy,
   FINAL_SUBMIT_CHOOSER_POLICY,
@@ -1203,6 +1203,39 @@ async function managedStratusAuthorization(signal?: AbortSignal): Promise<{
   };
 }
 
+/**
+ * Bounded lifetime of the ephemeral correlation a read scan carries. Stratus rejects a
+ * providerDeadlineAt that does not leave a bounded employer-action window: it must sit strictly
+ * inside (PROVIDER_RESPONSE_MARGIN_MS + PROVIDER_MINIMUM_SUBMIT_WINDOW_MS, MAX_PROVIDER_DEADLINE_MS],
+ * i.e. more than 12s and at most 5min out. Four minutes is a generous ceiling for a discover-plus-probe
+ * read of one form (well under stratus's own 270s run budget) and leaves a full minute of headroom
+ * below the 300s maximum, so ordinary request latency or clock skew can never push it out of bounds.
+ */
+const MANAGED_READ_SCAN_DEADLINE_MS = 240_000;
+
+/**
+ * The correlation a MUTATING READ SCAN carries, distinct in every way from a submission's durable
+ * correlation. A submission derives its attempt from the durable submission-attempt ledger (a real
+ * DB row bound to a packet) and sends allowSubmit; this is a fresh, throwaway UUID triple with no
+ * ledger row, no allowSubmit, and no continuation. Its only job is to satisfy stratus's
+ * correlation-required policy for the probe clicks (which classify as mutations) and to let stratus
+ * echo it back so the result is provably the one this call asked for. It never mints a terminal
+ * result, because a read scan is not a submission.
+ */
+export function managedReadScanCorrelation(nowMs: number = Date.now()): {
+  submissionAttempt: ManagedSubmissionAttempt;
+  providerDeadlineAt: string;
+} {
+  return {
+    submissionAttempt: {
+      runId: randomUUID(),
+      claimId: randomUUID(),
+      executionId: randomUUID(),
+    },
+    providerDeadlineAt: new Date(nowMs + MANAGED_READ_SCAN_DEADLINE_MS).toISOString(),
+  };
+}
+
 // `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA
 // probe does not: it reads one attribute and throws the result away, so a full-page PNG would be
 // rendered, transferred and retained by the third-party runner for nothing.
@@ -1218,20 +1251,38 @@ export async function runManagedBrowser(
     submissionAttempt?: ManagedSubmissionAttempt;
     providerDeadlineAt?: string;
     timeoutMs?: number;
+    /**
+     * Correlate this run as a READ SCAN whose actions mutate the page (option-probe clicks) but that
+     * never submits. Under stratus correlationRequired, any mutation needs a submissionAttempt and a
+     * providerDeadlineAt; a read scan supplies a fresh ephemeral pair (see managedReadScanCorrelation)
+     * so the probe clicks are accepted and contained, WITHOUT the submit-only durable-terminal-result
+     * assertion. It is a usage error to combine this with allowSubmit or requestContinuation: a scan
+     * is by definition not a submission.
+     */
+    scanCorrelation?: boolean;
   } = {},
 ): Promise<ManagedBrowserResult> {
   if (options.timeoutMs !== undefined) assertManagedBrowserTimeout(options.timeoutMs, 'Managed Stratus run');
+  const submitCorrelated = options.allowSubmit === true || options.requestContinuation === true;
+  const scanCorrelated = options.scanCorrelation === true;
+  if (scanCorrelated && submitCorrelated) {
+    throw new Error('A managed read-scan correlation cannot also release a submission or request a continuation');
+  }
+  // A read scan mints its own ephemeral correlation unless the caller pinned an exact pair (tests do).
+  const scanPair = scanCorrelated && (options.submissionAttempt == null || options.providerDeadlineAt == null)
+    ? managedReadScanCorrelation()
+    : null;
   const providerDeadlineAt = managedProviderDeadline(
-    options.providerDeadlineAt,
-    options.allowSubmit === true || options.requestContinuation === true,
+    options.providerDeadlineAt ?? scanPair?.providerDeadlineAt,
+    submitCorrelated || scanCorrelated,
   );
   const effectiveTimeoutMs = managedProviderRequestTimeoutMs(options.timeoutMs, providerDeadlineAt);
   const signal = effectiveTimeoutMs === undefined ? undefined : AbortSignal.timeout(effectiveTimeoutMs);
   const { baseUrl, headers } = await managedStratusAuthorization(signal);
   const outboundActions = normalizeStratusActions(actions);
   const expectedSubmissionAttempt = managedSubmissionAttempt(
-    options.submissionAttempt,
-    options.allowSubmit === true || options.requestContinuation === true,
+    options.submissionAttempt ?? scanPair?.submissionAttempt,
+    submitCorrelated || scanCorrelated,
   );
   const response = await fetch(`${baseUrl}/api/run`, {
     method: 'POST',
@@ -1257,8 +1308,12 @@ export async function runManagedBrowser(
   if (!response.ok || !payload.run) {
     throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
   }
+  // The echo binds the result to the exact correlation we sent, for a scan and a submit alike, so it
+  // is always asserted when an attempt was sent. The durable terminal result ID, however, is a
+  // submit-only concept: it identifies the immutable employer-submission receipt. A read scan mints
+  // no such receipt (stratus runs it ephemerally), so asserting one here would fail a correct scan.
   if (expectedSubmissionAttempt) assertManagedSubmissionAttemptEcho(payload.run, expectedSubmissionAttempt);
-  if (expectedSubmissionAttempt) managedBrowserTerminalResultId(payload.run);
+  if (expectedSubmissionAttempt && !scanCorrelated) managedBrowserTerminalResultId(payload.run);
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }
