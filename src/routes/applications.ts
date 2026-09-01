@@ -164,6 +164,7 @@ import {
   selfSubmittedSubmissionReceiptText,
 } from '../lib/authoritativeSubmissionProjection';
 import { submissionAuthorityEnvelopeForUnattemptedPacket } from './resume';
+import { withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
@@ -3271,13 +3272,24 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
       }
       const next = freshSubmitRequestReview(current, canonicalSubmittedQuestions, submittedReviewedAt);
-      const claimed = await db.update(generated_resumes)
+      /* The revision guard behind this write's trigger try-locks the per-user advisory lock and
+       * raises "retry the request" (40001) instead of waiting, so this claim fails whenever an
+       * authority projection read - a dashboard poll, a history load - holds the lock for a few
+       * milliseconds. Observed live 2026-09-01: this exact statement 500'd and the applicant's run
+       * reported failed. The raise aborts the statement before anything commits, and the status
+       * guard makes a rerun land in the designed contention path, so retrying here is safe. */
+      const claimed = await withAuthorityRevisionRetry(() => db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
         ))
-        .returning({ id: generated_resumes.id });
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'submit-request claim hit the authority revision guard; retrying',
+        ),
+      });
       if (claimed.length === 0) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
