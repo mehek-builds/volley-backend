@@ -227,6 +227,22 @@ const logoVerificationQuerySchema = z.object({
 export const LOGO_VERIFICATION_GLOBAL_CONCURRENCY = 16;
 export const LOGO_VERIFICATION_PROVIDER_CONCURRENCY = 4;
 export const LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS = 1_100;
+export const LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS =
+  LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS;
+/**
+ * Providers whose public API shares one PLATFORM-WIDE limit across every tenant, so logo probes
+ * spend the same budget the poll scheduler paces (PROVIDER_START_INTERVALS_MS in
+ * src/lib/jobPollScheduler.ts; the 2026-09-01 drain evidence lives on that constant). An
+ * interval-paced provider here also runs one probe at a time. Crelate shares that platform limit
+ * but is deliberately absent: each verify-logos request admits at most one Crelate candidate
+ * (LOGO_VERIFICATION_CRELATE_CANDIDATES) at concurrency 1, so there is no second same-request
+ * start for an interval to space, and CRELATE_LOGO_CIRCUIT_OPEN_MS already halts repeat traffic
+ * across requests after a 429.
+ */
+export const LOGO_VERIFICATION_START_INTERVALS_MS: Readonly<Record<string, number>> = {
+  workable: LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
+  recruitee: LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS,
+};
 export const LOGO_VERIFICATION_REQUEST_CANDIDATES = 16;
 export const LOGO_VERIFICATION_PROVIDER_CANDIDATES = 4;
 export const LOGO_VERIFICATION_WORKABLE_CANDIDATES = 2;
@@ -411,7 +427,8 @@ export function boundedLogoVerificationCandidates<T extends { ats_name: string }
 type ProviderAwareLogoQueueOptions = {
   concurrency?: number;
   providerConcurrency?: number;
-  workableStartIntervalMs?: number;
+  /** Per-provider start spacing, merged over LOGO_VERIFICATION_START_INTERVALS_MS. */
+  startIntervalsMs?: Readonly<Record<string, number>>;
   timeoutMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -424,7 +441,7 @@ export class LogoVerificationRequestTimeoutError extends Error {
   }
 }
 
-/** Bound the whole verifier and each ATS family while spacing the provider with a shared limit. */
+/** Bound the whole verifier and each ATS family while spacing providers with a shared limit. */
 export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
   candidates: readonly T[],
   operation: (candidate: T, signal: AbortSignal) => Promise<void>,
@@ -436,10 +453,10 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
     1,
     options.providerConcurrency ?? LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
   );
-  const workableStartIntervalMs = Math.max(
-    0,
-    options.workableStartIntervalMs ?? LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
-  );
+  const startIntervalsMs: Record<string, number> = { ...LOGO_VERIFICATION_START_INTERVALS_MS };
+  for (const [provider, interval] of Object.entries(options.startIntervalsMs ?? {})) {
+    startIntervalsMs[provider] = Math.max(0, interval);
+  }
   const timeoutMs = Math.max(1, options.timeoutMs ?? LOGO_VERIFICATION_REQUEST_TIMEOUT_MS);
   const controller = new AbortController();
   const timeoutError = new LogoVerificationRequestTimeoutError(timeoutMs);
@@ -449,10 +466,15 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
   }));
   const pending = [...candidates];
   const activeByProvider = new Map<string, number>();
+  const nextStartByProvider = new Map<string, number>();
+  const latestStartBarrier = () => {
+    let latest = 0;
+    for (const nextStart of nextStartByProvider.values()) latest = Math.max(latest, nextStart);
+    return latest;
+  };
   let active = 0;
   let completed = 0;
-  let nextWorkableStart = 0;
-  let workableTimerPending = false;
+  let pacedTimerPending = false;
   let completionTimerPending = false;
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -462,7 +484,7 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
     let firstFailure: unknown;
     const rejectWhenProviderBarrierClears = () => {
       if (settled || !hasFailure || active !== 0) return;
-      const delay = Math.max(0, nextWorkableStart - now());
+      const delay = Math.max(0, latestStartBarrier() - now());
       if (delay > 0) {
         if (!completionTimerPending) {
           completionTimerPending = true;
@@ -487,8 +509,9 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         firstFailure = error;
       }
       /* The route holds the shared database advisory lock around this queue. Do not reject while a
-         started sibling can still mutate proof state, or while the final Workable start barrier is
-         active, because either return would release cross-replica pacing protection too early. */
+         started sibling can still mutate proof state, or while any paced provider's final start
+         barrier is active, because either return would release cross-replica pacing protection too
+         early. */
       rejectWhenProviderBarrierClears();
     };
     const onTimeout = () => {
@@ -502,10 +525,10 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         rejectWhenProviderBarrierClears();
         return;
       }
-      if (completed === candidates.length && now() < nextWorkableStart) {
+      if (completed === candidates.length && now() < latestStartBarrier()) {
         if (!completionTimerPending) {
           completionTimerPending = true;
-          void sleep(nextWorkableStart - now()).then(() => {
+          void sleep(latestStartBarrier() - now()).then(() => {
             completionTimerPending = false;
             schedule();
           }, fail);
@@ -522,19 +545,24 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         const timestamp = now();
         const index = pending.findIndex((candidate) => {
           const providerActive = activeByProvider.get(candidate.ats_name) ?? 0;
-          const providerLimit = candidate.ats_name === 'workable'
-            || candidate.ats_name === 'crelate'
+          const startInterval = startIntervalsMs[candidate.ats_name];
+          /* A paced probe also runs alone: one candidate can retry its provider several times
+             (retryTransientLogoVerification), so spaced starts alone would still let two
+             candidates' retries overlap on the one shared platform limit. */
+          const providerLimit = startInterval !== undefined || candidate.ats_name === 'crelate'
             ? 1
             : providerConcurrency;
           return providerActive < providerLimit
-            && (candidate.ats_name !== 'workable' || timestamp >= nextWorkableStart);
+            && (startInterval === undefined
+              || timestamp >= (nextStartByProvider.get(candidate.ats_name) ?? 0));
         });
         if (index < 0) break;
         const [candidate] = pending.splice(index, 1);
         active += 1;
         activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 0) + 1);
-        if (candidate.ats_name === 'workable') {
-          nextWorkableStart = timestamp + workableStartIntervalMs;
+        const startInterval = startIntervalsMs[candidate.ats_name];
+        if (startInterval !== undefined) {
+          nextStartByProvider.set(candidate.ats_name, timestamp + startInterval);
         }
         let task: Promise<void>;
         try {
@@ -555,13 +583,20 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         });
       }
 
-      const workableWaiting = pending.some((candidate) => candidate.ats_name === 'workable');
-      if (!workableTimerPending && active < concurrency && workableWaiting) {
-        const delay = Math.max(0, nextWorkableStart - now());
+      let earliestPacedStart = Infinity;
+      for (const candidate of pending) {
+        if (startIntervalsMs[candidate.ats_name] === undefined) continue;
+        earliestPacedStart = Math.min(
+          earliestPacedStart,
+          nextStartByProvider.get(candidate.ats_name) ?? 0,
+        );
+      }
+      if (!pacedTimerPending && active < concurrency && earliestPacedStart !== Infinity) {
+        const delay = Math.max(0, earliestPacedStart - now());
         if (delay > 0) {
-          workableTimerPending = true;
+          pacedTimerPending = true;
           void sleep(delay).then(() => {
-            workableTimerPending = false;
+            pacedTimerPending = false;
             schedule();
           }, fail);
         }
@@ -4646,7 +4681,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         global: LOGO_VERIFICATION_GLOBAL_CONCURRENCY,
         per_provider: LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
         workable: 1,
+        recruitee: 1,
         workable_start_interval_ms: LOGO_VERIFICATION_WORKABLE_START_INTERVAL_MS,
+        recruitee_start_interval_ms: LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS,
+        start_interval_ms_by_provider: LOGO_VERIFICATION_START_INTERVALS_MS,
         request_candidates: LOGO_VERIFICATION_REQUEST_CANDIDATES,
         per_provider_candidates: LOGO_VERIFICATION_PROVIDER_CANDIDATES,
         workable_candidates: LOGO_VERIFICATION_WORKABLE_CANDIDATES,
