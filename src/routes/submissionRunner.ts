@@ -7010,8 +7010,14 @@ async function prepareManaged(
    * then failed the whole packet with the same sentence. A prepare run truly cannot submit (no
    * allowSubmit, no final action, both enforced server-side), so the ephemeral scan pair is the
    * correct correlation; the DURABLE attempt stays what it means - claimSubmission's ledger row,
-   * opened only when a submit-capable run is about to launch. The widened deadline covers
-   * stratus's own 270s run budget: these are the two big runs of the prepare path. */
+   * opened only when a submit-capable run is about to launch.
+   *
+   * This pass runs FIRST, which is why its uncorrelated form was the worst of the four: it fails
+   * closed before the option-probe and fill runs are ever reached, and the .catch below files the
+   * refusal as a discovery failure, so the applicant is told the form's questions could not be read
+   * rather than that a correlation was missing. The widened window is for the two big runs of the
+   * prepare path (this and the fill), which are the two that can legitimately reach stratus's own
+   * run budget. See MANAGED_PREPARE_SCAN_OPTIONS for why it is 280s and not more. */
   const discoveryResult = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,
