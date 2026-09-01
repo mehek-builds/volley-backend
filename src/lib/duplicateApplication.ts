@@ -89,6 +89,16 @@ export type DuplicateApplicationMatch = {
    * owe the applicant different sentences, and telling her she has already applied when nobody
    * knows that is the kind of false certainty this codebase keeps having to delete. */
   certainty: 'submitted' | 'unverified' | 'repair_required';
+  /* WITHIN 'unverified', WHETHER A SEND IS ACTUALLY IN EVIDENCE.
+   *
+   * 'pressed' is the real unverified press - a boundary was authorized or a press was observed and
+   * the outcome was lost (the Skydio case), or a legacy runner recorded the same in prose. 'opened'
+   * is an attempt that never got past attempt_opened: no boundary, no press, nothing that shows a
+   * send happened (submissionAttemptRetrySafety reason 'opened'), which the legacy_backfill rows are.
+   * The refusal is identical - a second application still cannot be withdrawn - but the two owe the
+   * applicant different sentences, and telling her Litos "already pressed Send" over an attempt that
+   * only opened is the false certainty this file exists to avoid. Absent means 'pressed'. */
+  send_evidence?: 'pressed' | 'opened';
   tracker_available?: boolean;
 };
 
@@ -125,6 +135,21 @@ export function duplicateApplicationReason(match: DuplicateApplicationMatch): st
    * have found out from the employer. Now it is stopped, and the sentence sends her to the one
    * action that unblocks both packets rather than leaving her to guess. */
   if (match.certainty === 'unverified') {
+    /* THE OPENED-ONLY TWIN. An attempt exists but nothing in the ledger shows a send: no boundary was
+     * authorized and no press was observed (submissionAttemptRetrySafety reason 'opened'), which is
+     * every legacy_backfill attempt reconstructed as an open with no completion. Saying "Litos already
+     * pressed Send" here is the false certainty this file otherwise deletes, so the sentence claims
+     * only what is true - an earlier attempt whose outcome is unknown - while keeping the identical
+     * fail-closed refusal and the same resolution path. It still carries the phrase "does not know
+     * whether this application went through" so attentionCategoriesForReasons files it as
+     * unverified_submission, exactly as the pressed sentence's "could not confirm what came back" does. */
+    if (match.send_evidence === 'opened') {
+      return `Not sent: Litos has an earlier attempt on ${role}${at} and does not know whether this `
+        + 'application went through, so the employer may already have it. Sending this one could make '
+        + 'it two, and an application cannot be taken back once it is in. Open that earlier attempt in '
+        + 'your Tracker, check the employer\u2019s page, and tell Litos whether it is there. If it is '
+        + 'not, Litos will send it for you.';
+    }
     return `Not sent: Litos already pressed Send on ${role}${at} and could not confirm what came back, `
       + 'so the employer may already have that application. Sending this one could make it two, and an '
       + 'application cannot be taken back once it is in. Open that earlier application in your Tracker, '
@@ -154,6 +179,10 @@ export type SubmittedTwinRow = {
   /* When a submit on this row was pressed and lost, and nobody has looked yet. Null on every row
    * that is either cleanly submitted or cleanly not. */
   unverified_at?: string | null;
+  /* Whether the unverified evidence is an actual send ('pressed': a boundary was authorized or a
+   * press observed, or a legacy prose press) or only an opened attempt with nothing showing a send
+   * ('opened'). Drives the sentence, not the refusal. Absent is treated as 'pressed'. */
+  unverified_send_evidence?: 'pressed' | 'opened';
   /* Older runners recorded the uncertain press only as attention_reason prose. Those rows have no
    * unverified_submission object and therefore no timestamp, but they carry the same duplicate-send
    * risk until the applicant resolves the earlier attempt. */
@@ -354,7 +383,7 @@ const UNIDENTIFIABLE_DUPLICATE_REASON = 'Not sent: Litos has an earlier applicat
   + 'posting identity cannot be safely compared with this one. Sending now could create a duplicate. '
   + 'Open the earlier application in your Tracker and resolve whether the employer received it first.';
 
-function ledgerTwin(
+export function ledgerTwin(
   attempt: BlockingSubmissionAttempt,
   projection?: AuthoritativeSubmissionProjection,
 ): SubmittedTwinRow {
@@ -367,6 +396,13 @@ function ledgerTwin(
     : attempt.retrySafety.kind === 'blocked_confirmed' && !exactConfirmed
       ? attempt.retrySafety.confirmedAt
       : null;
+  // 'opened' is the retry-safety reason for an attempt that never authorized a boundary or observed a
+  // press: real for every legacy_backfill attempt reconstructed as a bare open. Any other unverified
+  // reason (boundary_authorized, pressed, invalid_sequence) is a real or ambiguous send and stays
+  // 'pressed'. Only the sentence differs; the block does not.
+  const unverifiedSendEvidence: 'pressed' | 'opened' | undefined = attempt.retrySafety.kind === 'blocked_unverified'
+    ? (attempt.retrySafety.reason === 'opened' ? 'opened' : 'pressed')
+    : undefined;
   const hasExactScope = frozenPostingIdentityHasExactScope(attempt.postingIdentity);
   const isRootAutofillOrphan = attempt.applicationId === null
     && !attempt.parentAttemptId
@@ -402,6 +438,7 @@ function ledgerTwin(
     tracker_available: Boolean(attempt.applicationId),
     submitted_at: submittedAt,
     unverified_at: unverifiedAt,
+    ...(unverifiedSendEvidence ? { unverified_send_evidence: unverifiedSendEvidence } : {}),
     ...(exactConfirmed
       ? { receipt_authority: 'confirmed' as const }
       : attempt.retrySafety.kind === 'blocked_confirmed'
@@ -664,6 +701,9 @@ export function duplicateAmong(
       submitted_at: row.submitted_at ?? undefined,
       basis: verdict.basis,
       certainty,
+      // Only the 'unverified' sentence reads it; an opened-only attempt gets the honest wording that
+      // does not claim a press, while a real or legacy press stays 'pressed'.
+      ...(certainty === 'unverified' ? { send_evidence: row.unverified_send_evidence ?? 'pressed' } : {}),
       ...(row.tracker_available === false ? { tracker_available: false } : {}),
     };
     const reason = duplicateApplicationReason(match);
