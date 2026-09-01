@@ -25,6 +25,27 @@ export function clipJdText(rawText: string | undefined | null): string {
 const WORKABLE_APPLICATION_PATH = /^\/((?:[a-z0-9][a-z0-9._-]*\/)?j\/[a-z0-9]+)\/apply\/?$/i;
 const LEVER_APPLICATION_PATH = /^\/([^/]+)\/([^/]+)\/apply\/?$/i;
 const LEVER_HOSTS = new Set(['jobs.lever.co', 'jobs.eu.lever.co']);
+/* The other boards whose candidate form lives on a separate route from the posting. Each pattern
+ * is the family's own application route, measured on live tenants: a pasted apply link is the
+ * commonest shape a student has (it is what the board's Apply button copies), and reading the form
+ * page instead of the posting yields "Litos could not find a stated requirement on that page"
+ * (measured 2026-09-02 on a Crelate apply link). The rewrite keeps the family's tenant and posting
+ * identity and drops only the form segment, so the monitored-inventory lookup (which keys on both
+ * apply_url and posting_url) and the browser read both land on the posting. Per host on purpose,
+ * exactly like Workable and Lever above: a trailing form segment means whatever the board says it
+ * means, so nothing is stripped on a host we have not checked. */
+const CRELATE_APPLICATION_PATH = /^\/(portal\/[^/]+\/job)\/apply\/([^/]+)\/?$/i;
+const RECRUITEE_APPLICATION_PATH = /^\/(o\/[^/]+)\/c\/new\/?$/i;
+const TEAMTAILOR_APPLICATION_PATH = /^\/(jobs\/[^/]+)\/applications\/new\/?$/i;
+const PINPOINT_APPLICATION_PATH = /^\/((?:[a-z]{2}\/)?postings\/[^/]+)\/applications\/new\/?$/i;
+const BREEZY_APPLICATION_PATH = /^\/(p\/[^/]+)\/apply\/?$/i;
+const SEPARATE_FORM_ROUTES: ReadonlyArray<{ host: (hostname: string) => boolean; path: RegExp; posting: (match: RegExpMatchArray) => string }> = [
+  { host: (h) => h === 'jobs.crelate.com', path: CRELATE_APPLICATION_PATH, posting: (m) => `/${m[1]}/${m[2]}` },
+  { host: (h) => /^[a-z0-9-]+\.recruitee\.com$/i.test(h), path: RECRUITEE_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/i.test(h), path: TEAMTAILOR_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^[a-z0-9-]+\.pinpointhq\.com$/i.test(h), path: PINPOINT_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^[a-z0-9-]+\.breezy\.hr$/i.test(h), path: BREEZY_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+];
 
 /**
  * An application route contains form labels, not the job description. Read the exact job overview
@@ -73,6 +94,19 @@ export function jobDescriptionSourceUrl(rawUrl: string): string {
     url.search = '';
     url.hash = '';
     return url.toString();
+  }
+
+  if (url.protocol === 'https:') {
+    const hostname = url.hostname.toLowerCase();
+    for (const route of SEPARATE_FORM_ROUTES) {
+      if (!route.host(hostname)) continue;
+      const match = url.pathname.match(route.path);
+      if (!match) return rawUrl;
+      url.pathname = route.posting(match);
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
   }
 
   return rawUrl;
@@ -126,6 +160,9 @@ export type MonitoredInventoryJob = {
   apply_url: string;
   posting_url: string;
   title: string;
+  /* Optional only so older callers and fixtures that never carried it keep compiling; the route's
+     own lookup always selects it. */
+  company_name?: string | null;
   description: string;
   ats_name: string | null;
   board_token: string | null;
@@ -144,7 +181,7 @@ export type MonitoredInventoryJob = {
 export function monitoredJobDescriptionMatch(
   rawUrl: string,
   job: MonitoredInventoryJob,
-): { jdText: string; pageTitle: string } | undefined {
+): { jdText: string; pageTitle: string; companyName: string } | undefined {
   const storedCanonical = canonicalMonitoredPortalUrl(
     job.apply_url,
     job.ats_name,
@@ -175,7 +212,7 @@ export function monitoredJobDescriptionMatch(
   if (!pastedCanonical) return undefined;
   const jdText = clipJdText(job.description);
   if (!jdText) return undefined;
-  return { jdText, pageTitle: job.title.trim() };
+  return { jdText, pageTitle: job.title.trim(), companyName: (job.company_name ?? '').trim() };
 }
 
 /**
@@ -191,7 +228,7 @@ export function monitoredJobDescriptionMatch(
  */
 export async function findMonitoredJobDescription(
   rawUrl: string,
-): Promise<{ jobId: string; jdText: string; pageTitle: string } | undefined> {
+): Promise<{ jobId: string; jdText: string; pageTitle: string; companyName: string } | undefined> {
   const keys = monitoredInventoryLookupKeys(rawUrl);
   const candidates = await db.select({
     id: monitored_jobs.id,
@@ -199,6 +236,7 @@ export async function findMonitoredJobDescription(
     apply_url: monitored_jobs.apply_url,
     posting_url: monitored_jobs.posting_url,
     title: monitored_jobs.title,
+    company_name: monitored_jobs.company_name,
     // Same bounded read the portal repair path uses: the route clips to MAX_JD_TEXT_CHARS anyway,
     // so there is no reason to move a multi-hundred-kilobyte description over the wire.
     description: sql<string>`left(${monitored_jobs.description}, 60000)`,
@@ -298,9 +336,14 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
           },
           'job description served from monitored inventory',
         );
+        /* The posting's identity rides with its text. The composer asks for company and role
+           before it will tailor or fill, and a student who pasted a link should not be typing
+           either back in when the monitor already holds both for this exact posting. */
         return reply.status(200).send({
           jd_text: monitored.jdText,
           page_title: monitored.pageTitle || undefined,
+          company: monitored.companyName || undefined,
+          role: monitored.pageTitle || undefined,
         });
       }
       fastify.log.warn(
