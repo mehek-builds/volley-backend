@@ -9,6 +9,7 @@ import {
   packetAuditContentIdentity,
   packetAuditIsSubmissionReady,
   type PacketAudit,
+  packetAuditContentIdentityWithoutDelivery,
 } from './packetAudit';
 import { rerenderFrozenResume } from './packetDocumentRecovery';
 import { createPdfGenerationBinding } from './pdfGenerationBinding';
@@ -141,6 +142,54 @@ export function restoredPacketAcknowledgement(input: {
     pdfSizeBytes: input.restoredAudit.bindings.pdf.sizeBytes,
     acknowledged_at: input.acknowledgedAt,
     source: 'auto_restored',
+  };
+}
+
+/**
+ * The acknowledgement a packet re-audited WITH THE CAPABILITIES DISCOVERY MEASURED may carry.
+ *
+ * The review card she approved on says, verbatim, "Litos will check the company's form first. If
+ * the form has a cover-letter attachment, Litos writes one and attaches it." The audit she
+ * acknowledged was built before that check, with both capability facts unknown; the discovery pass
+ * then learned them, the delivery envelope moved, and every first approve of a form with no
+ * questions parked on "this application changed after you approved". Measured 2026-09-01 on
+ * TixTrack (teamtailor) and Cartesia (ashby): the acknowledged sha and the measured sha differed
+ * by exactly the two capability facts, nothing she had looked at had moved, and the only way on was
+ * a second identical approve.
+ *
+ * Same discipline as restoredPacketAcknowledgement, and deliberately narrower in one way and wider
+ * in one way. Narrower: no authority argument, because the only caller is the runner's prepare,
+ * which is authorizing a send by construction. Wider: the employer-delivery hash is set aside from
+ * the identity comparison, and ONLY that hash; the caller has to have proven, with
+ * deliveryDriftIsLitosLearnedOnly, that what moved it is a fact the form taught Litos after she
+ * approved. Every other condition is the restore's: an acknowledgement existed and bound the prior
+ * audit exactly, both audits carry the current delivery binding in the same mode (the channel and
+ * runtime inside the hash are the caller's to pin, and deliveryDriftIsLitosLearnedOnly does), the
+ * resume bytes are identical, and the re-issued audit says the same thing about the packet.
+ */
+export function relearnedCapabilitiesAcknowledgement(input: {
+  priorAudit: PacketAudit | undefined;
+  priorAcknowledgement: PacketAcknowledgement | undefined;
+  reissuedAudit: PacketAudit;
+  acknowledgedAt: string;
+}): PacketAcknowledgement | null {
+  if (!input.priorAudit || !input.priorAcknowledgement) return null;
+  if (!packetAuditIsSubmissionReady(input.priorAudit)
+    || !packetAuditIsSubmissionReady(input.reissuedAudit)) return null;
+  if (!acknowledgementBindsAudit(input.priorAcknowledgement, input.priorAudit)) return null;
+  if (input.priorAudit.bindings.pdf.sha256 !== input.reissuedAudit.bindings.pdf.sha256) return null;
+  if (input.priorAudit.bindings.employerDelivery?.mode !== input.reissuedAudit.bindings.employerDelivery?.mode) return null;
+  if (packetAuditContentIdentityWithoutDelivery(input.priorAudit)
+    !== packetAuditContentIdentityWithoutDelivery(input.reissuedAudit)) return null;
+  return {
+    ownerSha256: input.reissuedAudit.bindings.ownerSha256,
+    applicationId: input.reissuedAudit.bindings.applicationId,
+    audit_digest: input.reissuedAudit.audit_digest,
+    packet_version: input.reissuedAudit.packet_version,
+    pdfSha256: input.reissuedAudit.bindings.pdf.sha256,
+    pdfSizeBytes: input.reissuedAudit.bindings.pdf.sizeBytes,
+    acknowledged_at: input.acknowledgedAt,
+    source: 'capabilities_measured',
   };
 }
 

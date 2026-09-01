@@ -48,6 +48,7 @@ import {
   PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE,
   transportVerifiedBuiltPacket,
   verifiedBuiltPacketIssues,
+  deliveryDriftIsLitosLearnedOnly,
   managedActionDiagnosticsForLog,
   stableManagedDocumentCapability,
   managedFormSnapshotWithStableCapabilities,
@@ -6437,4 +6438,87 @@ test('a reviewed band that is an exact offered option stays closed through the s
   assert.equal(settled[0] && 'answer_draft' in settled[0] && settled[0].answer_draft !== undefined, false,
     'no draft is minted for a fit answer');
   assert.deepEqual(blankRequiredQuestionLabels(settled), []);
+});
+
+/* THE ONLY THING THAT MOVED THE DELIVERY HASH IS WHAT THE FORM TAUGHT LITOS. Measured 2026-09-01 on
+ * TixTrack and Cartesia: a first approve of a form with no applicant questions parked on "how Litos
+ * reaches this employer changed" because discovery learned the cover-letter and transcript facts
+ * after she approved. These pin what may and may not count as learned. */
+test('delivery drift counts as Litos-learned only when the probe alone moved it', () => {
+  const resume = Buffer.from('%PDF-1.7\nexemplar');
+  const packetFor = (over: Partial<SubmissionPacket> = {}): SubmissionPacket => ({
+    fullName: 'Mehek Mandal',
+    email: 'app-cartesia@apply.trylitos.com',
+    jdText: 'Agent harness engineering.',
+    resume,
+    resumeName: 'resume.pdf',
+    applicantSnapshot: { profile: { full_name: 'Mehek Mandal', email: 'mehek@example.com', experience: [], skills: [], school: 'USC', grad_year: 2028 }, application_profile: { phone: '+12135746270' } },
+    questions: [],
+    ...over,
+  });
+  const envelopeFor = (caps: { coverLetterSupported?: boolean; transcriptSupported?: boolean }, destinationUrl = 'https://jobs.ashbyhq.com/cartesia/apply') => employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl,
+    portalFamily: 'ashby',
+    ...caps,
+  });
+  const approved = packetFor();
+  const beforeProbe = envelopeFor({});
+  const afterProbe = envelopeFor({ coverLetterSupported: false, transcriptSupported: false });
+  const audit = createPacketAudit({
+    ownerId: 'owner-1',
+    applicationId: 'application-1',
+    jdText: approved.jdText ?? '',
+    spec: {},
+    jobContext: { company: 'Cartesia', role: 'Software Engineer' },
+    questions: [],
+    applicantSnapshot: approved.applicantSnapshot,
+    resumeEmail: 'student@example.com',
+    applicantEmail: approved.email,
+    employerDelivery: createEmployerDeliveryBindings(approved, {}, { mode: 'browser', envelope: beforeProbe }),
+    pdfObjectKey: 'users/owner-1/resumes/application-1.pdf',
+    pdfBytes: resume,
+    editedTerms: [],
+    clauses: [{ text: approved.jdText ?? '', start: 0, end: (approved.jdText ?? '').length, verdict: 'unscoreable' }],
+    rejected: [],
+    degraded: false,
+    terms: { covered: [], missing: [], edited: [] },
+  });
+  const judge = (over: {
+    packet?: SubmissionPacket;
+    approvedPacket?: SubmissionPacket;
+    approvedEnvelope?: ReturnType<typeof envelopeFor>;
+    measuredEnvelope?: ReturnType<typeof envelopeFor>;
+  } = {}) => deliveryDriftIsLitosLearnedOnly({
+    packet: over.packet ?? approved,
+    approvedPacket: over.approvedPacket ?? approved,
+    audit,
+    verifiedQuestions: [],
+    mode: 'browser',
+    approvedEnvelope: over.approvedEnvelope ?? beforeProbe,
+    measuredEnvelope: over.measuredEnvelope ?? afterProbe,
+  });
+
+  // The live case: nothing moved but the two capability facts, both unknown at approval.
+  assert.equal(judge(), true);
+  // The form inventory a first probe read is learned too: the approved packet had none.
+  assert.equal(judge({ packet: packetFor({ fieldOptions: { country: ['United States', 'Canada'] } }) }), true);
+  // No drift at all is not "learned only"; the caller simply proceeds.
+  assert.equal(judge({ measuredEnvelope: beforeProbe }), false);
+  // A capability that was KNOWN and then changed is the employer changing the form.
+  assert.equal(judge({
+    approvedEnvelope: envelopeFor({ coverLetterSupported: false, transcriptSupported: false }),
+    measuredEnvelope: envelopeFor({ coverLetterSupported: true, transcriptSupported: false }),
+  }), false);
+  // The destination moving is never a capability.
+  assert.equal(judge({ measuredEnvelope: envelopeFor({ coverLetterSupported: false, transcriptSupported: false }, 'https://jobs.ashbyhq.com/other/apply') }), false);
+  // Anything she looked at moving alongside the probe refuses: her profile, the posting.
+  const someoneElse = packetFor({
+    applicantSnapshot: {
+      profile: { full_name: 'Someone Else', email: 'mehek@example.com', experience: [], skills: [], school: 'USC', grad_year: 2028 },
+      application_profile: { phone: '+12135746270' },
+    },
+  });
+  assert.equal(judge({ packet: someoneElse }), false);
+  assert.equal(judge({ packet: packetFor({ jdText: 'The posting was edited.' }) }), false);
 });

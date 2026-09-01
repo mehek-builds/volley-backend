@@ -702,6 +702,21 @@ export function packetAuditContentIdentity(audit: PacketAudit): string {
   return packetAuditSha256({ ...rest, bindings: contentBindings });
 }
 
+/**
+ * The same identity minus HOW THE PACKET IS DELIVERED, for exactly one caller: the runner deciding
+ * whether the capabilities a discovery pass just measured (does the form take a cover letter, a
+ * transcript) may re-issue the audit under the approval she already gave. Everything she looked at
+ * and agreed to is still compared: the spec, the job description, the job context, the questions,
+ * the applicant snapshot, both email identities, every clause, term and verdict. Only the employer
+ * delivery hash is set aside, and only because the caller has separately proven that the ONE thing
+ * moving that hash is a fact Litos learned by looking at the form after she approved.
+ */
+export function packetAuditContentIdentityWithoutDelivery(audit: PacketAudit): string {
+  const { audit_digest: _digest, packet_version: _version, bindings, ...rest } = audit;
+  const { pdf: _pdf, employerDelivery: _delivery, ...contentBindings } = bindings;
+  return packetAuditSha256({ ...rest, bindings: contentBindings });
+}
+
 export function packetAuditIsSubmissionReady(audit: unknown): audit is PacketAudit {
   try {
     if (!audit || typeof audit !== 'object') return false;
