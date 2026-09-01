@@ -581,11 +581,27 @@ test('a completed cursor cycle cannot certify detail failures preserved by an ea
 });
 
 test('the floor and the autonomy rule are enforced against the same set of portals', () => {
-  // The two constraints pull against each other: every portal removed from AUTONOMOUS_PORTAL_FAMILIES
-  // subtracts its boards from the number the floor is measured on. This asserts they cannot drift
-  // apart - a board may only be polled from a portal that is both autonomous and pollable, so the
-  // floor is always counted over exactly the jobs the board is allowed to show.
+  // Every pollable board is either fully autonomous - surfaced in onboarding, submitted end-to-end,
+  // and counted toward the floor - or an assisted exception: pollable and fully fillable, but its
+  // final human-check + send belongs to the applicant, so it is surfaced on the dashboard only
+  // (fill-and-handoff) and is NOT part of the autonomous set the floor is measured on. rippling is
+  // the one assisted exception (Cloudflare-Turnstile-gated on submit; witnessed 2026-08-20).
+  //
+  // The invariant that must not drift: the autonomous set and the floor's counting set are the same,
+  // and no board is BOTH counted by the floor AND unable to be completed. Assisted boards are polled
+  // (POLLABLE) but excluded from AUTONOMOUS, so they never inflate the floor with jobs the board
+  // cannot autonomously finish.
+  const ASSISTED_EXCEPTIONS = new Set<string>(['rippling']);
   for (const board of POLLABLE_JOB_BOARDS) {
+    if (ASSISTED_EXCEPTIONS.has(board)) {
+      assert.equal(portalCanAutoSubmit(board), false,
+        `${board} is an assisted exception and must NOT auto-submit`);
+      assert.ok(
+        !(AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(board),
+        `${board} is an assisted exception and must NOT be in the autonomous set the floor counts over`,
+      );
+      continue;
+    }
     assert.equal(portalCanAutoSubmit(board), true, `${board} is polled but cannot be completed`);
     assert.ok(
       (AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(board),
@@ -593,6 +609,11 @@ test('the floor and the autonomy rule are enforced against the same set of porta
     );
   }
   assert.ok(POLLABLE_JOB_BOARDS.length > 0, 'no pollable boards means the floor can never be met');
+  // At least one board must be genuinely autonomous, or the floor is uncountable.
+  assert.ok(
+    POLLABLE_JOB_BOARDS.some((b) => !ASSISTED_EXCEPTIONS.has(b)),
+    'every pollable board is assisted-only: the floor would count over nothing',
+  );
 });
 
 test('current inventory is verified by a recent successful ATS observation', () => {

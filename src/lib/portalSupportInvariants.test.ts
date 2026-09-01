@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { browserApplicationCapability } from './browserApplicationCapabilities';
+import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   CAPTCHA_BLOCKER,
@@ -185,4 +186,21 @@ test('no family that gates every form can have its blocker dropped', () => {
     // what the page read happened to return.
     assert.match(portalHandoffReason(family) ?? '', /prove you are human/);
   }
+});
+
+/* Rippling is the assisted tier: pollable and fully fillable, but CAPTCHA-gated on submit (an
+ * invisible Cloudflare Turnstile challenge witnessed on the Apply press 2026-08-20), so Litos fills
+ * it and hands off the human-check + send. It must be BOTH in POLLABLE (so its jobs are ingested for
+ * the dashboard fill-and-handoff flow) and OUT of AUTONOMOUS (so onboarding never surfaces it).
+ * Re-promoting rippling to autonomous requires a live witness that the Turnstile gate is gone; this
+ * pin makes that a deliberate change rather than an accident. */
+test('rippling is the assisted tier: pollable, CAPTCHA-gated, never autonomous', () => {
+  assert.equal(isCaptchaGatedFamily('rippling'), true, 'rippling must be CAPTCHA-gated (fill-and-handoff)');
+  assert.equal(portalCanAutoSubmit('rippling'), false, 'rippling must never auto-submit');
+  assert.equal(isAutonomousPortalFamily('rippling'), false, 'rippling must not be autonomous');
+  assert.equal(
+    (POLLABLE_JOB_BOARDS as readonly string[]).includes('rippling'), true,
+    'rippling must stay pollable so its jobs are ingested for the dashboard assisted flow',
+  );
+  assert.match(portalHandoffReason('rippling') ?? '', /prove you are human/);
 });
