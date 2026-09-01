@@ -6721,6 +6721,22 @@ function recruiteeFixedCandidateSelector(selector: string | null | undefined): b
     || /^input\[id=(?:"|')?input-candidate\.(?:name|email|phone)(?:-[\w-]+)?(?:"|')?\]$/i.test(normalized);
 }
 
+/* CRELATE'S FOUR BUILT-IN CANDIDATE CONTROLS, which the fixed pass fills by selector
+ * (CRELATE_FIRST_NAME_SELECTOR and siblings in lib/portalSubmission.ts: input#firstName,
+ * input#lastName, input#email, input#phone). Discovery captures them too, under labels welded from
+ * placeholder, name and id ("enter first name firstname firstname"), and with no crelate entry in
+ * either exclusion they became questions: The Maven Group, application 305dae5e, 2026-09-01, asked
+ * her to type her own first name, last name and email address as "1 of 3", and the phone was both
+ * answered as a question and filled by the fixed pass. Same shape as the Recruitee and Pinpoint
+ * rules above: the fixed pass owns the control, so it is never a question. */
+function crelateFixedCandidateSelector(selector: string | null | undefined): boolean {
+  const normalized = selector?.trim() ?? '';
+  if (!normalized) return false;
+  return /^(?:input)?#(?:firstName|lastName|email|phone)(?:\[name=(?:"|')?(?:firstName|lastName|email|phone)(?:"|')?\])?$/.test(normalized)
+    || /^(?:input)?\[name=(?:"|')?(?:firstName|lastName|email|phone)(?:"|')?\]$/.test(normalized)
+    || /^(?:input)?\[id=(?:"|')?(?:firstName|lastName|email|phone)(?:"|')?\]$/.test(normalized);
+}
+
 function pinpointFixedApplicationSelector(selector: string | null | undefined): boolean {
   const normalized = selector?.trim() ?? '';
   if (!normalized) return false;
@@ -6753,6 +6769,10 @@ export function discoveredFieldIsFixedPortalProfileControl(
     return pinpointFixedApplicationSelector(field.durableSelector)
       || pinpointFixedApplicationSelector(field.selector);
   }
+  if (portal === 'crelate') {
+    return crelateFixedCandidateSelector(field.durableSelector)
+      || crelateFixedCandidateSelector(field.selector);
+  }
   return false;
 }
 
@@ -6776,6 +6796,7 @@ export function normalizeStoredPortalQuestions<T extends {
     if ((portal === 'recruitee' || portal === 'manual_recruitee')
       && recruiteeFixedCandidateSelector(question.portal_selector)) continue;
     if (portal === 'pinpoint' && pinpointFixedApplicationSelector(question.portal_selector)) continue;
+    if (portal === 'crelate' && crelateFixedCandidateSelector(question.portal_selector)) continue;
     const reviewLabel = normalizeReviewQuestionLabel(label);
     if (!reviewLabel) continue;
     const key = reviewLabel.toLowerCase();

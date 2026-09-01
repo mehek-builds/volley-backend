@@ -4768,3 +4768,45 @@ test('the employer-named question now resolves to an option on the employer list
     null,
   );
 });
+
+/* Crelate's built-in candidate controls are the fixed pass's, never questions. Measured on The
+ * Maven Group (application 305dae5e, 2026-09-01): "enter first name firstname firstname" was
+ * question 1 of 3 on the review screen. */
+test('crelate identity controls are fixed fields, not questions, whatever label discovery welded', () => {
+  const welded = [
+    ['enter first name firstname firstname', '#firstName'],
+    ['enter last name lastname lastname', '#lastName'],
+    ['enter email address email email', '#email'],
+    ['enter phone number phone phone', '#phone'],
+    ['enter first name firstname firstname', 'input#firstName[name="firstName"]'],
+    ['enter email address email email', 'input[name="email"]'],
+  ] as const;
+  for (const [label, selector] of welded) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl('crelate', {
+      label,
+      selector,
+      durableSelector: selector,
+    }), true, `${selector} is a fixed control`);
+  }
+  // A custom crelate question with an employer-owned selector stays a question.
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('crelate', {
+    label: 'Do you hold an active security clearance?',
+    selector: '#clearance',
+    durableSelector: '#clearance',
+  }), false);
+  // Another family's #email is not claimed by crelate's rule.
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('breezy', {
+    label: 'enter email address email email',
+    selector: '#email',
+    durableSelector: '#email',
+  }), false);
+
+  const input = [
+    { id: 'first', question: 'enter first name firstname firstname', answer: '', portal_selector: '#firstName' },
+    { id: 'last', question: 'enter last name lastname lastname', answer: '', portal_selector: '#lastName' },
+    { id: 'email', question: 'enter email address email email', answer: '', portal_selector: '#email' },
+    { id: 'phone', question: 'enter phone number phone phone', answer: '+12135746270', portal_selector: '#phone' },
+    { id: 'custom', question: 'Do you hold an active security clearance?', answer: 'No', portal_selector: '#clearance' },
+  ];
+  assert.deepEqual(normalizeStoredPortalQuestions(input, 'crelate'), [input[4]]);
+});
