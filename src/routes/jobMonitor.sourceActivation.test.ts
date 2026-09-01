@@ -10,6 +10,7 @@ import {
   LOGO_VERIFICATION_GLOBAL_CONCURRENCY,
   LOGO_VERIFICATION_PROVIDER_CANDIDATES,
   LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
+  LOGO_VERIFICATION_RECRUITEE_CANDIDATES,
   LOGO_VERIFICATION_RECRUITEE_START_INTERVAL_MS,
   LOGO_VERIFICATION_REQUEST_CANDIDATES,
   LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
@@ -180,6 +181,27 @@ test('a paced provider barrier never delays another provider', async () => {
   ]);
 });
 
+test('an ats_name that collides with an Object member is not treated as paced', async () => {
+  /* career_page_sources.ats_name is unconstrained lowercase text and the logo candidate query has
+     no board allowlist, so the pacing lookup must not answer an inherited member and stall the
+     candidate while the route holds the shared advisory lock. */
+  const completed: string[] = [];
+  await runProviderAwareLogoQueue([
+    { ats_name: 'constructor', index: 0 },
+    { ats_name: 'constructor', index: 1 },
+    { ats_name: '__proto__', index: 0 },
+    { ats_name: '__proto__', index: 1 },
+  ], async (candidate) => {
+    completed.push(candidate.ats_name);
+  }, {
+    timeoutMs: 1_000,
+    now: () => 0,
+    sleep: async () => { throw new Error('an unpaced provider must never wait on a start barrier'); },
+  });
+
+  assert.deepEqual(completed.sort(), ['__proto__', '__proto__', 'constructor', 'constructor']);
+});
+
 test('the logo queue paces exactly the providers the poll scheduler paces, minus crelate', () => {
   assert.deepEqual(Object.keys(LOGO_VERIFICATION_START_INTERVALS_MS).sort(), [
     'recruitee',
@@ -348,6 +370,26 @@ test('one degraded provider cannot make a logo request exceed its bounded candid
     Array.from({ length: 200 }, (_, index) => ({ ats_name: 'crelate', index })),
   );
   assert.equal(crelateOnly.length, LOGO_VERIFICATION_CRELATE_CANDIDATES);
+
+  const recruiteeOnly = boundedLogoVerificationCandidates(
+    Array.from({ length: 200 }, (_, index) => ({ ats_name: 'recruitee', index })),
+  );
+  assert.equal(recruiteeOnly.length, LOGO_VERIFICATION_RECRUITEE_CANDIDATES);
+});
+
+test('a fully degraded paced provider still fits inside the bounded request deadline', () => {
+  /* A paced family runs one candidate at a time, so its candidates are serial, not parallel. Worst
+     case per candidate: 3 attempts of two 10s-timeout fetches plus 1s + 5s of retry backoff. */
+  const worstCaseCandidateMs = 3 * 2 * 10_000 + 1_000 + 5_000;
+  for (const [provider, intervalMs] of Object.entries(LOGO_VERIFICATION_START_INTERVALS_MS)) {
+    const candidates = provider === 'workable'
+      ? LOGO_VERIFICATION_WORKABLE_CANDIDATES
+      : LOGO_VERIFICATION_RECRUITEE_CANDIDATES;
+    assert.ok(
+      candidates * (worstCaseCandidateMs + intervalMs) < LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
+      `a degraded ${provider} lane must not 503 the whole verify-logos request`,
+    );
+  }
 });
 
 test('Crelate 429s open the circuit and exhaust on the third consecutive attempt', () => {

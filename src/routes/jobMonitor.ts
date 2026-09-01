@@ -246,6 +246,13 @@ export const LOGO_VERIFICATION_START_INTERVALS_MS: Readonly<Record<string, numbe
 export const LOGO_VERIFICATION_REQUEST_CANDIDATES = 16;
 export const LOGO_VERIFICATION_PROVIDER_CANDIDATES = 4;
 export const LOGO_VERIFICATION_WORKABLE_CANDIDATES = 2;
+/**
+ * A paced provider runs its candidates one at a time, and each candidate can spend three attempts
+ * of 10s-timeout fetches plus 6s of retry backoff (retryTransientLogoVerification). Keep a paced
+ * family's candidate budget at the Workable number so a fully degraded provider still fits inside
+ * LOGO_VERIFICATION_REQUEST_TIMEOUT_MS instead of 503ing the whole request.
+ */
+export const LOGO_VERIFICATION_RECRUITEE_CANDIDATES = LOGO_VERIFICATION_WORKABLE_CANDIDATES;
 export const LOGO_VERIFICATION_CRELATE_CANDIDATES = 1;
 export const LOGO_VERIFICATION_CRELATE_CONCURRENCY = 1;
 /** Leave Railway a full minute to receive the bounded failure response and close the request. */
@@ -413,9 +420,11 @@ export function boundedLogoVerificationCandidates<T extends { ats_name: string }
     if (selected.length >= LOGO_VERIFICATION_REQUEST_CANDIDATES) break;
     const providerLimit = candidate.ats_name === 'workable'
       ? LOGO_VERIFICATION_WORKABLE_CANDIDATES
-      : candidate.ats_name === 'crelate'
-        ? LOGO_VERIFICATION_CRELATE_CANDIDATES
-        : LOGO_VERIFICATION_PROVIDER_CANDIDATES;
+      : candidate.ats_name === 'recruitee'
+        ? LOGO_VERIFICATION_RECRUITEE_CANDIDATES
+        : candidate.ats_name === 'crelate'
+          ? LOGO_VERIFICATION_CRELATE_CANDIDATES
+          : LOGO_VERIFICATION_PROVIDER_CANDIDATES;
     const providerSelected = selectedByProvider.get(candidate.ats_name) ?? 0;
     if (providerSelected >= providerLimit) continue;
     selected.push(candidate);
@@ -453,9 +462,15 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
     1,
     options.providerConcurrency ?? LOGO_VERIFICATION_PROVIDER_CONCURRENCY,
   );
-  const startIntervalsMs: Record<string, number> = { ...LOGO_VERIFICATION_START_INTERVALS_MS };
+  /* A Map, not an object: ats_name is unconstrained lowercase text, so an object index would
+     answer an inherited member for a source named 'constructor' or '__proto__' and poison that
+     family's barrier with NaN, stalling the candidate until the request deadline while the route
+     holds the shared advisory lock. */
+  const startIntervalsMs = new Map<string, number>(
+    Object.entries(LOGO_VERIFICATION_START_INTERVALS_MS),
+  );
   for (const [provider, interval] of Object.entries(options.startIntervalsMs ?? {})) {
-    startIntervalsMs[provider] = Math.max(0, interval);
+    startIntervalsMs.set(provider, Math.max(0, interval));
   }
   const timeoutMs = Math.max(1, options.timeoutMs ?? LOGO_VERIFICATION_REQUEST_TIMEOUT_MS);
   const controller = new AbortController();
@@ -545,7 +560,7 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         const timestamp = now();
         const index = pending.findIndex((candidate) => {
           const providerActive = activeByProvider.get(candidate.ats_name) ?? 0;
-          const startInterval = startIntervalsMs[candidate.ats_name];
+          const startInterval = startIntervalsMs.get(candidate.ats_name);
           /* A paced probe also runs alone: one candidate can retry its provider several times
              (retryTransientLogoVerification), so spaced starts alone would still let two
              candidates' retries overlap on the one shared platform limit. */
@@ -560,7 +575,7 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
         const [candidate] = pending.splice(index, 1);
         active += 1;
         activeByProvider.set(candidate.ats_name, (activeByProvider.get(candidate.ats_name) ?? 0) + 1);
-        const startInterval = startIntervalsMs[candidate.ats_name];
+        const startInterval = startIntervalsMs.get(candidate.ats_name);
         if (startInterval !== undefined) {
           nextStartByProvider.set(candidate.ats_name, timestamp + startInterval);
         }
@@ -585,7 +600,7 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
 
       let earliestPacedStart = Infinity;
       for (const candidate of pending) {
-        if (startIntervalsMs[candidate.ats_name] === undefined) continue;
+        if (!startIntervalsMs.has(candidate.ats_name)) continue;
         earliestPacedStart = Math.min(
           earliestPacedStart,
           nextStartByProvider.get(candidate.ats_name) ?? 0,
@@ -1020,6 +1035,7 @@ export async function selectProviderBalancedLogoVerificationCandidates(
     .from(ranked)
     .where(sql`${ranked.provider_rank} <= case
       when ${ranked.ats_name} = 'workable' then ${LOGO_VERIFICATION_WORKABLE_CANDIDATES}::bigint
+      when ${ranked.ats_name} = 'recruitee' then ${LOGO_VERIFICATION_RECRUITEE_CANDIDATES}::bigint
       when ${ranked.ats_name} = 'crelate' then ${LOGO_VERIFICATION_CRELATE_CANDIDATES}::bigint
       else ${LOGO_VERIFICATION_PROVIDER_CANDIDATES}::bigint
     end`)
@@ -4688,6 +4704,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         request_candidates: LOGO_VERIFICATION_REQUEST_CANDIDATES,
         per_provider_candidates: LOGO_VERIFICATION_PROVIDER_CANDIDATES,
         workable_candidates: LOGO_VERIFICATION_WORKABLE_CANDIDATES,
+        recruitee_candidates: LOGO_VERIFICATION_RECRUITEE_CANDIDATES,
         crelate: LOGO_VERIFICATION_CRELATE_CONCURRENCY,
         crelate_candidates: LOGO_VERIFICATION_CRELATE_CANDIDATES,
         request_timeout_ms: LOGO_VERIFICATION_REQUEST_TIMEOUT_MS,
