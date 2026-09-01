@@ -114,3 +114,51 @@ test('an aggregate verifier deadline stops a DNS lookup that never resolves', as
   assert.equal(lookupStarted, true);
   assert.deepEqual(await verification, { verified: false, reason: 'timeout' });
 });
+
+test('verifies a brand that trails its homepage title behind a separator', async () => {
+  /* anthropic.com's exact shape on 2026-08-31: <title>Home \ Anthropic</title>, no og:site_name.
+     The lead-only title split left 1,896 sources failed on identity_mismatch for this. The domain
+     label still has to equal the company name, so this stays a two-signal check. */
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Home \\ Anthropic</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Anthropic', company_domain: 'anthropic.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.deepEqual(result, {
+    verified: true,
+    company_logo_url: 'https://anthropic.example/favicon.png',
+    method: VERIFIED_HOMEPAGE_LOGO_METHOD,
+  });
+});
+
+test('a mid-title brand mention on a lookalike host still fails on the host signal', async () => {
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acmeportal.example' },
+    {
+      resolveHost: publicDns,
+      fetcher: async () => new Response('<title>Store | Acme | Deals</title>') as never,
+    },
+  );
+  assert.deepEqual(result, { verified: false, reason: 'identity_mismatch' });
+});
+
+test('hyphenated brand names are not split into title segments', async () => {
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Rent-A-Center</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Rent-A-Center', company_domain: 'rent-a-center.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.equal(result.verified, true);
+});
