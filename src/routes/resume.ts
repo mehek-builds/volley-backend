@@ -470,6 +470,26 @@ export const autofillEventSchema = z.object({
   r030_candidate_labels: z.array(z.string().max(200)).max(50).optional(),
 });
 
+/**
+ * The student-facing line explaining an uncitable lead, applied so it SURVIVES.
+ *
+ * It is added once when the fallback is decided and re-applied after the post-fit validation, which
+ * assigns `specWarnings` outright rather than appending. A plain push at the decision point looked
+ * correct and was measured wrong in production: the note was created and then discarded, so the
+ * build stopped failing but never said why it led with what it led with.
+ *
+ * Idempotent, because it is applied more than once on the same request and a student reading two
+ * copies of the same sentence would reasonably conclude something is broken.
+ */
+export function withLeadFallbackNote(
+  warnings: ReturnType<typeof validateResumeSpec>['warnings'],
+  fallback: LeadFallbackDecision | null,
+): ReturnType<typeof validateResumeSpec>['warnings'] {
+  if (!fallback) return warnings;
+  if (warnings.some((w) => w.flags.includes(fallback.reason))) return warnings;
+  return [...warnings, { entry: fallback.entry_org, bullet: '', flags: [fallback.reason] }];
+}
+
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
   /* GIVING THE FREE BUILD BACK WHEN IT DID NOT PRODUCE ANYTHING.
@@ -1124,10 +1144,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         { userId, company: body.company, lead: leadFallback.entry_org, overlap: leadFallback.jd_overlap_terms },
         'lead fit is unscoreable against this posting; ordered by relevance, recency and substance',
       );
-      specWarnings = [
-        ...specWarnings,
-        { entry: leadFallback.entry_org, bullet: '', flags: [leadFallback.reason] },
-      ];
+      specWarnings = withLeadFallbackNote(specWarnings, leadFallback);
     }
     if (leadIssues.length > 0) {
       fastify.log.error(
@@ -1234,7 +1251,13 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     finalSpecValidation.issues.push(
       ...leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } }),
     );
-    specWarnings = finalSpecValidation.warnings;
+    /* REPLACES the array, so the fallback note has to be re-applied rather than assumed to
+       survive. Measured live 2026-09-01 on an EQT Corporation midstream-engineering posting: the
+       build returned 200 with the lead correctly ordered by rankLeadWithoutCitation, and the line
+       telling the student which entry led and why was silently dropped here, three hundred lines
+       after it was added. The 422 was fixed and the explanation was not, which is the half of the
+       fix the student actually reads. */
+    specWarnings = withLeadFallbackNote(finalSpecValidation.warnings, leadFallback);
     atsCoverage = finalSpecValidation.ats_keyword_coverage_pct;
     if (finalSpecValidation.issues.length > 0) {
       fastify.log.error(
