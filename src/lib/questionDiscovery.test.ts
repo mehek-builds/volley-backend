@@ -4805,11 +4805,18 @@ test('crelate identity controls are fixed fields, not questions, whatever label 
     selector: '#clearance',
     durableSelector: '#clearance',
   }), false);
-  // Another family's #email is not claimed by crelate's rule.
+  // Another family's identity control is claimed too, now by the identity rule rather than
+  // crelate's selectors: her email is never a question for her on any family.
   assert.equal(discoveredFieldIsFixedPortalProfileControl('breezy', {
     label: 'enter email address email email',
     selector: '#email',
     durableSelector: '#email',
+  }), true);
+  // But a non-identity crelate control with a foreign selector is still a question.
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('breezy', {
+    label: 'Do you hold an active security clearance?',
+    selector: '#clearance',
+    durableSelector: '#clearance',
   }), false);
 
   const input = [
@@ -4887,4 +4894,48 @@ test('comeet, zoho recruit and bullhorn identity controls are fixed fields too',
     { id: 'a', question: 'first name firstname', answer: '', portal_selector: 'input[name="First_Name"]' },
     { id: 'b', question: 'Why us?', answer: 'Because', portal_selector: 'textarea[name="motivation"]' },
   ], 'zoho_recruit').map((q) => q.id), ['b']);
+});
+
+/* Her own name and email are never a question for her, on any supported family. Measured on The
+ * Maven Group (crelate) and Hudson River Trading (greenhouse), 2026-09-01: "first name* first name
+ * first_name" was question 1 of 10 on the review screen, optional, blank. */
+test('identity controls are fixed fields on every family, whatever the welded label', () => {
+  for (const [portal, label, selector] of [
+    ['greenhouse', 'first name* first name first_name', '#first_name'],
+    ['greenhouse', 'last name* last name last_name', '#last_name'],
+    ['greenhouse', 'email* email email', '#email'],
+    ['lever', 'full name cname', '[name="name"]'],
+    ['breezy', 'email address cemail', '[name="cEmail"]'],
+    ['ashby', 'Name', 'input[name="_systemfield_name"]'],
+  ] as const) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl(portal, { label, selector, durableSelector: selector }), true, `${portal} ${label}`);
+  }
+  // The deliberate exclusions of isCoreIdentityField still stand: legal and preferred names are
+  // separate questions, and an email that is not the applicant's is a real question.
+  for (const [portal, label, selector] of [
+    ['greenhouse', 'preferred first name preferred first name preferred_name', '#preferred_name'],
+    ['greenhouse', 'legal first name', '#legal_first_name'],
+    ['greenhouse', 'please provide your university email address', '#question_1'],
+    ['greenhouse', 'emergency contact name', '#question_2'],
+  ] as const) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl(portal, { label, selector, durableSelector: selector }), false, `${portal} ${label}`);
+  }
+  assert.deepEqual(normalizeStoredPortalQuestions([
+    { id: 'a', question: 'first name* first name first_name', answer: '', portal_selector: '#first_name' },
+    { id: 'b', question: 'preferred first name preferred first name preferred_name', answer: 'Mehek', portal_selector: '#preferred_name' },
+    { id: 'c', question: 'email* email email', answer: '', portal_selector: '#email' },
+  ], 'greenhouse').map((q) => q.id), ['b']);
+});
+
+/* A question that asks WHERE she wants to work is not the offer question, even when it mentions
+ * offers: Hudson River Trading, 2026-09-01, "No" typed into a location preference. */
+test('the offer rule does not claim a location choice that mentions return offers', () => {
+  const label = 'please select your top preferred hrt office location. return offers will be specific to the office you have selected.';
+  const resolved = resolveKnownAnswer(label, 'select', { has_outstanding_offers: false }, undefined);
+  // Left for her as the location choice it is, never answered "No" from the offer rule.
+  assert.ok(resolved && 'skipReason' in resolved && /location choice/.test(resolved.skipReason), JSON.stringify(resolved));
+  assert.deepEqual(
+    resolveKnownAnswer('do you have any upcoming offer deadlines?', 'select', { has_outstanding_offers: false }, undefined),
+    { value: 'No' },
+  );
 });
