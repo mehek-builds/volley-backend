@@ -7004,6 +7004,16 @@ async function prepareManaged(
     row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
+    // buildManagedDiscoveryActions fills the fixed fields before asking stratus's `discover` action
+    // to scan the page, so this is a mutation - it types into the form - even though it never
+    // presses submit. Under stratus correlationRequired every mutating run needs a submissionAttempt
+    // and providerDeadline or it is refused with "A durable submissionAttempt is required for every
+    // submit-capable or continuable run". This pass runs FIRST, so without the ephemeral scan
+    // correlation it fails closed before the option-probe and fill runs (which already carry it) are
+    // ever reached, and the whole application stops before anything is shown or sent. scanCorrelation
+    // mints the throwaway {submissionAttempt, providerDeadline} pair for exactly this case - a
+    // mutation that is not a submission - the same way the pre-scan, option-probe and fill do.
+    { scanCorrelation: true },
   )
     .catch((error: unknown) => {
       // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
