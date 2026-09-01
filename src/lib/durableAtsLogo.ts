@@ -7,12 +7,14 @@ export type DurableAtsLogoAsset = {
   provider: SupportedJobBoard;
   board_token: string;
   bytes: Uint8Array;
+  /** What the response claimed. Informational: the store re-derives the type from the bytes. */
   content_type: string;
 };
 
 export type DurableHomepageLogoAsset = {
   company_domain: string;
   bytes: Uint8Array;
+  /** What the response claimed. Informational: the store re-derives the type from the bytes. */
   content_type: string;
 };
 
@@ -44,7 +46,6 @@ const EXTENSION_BY_CONTENT_TYPE = new Map([
   ['image/gif', 'gif'],
   ['image/webp', 'webp'],
   ['image/x-icon', 'ico'],
-  ['image/vnd.microsoft.icon', 'ico'],
 ]);
 
 /** The employer domain shape this store will key on: bare, lowercase, no port, no path. */
@@ -58,9 +59,30 @@ function defaultUploader(
   return putPublicLogoObject(pathname, body, options.contentType, {}, options.signal);
 }
 
-/** Is this content type one this store is willing to serve back from our own origin? */
-export function durableLogoExtension(contentType: string): string | null {
-  return EXTENSION_BY_CONTENT_TYPE.get(contentType.trim().toLowerCase().split(';', 1)[0]) ?? null;
+/**
+ * The type these bytes ARE, not the type a response claimed they are, or null when this store
+ * will not serve them.
+ *
+ * Claims and content disagree constantly on favicons: a PNG served as image/x-icon is routine,
+ * and the verifier's signature check accepts any image/* claim paired with any recognised magic,
+ * so trusting the claim here would have us publish a knowingly mislabeled type from our OWN
+ * origin (review finding 2026-09-01). Sniffing also rescues correct assets under a wrong label,
+ * like a JPEG announced as image/jpg, which a claim-keyed lookup dropped.
+ *
+ * SVG is absent on purpose and cannot be sniffed into this map: see the note above.
+ */
+export function durableLogoContentType(bytes: Uint8Array): string | null {
+  if (bytes.byteLength < 12) return null;
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  const ascii = String.fromCharCode(...bytes.slice(0, 12));
+  if (ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a')) return 'image/gif';
+  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP') return 'image/webp';
+  /* Type 1 is an icon and type 2 a cursor. The verifier accepts both, so this must too, or an
+     asset we proved and stored would be one the measurement calls unrenderable. */
+  if (bytes[0] === 0x00 && bytes[1] === 0x00 && (bytes[2] === 0x01 || bytes[2] === 0x02)
+    && bytes[3] === 0x00) return 'image/x-icon';
+  return null;
 }
 
 /**
@@ -75,13 +97,13 @@ async function persistProvenLogoBytes(
   provider: 'rippling' | 'homepage',
   tenant: string,
   bytes: Uint8Array,
-  contentType: string,
   uploader: DurableLogoUploader,
   signal?: AbortSignal,
 ): Promise<string> {
-  const normalizedType = contentType.trim().toLowerCase().split(';', 1)[0];
-  const extension = durableLogoExtension(normalizedType);
-  if (!extension || bytes.byteLength < 4 || bytes.byteLength > MAX_DURABLE_LOGO_BYTES) {
+  /* The bytes decide, not the response's claim about them. */
+  const storedType = durableLogoContentType(bytes);
+  const extension = storedType ? EXTENSION_BY_CONTENT_TYPE.get(storedType) : null;
+  if (!storedType || !extension || bytes.byteLength > MAX_DURABLE_LOGO_BYTES) {
     throw new Error('unsafe_url');
   }
 
@@ -89,9 +111,9 @@ async function persistProvenLogoBytes(
   const pathname = `company-logos/${provider}/${encodeURIComponent(tenant)}/${digest}.${extension}`;
   const stored = await uploader(pathname, Buffer.from(bytes), {
     addRandomSuffix: false,
-    /* The stored object declares the type the key's extension maps back to, so what the read
-       route serves and what the bytes are can never disagree. */
-    contentType: extension === 'ico' ? 'image/x-icon' : normalizedType,
+    /* Declared as what the bytes sniffed to, which is also what the key's extension maps back
+       to, so the read route, the key and the bytes can never disagree. */
+    contentType: storedType,
     cacheControlMaxAge: ONE_YEAR_SECONDS,
     ...(signal ? { signal } : {}),
   });
@@ -118,14 +140,7 @@ export async function persistDurableAtsLogo(
   if (asset.provider !== 'rippling') throw new Error('unsafe_url');
   const token = normalizeExecutableAtsBoardToken(asset.provider, asset.board_token);
   if (!token) throw new Error('unsafe_url');
-  return persistProvenLogoBytes(
-    'rippling',
-    token,
-    asset.bytes,
-    asset.content_type,
-    uploader,
-    signal,
-  );
+  return persistProvenLogoBytes('rippling', token, asset.bytes, uploader, signal);
 }
 
 /**
@@ -146,12 +161,5 @@ export async function persistDurableHomepageLogo(
   const domain = asset.company_domain.trim().toLowerCase().replace(/^www\./, '');
   /* The tenant is the domain the verifier just proved, not anything a page said about itself. */
   if (!STORABLE_DOMAIN_RE.test(domain) || domain.length > 128) throw new Error('unsafe_url');
-  return persistProvenLogoBytes(
-    'homepage',
-    domain,
-    asset.bytes,
-    asset.content_type,
-    uploader,
-    signal,
-  );
+  return persistProvenLogoBytes('homepage', domain, asset.bytes, uploader, signal);
 }

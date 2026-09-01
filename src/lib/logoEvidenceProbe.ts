@@ -52,8 +52,10 @@ export function icoContainsPng(buf: Uint8Array): boolean {
  */
 export function servableImageType(contentType: string | null, bytes: Uint8Array): string | null {
   const claimed = (contentType ?? '').split(';')[0].trim().toLowerCase();
-  const isIcoShaped = bytes[0] === 0x00 && bytes[1] === 0x00 && bytes[2] === 0x01
-    && bytes[3] === 0x00;
+  /* Type 1 is an icon and type 2 a cursor. The verifier accepts both and the store keeps both,
+     so refusing type 2 here would call an asset we serve unrenderable (review finding). */
+  const isIcoShaped = bytes[0] === 0x00 && bytes[1] === 0x00
+    && (bytes[2] === 0x01 || bytes[2] === 0x02) && bytes[3] === 0x00;
   /* Keyed on the BYTES being a real ICO container, never on the claimed type alone. A bot wall
      answering an icon request with a 200 and an HTML login page, which is the common shape here,
      labels it whatever it likes; trusting that label would count the wall as a logo. Inside a

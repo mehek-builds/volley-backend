@@ -35,6 +35,9 @@ type VerificationOptions = {
   /* Given bytes this verifier has already fetched and signature-checked, keep a copy and answer
      with our own URL. Optional so every existing caller and test keeps its current behaviour. */
   persistDurableLogo?: DurableHomepageLogoPersister;
+  /* Called when a copy was attempted and refused. A store outage otherwise looks exactly like
+     this feature not existing: coverage simply stops improving, with nothing to read. */
+  onDurableCopyFailure?: (reason: string) => void;
 };
 
 const USER_AGENT = 'LitosCompanyLogoVerifier/1.0';
@@ -489,8 +492,10 @@ export async function verifyCatalogSourceLogo(
                 company_logo_url: durableUrl,
                 method: VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD,
               };
-            } catch {
-              /* Storage said no. The employer's own URL is still proven, so fall through. */
+            } catch (error) {
+              /* Storage said no. The employer's own URL is still proven, so fall through, but
+                 say so: silence here is indistinguishable from the store not being wired. */
+              options.onDurableCopyFailure?.(logoVerificationErrorReason(error));
             }
           }
           /* A signed or cache-busting query can expire. Do not prove one URL and persist a

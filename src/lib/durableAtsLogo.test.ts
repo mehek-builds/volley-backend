@@ -160,11 +160,51 @@ test('durable homepage copies refuse anything that is not a bare employer domain
 
 test('durable homepage copies refuse an oversized or empty payload', async () => {
   const uploader: DurableLogoUploader = async () => ({ url: 'https://api.trylitos.com/x' });
-  for (const bytes of [new Uint8Array(0), new Uint8Array(1_000_001)]) {
+  /* Genuinely PNG bytes, so the size cap is what rejects the big one rather than the type check. */
+  const oversized = new Uint8Array(1_000_001);
+  oversized.set(png, 0);
+  for (const bytes of [new Uint8Array(0), oversized]) {
     await assert.rejects(
       () => persistDurableHomepageLogo({ company_domain: 'acme.example', bytes, content_type: 'image/png' }, uploader),
       /unsafe_url/,
     );
+  }
+});
+
+test('the stored type comes from the bytes, never from what the response claimed', async () => {
+  /* Favicons lie constantly: real PNG bytes served as image/x-icon is routine, and the verifier
+     accepts any image/* claim beside any recognised magic. Trusting the claim would publish a
+     knowingly mislabeled type from our own origin (review finding 2026-09-01). */
+  const previousBase = process.env.OBJECT_STORAGE_PUBLIC_BASE_URL;
+  process.env.OBJECT_STORAGE_PUBLIC_BASE_URL = 'https://api.trylitos.com';
+  let uploadedPath = '';
+  let uploadedType = '';
+  const uploader: DurableLogoUploader = async (pathname, _body, options) => {
+    uploadedPath = pathname;
+    uploadedType = options.contentType;
+    return { url: `https://api.trylitos.com/storage/logo/homepage/acme.example/${pathname.split('/').at(-1)}` };
+  };
+  try {
+    await persistDurableHomepageLogo({
+      company_domain: 'acme.example',
+      bytes: png,
+      content_type: 'image/x-icon',
+    }, uploader);
+    assert.match(uploadedPath, /\.png$/, 'PNG bytes are stored as a PNG whatever the header said');
+    assert.equal(uploadedType, 'image/png');
+
+    /* And the inverse: a JPEG under the non-standard image/jpg label is kept, not dropped. */
+    const jpeg = Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1]);
+    await persistDurableHomepageLogo({
+      company_domain: 'acme.example',
+      bytes: jpeg,
+      content_type: 'image/jpg',
+    }, uploader);
+    assert.match(uploadedPath, /\.jpg$/);
+    assert.equal(uploadedType, 'image/jpeg');
+  } finally {
+    if (previousBase === undefined) delete process.env.OBJECT_STORAGE_PUBLIC_BASE_URL;
+    else process.env.OBJECT_STORAGE_PUBLIC_BASE_URL = previousBase;
   }
 });
 

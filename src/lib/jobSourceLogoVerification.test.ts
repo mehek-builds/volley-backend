@@ -271,12 +271,14 @@ test('a store that refuses leaves the employer URL exactly as it was', async () 
       headers: { 'content-type': 'text/html' },
     });
   };
+  const refusals: string[] = [];
   const result = await verifyCatalogSourceLogo(
     { company_name: 'Acme', company_domain: 'acme.example' },
     {
       fetcher: fetcher as typeof fetch,
       resolveHost: publicDns,
       persistDurableLogo: async () => { throw new Error('unsafe_url'); },
+      onDurableCopyFailure: (reason) => refusals.push(reason),
     },
   );
   assert.deepEqual(result, {
@@ -284,6 +286,9 @@ test('a store that refuses leaves the employer URL exactly as it was', async () 
     company_logo_url: 'https://acme.example/favicon.png',
     method: VERIFIED_HOMEPAGE_LOGO_METHOD,
   });
+  /* The fallback is silent to the reader and loud to the operator: a store outage looks exactly
+     like this feature not existing unless the refusal is reported. */
+  assert.deepEqual(refusals, ['unsafe_url']);
 });
 
 test('a copy rescues an asset whose URL carries a query, which no URL could', async () => {

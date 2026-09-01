@@ -4456,6 +4456,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
               /* Keep the bytes the verifier proves. Employers whose infrastructure answers this
                  verifier and refuses everyone else were otherwise verified-but-monogrammed. */
               persistDurableLogo: (asset) => persistDurableHomepageLogo(asset, undefined, signal),
+              onDurableCopyFailure: (reason) => request.log.warn(
+                { source_id: candidate.id, company: candidate.company_name, reason },
+                'durable homepage logo copy refused; serving the employer URL',
+              ),
             });
             return homepageResult.verified
               ? {
