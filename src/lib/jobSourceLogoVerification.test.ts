@@ -162,3 +162,57 @@ test('hyphenated brand names are not split into title segments', async () => {
   );
   assert.equal(result.verified, true);
 });
+
+test('the careers suffix is stripped from an edge segment, not only the whole title', async () => {
+  /* "Home | Acme Careers": the brand trails, wearing the noise word. Stripping the suffix only
+     from the full title left exactly this shape failing while "Home | Acme" passed
+     (review finding 2026-09-01). */
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Home | Acme Careers</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.equal(result.verified, true);
+});
+
+test('a middle-segment brand mention does not complete identity', async () => {
+  /* The expired-domain marketplace lander (review finding 2026-09-01): the host signal AGREES,
+     because the label of the dead domain matches the company, and the title names the brand in
+     its middle segment and the domain itself in its lead. Neither may complete the check: the
+     middle is where boilerplate lives, and a domain-shaped segment is the page naming the
+     domain, not the employer, normalizeName's suffix stripping notwithstanding. */
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      resolveHost: publicDns,
+      fetcher: (async () => new Response(
+        '<title>acme.example - Acme - available at ExampleBrandMarket</title>',
+        { headers: { 'content-type': 'text/html' } },
+      )) as typeof fetch,
+    },
+  );
+  assert.deepEqual(result, { verified: false, reason: 'identity_mismatch' });
+});
+
+test('an unspaced em dash still separates title segments', async () => {
+  /* Title templates set em dashes tight as often as spaced, and no brand contains one, so the
+     whitespace rule that protects hyphenated brands must not apply to it. */
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Home\u2014Acme</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.equal(result.verified, true);
+});
