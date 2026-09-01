@@ -58,6 +58,7 @@ import type { JobSourceInput } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
 import { POLL_TIME_BUDGET_MS } from '../lib/jobPollScheduler';
+import { JOB_SOURCES, RETIRED_JOB_SOURCES } from '../lib/jobSources';
 
 test('the board has independent five-hundred-thousand posting and fifty-thousand grouped-role floors', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
@@ -147,8 +148,31 @@ test('source identity normalization uses the provider executable-token contract'
 
 test('the monitor never retires the persisted source fleet from a smaller static catalog', () => {
   const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
-  assert.doesNotMatch(source, /await retireUnlistedSources\(allSources\)/);
-  assert.match(source, /const retired: string\[\] = \[\]/);
+  /* RETIRE-BY-ABSENCE STAYS BANNED, and that is the invariant this guard exists for (f57585e,
+     2026-08-30): remote discovery makes the persisted fleet far larger than the static catalog,
+     so an older release or a partial catalog must never disable sources a newer release
+     independently verified. Disabling thousands by omission is the failure mode. */
+  assert.doesNotMatch(source, /retireUnlistedSources/);
+  assert.doesNotMatch(source, /notInArray\(career_page_sources\.id/);
+
+  /* EXPLICIT, ENUMERATED RETIREMENT IS ALLOWED, and is a different thing. A board that answers
+     404 forever has to be expressible somewhere durable, and deleting its catalog line does not
+     retire it: the sync is additive, so the row stayed enabled and polled on. Measured
+     2026-09-01, three such rows, one holding 121 active postings.
+
+     The distinction that keeps f57585e's invariant intact: this disables exactly the entries
+     NAMED in RETIRED_JOB_SOURCES and nothing else, retirements only accumulate so an older
+     release carries a smaller list rather than a larger one, and the operator channel still runs
+     afterwards, so an operator remains able to restore any of them. The reviewed catalog is the
+     durable home for a permanent retirement; JOB_MONITOR_SOURCES_JSON is documented as the
+     TEMPORARY override and is capped at 100, so it is the wrong place for a permanent fact. */
+  assert.match(source, /const retired = RETIRED_JOB_SOURCES\.map/);
+  assert.ok(RETIRED_JOB_SOURCES.length < 100, 'the retired list is enumerated, never a bulk sweep');
+  assert.ok(
+    RETIRED_JOB_SOURCES.length < JOB_SOURCES.length / 10,
+    'a retired list rivalling the active catalog is a bulk disable wearing a list, and is why '
+    + 'retire-by-absence was banned in the first place',
+  );
 });
 
 test('post-poll metric statements leave time for the cron to answer', () => {

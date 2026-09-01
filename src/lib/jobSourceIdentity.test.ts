@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { portalNameAgrees } from './sponsorIdentity';
-import { JOB_SOURCES } from './jobSources';
+import { JOB_SOURCES, RETIRED_JOB_SOURCES } from './jobSources';
 import { POLL_SEGMENT_SIZE } from './jobPollScheduler';
 import {
   MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE,
@@ -132,4 +132,38 @@ test('the reviewed catalog meets the configured employer-industry coverage thres
     classified.length / JOB_SOURCES.length >= MINIMUM_INDUSTRY_CLASSIFICATION_COVERAGE,
     'a source addition or rename must update the reviewed industry taxonomy',
   );
+});
+
+test('a retired board is disabled by the catalog, not merely deleted from it', () => {
+  /* Deleting a line does NOT retire a source: upsertSources is additive and only disables what
+     the catalog explicitly marks disabled, so every deletion left its row enabled and polling a
+     404 forever. Measured 2026-09-01: greenhouse/svetness, greenhouse/marqeta and
+     greenhouse/clickhouse were all still enabled, ClickHouse alone holding 121 active postings. */
+  assert.ok(RETIRED_JOB_SOURCES.length > 0, 'the retired catalog is the mechanism, not a list to empty');
+  for (const source of RETIRED_JOB_SOURCES) {
+    assert.equal(source.enabled, false, `${source.board_token} must retire, not re-add`);
+    assert.ok(source.career_url.startsWith('https://'), `${source.board_token} needs a real career_url`);
+  }
+  const retired = RETIRED_JOB_SOURCES.map((s) => `${s.ats_name}/${s.board_token}`);
+  for (const known of ['greenhouse/svetness', 'greenhouse/marqeta', 'greenhouse/clickhouse']) {
+    assert.ok(retired.includes(known), `${known} was retired in the catalog and must stay retired`);
+  }
+});
+
+test('nothing is both active and retired', () => {
+  /* The one mistake this shape makes possible, and the expensive one: a token left in both lists
+     would have the retirement pass disable a source the active catalog just enabled, silently
+     removing a live board's postings. The re-pointed cases are exactly where it could happen,
+     since the company keeps its name and only the token moves. */
+  const active = new Set(JOB_SOURCES.map((s) => `${s.ats_name}/${s.board_token}`));
+  for (const source of RETIRED_JOB_SOURCES) {
+    const key = `${source.ats_name}/${source.board_token}`;
+    assert.ok(!active.has(key), `${key} is in both the active and retired catalogs`);
+  }
+  /* A re-point keeps the company on the board under its new token, so the NAME may legitimately
+     appear in both. Marqeta and ClickHouse are exactly that, and must stay pollable. */
+  const activeCompanies = new Set(JOB_SOURCES.map((s) => s.company_name.toLowerCase()));
+  for (const name of ['marqeta', 'clickhouse']) {
+    assert.ok(activeCompanies.has(name), `${name} was re-pointed, so it must still be polled somewhere`);
+  }
 });

@@ -730,3 +730,44 @@ export const JOB_SOURCES: JobSourceInput[] = ENTRIES.map(([company_name, ats_nam
   career_url: careerUrl(ats_name, board_token),
   enabled: true,
 }));
+
+/**
+ * Boards that were in the reviewed catalog and are gone, kept here rather than simply deleted.
+ *
+ * DELETING THE LINE DOES NOT RETIRE THE SOURCE. `upsertSources` is additive: it only disables a
+ * row whose catalog entry explicitly says so, and nothing disables a row whose entry merely
+ * disappeared. So every retirement so far left its live row ENABLED, polling a board that answers
+ * 404 forever and holding its old postings active. Measured 2026-09-01: greenhouse/svetness
+ * (retired 08-31), greenhouse/marqeta and greenhouse/clickhouse (both re-pointed to new boards
+ * that day) were all still enabled, and ClickHouse alone still had 121 active postings.
+ *
+ * Nothing user-facing broke, because the verified-evidence gate excludes a source whose logo
+ * verification failed, which is what a dead board's does. That is a backstop rather than the
+ * intent: with the gate disabled those postings would surface from boards that no longer exist.
+ *
+ * These stay OUT of JOB_SOURCES on purpose. That list is the ACTIVE catalog: the identity CI
+ * check, the sponsor matcher and the poll-budget arithmetic all walk it and would each have to
+ * learn to skip disabled entries. Retirement is a different question from "what do we poll", so
+ * it gets its own list, and the reconciliation applies it explicitly.
+ *
+ * To retire a board: move its entry here rather than deleting it. To re-point one to a new board
+ * (the usual case, and better, since the inventory survives), add the new entry above AND put the
+ * old one here, because the old row is what would otherwise linger.
+ */
+const RETIRED_ENTRIES: readonly Entry[] = [
+  /* Greenhouse token began returning 404 on 2026-08-31 with no successor board found. */
+  ['Svetness Personal Training', 'greenhouse', 'svetness'],
+  /* Both left Greenhouse and now post on Ashby; the live entries above point at the new boards. */
+  ['Marqeta', 'greenhouse', 'marqeta'],
+  ['Clickhouse', 'greenhouse', 'clickhouse'],
+];
+
+/** The retired catalog, as disabling upserts. Applied by the scheduled source reconciliation. */
+export const RETIRED_JOB_SOURCES: JobSourceInput[] = RETIRED_ENTRIES
+  .map(([company_name, ats_name, board_token]) => ({
+    company_name,
+    ats_name,
+    board_token,
+    career_url: careerUrl(ats_name, board_token),
+    enabled: false,
+  }));

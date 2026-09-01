@@ -487,13 +487,25 @@ export async function runCompleteDrain({
         const deadlineMs = Number.isFinite(config.logoDrainDeadlineMs)
           ? config.logoDrainDeadlineMs
           : Number.POSITIVE_INFINITY;
-        if (waitedMs >= deadlineMs) {
+        /* THE DRAIN'S OWN AGE, because waitedMs is measured from process start and a restart
+           therefore hands a stuck drain a whole fresh grace period. That is not hypothetical: the
+           deploy that shipped this deadline restarted the worker onto a drain already 36 hours old,
+           and reset it to zero. A worker that restarts even occasionally - a deploy, a crash, a
+           Railway migration - could then wait forever in deadline-sized slices and never once
+           reach the deadline. drain_started_at is persistent, so age is the honest clock. */
+        const drainAgeMs = drainStartedAt
+          ? now().getTime() - Date.parse(drainStartedAt)
+          : Number.NaN;
+        const drainPastDeadline = Number.isFinite(drainAgeMs) && drainAgeMs >= deadlineMs;
+        if (waitedMs >= deadlineMs || drainPastDeadline) {
           logoDeadlineReached = true;
           logoComplete = true;
           logger.error(JSON.stringify({
             event: 'logo_drain_deadline_reached',
             pass,
             waited_ms: waitedMs,
+            drain_age_ms: Number.isFinite(drainAgeMs) ? drainAgeMs : null,
+            yielded_on: drainPastDeadline && waitedMs < deadlineMs ? 'drain_age' : 'wait',
             deadline_ms: deadlineMs,
             remaining_logo_sources: logos.remainingSources,
             drain_started_at: drainStartedAt,
