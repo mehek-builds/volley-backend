@@ -458,3 +458,48 @@ test('an old posting still counts when its employer feed verified it recently', 
   const names = res.json().company_counts.map((c: { company_name: string }) => c.company_name);
   assert.ok(names.includes('Long Running Requisition Co'));
 });
+
+test('career_url addresses exactly one source, which a colliding company name cannot', async () => {
+  /* The company filter is a substring over display names, and display names collide: the live
+     board carries several distinct sources literally named "Careers" and two real companies named
+     "Crisp", so name-keyed callers (the website logo route resolving one source's verified
+     evidence) either page through thousands of strangers or refuse the ambiguity. career_url is
+     the source's identity, so this filter must be exact and quiet: the whole board for its one
+     URL, nothing for anyone else's. */
+  const [filtered, board] = await Promise.all([
+    app.inject({
+      method: 'GET',
+      url: `/jobs?limit=100&career_url=${encodeURIComponent('https://job-boards.greenhouse.io/fixture')}`,
+    }),
+    app.inject({ method: 'GET', url: '/jobs?limit=100' }),
+  ]);
+  assert.equal(filtered.statusCode, 200);
+  const expected = board.json().jobs
+    .filter((job: { career_url: string }) => job.career_url === 'https://job-boards.greenhouse.io/fixture')
+    .length;
+  assert.ok(expected > 0, 'the fixture source must be on the board for this test to mean anything');
+  assert.equal(filtered.json().total, expected);
+  for (const job of filtered.json().jobs) {
+    assert.equal(job.career_url, 'https://job-boards.greenhouse.io/fixture');
+  }
+
+  const stranger = await app.inject({
+    method: 'GET',
+    url: `/jobs?limit=100&career_url=${encodeURIComponent('https://job-boards.greenhouse.io/someone-else')}`,
+  });
+  assert.equal(stranger.statusCode, 200);
+  assert.equal(stranger.json().total, 0, 'an unknown source matches nothing, never a fuzzy neighbour');
+
+  const grouped = await app.inject({
+    method: 'GET',
+    url: `/jobs/grouped?limit=100&career_url=${encodeURIComponent('https://job-boards.greenhouse.io/fixture')}`,
+  });
+  assert.equal(grouped.statusCode, 200);
+  assert.ok(grouped.json().jobs.length > 0, 'the grouped surface honours the same source key');
+
+  const insecure = await app.inject({
+    method: 'GET',
+    url: `/jobs?career_url=${encodeURIComponent('http://job-boards.greenhouse.io/fixture')}`,
+  });
+  assert.equal(insecure.statusCode, 400, 'the source key is https-only, like every stored career_url');
+});

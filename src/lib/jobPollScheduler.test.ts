@@ -4,6 +4,8 @@ import {
   POLL_SEGMENT_SIZE,
   POLL_SOURCE_LIMIT,
   pollSourcesWithinBudget,
+  PROVIDER_MAX_IN_FLIGHT,
+  PROVIDER_START_INTERVALS_MS,
   retryTransient,
   WORKABLE_START_INTERVAL_MS,
 } from './jobPollScheduler';
@@ -51,6 +53,74 @@ test('replenishes an ordinary polling slot without waiting for the whole active 
   completions.get(2)!();
   const outcome = await outcomePromise;
   assert.equal(outcome.attempted, 3);
+});
+
+test('Recruitee and Crelate are paced, and multi-request Crelate is also completion-gated', () => {
+  /* Both proved their shared platform limit empirically on 2026-09-01: one full-concurrency drain
+     left 71 Recruitee and 19 Crelate sources on HTTP 429, and the 19 Crelate boards had NEVER
+     completed a poll - chronic starvation, not a burst. Behavioral minimums only: the roster may
+     grow and a provider that documents a real limit gets its own interval. */
+  for (const family of ['workable', 'recruitee', 'crelate']) {
+    assert.ok((PROVIDER_START_INTERVALS_MS[family] ?? 0) > 0, `${family} must have paced starts`);
+  }
+  /* Start spacing bounds only a poll's FIRST request. A Crelate poll then makes hundreds of
+     detail requests to the same shared host, so it must also run one poll at a time. */
+  assert.equal(PROVIDER_MAX_IN_FLIGHT.crelate, 1);
+});
+
+test('a second Crelate poll waits for the first to COMPLETE, not merely for the start interval', async () => {
+  let clock = 0;
+  const starts: number[] = [];
+  const completions: Array<() => void> = [];
+  const sources = Array.from({ length: 2 }, (_, index) => ({ ats_name: 'crelate', index }));
+  const outcomePromise = pollSourcesWithinBudget(sources, async () => {
+    starts.push(clock);
+    await new Promise<void>((resolve) => { completions.push(resolve); });
+    return starts.length;
+  }, {
+    concurrency: 4,
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(starts, [0], 'the interval alone must not admit an overlapping Crelate poll');
+  assert.ok(clock >= WORKABLE_START_INTERVAL_MS, 'the scheduler reached and passed the barrier');
+  completions[0]!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(starts.length, 2, 'completion releases the family lane');
+  completions[1]!();
+  const outcome = await outcomePromise;
+  assert.equal(outcome.attempted, 2);
+});
+
+test('spaces Recruitee and Crelate starts within each family while families stay independent', async () => {
+  let clock = 0;
+  const starts: Array<[string, number]> = [];
+  const sources = [
+    { ats_name: 'recruitee', index: 0 },
+    { ats_name: 'crelate', index: 1 },
+    { ats_name: 'recruitee', index: 2 },
+    { ats_name: 'crelate', index: 3 },
+    { ats_name: 'greenhouse', index: 4 },
+  ];
+  const outcome = await pollSourcesWithinBudget(sources, async (source) => {
+    starts.push([source.ats_name, clock]);
+    return source.index;
+  }, {
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  assert.equal(outcome.attempted, 5);
+  const startTimes = (family: string) => starts
+    .filter(([name]) => name === family)
+    .map(([, at]) => at);
+  /* One start per family per interval - and Recruitee's cooldown must not delay Crelate's first
+     start, or the pacing would serialize the whole paced portion of a segment. */
+  assert.deepEqual(startTimes('recruitee'), [0, WORKABLE_START_INTERVAL_MS]);
+  assert.deepEqual(startTimes('crelate'), [0, WORKABLE_START_INTERVAL_MS]);
+  assert.deepEqual(startTimes('greenhouse'), [0], 'ordinary sources are never paced');
 });
 
 test('spaces Workable request starts beyond the shared provider limit', async () => {

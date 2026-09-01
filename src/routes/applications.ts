@@ -163,9 +163,71 @@ import {
   measuredPersistedReceiptMatchesOpening,
   selfSubmittedSubmissionReceiptText,
 } from '../lib/authoritativeSubmissionProjection';
+import { submissionAuthorityEnvelopeForUnattemptedPacket } from './resume';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
+
+/**
+ * The public submission-authority envelope a submission-state response from this file must carry
+ * before the dashboard will authorise a first employer send.
+ *
+ * The dashboard installs these responses as its live submission state and re-derives the send gate
+ * from `response.submission_authority` alone, with the same fail-closed contract it applies to a
+ * `/resume/history` packet: an absent or unparsable envelope is quarantined, and every send then
+ * refuses with "the exact prior submission evidence is verified" - including for a packet that has
+ * never opened one attempt. `/resume/history` already attaches this envelope for genuinely
+ * un-attempted packets, but a response from this file overwrites that state WITHOUT one, so
+ * selecting an application re-quarantined the very packet the history route had just freed.
+ * Observed live 2026-09-01 on a fresh never-attempted packet: GET
+ * /applications/:id/submission installed, then the review screen's fill refused.
+ *
+ * Same rules as the history route's envelope, via the same helper: attached ONLY when the
+ * authoritative projection is `none` with `no_evidence` retry safety, which hold together exactly
+ * when the packet has no attempt-opened event. A packet with ANY attempt history gets nothing here
+ * and stays as fail-closed as before, and a projection read failure also attaches nothing - the
+ * gate then blocks, which is exactly today's behaviour, never an unauthorised send.
+ */
+/**
+ * The only review statuses from which the dashboard can offer a FIRST employer send, i.e. the only
+ * states where this envelope changes anything. Every other status either has an attempt open or is
+ * actively opening one, so the projection could never be `none` and the helper would pay a
+ * projection transaction (and its per-user `pg_advisory_xact_lock`) on every poll of a live fill
+ * only to attach nothing. Skipping there is behaviour-identical and keeps the polling hot path off
+ * the submission-attempt lock.
+ */
+const FIRST_SEND_REVIEW_STATUSES = new Set([
+  'resume_ready',
+  'questions_ready',
+  'ready_to_submit',
+  'needs_attention',
+  'failed',
+]);
+
+async function unattemptedPacketSubmissionAuthority(
+  userId: string,
+  packetId: string,
+  reviewStatus: string,
+  log: FastifyRequest['log'],
+): Promise<{ submission_authority?: ReturnType<typeof submissionAuthorityEnvelopeForUnattemptedPacket> }> {
+  if (!FIRST_SEND_REVIEW_STATUSES.has(reviewStatus)) return {};
+  try {
+    const projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
+    const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
+      packetId,
+      projectionState: projections.byPacketId.get(packetId)?.state,
+      retrySafetyKind: projections.retrySafetyByPacketId.get(packetId)?.kind,
+      revision: projections.revision,
+    });
+    return envelope ? { submission_authority: envelope } : {};
+  } catch (error) {
+    log.warn(
+      { err: error, packetId },
+      'submission authority projection unavailable for submission response; packet stays fail-closed at the send gate',
+    );
+    return {};
+  }
+}
 const packetAuditAcknowledgementSchema = z.object({
   audit_digest: z.string().regex(/^[a-f0-9]{64}$/),
   packet_version: z.string().regex(/^[a-f0-9]{64}$/),
@@ -2374,9 +2436,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           application_id: row.id,
           review: reviewWithoutPassiveHandoffUrl(responseReview),
           manual_handoff_available: manualHandoffAvailable(responseReview),
+          ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, responseReview.status, request.log)),
         });
       }
-      return reply.send({ application_id: row.id, review: next });
+      return reply.send({
+        application_id: row.id,
+        review: next,
+        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, next.status, request.log)),
+      });
     },
   );
 
@@ -3215,7 +3282,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
         const review = readApplicationReview(refreshed.spec);
-        return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        return reply.status(202).send({
+          application_id: row.id,
+          review: review ?? current,
+          ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, (review ?? current).status, request.log)),
+        });
       }
       const processed = await processSubmissionApplication(row.id, fastify);
       const [refreshed] = await db.select().from(generated_resumes).where(and(
@@ -3298,6 +3369,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         documents: storedDocuments(row),
         handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
+        ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, review.status, request.log)),
       });
     },
   );

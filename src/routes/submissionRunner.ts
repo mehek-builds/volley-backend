@@ -7134,12 +7134,14 @@ async function prepareManaged(
         : label.match(/^closed_control:(.+)$/)?.[1];
       return id ? [id] : [];
     }))];
-    // Probe clicks classify as mutations; the same ephemeral correlation the posting-questions
-    // pre-scan carries (postingQuestions.ts), at the standard read-scan deadline.
     const result = await runManagedBrowserWithAccountFence(
       row.user_id,
       applicationUrl,
       actions,
+      // Option-probe clicks open dropdowns to read their choices: a mutation that never submits, so
+      // it needs the same ephemeral scan correlation as the fill and the pre-scan, or stratus
+      // correlationRequired refuses it for lacking a submissionAttempt. The standard read-scan
+      // window is right for a probe batch: it is far smaller than a full fill.
       { screenshot: false, scanCorrelation: true },
     )
       .catch((error: unknown) => {
@@ -7631,9 +7633,18 @@ async function prepareManaged(
     progress_stage: 'Filling your answers',
     progress_updated_at: new Date().toISOString(),
   }));
-  // The fill run mutates the form and never submits (buildManagedPortalActions without `submit`
-  // builds no final action), so it carries the same ephemeral scan correlation as the discovery
-  // pass above, at the same widened deadline. See the discovery call for the full argument.
+  /* This prepare run fills the employer form and screenshots it for review; it never presses
+   * submit (buildManagedPortalActions was called without `submit`, so there is no confirmAndSubmit
+   * and no allowSubmit). But typing into the form is a mutation, and under stratus
+   * correlationRequired every mutating run needs a submissionAttempt and providerDeadline or it is
+   * refused with "A durable submissionAttempt is required for every submit-capable or continuable
+   * run". scanCorrelation mints the ephemeral throwaway pair for exactly this case - a mutation
+   * that is not a submission - the same way the posting-question pre-scans already do. Without it
+   * the fill fails closed and nothing is ever shown or sent.
+   *
+   * The widened window rather than the read-scan default: this and the discovery pass are the two
+   * big runs of the prepare path (up to 120 actions including document uploads), so they are the
+   * two that can legitimately reach stratus's own run budget. See MANAGED_PREPARE_SCAN_OPTIONS. */
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
     applicationUrl,

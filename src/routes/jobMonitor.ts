@@ -601,6 +601,13 @@ const listQuerySchema = z.object({
   title: z.string().trim().max(200).optional(),
   location: z.string().trim().max(200).optional(),
   company: z.string().trim().max(200).optional(),
+  /* The exact employer board, for callers that already KNOW the source. The company filter is a
+     substring match over display names, which cannot address one source when names collide (the
+     board carries several distinct companies literally named "Careers", and two real companies
+     named "Crisp"). career_page_sources.career_url is the source's identity, so this filter is
+     exact-match https-only: the website's logo route uses it to fetch one source's verified
+     evidence instead of paging a name that matches thousands of rows. */
+  career_url: z.string().trim().url().startsWith('https://').max(4000).optional(),
   remote: z.enum(['true', 'false']).optional(),
   /* Show only postings where visa sponsorship is confirmed. A filter anyone may ask for - the
      public board at /browse-jobs offers it as a checkbox - and one that some accounts get whether
@@ -2428,6 +2435,43 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       };
     }
 
+    /* A RENAMED TENANT IS ADOPTED DURABLY, NOT RE-DERIVED FOREVER. The fetch validated this batch
+     * against the tenant the provider redirected to (a renamed Recruitee subdomain), and the
+     * stored posting URLs live on that host - but canonicalMonitoredPortalUrl binds a row's URLs
+     * to its source's CONFIGURED board_token, so leaving the old token in place would ingest jobs
+     * that display and can never be applied to. The token moves on the source row, atomically with
+     * this batch's job window below, which also removes the per-poll redirect hop and survives the
+     * provider eventually retiring the redirect.
+     *
+     * One exception: when another source already owns the new token (discovery later added the
+     * renamed tenant as its own row, or two stale slugs converged), renaming would collide with
+     * the (ats_name, board_token) identity and ingesting would publish the same tenant twice under
+     * two company names. That is an operator decision, so it lands queryably in last_error and the
+     * existing rows stay up, exactly like the other preserving guards. */
+    const adoptedBoardToken = fetched.adopted_board_token ?? null;
+    if (adoptedBoardToken) {
+      const [adoptedTokenOwner] = await db.select({
+        id: career_page_sources.id,
+        company: career_page_sources.company_name,
+      }).from(career_page_sources).where(and(
+        eq(career_page_sources.ats_name, source.ats_name),
+        eq(career_page_sources.board_token, adoptedBoardToken),
+        ne(career_page_sources.id, source.id),
+      ));
+      if (adoptedTokenOwner) {
+        const message = await recordBoardPreservingFault(source.id, (active) =>
+          `Provider redirected this board to tenant '${adoptedBoardToken}', which '${adoptedTokenOwner.company}' already tracks; `
+          + `keeping the ${active} live rows and not ingesting a duplicate tenant.`);
+        return {
+          source_id: source.id,
+          company: source.company_name,
+          jobs: 0,
+          ok: false as const,
+          error: message!,
+        };
+      }
+    }
+
     /* CURRENTNESS IS ESTABLISHED AT INGEST, not inferred from publication age.
      *
      * Filtering only in boardConditions() meant the table stored every posting a board had ever
@@ -2618,6 +2662,8 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
         /* Cursor state and the job window are one atomic fact. Committing either without the other
            can skip a window forever after a transient database or source-status write failure. */
         await tx.update(career_page_sources).set({
+          /* The rename and the job window it validated are one atomic fact, like the cursor. */
+          ...(adoptedBoardToken ? { board_token: adoptedBoardToken } : {}),
           ...completedPollFields(fetched.detail_progress, now),
           /* The baseline moves only when a poll completes its sweep, so a spike is always judged
              against the last poll that actually wrote the board - never against a guard fault. An
@@ -2919,6 +2965,7 @@ export function boardConditions(f: {
   title?: string;
   location?: string;
   company?: string;
+  career_url?: string;
   remote?: 'true' | 'false';
   sponsorOnly?: boolean;
   employmentType?: string;
@@ -2983,6 +3030,8 @@ export function boardConditions(f: {
     if (clauses.length) conditions.push(clauses.length === 1 ? clauses[0]! : or(...clauses)!);
   }
   if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
+  /* Exact match, never a pattern: this is a source key, not a search box. */
+  if (f.career_url) conditions.push(eq(career_page_sources.career_url, f.career_url));
   if (f.remote) {
     conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
   } else if (f.targeting?.remote_only) {
@@ -3131,6 +3180,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       title: title ?? null,
       location: location ?? null,
       company: company ?? null,
+      career_url: parsed.data.career_url ?? null,
       remote: remote ?? null,
       sponsor_only: sponsorOnly,
       employment_type: parsed.data.employment_type ?? null,
@@ -3646,6 +3696,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       && !title
       && !location
       && !company
+      && !parsed.data.career_url
       && !remote
       && !parsed.data.employment_type
       && !sponsorOnly
@@ -3667,6 +3718,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       title: title ?? null,
       location: location ?? null,
       company: company ?? null,
+      career_url: parsed.data.career_url ?? null,
       remote: remote ?? null,
       sponsor_only: sponsorOnly,
       employment_type: parsed.data.employment_type ?? null,
