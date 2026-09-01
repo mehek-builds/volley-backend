@@ -373,8 +373,8 @@ async function seedLegacyRepairCandidate(overrides: { pressOnGenerated?: boolean
     job_context: jobContext,
     spec: { ...structuredContent, _review: review },
     resume_object_key: objectKey,
-    pipeline_stage: 'applied',
-    pipeline_stage_at: new Date(RECEIPT_AT),
+    pipeline_stage: null,
+    pipeline_stage_at: null,
   });
   await backendDb.insert(schema.artifacts).values({
     id: artifactId,
@@ -393,6 +393,8 @@ async function seedLegacyRepairCandidate(overrides: { pressOnGenerated?: boolean
     structured_content: structuredContent,
     rendered_object_key: objectKey,
   });
+  // Mirrors production's pre-ledger rows: the resume link and selection exist, but none of the
+  // mutable attachment writes or the packet pipeline stage were ever recorded.
   await backendDb.insert(schema.applications).values({
     id: applicationId,
     user_id: userId,
@@ -407,17 +409,16 @@ async function seedLegacyRepairCandidate(overrides: { pressOnGenerated?: boolean
     submission_state: 'submitted',
     application_fingerprint: `legacy-repair:${packetId}`,
     selected_resume_artifact_id: artifactId,
-    resume_attached: true,
-    resume_source: 'artifact',
-    resume_attached_at: attachedAt,
+    resume_attached: false,
+    resume_source: 'none',
+    resume_attached_at: null,
   });
   await backendDb.insert(schema.application_artifacts).values({
     application_id: applicationId,
     artifact_id: artifactId,
     purpose: 'resume',
     selected: true,
-    attachment_result: 'attached',
-    attached_at: attachedAt,
+    attached_at: null,
   });
 
   const legacyBinding = (attemptId: string, operation: 'initial_submission' | 'manual_submission'):

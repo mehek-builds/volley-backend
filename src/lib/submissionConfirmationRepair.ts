@@ -1,6 +1,7 @@
-import { and, eq, or } from 'drizzle-orm';
+import { and, eq, isNull, or } from 'drizzle-orm';
 import { db } from '../db';
 import {
+  application_artifacts,
   application_submission_attempt_events,
   applications,
   generated_resumes,
@@ -322,6 +323,43 @@ export async function repairMissingSubmissionConfirmation(input: {
       )) {
         return refused(scope, 'receipt_not_verified',
           'The stored receipt URL and text do not match the posting frozen on the immutable attempt.');
+      }
+
+      if (legacyAttemptId) {
+        /* Pre-ledger rows never got the mutable document-tuple writes the modern flow performs, so
+         * the authoritative projection would stay repair_required even with the confirmation fact
+         * in place. Complete ONLY absent values, inside this same transaction: an already-written
+         * value is never overwritten, and any inconsistency between existing values still fails the
+         * projection assertion below and rolls everything back. */
+        if (canonical.selected_resume_artifact_id
+          && !canonical.resume_attached
+          && canonical.resume_source === 'none'
+          && !canonical.resume_attached_at) {
+          await tx.update(application_artifacts).set({ attached_at: observedAt }).where(and(
+            eq(application_artifacts.application_id, input.applicationId),
+            eq(application_artifacts.artifact_id, canonical.selected_resume_artifact_id),
+            eq(application_artifacts.purpose, 'resume'),
+            isNull(application_artifacts.attached_at),
+          ));
+          await tx.update(applications).set({
+            resume_attached: true,
+            resume_source: 'artifact',
+            resume_attached_at: observedAt,
+          }).where(and(
+            eq(applications.id, input.applicationId),
+            eq(applications.user_id, input.userId),
+          ));
+        }
+        if (!packet.pipeline_stage) {
+          await tx.update(generated_resumes).set({
+            pipeline_stage: 'applied',
+            pipeline_stage_at: observedAt,
+          }).where(and(
+            eq(generated_resumes.id, packet.id),
+            eq(generated_resumes.user_id, input.userId),
+            isNull(generated_resumes.pipeline_stage),
+          ));
+        }
       }
 
       const candidate: EligibleRepair = {
