@@ -201,6 +201,11 @@ Rules:
   background is spelling their own history the way they have always spelt it. This applies to every
   word on the page, not only to verbs.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
+- A CURRENT role may keep the present tense. The same approved verb in its present or "-ing" form is
+  approved: "Driving full SDLC", "Facilitating cross-functional collaboration" and "Leading a team of
+  four" are all correct for a job the applicant still holds. Do NOT re-tense a bullet to the past to
+  satisfy the rule above; the checker accepts both tenses and re-tensing only costs the applicant
+  their own words.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount, or multiplier in a bullet whenever the source material
   supports one; do not invent metrics that aren't grounded in the experience bank.
