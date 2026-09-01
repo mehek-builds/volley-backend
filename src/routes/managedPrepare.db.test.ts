@@ -12,6 +12,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { SignJWT } from 'jose';
 import * as schema from '../db/schema';
 import type { ManagedPrepareDependencies } from '../lib/managedPrepare';
+import { educationFrom } from '../engine/resumePolicy';
+import { educationDriftIssues } from '../engine/resumeValidate';
+import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
 import { verifyCurrentPacketAudit } from '../lib/packetAudit';
 import type { SubmissionPacket } from '../lib/portalSubmission';
@@ -57,6 +60,7 @@ let otherAuthorization: string;
 
 const storedDocuments = new Map<string, Buffer>();
 let renderCalls = 0;
+let lastRenderedSpec: ResumeSpec | null = null;
 let storeCalls = 0;
 let readCalls = 0;
 let deleteCalls = 0;
@@ -101,6 +105,7 @@ const dependencies: Partial<ManagedPrepareDependencies> = {
   },
   renderMainResume: async ({ spec }) => {
     renderCalls += 1;
+    lastRenderedSpec = spec;
     return {
       buffer: Buffer.from(`%PDF-1.4\n${spec.target_role}\n%%EOF\n`),
       spec,
@@ -240,7 +245,12 @@ async function seedSourceAndJob() {
   );
 }
 
-async function seedUser(userId: string, email: string, baseResume: unknown = BASE_RESUME) {
+async function seedUser(
+  userId: string,
+  email: string,
+  baseResume: unknown = BASE_RESUME,
+  parsed: Record<string, unknown> = {},
+) {
   await database.query(
     `insert into "users" ("id", "email", "email_verified", "is_guest", "plan")
      values ($1, $2, true, false, 'free')`,
@@ -249,7 +259,7 @@ async function seedUser(userId: string, email: string, baseResume: unknown = BAS
   await database.query(
     `insert into "profiles" ("user_id", "parsed_json", "base_resume_json", "base_resume_built_at")
      values ($1, $2, $3, now())`,
-    [userId, JSON.stringify({ full_name: `Applicant ${userId.slice(0, 4)}`, resume_email: email }), JSON.stringify(baseResume)],
+    [userId, JSON.stringify({ full_name: `Applicant ${userId.slice(0, 4)}`, resume_email: email, ...parsed }), JSON.stringify(baseResume)],
   );
 }
 
@@ -269,6 +279,7 @@ beforeEach(async () => {
   await database.exec('truncate "managed_prepare_object_cleanups", "users", "career_page_sources" cascade');
   storedDocuments.clear();
   renderCalls = 0;
+  lastRenderedSpec = null;
   storeCalls = 0;
   readCalls = 0;
   deleteCalls = 0;
@@ -646,6 +657,86 @@ test('scopes idempotency to the authenticated owner even for the same monitored 
   );
   assert.equal(ownership.rows.length, 2);
   assert.deepEqual(new Set(ownership.rows.map((row) => row.user_id)), new Set([STUDENT, OTHER_STUDENT]));
+});
+
+/* The education of record (profiles.parsed_json, the fields the dashboard's "Edit parsed details"
+ * writes and both drift guards compare against) is what the rendered packet must print. Measured
+ * 2026-09-02 on a real account: the main resume still carried the uploaded PDF's "May 2027" and an
+ * older degree while the profile said "May 2028", so every packet this route prepared was refused
+ * by the review screen's drift banner the moment it was born, and hand-editing the education line
+ * on each application was the only way through. */
+const EDUCATION_OF_RECORD = {
+  school: 'Example University, School of Engineering',
+  degree: 'Bachelor of Science in Computer Science',
+  grad_date: 'May 2028',
+};
+const EDUCATION_DRIFT_ISSUE = /^education (school|degree|graduation date) differs/u;
+
+test('renders the main resume with the education of record so a packet is never born already refused', async () => {
+  await seedUser(STUDENT, 'student@example.test', BASE_RESUME, EDUCATION_OF_RECORD);
+  const response = await prepare();
+  assert.equal(response.statusCode, 200, response.body);
+  const rendered = lastRenderedSpec;
+  assert.ok(rendered, 'the main resume was rendered');
+  assert.equal(rendered.school, EDUCATION_OF_RECORD.school);
+  assert.equal(rendered.degree, EDUCATION_OF_RECORD.degree);
+  assert.equal(rendered.grad_date, EDUCATION_OF_RECORD.grad_date);
+  // Only the education line moves; the rest of the approved main resume is untouched.
+  assert.equal(rendered.target_role, BASE_RESUME.target_role);
+  assert.deepEqual(rendered.skills, BASE_RESUME.skills);
+  assert.deepEqual(rendered.experience, normalizeSpec(BASE_RESUME).experience);
+
+  const packets = await database.query<Record<string, any>>(
+    `select "spec" from "generated_resumes" where "id" = $1 and "user_id" = $2`,
+    [response.json().packet_id, STUDENT],
+  );
+  const stored = packets.rows[0].spec;
+  assert.equal(stored.school, EDUCATION_OF_RECORD.school);
+  assert.equal(stored.degree, EDUCATION_OF_RECORD.degree);
+  assert.equal(stored.grad_date, EDUCATION_OF_RECORD.grad_date);
+  const profile = await database.query<Record<string, any>>(
+    `select "parsed_json" from "profiles" where "user_id" = $1`,
+    [STUDENT],
+  );
+  // The backend's own send-time rule, applied to the stored packet against the stored record.
+  const drift = educationDriftIssues(normalizeSpec(stored), educationFrom(profile.rows[0].parsed_json))
+    .filter((issue) => EDUCATION_DRIFT_ISSUE.test(issue));
+  assert.deepEqual(drift, []);
+});
+
+test('a blank record field leaves the approved main resume line alone, and a bare year stands in for a date', async () => {
+  await seedUser(STUDENT, 'student@example.test', BASE_RESUME, { grad_year: 2028 });
+  const response = await prepare();
+  assert.equal(response.statusCode, 200, response.body);
+  const rendered = lastRenderedSpec;
+  assert.ok(rendered, 'the main resume was rendered');
+  assert.equal(rendered.school, BASE_RESUME.school);
+  assert.equal(rendered.degree, BASE_RESUME.degree);
+  assert.equal(rendered.grad_date, '2028');
+});
+
+test('an education edit on the profile creates a new immutable packet instead of replaying the stale one', async () => {
+  await seedUser(STUDENT, 'student@example.test', BASE_RESUME, EDUCATION_OF_RECORD);
+  const first = await prepare();
+  assert.equal(first.statusCode, 200, first.body);
+  await database.query(
+    `update "profiles" set "parsed_json" = "parsed_json" || $2::jsonb where "user_id" = $1`,
+    [STUDENT, JSON.stringify({ grad_date: 'December 2028' })],
+  );
+
+  const second = await prepare();
+  assert.equal(second.statusCode, 200, second.body);
+  assert.equal(second.json().application_id, first.json().application_id);
+  assert.notEqual(second.json().packet_id, first.json().packet_id);
+  assert.equal(second.json().reused, false);
+  assert.equal(renderCalls, 2);
+  assert.equal(lastRenderedSpec?.grad_date, 'December 2028');
+
+  const replay = await prepare();
+  assert.equal(replay.statusCode, 200, replay.body);
+  assert.equal(replay.json().packet_id, second.json().packet_id);
+  assert.equal(replay.json().reused, true);
+  assert.equal(renderCalls, 2);
 });
 
 test('a changed main-resume digest creates a new immutable packet and rebinds the same canonical row', async () => {

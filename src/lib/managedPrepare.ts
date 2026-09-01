@@ -15,6 +15,7 @@ import {
   profiles,
   users,
 } from '../db/schema';
+import { educationFrom } from '../engine/resumePolicy';
 import { renderResumePdf, type ContactHeader } from '../engine/resumeRender';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import type { ResumeRow } from '../routes/submissionRunner';
@@ -153,6 +154,39 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+/* The main resume as the product will state its EDUCATION, before it is rendered into a packet.
+ *
+ * profiles.base_resume_json is the spec the student approved on /start, or the parse of the PDF she
+ * uploaded, frozen at that moment. profiles.parsed_json is the education of record: it is what
+ * GET /profile serves, what the dashboard's "Edit parsed details" writes, and what BOTH drift
+ * guards compare a packet against (engine/resumeValidate.ts educationDriftIssues on the unattended
+ * send path, and the site's education-drift banner on the review screen). Measured 2026-09-02 on a
+ * real account: the uploaded PDF still printed "May 2027" and a business-administration degree
+ * while the profile said "May 2028" and computer science, so every packet this route prepared was
+ * born already refused. The banner asked her to hand-fix the education line on each application,
+ * and an unattended send would have stopped on the same three fields.
+ *
+ * So the packet is rendered with the record's school, degree and graduation date, exactly as
+ * educationFrom derives them (grad_date, else the bare grad_year), because the rendered PDF is the
+ * copy an employer keeps and it must agree with the fields the student typed. A BLANK record field
+ * leaves the base resume's line alone: blank means "not on record", and erasing a degree from a
+ * resume because a profile box was never filled would be the same contradiction pointed the other
+ * way. Nothing else on the resume is touched; tailoring is a different route.
+ *
+ * The main-resume digest is taken over THIS spec, so an education edit on the profile produces a
+ * fresh immutable packet instead of replaying the stale one. */
+const MAIN_RESUME_EDUCATION_OF_RECORD = ['school', 'degree', 'grad_date'] as const;
+
+export function mainResumeOfRecord(baseResume: ResumeSpec, parsed: unknown): ResumeSpec {
+  const education = educationFrom(parsed);
+  const next: ResumeSpec = { ...baseResume };
+  for (const field of MAIN_RESUME_EDUCATION_OF_RECORD) {
+    const value = education[field]?.trim() ?? '';
+    if (value) next[field] = value;
+  }
+  return next;
 }
 
 function mainResumeContactHeader(
@@ -477,7 +511,7 @@ export async function prepareManagedApplication(
   if (!profile?.baseResume) {
     return prepareError(409, 'main_resume_missing', 'Build your main resume before preparing this application.');
   }
-  const baseResume = normalizeSpec(profile.baseResume);
+  const baseResume = mainResumeOfRecord(normalizeSpec(profile.baseResume), profile.parsed);
   const mainResumeDigest = packetAuditSha256(baseResume);
   const jdText = posting.description.trim();
   if (!jdText) return prepareError(422, 'managed_job_description_missing', 'This job has no description to review.');
@@ -536,7 +570,7 @@ export async function prepareManagedApplication(
     if (!currentProfile?.baseResume) {
       return prepareError(409, 'main_resume_missing', 'Build your main resume before preparing this application.');
     }
-    const currentBaseResume = normalizeSpec(currentProfile.baseResume);
+    const currentBaseResume = mainResumeOfRecord(normalizeSpec(currentProfile.baseResume), currentProfile.parsed);
     if (packetAuditSha256(currentBaseResume) !== mainResumeDigest) {
       return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
     }
@@ -892,13 +926,15 @@ export async function prepareManagedApplication(
           eq(applications.id, applicationId),
           eq(applications.user_id, input.userId),
         )).limit(1);
-        const [currentProfile] = await tx.select({ baseResume: profiles.base_resume_json }).from(profiles)
-          .where(eq(profiles.user_id, input.userId)).limit(1);
+        const [currentProfile] = await tx.select({
+          baseResume: profiles.base_resume_json,
+          parsed: profiles.parsed_json,
+        }).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1);
         if (!currentApplication) {
           return prepareError(409, 'managed_application_changed', 'The application changed before its packet could be committed.');
         }
         if (!currentProfile?.baseResume
-          || packetAuditSha256(normalizeSpec(currentProfile.baseResume)) !== mainResumeDigest) {
+          || packetAuditSha256(mainResumeOfRecord(normalizeSpec(currentProfile.baseResume), currentProfile.parsed)) !== mainResumeDigest) {
           return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
         }
         if (currentApplication.submission_state === 'submitted'
@@ -1015,12 +1051,15 @@ export async function prepareManagedApplication(
       eq(applications.id, applicationId),
       eq(applications.user_id, input.userId),
     )).limit(1);
-    const [currentProfile] = await tx.select({ baseResume: profiles.base_resume_json }).from(profiles)
-      .where(eq(profiles.user_id, input.userId)).limit(1);
+    const [currentProfile] = await tx.select({
+      baseResume: profiles.base_resume_json,
+      parsed: profiles.parsed_json,
+    }).from(profiles).where(eq(profiles.user_id, input.userId)).limit(1);
     if (!currentRow || !currentApplication) {
       return prepareError(409, 'managed_application_changed', 'The application changed before its packet could be committed.');
     }
-    if (!currentProfile?.baseResume || packetAuditSha256(normalizeSpec(currentProfile.baseResume)) !== mainResumeDigest) {
+    if (!currentProfile?.baseResume
+      || packetAuditSha256(mainResumeOfRecord(normalizeSpec(currentProfile.baseResume), currentProfile.parsed)) !== mainResumeDigest) {
       return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
     }
 
