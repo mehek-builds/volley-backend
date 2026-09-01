@@ -92,6 +92,28 @@ test('a token whose key sits outside its own user prefix is refused', () => {
   assert.equal(readDownloadToken(token), null);
 });
 
+test("a token for the user's own non-resumes document is served, not 403'd", () => {
+  // REGRESSION GUARD (2026-09-01). The endpoint serves every document Litos mints a token for, and
+  // those live under sibling folders, not only resumes/: managed-main-resumes/ (a "Prepare in Litos"
+  // packet renders its resume there) and documents/ (documentStore). A resumes/-only prefix check
+  // silently 403'd both, blocking the fill on "Litos could not load the exact PDF". The user-scoped
+  // check admits the owner's own files under any of these prefixes.
+  for (const key of [
+    `users/${USER}/managed-main-resumes/job-1/res-1/digest.pdf`,
+    `users/${USER}/documents/aaaaaaaa.pdf`,
+    `users/${USER}/resumes/abc-1700000000000.pdf`,
+  ]) {
+    const payload = readDownloadToken(mintDownloadToken(USER, key));
+    assert.ok(payload, `expected ${key} to be served`);
+    assert.equal(payload?.k, key);
+  }
+});
+
+test('a cross-user key under any folder is still refused', () => {
+  const otherKey = `users/${OTHER_USER}/managed-main-resumes/job-1/res-1/digest.pdf`;
+  assert.equal(readDownloadToken(mintDownloadToken(USER, otherKey)), null);
+});
+
 test('resumePrefix is scoped per user and cannot collide across users', () => {
   assert.equal(resumePrefix(USER), `users/${USER}/resumes/`);
   assert.ok(!resumePrefix(USER).startsWith(resumePrefix(OTHER_USER)));
