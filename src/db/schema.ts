@@ -2222,6 +2222,22 @@ export const monitored_jobs = pgTable('monitored_jobs', {
           activePostedIdx stops being usable as a range scan on EVERY board surface - /jobs,
           /jobs/grouped, /jobs/facets, surfacedJobCount and boardInventoryMetrics all share it. */
   typePostedIdx: index('monitored_jobs_type_posted_idx').on(t.is_active, t.employment_type, t.posted_at),
+  /* POST /jobs/extract looks a pasted URL up against this table before paying for a browser render
+     (findMonitoredJobDescription in src/routes/jobExtract.ts). Without these it is a sequential
+     scan of the whole board - 214,925 live postings across 10,944 sources when this was added on
+     2026-09-01 - on every extract request, hit or miss.
+     TWO SINGLE-COLUMN INDEXES, NOT ONE COMPOSITE, because the lookup is
+     `apply_url = any(...) OR posting_url = any(...)`: an OR of two different columns cannot be
+     served by one composite, and Postgres combines two separate indexes with a BitmapOr.
+     PARTIAL on the same predicate as cursorIdx and groupMemberIdx above, which is the predicate
+     the lookup itself carries, so a closed or unvalidated row is neither indexed nor eligible to
+     short-circuit a live read. */
+  applyUrlLookupIdx: index('monitored_jobs_apply_url_lookup_idx')
+    .on(t.apply_url)
+    .where(sql`${t.is_active} = true and ${t.ingest_eligible} = true`),
+  postingUrlLookupIdx: index('monitored_jobs_posting_url_lookup_idx')
+    .on(t.posting_url)
+    .where(sql`${t.is_active} = true and ${t.ingest_eligible} = true`),
 }));
 
 // One ready generation of the unfiltered grouped cursor projection, plus its immediate predecessor

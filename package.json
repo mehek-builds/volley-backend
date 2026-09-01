@@ -79,6 +79,8 @@
     "db:onboarding-build-grant": "node scripts/apply-onboarding-build-grant-migration.mjs",
     "db:onboarding-build-grant-limit": "node scripts/apply-onboarding-build-grant-limit-migration.mjs",
     "db:job-first-entry": "node scripts/apply-job-first-entry-migration.mjs",
+    "db:monitored-job-url-lookup-index": "node scripts/apply-monitored-job-url-lookup-index.mjs",
+    "test:monitored-job-url-lookup-index": "node --test scripts/apply-monitored-job-url-lookup-index.test.mjs",
     "db:automatic-verification": "node scripts/apply-automatic-verification-migration.mjs",
     "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
     "db:password-auth": "node scripts/apply-password-auth-migration.mjs",
