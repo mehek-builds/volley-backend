@@ -7,6 +7,7 @@ import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
+import { countryForPhoneField, isCallingCodeQuestion } from './phoneCountry';
 import {
   derivationIsCurrent,
   optionBandAnswer,
@@ -5104,7 +5105,7 @@ const NATIONALITY_TO_COUNTRY: Record<string, string> = {
 };
 
 export type ProfileKey =
-  | 'phone' | 'address_city' | 'address_state' | 'address_country'
+  | 'phone' | 'phone_country' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'current_employer' | 'most_recent_employer' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
   | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
@@ -5338,6 +5339,11 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
    * classified as a date of birth, an availability date or anything else. */
   if (AGE_ATTESTATION_QUESTION.test(l)) return null;
   if (type === 'tel') return 'phone';
+  /* A DIAL-CODE PICKER WANTS THE COUNTRY THE NUMBER BELONGS TO, and it is asked before the phone
+   * rule because "phone country code" names the code, not the number. RESIDENCE_QUESTION already
+   * refuses every "country code" form so that a picker is never answered with where she lives; this
+   * is the intent that answers it instead. See lib/phoneCountry.ts for the measured case. */
+  if (isCallingCodeQuestion(l)) return 'phone_country';
   /* A LABEL THAT ASKS FOR A PHONE NUMBER IS THE PHONE FIELD, whatever type the caller knows about.
    *
    * The escape above only fires for callers that saw the live control. refreshKnownQuestionAnswers
@@ -7671,6 +7677,10 @@ export function resolveKnownAnswer(
       return ap.address_city ? { value: ap.address_city } : null;
     case 'phone':
       return ap.phone ? { value: ap.phone } : null;
+    case 'phone_country': {
+      const country = countryForPhoneField(ap.phone, ap.address_country);
+      return country ? { value: country } : null;
+    }
     case 'linkedin_url':
       return ap.linkedin_url ? { value: ap.linkedin_url } : null;
     case 'github_url':
