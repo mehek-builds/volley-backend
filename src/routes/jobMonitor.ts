@@ -95,6 +95,7 @@ import {
   retryTransient,
 } from '../lib/jobPollScheduler';
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
+import { ingestionHealth } from '../lib/ingestionHealth';
 import {
   hasTargeting,
   isRemoteLocation,
@@ -226,6 +227,13 @@ export function jobMonitorDrainShouldInitialize(
 }
 const logoVerificationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(100),
+});
+/* 180 minutes by default: comfortably past one two-hour poll cycle, so an ordinary late drain never
+   trips it, and far short of the seven and a half hours the 2026-09-01 stall actually ran. The
+   caller may tighten or loosen it, but never past a day - a threshold measured in days would have
+   stayed silent through that incident and every plausible repeat of it. */
+const ingestionHealthQuerySchema = z.object({
+  threshold_minutes: z.coerce.number().int().min(1).max(1_440).default(180),
 });
 export const LOGO_VERIFICATION_GLOBAL_CONCURRENCY = 16;
 export const LOGO_VERIFICATION_PROVIDER_CONCURRENCY = 4;
@@ -4525,6 +4533,48 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     }
     await upsertSources(parsed.data.sources);
     return reply.status(204).send();
+  });
+
+  /* IS THE BOARD STILL BEING FED? Nothing answered that question until 2026-09-01, when ingestion
+   * stopped for seven and a half hours and the only reason anyone noticed was Mehek asking why a
+   * job tile showed a raw database code.
+   *
+   * WHY NOTHING CAUGHT IT. Every existing signal watches whether a RUN failed. The worker had not
+   * failed: it sat in a logo-verification retry loop on a drain 39 hours old, reporting SUCCESS,
+   * logging no errors, and polling nothing. A green worker and a dead board looked identical from
+   * outside. So this measures the OUTCOME instead of the process - the freshest last_seen_at on the
+   * board - because that is the fact a student is affected by, and it stays true no matter which
+   * component is at fault or how healthy that component believes it is.
+   *
+   * THE THRESHOLD IS DELIBERATELY LOOSE. A full drain is bounded by the two-hour cycle interval, and
+   * a drain that starts late still writes last_seen_at across the catalogue when it lands, so
+   * anything under about three hours is ordinary. The incident this exists for ran to seven and a
+   * half hours and would have kept going. This is a smoke alarm, not a latency budget: it should be
+   * silent through every normal cycle and unmissable when the board has actually stopped.
+   */
+  fastify.get('/internal/job-monitor/ingestion-health', async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireOperator(request, reply)) return;
+    const parsed = ingestionHealthQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'Invalid ingestion-health query', detail: parsed.error.issues });
+    }
+    /* No monitor lock. This is a read, and a health check that cannot run while the thing it is
+       watching is busy is a health check that goes quiet exactly when it matters most. */
+    const [row] = await db.select({
+      newest_seen_at: sql<Date | null>`max(${monitored_jobs.last_seen_at})`,
+      active_jobs: sql<number>`count(*)::int`,
+    }).from(monitored_jobs).where(eq(monitored_jobs.is_active, true));
+
+    /* The verdict lives in lib/ingestionHealth so its fail-closed branches can be tested without a
+       database - a board that has never been polled is the most stalled a board can be, and that
+       case is exactly the one an integration test is worst at reaching. */
+    const health = ingestionHealth(row?.newest_seen_at ?? null, parsed.data.threshold_minutes * 60_000);
+    return reply.send({
+      ...health,
+      threshold_minutes: parsed.data.threshold_minutes,
+      active_jobs: row?.active_jobs ?? 0,
+      checked_at: new Date().toISOString(),
+    });
   });
 
   /* Promote provisional catalog domains only after independent, current proof.
