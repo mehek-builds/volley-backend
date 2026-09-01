@@ -1174,6 +1174,28 @@ export function shouldKeepPostingsOnEmptyFetch(fetchedCount: number, activeNow: 
   return fetchedCount === 0 && activeNow > 0;
 }
 
+/**
+ * Whether a non-empty list whose postings ALL failed normalization should leave existing rows alone.
+ *
+ * The complement of shouldKeepPostingsOnEmptyFetch, born from the same wipe reached through a
+ * different door: on 2026-08-30 Greenhouse began decorating every absolute_url with `?gh_jid=`, the
+ * strict action-URL validator rejected all 2,239 SpaceX postings, and the poll then reported a
+ * CLEAN SUCCESS while sweeping the whole board inactive - last_polled_at advanced, last_error
+ * stayed null, and the failure was invisible until someone read monitored_jobs by hand. A board
+ * that lists postings but normalizes none of them is validator/provider drift, not a company
+ * closing every role between two polls, so it is recorded as an error and the rows stay up.
+ *
+ * Deliberately blind to the ingest-quality gate: Disney's two-placeholder board NORMALIZES fine and
+ * must keep deactivating. Only a fetch where normalization itself produced nothing is a fault.
+ */
+export function shouldKeepPostingsOnFullyRejectedFetch(
+  listedCount: number,
+  normalizedCount: number,
+  activeNow: number,
+): boolean {
+  return listedCount > 0 && normalizedCount === 0 && activeNow > 0;
+}
+
 const DETAIL_CURSOR_PATTERN = /(?:^|\s)next_detail_cursor=(\d+)(?:\s|$)/;
 const DETAIL_CURSOR_KEY_PATTERN = /(?:^|\s)next_detail_cursor_key=([A-Za-z0-9_-]{1,1024})(?:\s|$)/;
 
@@ -2296,6 +2318,54 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
           error: emptyFetchMessage,
         };
       }
+    }
+
+    /* A LIST WHOSE POSTINGS ALL FAILED NORMALIZATION NEVER DEACTIVATES A BOARD, AND NEVER LOOKS
+     * LIKE A CLEAN POLL.
+     *
+     * The guard above catches the API answering with nothing. This one catches the API answering
+     * with everything and this code accepting none of it - which is what a provider format drift
+     * looks like from here, and it must not be invisible. When Greenhouse added `?gh_jid=` to every
+     * absolute_url, the strict action-URL validator rejected all 2,239 SpaceX postings; the sweep
+     * below then flipped every row inactive, the upsert loop had nothing to write, and the source
+     * finished as a SUCCESS: last_polled_at and last_successful_poll_at advanced, last_error was
+     * cleared. Nothing anywhere recorded that a 2,239-posting board had just ingested zero.
+     *
+     * So a fully rejected fetch is treated exactly like an empty one - existing rows stay up, the
+     * fault lands in last_error where it is queryable - with one addition: it is recorded even when
+     * there is nothing to preserve, because a source that has NEVER ingested (a custom-domain
+     * Greenhouse board, say) failing silently on every poll is the same invisibility.
+     *
+     * Single-fetch providers only. For Rippling, Breezy, and Crelate an all-failed detail window is
+     * already represented honestly: preserve_external_ids reactivates the list-confirmed rows and
+     * detailRefreshStatus persists the failure and cursor, and this early return must not bypass
+     * that cursor advancement. */
+    if (!fetched.detail_progress && listedCount > 0 && jobs.length === 0) {
+      const rejectedFetchMessage = await db.transaction(async (tx) => {
+        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+        await tx.execute(sql.raw(
+          `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
+        ));
+        const [existing] = await tx
+          .select({ active: sql<number>`count(*)::int` })
+          .from(monitored_jobs)
+          .where(and(eq(monitored_jobs.source_id, source.id), eq(monitored_jobs.is_active, true)));
+        const active = existing?.active ?? 0;
+        const message = shouldKeepPostingsOnFullyRejectedFetch(listedCount, jobs.length, active)
+          ? `Board listed ${listedCount} postings but none survived normalization; keeping the ${active} live rows and not deactivating.`
+          : `Board listed ${listedCount} postings but none survived normalization; no live rows to keep.`;
+        await tx.update(career_page_sources)
+          .set({ last_polled_at: new Date(), last_error: message })
+          .where(eq(career_page_sources.id, source.id));
+        return message;
+      });
+      return {
+        source_id: source.id,
+        company: source.company_name,
+        jobs: 0,
+        ok: false as const,
+        error: rejectedFetchMessage,
+      };
     }
 
     /* CURRENTNESS IS ESTABLISHED AT INGEST, not inferred from publication age.

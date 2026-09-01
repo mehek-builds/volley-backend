@@ -277,6 +277,7 @@ function exactActionUrl(
   allowedHosts: ReadonlySet<string>,
   expectedSegments: readonly string[],
   expectedHost?: string,
+  allowedQuery?: ReadonlyMap<string, string>,
 ): ExactActionUrl | null {
   const value = text(raw);
   if (!value || /[\u0000-\u001f\u007f]/.test(value)) return null;
@@ -292,11 +293,24 @@ function exactActionUrl(
     || url.username
     || url.password
     || url.port
-    || url.search
     || url.hash
     || !allowedHosts.has(host)
     || (expectedHost !== undefined && host !== expectedHost)
   ) return null;
+  /* A query string is still rejected by default. The one exception is a parameter the caller names
+     together with the exact value it must carry: Greenhouse started decorating every absolute_url
+     with a self-referential `?gh_jid=<job id>` (first seen 2026-08-30, when it silently zeroed the
+     entire 2,239-posting SpaceX board), and that tracking suffix is provider decoration, not
+     routing. Anything else - an unexpected name, a mismatched value, a repeated parameter - is
+     rejected exactly as before, and the canonical URL below never carries a query at all. */
+  if (url.search) {
+    if (!allowedQuery) return null;
+    const seenNames = new Set<string>();
+    for (const [name, parameterValue] of url.searchParams) {
+      if (seenNames.has(name) || allowedQuery.get(name) !== parameterValue) return null;
+      seenNames.add(name);
+    }
+  }
 
   const rawSegments = url.pathname.split('/').slice(1);
   if (rawSegments.at(-1) === '') rawSegments.pop();
@@ -347,6 +361,9 @@ export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): 
         job.absolute_url,
         GREENHOUSE_ACTION_HOSTS,
         [expectedToken, 'jobs', id],
+        undefined,
+        /* Greenhouse's own tracking suffix, and only with this job's exact id. See exactActionUrl. */
+        new Map([['gh_jid', id]]),
       );
       if (!action) return [];
       postingUrl = action.canonical;
@@ -797,6 +814,14 @@ export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_
 }
 
 const DETAIL_FETCH_CONCURRENCY = 8;
+/* The LIST fetch is one request for the entire board, and a board is not small: SpaceX's Greenhouse
+   list with content=true is 25.4 MB across 2,239 postings (measured 2026-09-01). The container runs
+   POLL_CONCURRENCY of these in parallel on shared bandwidth, so sharing the 20-second per-detail
+   budget put the largest boards permanently at the mercy of throughput: the signal aborted the body
+   mid-read while the board itself answered HTTP 200. 90 seconds covers that payload at under
+   300 KB/s of effective throughput and still fits many sequential list fetches inside the
+   scheduler's nine-minute budget. */
+export const LIST_REQUEST_TIMEOUT_MS = 90_000;
 /* A source-level detail pass must leave enough room for the other sources selected in the same
    monitor segment. The cursor returned with a partial pass is persisted by pollSource, so this is
    a per-pass bound rather than a permanent first-N truncation. */
@@ -990,10 +1015,13 @@ function detailProgress(
   };
 }
 
-function detailRequestInit(): RequestInit {
+/* Every call site of this init is a LIST or board-metadata request - the per-posting detail
+   requests build their own init inside fetchWithinDetailDeadline - so it carries the list budget,
+   not the detail budget. See LIST_REQUEST_TIMEOUT_MS for why the two differ by 4.5x. */
+function listRequestInit(): RequestInit {
   return {
     headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
-    signal: AbortSignal.timeout(DETAIL_REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(LIST_REQUEST_TIMEOUT_MS),
   };
 }
 
@@ -1009,7 +1037,7 @@ async function fetchRipplingJobs(
   fetcher: typeof fetch,
   options: DetailFetchOptions,
 ): Promise<SourceJobFetch> {
-  const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
+  const listResponse = await fetcher(sourceEndpoint(source), listRequestInit());
   if (!listResponse.ok) throw new Error(`rippling board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json();
   if (!Array.isArray(listPayload)) throw new Error('Rippling board returned an invalid jobs payload');
@@ -1190,7 +1218,7 @@ async function fetchBreezyJobs(
   fetcher: typeof fetch,
   options: DetailFetchOptions,
 ): Promise<SourceJobFetch> {
-  const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
+  const listResponse = await fetcher(sourceEndpoint(source), listRequestInit());
   if (!listResponse.ok) throw new Error(`breezy board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json();
   if (!Array.isArray(listPayload)) throw new Error('Breezy board returned an invalid jobs payload');
@@ -1392,7 +1420,7 @@ async function fetchCrelateJobs(
   fetcher: typeof fetch,
   options: DetailFetchOptions,
 ): Promise<SourceJobFetch> {
-  const varsResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
+  const varsResponse = await fetcher(sourceEndpoint(source), listRequestInit());
   if (!varsResponse.ok) throw new Error(`crelate board returned HTTP ${varsResponse.status}`);
   const varsPayload = await varsResponse.json();
   if (!varsPayload || typeof varsPayload !== 'object' || Array.isArray(varsPayload)) {
@@ -1419,7 +1447,7 @@ async function fetchCrelateJobs(
     Locations: null,
     SearchText: null,
     Tags: null,
-  }), detailRequestInit());
+  }), listRequestInit());
   if (!listResponse.ok) throw new Error(`crelate board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json() as {
     Jobs?: unknown;
@@ -1560,10 +1588,7 @@ export async function fetchSourceJobBatch(
   if (source.ats_name === 'breezy') return fetchBreezyJobs(executableSource, fetcher, options);
   if (source.ats_name === 'crelate') return fetchCrelateJobs(executableSource, fetcher, options);
 
-  const response = await fetcher(sourceEndpoint(executableSource), {
-    headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
-    signal: AbortSignal.timeout(20_000),
-  });
+  const response = await fetcher(sourceEndpoint(executableSource), listRequestInit());
   if (!response.ok) throw new Error(`${source.ats_name} board returned HTTP ${response.status}`);
   const payload = await response.json();
   let jobs: NormalizedJob[];

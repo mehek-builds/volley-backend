@@ -43,6 +43,7 @@ import {
   mergeCurrentDrainPollFailures,
   monitorQuerySchema,
   shouldKeepPostingsOnEmptyFetch,
+  shouldKeepPostingsOnFullyRejectedFetch,
   targetRoleCoverageMetrics,
   groupedSponsorshipFor,
   sponsorOnlyPredicate,
@@ -165,15 +166,21 @@ test('every pollSource database unit installs bounded lock and statement timeout
     assert.ok(mutation > statementTimeout, `${label} must install both timeouts before database work`);
   };
 
+  const rejectedGuard = poll.slice(
+    poll.indexOf('if (!fetched.detail_progress && listedCount > 0'),
+    poll.indexOf('/* CURRENTNESS IS ESTABLISHED AT INGEST'),
+  );
+
   assertTimeoutsPrecede(emptyGuard, '.select({ active:', 'empty-board guard');
+  assertTimeoutsPrecede(rejectedGuard, '.select({ active:', 'fully-rejected-fetch guard');
   assertTimeoutsPrecede(atomicWrite, 'tx.update(monitored_jobs)', 'atomic source and job write');
   assertTimeoutsPrecede(failureWrite, 'tx.update(career_page_sources)', 'failure-state write');
   assert.ok(
     atomicWrite.indexOf('for update') < atomicWrite.indexOf('tx.update(monitored_jobs)'),
     'the atomic poll write must lock its source row before mutating monitored jobs',
   );
-  assert.equal(poll.match(/set local lock_timeout/g)?.length, 3);
-  assert.equal(poll.match(/set local statement_timeout/g)?.length, 3);
+  assert.equal(poll.match(/set local lock_timeout/g)?.length, 4);
+  assert.equal(poll.match(/set local statement_timeout/g)?.length, 4);
 });
 
 test('terminal poll failures stay visible without keeping a source in the drain queue', () => {
@@ -354,6 +361,39 @@ test('an empty poll response never deactivates a board that currently has postin
   // A non-empty response is always allowed to replace what is there, including a shrink.
   assert.equal(shouldKeepPostingsOnEmptyFetch(5, 600), false, 'a real shrink is still honoured');
   assert.equal(shouldKeepPostingsOnEmptyFetch(600, 600), false);
+});
+
+test('a fully rejected fetch preserves live rows and is recorded, never reported as a clean poll', () => {
+  // The SpaceX wipe of 2026-08-30: Greenhouse added ?gh_jid= to every absolute_url, the strict
+  // action-URL validator rejected all 2,239 postings, and the poll finished as a SUCCESS - rows
+  // swept inactive, last_error null. A listed-but-fully-rejected fetch is provider or validator
+  // drift and must both preserve the board and land in last_error.
+  assert.equal(shouldKeepPostingsOnFullyRejectedFetch(2239, 0, 2237), true,
+    'format drift must not wipe a live board');
+  assert.equal(shouldKeepPostingsOnFullyRejectedFetch(2239, 0, 0), false,
+    'nothing to preserve, though pollSource still records the fault');
+  assert.equal(shouldKeepPostingsOnFullyRejectedFetch(2239, 1, 2237), false,
+    'a single surviving posting means the sweep below is honest evidence');
+  assert.equal(shouldKeepPostingsOnFullyRejectedFetch(0, 0, 2237), false,
+    'the empty response belongs to shouldKeepPostingsOnEmptyFetch');
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const poll = source.slice(
+    source.indexOf('export async function pollSource'),
+    source.indexOf('/* The board\'s filter set'),
+  );
+  assert.match(poll, /!fetched\.detail_progress && listedCount > 0 && jobs\.length === 0/,
+    'multi-request providers must keep their preserve/cursor path; only single-fetch wipes are intercepted');
+  assert.match(poll, /none survived normalization/,
+    'the fault must be queryable in career_page_sources.last_error');
+  const rejectedGuard = poll.slice(
+    poll.indexOf('if (!fetched.detail_progress && listedCount > 0'),
+    poll.indexOf('/* CURRENTNESS IS ESTABLISHED AT INGEST'),
+  );
+  assert.match(rejectedGuard, /last_polled_at: new Date\(\)/,
+    'the source must still advance through the oldest-first queue');
+  assert.doesNotMatch(rejectedGuard, /last_successful_poll_at/,
+    'a fully rejected fetch must never mint success evidence');
 });
 
 test('multi-request provider cursor progress survives between source polls', () => {
