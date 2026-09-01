@@ -6,6 +6,7 @@ import {
   fetchSourceJobs,
   isIngestablePosting,
   isSelfDeclaredTestPosting,
+  LIST_REQUEST_TIMEOUT_MS,
   MIN_DESCRIPTION_CHARS,
   normalizeAshbyJobs,
   normalizeGreenhouseJobs,
@@ -952,4 +953,37 @@ test('a Greenhouse internship is classified through the DECODED description, not
     }],
   });
   assert.equal(fullTime?.employment_type, undefined);
+});
+
+test('the list fetch carries a large-board timeout, and a list abort is a thrown error', async () => {
+  /* SpaceX's Greenhouse list with content=true is 25.4 MB across 2,239 postings (measured
+     2026-09-01). Sharing the 20-second per-detail budget put the largest boards at the mercy of
+     effective throughput once POLL_CONCURRENCY polls split the container's bandwidth, so the list
+     budget is sized to cover that payload at under 300 KB/s. */
+  assert.equal(LIST_REQUEST_TIMEOUT_MS, 90_000);
+  assert.ok(LIST_REQUEST_TIMEOUT_MS >= Math.ceil((25.5 * 1024 * 1024) / (300 * 1024)) * 1000,
+    'the list budget must cover the largest measured board at degraded throughput');
+
+  let received: RequestInit | undefined;
+  await fetchSourceJobBatch(
+    { ats_name: 'greenhouse', board_token: 'acme' },
+    async (_input, init) => {
+      received = init;
+      return new Response(JSON.stringify({ jobs: [] }), { status: 200 });
+    },
+  );
+  assert.ok(received?.signal instanceof AbortSignal, 'the list request must carry an abort signal');
+
+  /* An aborted list fetch must REJECT out of this function. pollSource's catch block is what
+     writes career_page_sources.last_error, so a swallowed abort here is exactly the invisible
+     failure shape this module exists to prevent. */
+  await assert.rejects(
+    fetchSourceJobBatch(
+      { ats_name: 'greenhouse', board_token: 'acme' },
+      async () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      },
+    ),
+    (error: unknown) => error instanceof DOMException && error.name === 'TimeoutError',
+  );
 });

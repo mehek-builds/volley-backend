@@ -85,12 +85,35 @@ test('Greenhouse drops off-host, cross-tenant, cross-job, and unsupported action
   }
 });
 
+test('Greenhouse accepts its own gh_jid tracking suffix and canonicalizes it away', () => {
+  /* 2026-08-30: Greenhouse began decorating every absolute_url with ?gh_jid=<job id>. Rejecting it
+     zeroed the entire 2,239-posting SpaceX board on a poll that reported success. The suffix is
+     accepted only when its value is exactly this job's own id, and the stored URL never keeps it. */
+  const [job] = normalizeGreenhouseJobs(
+    greenhouse('https://boards.greenhouse.io/acme/jobs/101?gh_jid=101'),
+    'acme',
+  );
+  assert.equal(job.posting_url, 'https://boards.greenhouse.io/acme/jobs/101');
+  assert.equal(job.apply_url, job.posting_url);
+
+  for (const url of [
+    'https://boards.greenhouse.io/acme/jobs/101?gh_jid=999',
+    'https://boards.greenhouse.io/acme/jobs/101?gh_jid=101&utm_source=linkedin',
+    'https://boards.greenhouse.io/acme/jobs/101?gh_jid=101&gh_jid=101',
+    'https://boards.greenhouse.io/acme/jobs/101?gh_src=abc123',
+  ]) {
+    assert.deepEqual(normalizeGreenhouseJobs(greenhouse(url), 'acme'), [], url);
+  }
+});
+
 test('Lever binds both posting and apply URLs to one host, tenant, and external ID', () => {
   const cases = [
     { hostedUrl: 'https://attacker.example/acme/lever-job-1' },
     { hostedUrl: 'https://jobs.lever.co/other/lever-job-1' },
     { hostedUrl: 'https://jobs.lever.co/acme/other-job' },
     { hostedUrl: 'https://jobs.lever.co/acme/jobs/lever-job-1' },
+    /* No allowedQuery is declared for Lever, so even a self-referential suffix stays rejected. */
+    { hostedUrl: 'https://jobs.lever.co/acme/lever-job-1?gh_jid=lever-job-1' },
     { applyUrl: 'https://jobs.eu.lever.co/acme/lever-job-1/apply' },
     { applyUrl: 'https://jobs.lever.co/other/lever-job-1/apply' },
     { applyUrl: 'https://jobs.lever.co/acme/other-job/apply' },
