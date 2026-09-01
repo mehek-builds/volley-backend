@@ -4535,12 +4535,6 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  /* Promote provisional catalog domains only after independent, current proof.
-   *
-   * This is a separate bounded drain from job polling because proving a brand can require a
-   * homepage request plus an image request. A source stays invisible until this succeeds. Failed
-   * candidates remain excluded and are retried after seven days, while successful proof persists
-   * the exact image URL shown on every job tile. */
   /* IS THE BOARD STILL BEING FED? Nothing answered that question until 2026-09-01, when ingestion
    * stopped for seven and a half hours and the only reason anyone noticed was Mehek asking why a
    * job tile showed a raw database code.
@@ -4583,6 +4577,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     });
   });
 
+  /* Promote provisional catalog domains only after independent, current proof.
+   *
+   * This is a separate bounded drain from job polling because proving a brand can require a
+   * homepage request plus an image request. A source stays invisible until this succeeds. Failed
+   * candidates remain excluded and are retried after seven days, while successful proof persists
+   * the exact image URL shown on every job tile. */
   fastify.get('/internal/job-monitor/verify-logos', async (request: FastifyRequest, reply: FastifyReply) => {
     if (!requireOperator(request, reply)) return;
     const parsed = logoVerificationQuerySchema.safeParse(request.query);
