@@ -207,7 +207,11 @@ export async function scanPostingQuestions(
 }> {
   const portal = target.portal;
   if (!portal) return { questions: [], metadata_blockers: [], status: 'failed' };
-  const result = await browserRunner(target.applyUrl, buildManagedPrescriptActions(portal), { screenshot: false });
+  // A read scan, not a submission: the discover pass plus Greenhouse option probes drive clicks that
+  // stratus classifies as mutations, so under correlationRequired the run must carry correlation.
+  // scanCorrelation attaches a fresh ephemeral attempt and deadline for exactly that, with no
+  // allowSubmit and no submit-only terminal-result assertion. See runManagedBrowser.
+  const result = await browserRunner(target.applyUrl, buildManagedPrescriptActions(portal), { screenshot: false, scanCorrelation: true });
   const scanFieldOptions = managedResultFieldOptions(result);
   const discoveryRoleCapability = managedResultSupportsDiscoveryRole(result);
   const discoveredRaw = (result.discovered ?? []) as DiscoveredQuestion[];
@@ -234,7 +238,9 @@ export async function scanPostingQuestions(
       const closedControlId = label.match(/^closed_control:(.+)$/)?.[1];
       return closedControlId ? [closedControlId] : [];
     }))];
-    const probeResult = await browserRunner(target.applyUrl, actions, { screenshot: false })
+    // Each option-probe batch also opens listboxes and presses Escape (mutations), so it needs its
+    // own read-scan correlation for the same reason the main pass above does.
+    const probeResult = await browserRunner(target.applyUrl, actions, { screenshot: false, scanCorrelation: true })
       .catch(() => null);
     probeResults.push(probeResult);
     if (probeResult === null) {

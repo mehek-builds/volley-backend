@@ -30,8 +30,11 @@ import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
+  buildManagedPrescriptActions,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
 } from './portalSubmission';
+
+const MANAGED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const MANAGED_SUBMISSION_ATTEMPT = Object.freeze({
   runId: '11111111-1111-4111-8111-111111111111',
@@ -224,6 +227,162 @@ test('managed correlated synchronous responses require a durable terminal result
     await assert.rejects(
       runManagedBrowser('https://portal.example/apply', [], options),
       /64 lowercase hexadecimal characters/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('a mutating read scan correlates its probe clicks yet requires no submit terminal result', async () => {
+  // The bug: turning on stratus correlationRequired made a Greenhouse pre-scan 400 with
+  // SUBMISSION_ATTEMPT_REQUIRED, because its option probes (click a listbox open, read it, Escape)
+  // classify as mutations. scanCorrelation supplies a fresh ephemeral attempt and bounded deadline so
+  // the probes are accepted, and the run mints no durable terminal result because it is not a submit.
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let sentBody: Record<string, unknown> | null = null;
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      // Stratus echoes the correlation for a read scan but, unlike a submit, mints no terminalResult.
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application',
+          url: 'https://portal.example/apply',
+          text: '',
+          discovered: [],
+          submissionAttempt: sentBody.submissionAttempt,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const run = await runManagedBrowser(
+      'https://portal.example/apply',
+      buildManagedPrescriptActions('greenhouse'),
+      { screenshot: false, scanCorrelation: true },
+    );
+    // The scan succeeded despite the response carrying no durable terminal result.
+    assert.equal(run.title, 'Application');
+    assert.equal(run.terminalResult, undefined);
+    const body = sentBody as unknown as {
+      allowSubmit?: unknown;
+      requestContinuation?: unknown;
+      submissionAttempt?: { runId: string; claimId: string; executionId: string };
+      providerDeadlineAt?: string;
+    };
+    // Correlation was sent (fresh distinct v4 UUIDs), but never a submit release or a continuation.
+    assert.equal(body.allowSubmit, false, 'a read scan must never release a submission');
+    assert.equal(body.requestContinuation, undefined, 'a read scan must never request a continuation');
+    assert.match(body.submissionAttempt!.runId, MANAGED_UUID);
+    assert.match(body.submissionAttempt!.claimId, MANAGED_UUID);
+    assert.match(body.submissionAttempt!.executionId, MANAGED_UUID);
+    assert.equal(new Set(Object.values(body.submissionAttempt!)).size, 3, 'the three ids must be distinct');
+    // The deadline leaves the bounded employer-action window stratus enforces: >12s and <=5min out.
+    const remainingMs = Date.parse(body.providerDeadlineAt!) - Date.now();
+    assert.equal(body.providerDeadlineAt, new Date(Date.parse(body.providerDeadlineAt!)).toISOString());
+    assert.ok(remainingMs > 12_000 && remainingMs <= 300_000, `deadline out of bounds: ${remainingMs}ms`);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('a read scan refuses to double as a submission and still verifies the correlation echo', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  try {
+    // scanCorrelation and a submit release are mutually exclusive: a scan is not a submission.
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], { scanCorrelation: true, allowSubmit: true }),
+      /cannot also release a submission or request a continuation/i,
+    );
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], { scanCorrelation: true, requestContinuation: true }),
+      /cannot also release a submission or request a continuation/i,
+    );
+    // The echo still binds the result to the exact correlation sent: a mismatch is refused.
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      run: {
+        title: 'Application',
+        url: 'https://portal.example/apply',
+        text: '',
+        submissionAttempt: {
+          runId: '99999999-9999-4999-8999-999999999999',
+          claimId: '88888888-8888-4888-8888-888888888888',
+          executionId: '77777777-7777-4777-8777-777777777777',
+        },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await assert.rejects(
+      runManagedBrowser(
+        'https://portal.example/apply',
+        buildManagedPrescriptActions('greenhouse'),
+        { screenshot: false, scanCorrelation: true },
+      ),
+      /did not match its durable submission attempt/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('a real submit still requires allowSubmit, correlation, and a durable terminal result', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let sentBody: Record<string, unknown> | null = null;
+  const responses = [
+    { terminalResult: { resultId: MANAGED_TERMINAL_RESULT_ID } },
+    {},
+  ];
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const extra = responses.shift()!;
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application submitted',
+          url: 'https://portal.example/complete',
+          text: 'Thank you',
+          submissionAttempt: (sentBody as { submissionAttempt?: unknown }).submissionAttempt,
+          ...extra,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    // A submit run that DOES carry a durable terminal result succeeds and sends allowSubmit true.
+    const run = await runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    });
+    assert.equal(run.terminalResult?.resultId, MANAGED_TERMINAL_RESULT_ID);
+    assert.equal((sentBody as unknown as { allowSubmit?: unknown }).allowSubmit, true);
+    // A submit run WITHOUT a terminal result is still refused: the invariant is untouched by the scan path.
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      }),
+      /missing its durable terminal result ID/i,
     );
   } finally {
     globalThis.fetch = previousFetch;

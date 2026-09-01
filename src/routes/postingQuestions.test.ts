@@ -114,10 +114,12 @@ test('the posting scan executes every bounded option-probe batch', async () => {
   assert.equal(result.questions.every((question) => question.options?.join('|') === 'Yes|No'), true);
 });
 
-test('the scan asks for no screenshot', () => {
+test('the scan asks for no screenshot and correlates as a read scan', () => {
   // runManagedBrowser renders a full-page PNG by default and nothing on this path would look at it.
-  assert.match(ROUTE, /browserRunner\(target\.applyUrl, buildManagedPrescriptActions\(portal\), \{ screenshot: false \}\)/);
-  assert.match(ROUTE, /browserRunner\(target\.applyUrl, actions, \{ screenshot: false \}\)/);
+  // Both passes also drive option-probe clicks (mutations), so under stratus correlationRequired they
+  // must carry read-scan correlation: a fresh ephemeral attempt, no allowSubmit, no terminal result.
+  assert.match(ROUTE, /browserRunner\(target\.applyUrl, buildManagedPrescriptActions\(portal\), \{ screenshot: false, scanCorrelation: true \}\)/);
+  assert.match(ROUTE, /browserRunner\(target\.applyUrl, actions, \{ screenshot: false, scanCorrelation: true \}\)/);
 });
 
 test('a scan runs only on a cache miss, and only behind an hourly ceiling', () => {
