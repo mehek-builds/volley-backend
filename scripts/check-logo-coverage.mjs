@@ -207,12 +207,29 @@ const tally = tallyCoverage(
 console.log(`Checked ${tally.totalRows} live postings across ${sources.length} company-board sources.`);
 console.log(`Postings with a verified logo: ${tally.rowsWithLogo} (${(tally.coverage * 100).toFixed(2)}%).`);
 
+/* NAMED WHETHER THE RUN PASSES OR FAILS, and that is the half of the floor decision that keeps a
+   tolerance honest. The floor is 99.9% rather than 100% because the residue on a continuously
+   growing board rotates run to run (see MINIMUM_LOGO_COVERAGE for the measurement), but a
+   tolerance that printed nothing would let a slow slide reach the floor unseen. So every source
+   below 100% is listed either way; only the verdict differs. */
+const missing = tally.withoutLogo.map((k) => k.split('\n')[0]);
+if (missing.length) {
+  const report = tally.coverage < FLOOR ? console.error : console.warn;
+  report(`Sources without a verified logo: ${missing.slice(0, 50).join(', ')}`);
+  if (missing.length > 50) report(`...and ${missing.length - 50} more.`);
+}
+
+const asPercent = (value) => `${(value * 100).toFixed(2)}%`;
 if (tally.coverage < FLOOR) {
-  const missing = tally.withoutLogo.map((k) => k.split('\n')[0]);
-  console.error(`LOGO COVERAGE BELOW FLOOR: ${(tally.coverage * 100).toFixed(2)}% < ${(FLOOR * 100).toFixed(0)}%.`);
-  console.error(`Sources without a verified logo: ${missing.slice(0, 50).join(', ')}`);
-  if (missing.length > 50) console.error(`...and ${missing.length - 50} more.`);
+  console.error(`LOGO COVERAGE BELOW FLOOR: ${asPercent(tally.coverage)} < ${asPercent(FLOOR)}.`);
   process.exit(1);
 }
 
-console.log('Every surfaced posting has a verified company logo.');
+if (missing.length) {
+  console.log(
+    `Coverage ${asPercent(tally.coverage)} is above the ${asPercent(FLOOR)} floor, `
+    + `with ${missing.length} source(s) short of every posting. Named above.`,
+  );
+} else {
+  console.log('Every surfaced posting has a verified company logo.');
+}
