@@ -2254,11 +2254,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           allowedSingleBulletEntries: allowedSparseEntriesForApplicationEdit(parsed, bank),
         },
       );
-      const editedLeadIssues = selectedLead.issues.length > 0
-        ? selectedLead.issues
-        : leadAlignmentIssues(edited, review.jd_text, {
-          context: { company: applicationCompany(row), role: review.role },
-        });
+      /* Same rule as the generate route: the selector no longer reports "nothing citable here" as
+         an issue, so an edit that leaves the resume with no shared word is ordered by
+         rankLeadWithoutCitation and saved, not rejected. What is still rejected is a citation that
+         is present and does not hold. */
+      const editedLeadIssues = leadAlignmentIssues(edited, review.jd_text, {
+        context: { company: applicationCompany(row), role: review.role },
+      });
       validation.issues.push(...editedLeadIssues);
       if (validation.issues.length > 0) {
         return reply.status(422).send({

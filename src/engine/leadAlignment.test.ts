@@ -200,7 +200,7 @@ Requirements:
   assert.equal(selected.spec.lead_alignment?.evidence, quant.bullets[0]);
 });
 
-test('selection ignores an unsupported generic-keyword overlap and fails closed', () => {
+test('selection ignores an unsupported generic-keyword overlap and cites nothing', () => {
   const generic = {
     ...TRAECO,
     bullets: [
@@ -219,9 +219,18 @@ Requirements:
   const selected = selectJdAlignedLead(spec({ experience: [generic] }), jd, {
     company: 'Circuits Inc', role: 'Hardware Design Intern',
   });
+  /* The property under test is that generic overlap CANNOT MANUFACTURE A CITATION: "Build software
+     systems for engineering projects" against "Built software systems for an engineering team"
+     shares four words and proves nothing about hardware. That is unchanged. What no longer happens
+     is the build dying over it - the entry is ordered by rankLeadWithoutCitation and the packet
+     says so, rather than the student losing the resume. See leadAlignment.ts. */
   assert.equal(selected.spec.lead_alignment, null);
-  assert.match(selected.issues[0], /no selected bullet shares supported domain evidence/);
+  assert.deepEqual(selected.issues, []);
   assert.deepEqual(selected.supported_terms, []);
+  assert.equal(selected.fallback?.entry_org, generic.org);
+  assert.deepEqual(leadAlignmentIssues(selected.spec, jd, {
+    context: { company: 'Circuits Inc', role: 'Hardware Design Intern' },
+  }), []);
 });
 
 test('a citation bound to a different frozen JD is rejected', () => {
@@ -559,8 +568,13 @@ for (const [word, requirement, evidence] of [
     const selected = selectJdAlignedLead(spec({ experience: [only] }), jd, {
       company: 'Acme', role: 'Backend Engineer',
     });
+    // The word is shared and still buys nothing: no citation, and no supported term recorded.
     assert.equal(selected.spec.lead_alignment, null);
-    assert.match(selected.issues[0], /no selected bullet shares supported domain evidence/);
+    assert.deepEqual(selected.supported_terms, []);
+    // It orders the resume rather than refusing to produce one, and the citation stays absent.
+    assert.deepEqual(selected.issues, []);
+    assert.equal(selected.fallback?.entry_org, only.org);
+    assert.deepEqual(selected.fallback?.jd_overlap_terms.includes(word.split('-')[0]!), false);
   });
 }
 
@@ -661,4 +675,183 @@ Requirements:
   assert.ok(asks.some((ask) => /backend services in Python/.test(ask)), 'the work must remain');
   assert.ok(asks.some((ask) => /benefits enrollment service/.test(ask)), 'work on a benefits system must remain');
   assert.ok(asks.some((ask) => /design and ship a production feature/.test(ask)), 'the mentor ask must remain');
+});
+
+/* THE UNCITABLE POSTING, which used to be a dead end.
+ *
+ * Reproduced from the onboarding failure a student hit on 2026-09-01: "That build did not finish.
+ * Litos could not prove which experience should lead this resume, so it was not attached." Nothing
+ * is wrong with either document. The posting is written in engagement-and-stakeholder register and
+ * the resume is written in Python-and-SQL register, so six real asks are extracted and share not
+ * one domain word with any bullet. The proof rule correctly proves nothing; the build must still
+ * produce a resume, ordered by the ranks below and honest about why. */
+const UNCITABLE_JD = `Associate Consultant, Client Delivery
+
+What you'll do
+- Partner with senior stakeholders to scope engagements and shape recommendations.
+- Facilitate workshops and synthesize findings into executive-ready narratives.
+- Own workstreams across concurrent client accounts and manage competing deadlines.
+
+What we're looking for
+- Pursuing a bachelor's degree, graduating between December 2027 and June 2028.
+- Exceptional written and verbal communication skills.`;
+
+const UNCITABLE_CONTEXT = { company: 'Acme', role: 'Associate Consultant' };
+
+const LEDGER = {
+  type: 'job' as const,
+  org: 'Emirates Islamic Bank',
+  title: 'Data Analytics Intern',
+  date_range: 'Jun 2025 - Aug 2025',
+  bullets: [
+    'Automated reconciliation of 40k monthly ledger rows in Python.',
+    'Wrote SQL extracts feeding the quarterly regulatory filing.',
+  ],
+};
+const STUDIO = {
+  type: 'project' as const,
+  org: 'Rufescent',
+  title: 'Founder',
+  date_range: 'Jan 2023 - May 2024',
+  bullets: [
+    'Shipped a consumer mobile app; designed the UX in Figma.',
+    'Grew a TikTok waitlist to 1,200 signups.',
+  ],
+};
+
+test('a posting that shares no domain word with the resume still produces a resume', () => {
+  const asks = leadRequirementCandidates(UNCITABLE_JD, UNCITABLE_CONTEXT);
+  assert.ok(asks.length > 0, 'the posting must really state asks, or this tests the wrong branch');
+
+  const selected = selectJdAlignedLead(
+    spec({ experience: [LEDGER, STUDIO] }, UNCITABLE_JD),
+    UNCITABLE_JD,
+    UNCITABLE_CONTEXT,
+  );
+  // Nothing is invented to paper over the missing proof.
+  assert.equal(selected.spec.lead_alignment, null);
+  assert.deepEqual(selected.supported_terms, []);
+  // And nothing blocks: this is the assertion the 422 used to fail.
+  assert.deepEqual(selected.issues, []);
+  assert.deepEqual(
+    leadAlignmentIssues(selected.spec, UNCITABLE_JD, { context: UNCITABLE_CONTEXT }),
+    [],
+  );
+  // Latest and longest, which is the right answer for the large majority of these.
+  assert.equal(selected.spec.experience[0]?.org, LEDGER.org);
+  assert.match(selected.fallback?.reason ?? '', /most recent experience/);
+});
+
+test('an uncitable lead is ordered by the posting language it does share, over recency', () => {
+  /* The domain words live in a blurb, not in an ask, so nothing is citable - but "consumer",
+     "mobile", "figma" and "tiktok" are still this posting's own language, and the older entry is
+     the one that speaks it. Rank 1 must beat rank 2 here. */
+  const jd = `Associate, Brand Studio
+
+About the team
+We are a studio obsessed with consumer mobile products. Our designers live in Figma and our
+TikTok channel is our largest funnel.
+
+What you'll do
+- Partner with senior stakeholders to shape recommendations.
+- Own workstreams across concurrent accounts and manage competing deadlines.
+
+What we're looking for
+- Pursuing a bachelor's degree.`;
+  const context = { company: 'Acme', role: 'Associate, Brand Studio' };
+  assert.ok(leadRequirementCandidates(jd, context).length > 0);
+
+  const selected = selectJdAlignedLead(spec({ experience: [LEDGER, STUDIO] }, jd), jd, context);
+  assert.equal(selected.spec.lead_alignment, null);
+  assert.deepEqual(selected.issues, []);
+  assert.equal(selected.spec.experience[0]?.org, STUDIO.org);
+  assert.deepEqual(
+    selected.fallback?.jd_overlap_terms.filter((term) => ['consumer', 'mobile', 'figma', 'tiktok'].includes(term)).sort(),
+    ['consumer', 'figma', 'mobile', 'tiktok'],
+  );
+  assert.match(selected.fallback?.reason ?? '', /closest match to this posting's own language/);
+});
+
+test('the fallback never outranks a citation that does exist', () => {
+  /* The same two entries against a posting whose asks ARE provable by the OLDER entry. The proof
+     rule must decide, the fallback must not fire, and recency must not win. This is the property
+     the whole module exists for and the relaxation above must not touch it. */
+  const jd = `Product Design Intern
+
+Responsibilities
+- Design feature sets and flows in Figma and test them with users.
+- Ship consumer mobile experiences end-to-end.
+
+Requirements
+- A portfolio of shipped consumer work.`;
+  const context = { company: 'Acme', role: 'Product Design Intern' };
+  const selected = selectJdAlignedLead(spec({ experience: [LEDGER, STUDIO] }, jd), jd, context);
+  assert.equal(selected.fallback, null);
+  assert.equal(selected.spec.experience[0]?.org, STUDIO.org);
+  assert.equal(selected.spec.lead_alignment?.entry_org, STUDIO.org);
+  assert.deepEqual(leadAlignmentIssues(selected.spec, jd, { context }), []);
+});
+
+test('a missing citation is still a defect when the posting and the bullets can prove one', () => {
+  /* The other half of the relaxation, and the one that keeps the forcing function. Here a citable
+     pairing DOES exist, so a spec that arrives with lead_alignment absent is the model skipping the
+     work, and it must still be handed back rather than waved through. */
+  const jd = `Data Analyst Intern
+
+Responsibilities
+- Write SQL to reconcile transaction data for monthly reporting.
+- Automate recurring reporting in Python.
+
+Requirements
+- Pursuing a bachelor's degree in a quantitative field.`;
+  const context = { company: 'Acme', role: 'Data Analyst Intern' };
+  const uncited = spec({ experience: [LEDGER, STUDIO], lead_alignment: null }, jd);
+  assert.match(leadAlignmentIssues(uncited, jd, { context })[0] ?? '', /lead_alignment is missing/);
+});
+
+test('the fallback reorders entries and writes no text', () => {
+  const before = spec({ experience: [LEDGER, STUDIO] }, UNCITABLE_JD);
+  const after = selectJdAlignedLead(before, UNCITABLE_JD, UNCITABLE_CONTEXT).spec;
+  const identity = (s: ResumeSpec) => [...s.experience]
+    .map((entry) => JSON.stringify({ org: entry.org, title: entry.title, date: entry.date_range, bullets: entry.bullets }))
+    .sort();
+  assert.deepEqual(identity(after), identity(before));
+  assert.equal(after.experience.length, before.experience.length);
+});
+
+test('the fallback reason names the rank that actually beat the runner-up', () => {
+  /* The asks are in consulting register and no bullet can cite one, so this reaches the fallback.
+     The robotics language sits in a blurb, which is not an ask: Alpha shares none of it, Bravo and
+     Charlie share exactly the same words. Charlie therefore wins on RECENCY alone.
+
+     Reading the runner-up as the first non-winner in SPEC order compared Charlie against Alpha
+     instead of against Bravo, saw an overlap of 3 against 0, and told the student Charlie led on
+     language - a rank that separated nothing between the two entries that were actually close. */
+  const jd = `Associate Consultant
+
+About us
+We tune kinematics for warehouse robots every day.
+
+What you'll do
+- Partner with senior stakeholders to scope engagements and shape recommendations.
+- Facilitate workshops and synthesize findings into executive-ready narratives.
+
+What we're looking for
+- Pursuing a bachelor's degree.`;
+  const context = { company: 'Acme', role: 'Associate Consultant' };
+  assert.ok(leadRequirementCandidates(jd, context).length > 0, 'must reach the fallback, not the no-ask branch');
+
+  const shared = 'Tuned kinematics for a warehouse robot.';
+  const selected = selectJdAlignedLead(spec({
+    experience: [
+      { type: 'job', org: 'Alpha Ledger', title: 'Analyst', date_range: 'Jan 2020 - Mar 2020', bullets: ['Reconciled ledger rows nightly.'] },
+      { type: 'job', org: 'Bravo Robotics', title: 'Engineer', date_range: 'Jan 2021 - Mar 2021', bullets: [shared] },
+      { type: 'job', org: 'Charlie Robotics', title: 'Engineer', date_range: 'Jan 2025 - Present', bullets: [shared] },
+    ],
+  }, jd), jd, context);
+
+  assert.equal(selected.spec.lead_alignment, null);
+  assert.equal(selected.spec.experience[0]?.org, 'Charlie Robotics');
+  assert.match(selected.fallback?.reason ?? '', /most recent experience/);
+  assert.doesNotMatch(selected.fallback?.reason ?? '', /closest match/);
 });

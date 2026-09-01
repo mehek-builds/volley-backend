@@ -2,6 +2,7 @@ import { extractJdSignals } from './jdSignals';
 import type { JdContext } from './jdMatch';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
+import { comparableEndDate } from './recentExperience';
 
 /**
  * WHAT "THE TOP EXPERIENCE IS ALIGNED FOR THEIR ROLE" MEANS, STATED SO A MACHINE CAN CHECK IT.
@@ -261,6 +262,20 @@ export interface JdLeadSelectionResult {
   spec: ResumeSpec;
   issues: string[];
   supported_terms: string[];
+  /** Set when no citable pairing existed and the order came from rankLeadWithoutCitation instead.
+   *  Null on every packet whose lead is cited, which is the overwhelming majority. */
+  fallback: LeadFallbackDecision | null;
+}
+
+/** Why an uncitable packet leads with the entry it leads with. Metadata, like LeadAlignment: no
+ *  renderer reads it, and it is carried so the student can be TOLD rather than blocked. */
+export interface LeadFallbackDecision {
+  entry_org: string;
+  /** Domain-bearing words this entry shares with the posting as a whole. Often empty, and that is
+   *  the case the recency and substance ranks exist for. */
+  jd_overlap_terms: string[];
+  /** One sentence, written for the student, naming which rank decided it. */
+  reason: string;
 }
 
 /**
@@ -332,17 +347,167 @@ function candidateIsBetter(next: LeadCandidate, current: LeadCandidate | null): 
  * "software", "system" and "build" cannot create a match. The function never writes content: it
  * only moves one already-grounded entry to position zero and records verbatim citations.
  */
+/**
+ * THE ONE PREDICATE BOTH HALVES OF THIS FILE ASK, factored out so they cannot answer it
+ * differently. The module header records what it cost the last time selection and validation
+ * tokenised a posting one character apart; this is the same hazard one level up. The selector uses
+ * it to build candidates, and citableLeadCandidateExists uses it to decide whether a missing
+ * citation is a defect or an honest absence. If those two ever disagree, a packet is either blocked
+ * for a citation that could not exist or waved through despite one that could.
+ */
+function supportedLeadTerms(requirementTerms: Set<string>, evidence: string): string[] {
+  const evidenceTerms = comparisonTerms(evidence);
+  return [...requirementTerms].filter((term) => evidenceTerms.has(term));
+}
+
+/** Whether ANY bullet on ANY entry could have cited ANY of this posting's asks. Deliberately the
+ *  existence question and not the ranking one: which entry would have won is the selector's job,
+ *  and this only has to separate "the model skipped it" from "there was nothing to find". */
+function citableLeadCandidateExists(spec: ResumeSpec, asks: string[]): boolean {
+  return asks.some((ask) => {
+    const requirementTerms = comparisonTerms(ask);
+    return spec.experience.some((entry) => entry.bullets.some((evidence) => (
+      supportedLeadTerms(requirementTerms, evidence).some((term) => !LEAD_DECISION_STOPWORDS.has(term))
+    )));
+  });
+}
+
+/**
+ * THE ORDER TO USE WHEN NOTHING CAN BE CITED. Not proof, and it never pretends to be: this returns
+ * `lead_alignment: null` exactly as before. What it stops doing is refusing to produce a resume.
+ *
+ * WHY THIS EXISTS. The selector above is a PROOF rule, and a proof rule has two outcomes: proved,
+ * and not proved. It was wired so that "not proved" hard-failed the whole build, and a student saw
+ * "That build did not finish. Litos could not prove which experience should lead this resume, so it
+ * was not attached." That is the wrong response to the wrong question. "Which of her jobs does this
+ * posting most resemble" is a RANKING question and always has an answer; "can that answer be proved
+ * by a word both documents contain" is an EVIDENCE question and sometimes has none. Reproduced on a
+ * consulting posting whose six extracted asks are written in engagement-and-stakeholder register
+ * against a Python-and-SQL resume: six real asks, zero shared domain words, nothing wrong with
+ * either document, and no resume. The absence of a lexical coincidence is not a defect in the
+ * student's experience, and it must not be spent as one.
+ *
+ * The escape hatch already existed for the neighbouring case - a posting with no extractable ask
+ * returns `lead_alignment: null` and no issues (see above, and the Workable form-only test). This
+ * is the same treatment for the same reason, extended to the case where the posting is readable and
+ * only the citation is not.
+ *
+ * WHY A BROAD OVERLAP SCORE IS ALLOWED HERE AND NOWHERE ELSE. The module header records that a
+ * generic overlap score was tried as the SELECTOR and rejected, because it ranked a Program
+ * Management internship top for a Test Automation posting on words like "intern" and "system". That
+ * judgement stands and is untouched: whenever a citable pairing exists, the proof rule decides and
+ * this function is never called. The comparison here is different in both directions. It runs only
+ * when the proof rule has already found nothing, so the alternative it is measured against is not a
+ * better ranking - it is a 422. And it still refuses the generic words: the overlap is filtered
+ * through LEAD_DECISION_STOPWORDS, so "software", "system", "project" and "intern" cannot move a
+ * lead here either. What it adds is the rest of the posting. The proof rule may only read the
+ * closed list of primary asks, which is what makes it strict; a posting's domain language lives in
+ * its whole text, and reading that is enough to separate entries the asks alone could not.
+ *
+ * THE RANKS, in order, and the first three are the ones Litos was asked for:
+ *   1. Domain-word overlap with the posting as a whole. Highest wins.
+ *   2. Recency. The most recently ended role, `Present` counting as the latest of all.
+ *   3. Substance: more bullets first, then more written evidence by length.
+ *   4. The model's own order, as the final deterministic tie-break - the same last resort
+ *      candidateIsBetter uses, and for the same reason.
+ *
+ * Rank 1 is empty far more often than it looks, because an entry that shared a domain word with the
+ * whole posting usually shared one with an ask too and never reached this function. So in practice
+ * ranks 2 and 3 decide most of these, which is the latest-and-longest answer that is right for the
+ * large majority of them.
+ *
+ * IT INVENTS NOTHING, which is the constraint that binds every path in this file. It reorders
+ * already-grounded entries and writes no text: no bullet is created, edited, merged or moved
+ * between entries, and no citation is fabricated to paper over the missing one.
+ */
+export function rankLeadWithoutCitation(spec: ResumeSpec, jdText: string): JdLeadSelectionResult {
+  if (spec.experience.length === 0) {
+    return { spec: { ...spec, lead_alignment: null }, issues: [], supported_terms: [], fallback: null };
+  }
+  const jdTerms = comparisonTerms(jdText);
+  const ranked = spec.experience.map((entry, entryIndex) => {
+    const entryTerms = comparisonTerms([entry.title, ...entry.bullets].join(' '));
+    const overlap = [...entryTerms].filter((term) => jdTerms.has(term) && !LEAD_DECISION_STOPWORDS.has(term));
+    return {
+      entry,
+      entryIndex,
+      overlap,
+      /* MAX_SAFE_INTEGER for "Present". An undated entry sorts last rather than first: a missing
+         date is not evidence of recency, and treating it as such would let a bare project title
+         outrank a current job. */
+      endDate: comparableEndDate(entry.date_range) ?? -1,
+      bulletCount: entry.bullets.length,
+      bulletChars: entry.bullets.join(' ').length,
+    };
+  });
+  /* Sorted once and read twice. The runner-up must be the SECOND-PLACE entry under this exact
+     order, not merely some other entry: leadFallbackReason names the first rank on which the winner
+     beats it, and reading an arbitrary entry there makes it name a rank that decided nothing. With
+     entries [Alpha (no overlap), Bravo (2021, shares the posting's words), Charlie (Present, shares
+     the same words)], Charlie beats Bravo on RECENCY alone, but compared against Alpha it looks
+     like a language win and the student was told so. */
+  const ordered = [...ranked].sort((a, b) => (
+    b.overlap.length - a.overlap.length
+    || b.endDate - a.endDate
+    || b.bulletCount - a.bulletCount
+    || b.bulletChars - a.bulletChars
+    || a.entryIndex - b.entryIndex
+  ));
+  const best = ordered[0]!;
+  const runnerUp = ordered[1];
+  const experience = best.entryIndex === 0
+    ? [...spec.experience]
+    : [
+      best.entry,
+      ...spec.experience.slice(0, best.entryIndex),
+      ...spec.experience.slice(best.entryIndex + 1),
+    ];
+  return {
+    spec: { ...spec, experience, lead_alignment: null },
+    issues: [],
+    supported_terms: [],
+    fallback: {
+      entry_org: best.entry.org,
+      jd_overlap_terms: best.overlap,
+      reason: leadFallbackReason(best, runnerUp),
+    },
+  };
+}
+
+/** Names the rank that actually decided it, in the student's words. Written from the comparison
+ *  against the runner-up rather than from the winner alone, so it never claims a reason that did
+ *  not separate anything. */
+function leadFallbackReason(
+  best: { entry: { org: string }; overlap: string[]; endDate: number; bulletCount: number },
+  runnerUp: { overlap: string[]; endDate: number; bulletCount: number } | undefined,
+): string {
+  const led = `Led with ${best.entry.org}`;
+  if (!runnerUp) return `${led}: it is the only experience on this resume.`;
+  if (best.overlap.length > runnerUp.overlap.length) {
+    const words = best.overlap.slice(0, 3).join(', ');
+    return `${led}: it is the closest match to this posting's own language (${words}).`;
+  }
+  if (best.endDate > runnerUp.endDate) return `${led}: it is your most recent experience.`;
+  if (best.bulletCount > runnerUp.bulletCount) return `${led}: it is your most substantial experience.`;
+  return `${led}: nothing separates it from your other experience for this posting.`;
+}
+
 export function selectJdAlignedLead(
   spec: ResumeSpec,
   jdText: string,
   context?: JdContext,
 ): JdLeadSelectionResult {
   const asks = leadRequirementCandidates(jdText, context);
+  /* A posting with no extractable ask carries no text to rank against either, so the order is left
+     exactly as the model emitted it. rankLeadWithoutCitation is reserved for the other flavour of
+     unscoreable below, where there IS a posting to read and only the citation-grade evidence is
+     missing. */
   if (asks.length === 0) {
     return {
       spec: { ...spec, lead_alignment: null },
       issues: [],
       supported_terms: [],
+      fallback: null,
     };
   }
 
@@ -363,8 +528,7 @@ export function selectJdAlignedLead(
       const requirement = asks[askIndex]!;
       const requirementTerms = askTermSets[askIndex]!;
       for (const evidence of entry.bullets) {
-        const evidenceTerms = comparisonTerms(evidence);
-        const supportedTerms = [...requirementTerms].filter((term) => evidenceTerms.has(term));
+        const supportedTerms = supportedLeadTerms(requirementTerms, evidence);
         const specificTerms = supportedTerms.filter((term) => !LEAD_DECISION_STOPWORDS.has(term));
         // No broad-word fallback. If the domain-bearing intersection is empty, this bullet does
         // not support ordering, even if it shares "build software systems" with the posting.
@@ -383,13 +547,7 @@ export function selectJdAlignedLead(
     }
   }
 
-  if (!best) {
-    return {
-      spec: { ...spec, lead_alignment: null },
-      issues: ['lead experience cannot be chosen: no selected bullet shares supported domain evidence with a primary ask in the frozen job description'],
-      supported_terms: [],
-    };
-  }
+  if (!best) return rankLeadWithoutCitation(spec, jdText);
 
   const lead = spec.experience[best.entryIndex]!;
   const experience = best.entryIndex === 0
@@ -408,6 +566,7 @@ export function selectJdAlignedLead(
     },
     issues: [],
     supported_terms: best.supportedTerms,
+    fallback: null,
   };
 }
 
@@ -657,8 +816,19 @@ export function leadAlignmentIssues(
       ? ['lead_alignment cannot cite a lead requirement when the frozen job description contains no supported primary ask']
       : [];
   }
+  /* A MISSING CITATION IS A DEFECT ONLY WHEN A CITATION WAS AVAILABLE, and until this asked that
+     question it treated the two opposite situations as one. Absent because the model skipped the
+     work while the posting and the bullets share provable evidence: a real defect, and the retry
+     feedback below is what makes the model go and find it. Absent because this spec and this
+     posting have no citable pairing at all: not a defect in either document, and reporting it as
+     one is what turned an honest resume into "That build did not finish" for the student. The
+     selector has already ordered those packets by rankLeadWithoutCitation; there is nothing here
+     left to fix and nothing to hand back to the model. Same treatment, same reason, as the
+     no-supported-ask branch directly above. */
   if (!alignment) {
-    return ['lead_alignment is missing: name the posting requirement the first experience entry proves'];
+    return citableLeadCandidateExists(spec, asks)
+      ? ['lead_alignment is missing: name the posting requirement the first experience entry proves']
+      : [];
   }
 
   const issues: string[] = [];
