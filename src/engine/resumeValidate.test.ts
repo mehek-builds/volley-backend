@@ -195,6 +195,65 @@ test('a source-limited priority role may keep its only grounded bullet without i
   assert.ok(!result.issues.some((issue) => /bullet selected \(min 2\)/.test(issue)));
 });
 
+/* The near-duplicate check used to loop per entry, so a pair sharing 30% of its words inside one
+   entry was flagged while a pair sharing 100% across two entries passed in silence. That is how a
+   live resume printed the same three sentences under EXPERIENCE and again under PROJECTS with
+   nothing raised here. */
+test('a bullet repeated under another entry is flagged, not just one repeated in place', () => {
+  const shared = 'Shipped a consumer mobile app end to end and reached 100+ active users in eight weeks';
+  const result = validateResumeSpec(
+    spec([
+      {
+        org: 'Tonee - AI Texting Tone Detector',
+        title: 'AI Engineer',
+        date_range: '2025 - Present',
+        bullets: [shared, 'Conducted 47 user interviews across three separate consumer markets'],
+      },
+      {
+        org: 'Tonee - AI Texting Tone Detector',
+        title: 'Founder',
+        date_range: '2025 - Present',
+        bullets: [shared, 'Evaluated three technical architectures for mobile inference performance'],
+      },
+    ]),
+    '',
+    BANK,
+  );
+
+  const overlap = result.warnings.filter((warning) =>
+    warning.flags.some((flag) => flag.startsWith('overlaps')),
+  );
+  assert.ok(
+    overlap.some((warning) => warning.flags.some((flag) => flag.includes('a bullet under "Tonee'))),
+    JSON.stringify(overlap),
+  );
+  /* Reported only. The deterministic removal lives in enforceExperienceBulletFloor, which runs
+     after this and can also see the bank top-up; two mechanisms racing to drop one bullet would
+     make it impossible to say from a packet which one acted. */
+  assert.ok(!result.issues.some((issue) => /overlaps/.test(issue)));
+});
+
+test('two bullets under one entry still name each other by their position in that entry', () => {
+  const result = validateResumeSpec(
+    spec([{
+      org: 'Northwind Labs',
+      title: 'Software Engineer Intern',
+      date_range: '2024',
+      bullets: [
+        'Built an internal analytics dashboard used by the growth team every week',
+        'Built an internal analytics dashboard used by the growth team every month',
+      ],
+    }]),
+    '',
+    BANK,
+  );
+
+  assert.ok(
+    result.warnings.some((warning) => warning.flags.some((flag) => /^overlaps bullet 2 /.test(flag))),
+    JSON.stringify(result.warnings),
+  );
+});
+
 test('target role headline must match the role for this application', () => {
   const s = spec([
     {

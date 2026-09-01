@@ -577,9 +577,15 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         priorityEntryId: selectedEntryId,
         allowSparsePriority: recentReview?.continue_with_found === true,
         allowSparseAll: rawSpec.generation_method === 'local_fallback',
-        onDropped: ({ org, bullets }) =>
+        /* Two causes, two sentences. "Add another bullet" is the fix for a thin entry and a dead
+           end for a duplicated one: an entry emptied by the dedupe has every bullet already on the
+           page under another heading, so a fourth bullet changes nothing and the student would be
+           sent round a loop. Say what actually happened instead. */
+        onDropped: ({ org, bullets, reason }) =>
           droppedForLength.push(
-            `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
+            reason === 'already_printed'
+              ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
+              : `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
           ),
       });
       const removed = [...droppedForLength, ...pruned.removed];

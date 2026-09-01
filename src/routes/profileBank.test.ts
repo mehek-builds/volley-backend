@@ -104,6 +104,88 @@ describe('bankEntriesFrom', () => {
     assert.equal(entries[0].date_range, null);
   });
 
+  /* The exact production shape, from user a18f774b on 2026-09-01. One resume listed Tonee under
+     both its Experience and its Projects heading, so the parse recorded it in `experience` AND in
+     `projects` with the same sentences, and the two transcriptions even disagreed about the dash in
+     the name. Both rows were written, /resume/generate selected both, and resumeRender split them
+     across EXPERIENCE and PROJECTS - printing the same bullets twice on a one-page resume. */
+  test('a venture listed under both Experience and Projects banks once', () => {
+    const bullets = [
+      'Shipped consumer mobile app end-to-end; designed feature set and UX in Figma.',
+      'Conducted 47 user interviews and analyzed 8,300+ behavioral data points.',
+    ].join('\n');
+    const entries = bankEntriesFrom(
+      profile({
+        experience: [{
+          company: 'Tonee - AI Texting Tone Detector',
+          title: 'AI Engineer',
+          start: 'September 2025',
+          end: 'Present',
+          description: bullets,
+        }],
+        projects: [{
+          name: 'Tonee \u2013 AI Texting Tone Detector',
+          role: 'AI Engineer',
+          description: bullets,
+        }],
+      }),
+      UID,
+    );
+    assert.equal(entries.length, 1);
+    // The job survives, not the project: it is the stronger claim and the section an employer
+    // reads for work history.
+    assert.equal(entries[0].type, 'job');
+    assert.equal(entries[0].org, 'Tonee - AI Texting Tone Detector');
+  });
+
+  /* The case the de-dup must NOT touch. Two roles at one organisation is an ordinary resume shape,
+     and engine/resumeValidate.ts goes to some trouble to keep them apart. Genuine dual roles
+     describe different work, which is exactly what the subset rule keys on. */
+  test('a project at the same org describing different work is still banked', () => {
+    const entries = bankEntriesFrom(
+      profile({
+        experience: [{
+          company: 'USC Lava Lab',
+          title: 'Product Manager',
+          start: '2025',
+          end: '2026',
+          description: 'Ran discovery interviews for the incubator cohort.',
+        }],
+        projects: [{
+          name: 'USC Lava Lab',
+          role: 'Builder',
+          description: 'Built a matching engine for founder and mentor pairing.',
+        }],
+      }),
+      UID,
+    );
+    assert.deepEqual(entries.map((entry) => entry.type), ['job', 'project']);
+  });
+
+  /* A partial repeat is a real second role, not a restatement, so the subset rule leaves it alone.
+     Dropping on a single shared sentence would delete the junior half of a promotion. */
+  test('an entry sharing only some bullets with a same-org entry survives', () => {
+    const shared = 'Shipped the consumer mobile app end to end.';
+    const entries = bankEntriesFrom(
+      profile({
+        experience: [{
+          company: 'Tonee',
+          title: 'Founder',
+          start: '2025',
+          end: 'Present',
+          description: shared,
+        }],
+        projects: [{
+          name: 'Tonee',
+          role: 'AI Engineer',
+          description: [shared, 'Cut inference latency from 2.3s to 0.1s.'].join('\n'),
+        }],
+      }),
+      UID,
+    );
+    assert.equal(entries.length, 2);
+  });
+
   test('drops entries with no org - an unnamed row cannot ground anything', () => {
     const entries = bankEntriesFrom(
       profile({
