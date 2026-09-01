@@ -787,6 +787,23 @@ test('a profile edit outside the three education fields replays the exact packet
   assert.equal(storeCalls, 1);
 });
 
+test('a prepared main-resume packet reads as untailored, a tailored packet does not', async () => {
+  /* Imported here, not at the top: a value import of lib/managedPrepare would load the db module
+     before the before() hook has pointed DATABASE_URL and the JWT secret at this test's server. */
+  const { packetIsUntailoredMainResume } = await import('../lib/managedPrepare');
+  await seedUser(STUDENT, 'student@example.test');
+  const response = await prepare();
+  assert.equal(response.statusCode, 200, response.body);
+  const packets = await database.query<Record<string, any>>(
+    `select "spec" from "generated_resumes" where "id" = $1 and "user_id" = $2`,
+    [response.json().packet_id, STUDENT],
+  );
+  assert.equal(packetIsUntailoredMainResume(packets.rows[0].spec), true);
+  assert.equal(packetIsUntailoredMainResume({ ...BASE_RESUME, _review: { jd_text: 'x' } }), false);
+  assert.equal(packetIsUntailoredMainResume({ ...BASE_RESUME, _managed_prepare: { resume_source: 'artifact' } }), false);
+  assert.equal(packetIsUntailoredMainResume(null), false);
+});
+
 test('a changed main-resume digest creates a new immutable packet and rebinds the same canonical row', async () => {
   await seedUser(STUDENT, 'student@example.test');
   const first = await prepare();

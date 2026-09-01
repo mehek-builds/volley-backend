@@ -15,6 +15,7 @@ import {
   users,
 } from '../db/schema';
 import { getEntitlementSnapshot } from '../lib/entitlements';
+import { packetIsUntailoredMainResume } from '../lib/managedPrepare';
 import { previewScreenshotMissing } from '../lib/managedRunStopSummary';
 import { confirmedPacketPipelineProjection } from '../lib/canonicalApplicationLifecycle';
 import {
@@ -386,6 +387,7 @@ export function runnerLeadAlignmentIssues(row: Pick<ResumeRow, 'spec' | 'job_con
   }
   return leadAlignmentIssues(normalizeSpec(row.spec), review.jd_text, {
     context: { company: runnerApplicationCompany(row), role: review.role },
+    untailored: packetIsUntailoredMainResume(row.spec),
   });
 }
 
