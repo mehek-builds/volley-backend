@@ -268,9 +268,11 @@ function encodedPathSegment(value: string): string {
 /**
  * Accept one known first-party action route and return its canonical spelling.
  *
- * Provider payload URLs are data, not authority. This deliberately rejects credentials, query
- * parameters, fragments, alternate ports, encoded separators, extra path components, and vendor
- * lookalike hosts before a row can receive the persisted ingest eligibility proof.
+ * Provider payload URLs are data, not authority. This deliberately rejects credentials, fragments,
+ * alternate ports, encoded separators, extra path components, and vendor lookalike hosts before a
+ * row can receive the persisted ingest eligibility proof. Query strings are rejected too, with one
+ * caller-declared exception: an exact-valued parameter named in `allowedQuery` (see below), which
+ * never survives into the canonical URL.
  */
 function exactActionUrl(
   raw: unknown,
@@ -310,6 +312,9 @@ function exactActionUrl(
       if (seenNames.has(name) || allowedQuery.get(name) !== parameterValue) return null;
       seenNames.add(name);
     }
+    /* `?` noise like `?&&&` makes url.search truthy while searchParams iterates nothing; that is
+       not the declared parameter, so it stays rejected. */
+    if (seenNames.size === 0) return null;
   }
 
   const rawSegments = url.pathname.split('/').slice(1);
@@ -1015,13 +1020,22 @@ function detailProgress(
   };
 }
 
-/* Every call site of this init is a LIST or board-metadata request - the per-posting detail
-   requests build their own init inside fetchWithinDetailDeadline - so it carries the list budget,
-   not the detail budget. See LIST_REQUEST_TIMEOUT_MS for why the two differ by 4.5x. */
+/* The large-board budget, for the generic single-fetch path only: that is the one request whose
+   body can be 25 MB. Rippling, Breezy and Crelate list/metadata payloads are small (Rippling and
+   Breezy carry no descriptions at all; Crelate's list holds only snippets), so they keep the tight
+   detail budget below - a hung host there should release its scheduler slot in 20s, not pin it for
+   90s, and Crelate makes two sequential metadata requests per poll. */
 function listRequestInit(): RequestInit {
   return {
     headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
     signal: AbortSignal.timeout(LIST_REQUEST_TIMEOUT_MS),
+  };
+}
+
+function detailRequestInit(): RequestInit {
+  return {
+    headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
+    signal: AbortSignal.timeout(DETAIL_REQUEST_TIMEOUT_MS),
   };
 }
 
@@ -1037,7 +1051,7 @@ async function fetchRipplingJobs(
   fetcher: typeof fetch,
   options: DetailFetchOptions,
 ): Promise<SourceJobFetch> {
-  const listResponse = await fetcher(sourceEndpoint(source), listRequestInit());
+  const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
   if (!listResponse.ok) throw new Error(`rippling board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json();
   if (!Array.isArray(listPayload)) throw new Error('Rippling board returned an invalid jobs payload');
@@ -1218,7 +1232,7 @@ async function fetchBreezyJobs(
   fetcher: typeof fetch,
   options: DetailFetchOptions,
 ): Promise<SourceJobFetch> {
-  const listResponse = await fetcher(sourceEndpoint(source), listRequestInit());
+  const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
   if (!listResponse.ok) throw new Error(`breezy board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json();
   if (!Array.isArray(listPayload)) throw new Error('Breezy board returned an invalid jobs payload');
@@ -1420,7 +1434,7 @@ async function fetchCrelateJobs(
   fetcher: typeof fetch,
   options: DetailFetchOptions,
 ): Promise<SourceJobFetch> {
-  const varsResponse = await fetcher(sourceEndpoint(source), listRequestInit());
+  const varsResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
   if (!varsResponse.ok) throw new Error(`crelate board returned HTTP ${varsResponse.status}`);
   const varsPayload = await varsResponse.json();
   if (!varsPayload || typeof varsPayload !== 'object' || Array.isArray(varsPayload)) {
@@ -1447,7 +1461,7 @@ async function fetchCrelateJobs(
     Locations: null,
     SearchText: null,
     Tags: null,
-  }), listRequestInit());
+  }), detailRequestInit());
   if (!listResponse.ok) throw new Error(`crelate board returned HTTP ${listResponse.status}`);
   const listPayload = await listResponse.json() as {
     Jobs?: unknown;
@@ -1618,7 +1632,22 @@ export async function fetchSourceJobBatch(
       );
       break;
     }
-    case 'workable': jobs = normalizeWorkableJobs(payload); break;
+    case 'workable': {
+      jobs = normalizeWorkableJobs(payload);
+      /* Raw shortcodes, not the normalized jobs' ids. Workable was the one single-fetch provider
+         still on the fallback below, which derives "listed" from the already-validated jobs - so a
+         board whose URLs all failed validation read as listedCount 0 and was misdiagnosed as an
+         empty board instead of a fully rejected one. Same charset rule as validatedWorkableUrl;
+         uniqueListedExternalIds collapses the per-location shortcode repeats. */
+      listedExternalIds = uniqueListedExternalIds(
+        (payload as { jobs: unknown[] }).jobs,
+        (raw) => {
+          const shortcode = text((raw as Record<string, unknown>).shortcode);
+          return shortcode && /^[A-Za-z0-9]+$/.test(shortcode) ? shortcode : undefined;
+        },
+      );
+      break;
+    }
     case 'recruitee': {
       jobs = normalizeRecruiteeJobs(payload, boardToken);
       listedExternalIds = uniqueListedExternalIds(
