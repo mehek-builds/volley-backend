@@ -163,7 +163,7 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // compile time and not only at runtime. That is what lets the jobs board's own union be checked
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
-type CaptchaGatedFamily = 'jazzhr' | 'bamboohr' | 'comeet';
+type CaptchaGatedFamily = 'jazzhr' | 'bamboohr' | 'comeet' | 'rippling';
 type ConsentGatedFamily = 'teamtailor';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
@@ -177,8 +177,14 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // present, window.grecaptcha is defined, the badge renders, and recaptcha/api.js?render=explicit is
 // loaded. BambooHR's fields are otherwise clean and fully fillable, which is exactly why the ceiling
 // has to be written down - the form LOOKS like a one-run submit and is not.
+// Rippling belongs here, not in AUTONOMOUS: the 2026-08-20 press-window witness proved its Apply
+// press is intercepted by an invisible Cloudflare Turnstile challenge (the press POSTed to
+// challenges.cloudflare.com and never reached any rippling.com host; the form stayed filled with no
+// confirmation). Litos reaches and fills the Rippling form fully, so it fills-and-hands-off the human
+// check + send, exactly as it does for the reCAPTCHA boards below. Standing rule: Litos never attempts
+// the challenge. Re-promoting rippling to AUTONOMOUS requires a live witness that the gate is gone.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jazzhr', 'bamboohr', 'comeet'] satisfies CaptchaGatedFamily[],
+  ['jazzhr', 'bamboohr', 'comeet', 'rippling'] satisfies CaptchaGatedFamily[],
 );
 
 // These forms are fillable, but their final action belongs to the applicant. Personio tenants can
@@ -621,11 +627,12 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
   'lever',
   'ashby',
   'workable',
-  // Added 2026-07-29 from live capture. Both are single-step, CAPTCHA-free forms with a real submit
-  // button, which is the whole bar for this list. They were the only two of the seven platforms
-  // looked at that session that cleared it - the other five each stop on a CAPTCHA, a consent
-  // choice, or an account wall.
-  'rippling',
+  // Added 2026-07-29 from live capture: a single-step, CAPTCHA-free form with a real submit button,
+  // which is the whole bar for this list. Rippling was added the same day from that same capture, but
+  // has since been demoted to CAPTCHA_GATED_FAMILIES: the 2026-08-20 press-window witness proved its
+  // Apply press is intercepted by an invisible Cloudflare Turnstile challenge, so it fills-and-hands-off
+  // rather than finishing on its own. It stays POLLABLE (assisted tier, dashboard-only) but is not
+  // autonomous, so it is never surfaced in onboarding.
   'breezy',
   // Recruitee is a single-page form. Its optional invisible hCaptcha is handled by the shared
   // pre-submit challenge probe, and any tenant agreement remains an empty required-field blocker.
@@ -639,6 +646,15 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
 
 export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
   return (AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(value);
+}
+
+// The families a MONITORED (polled) row can be canonicalized for: the autonomous set plus the
+// assisted exception (rippling). This is exactly the pollable set (SupportedJobBoard), and it is the
+// right gate for monitored URLs because monitored rows only ever come from pollable boards. It is
+// deliberately WIDER than isAutonomousPortalFamily: rippling is polled and its jobs are canonicalized
+// and filled for the dashboard fill-and-handoff flow, even though it is never autonomously submitted.
+function isMonitoredPortalFamily(value: string): value is AutonomousPortalFamily | 'rippling' {
+  return isAutonomousPortalFamily(value) || value === 'rippling';
 }
 
 // Why a run stopped short of submitting, in the student's words. Surfaced on the blocker card so
@@ -8976,7 +8992,7 @@ export function canonicalMonitoredPortalUrl(
 ): string | undefined {
   if (!rawUrl) return undefined;
   const expectedFamily = atsName?.trim().toLowerCase();
-  if (!expectedFamily || !isAutonomousPortalFamily(expectedFamily)) return undefined;
+  if (!expectedFamily || !isMonitoredPortalFamily(expectedFamily)) return undefined;
   const token = normalizeExecutableAtsBoardToken(expectedFamily, boardToken);
   if (!token) return undefined;
   if (expectedFamily === 'greenhouse') {

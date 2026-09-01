@@ -933,15 +933,21 @@ export function verifiedLogoEvidencePredicate(asOf?: Date) {
 }
 
 /**
- * The source queue must use the same evidence gate as the public inventory. Polling an unverified
- * or expired-logo source cannot make a job visible, but it can still fetch thousands of rows and
- * churn their active state. Keeping this as one predicate also prevents the selection query and
- * the remaining-count query from disagreeing about whether a drain is complete.
+ * The source queue must use the same logo-evidence gate as the public inventory. Polling an
+ * unverified or expired-logo source cannot make a job visible, but it can still fetch thousands of
+ * rows and churn their active state. Keeping this as one predicate also prevents the selection query
+ * and the remaining-count query from disagreeing about whether a drain is complete.
+ *
+ * The FAMILY set is POLLABLE_JOB_BOARDS, deliberately WIDER than the surfacing gate in
+ * boardConditions (AUTONOMOUS_PORTAL_FAMILIES). Assisted boards (rippling) are polled and ingested
+ * here so their jobs are fresh for the dashboard fill-and-handoff flow, but boardConditions never
+ * surfaces them in the autonomous public inventory or the onboarding match. Poll a superset; surface
+ * only the autonomous subset.
  */
 export function pollingSourceEligibilityPredicate() {
   return and(
     eq(career_page_sources.enabled, true),
-    inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+    inArray(career_page_sources.ats_name, [...POLLABLE_JOB_BOARDS]),
     eq(career_page_sources.portal_name_mismatch, false),
     sql`nullif(btrim(${career_page_sources.portal_company_name}), '') is not null`,
     verifiedLogoEvidencePredicate(),

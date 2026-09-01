@@ -228,6 +228,18 @@ test('404s a posting whose source is disabled or off the autonomous families', a
   assert.equal(generateCalls.length, 0);
 });
 
+test('404s an assisted-tier (rippling) posting: onboarding builds only fully autonomous jobs', async () => {
+  /* THE ONBOARDING HARD CHECK. rippling is pollable and fully fillable, but its Apply press is
+     CAPTCHA-gated (Cloudflare Turnstile), so it is fill-and-handoff, not autonomous. Onboarding must
+     only ever build a job it can immediately submit end-to-end. This seeds a rippling posting that
+     passes EVERY other board gate - enabled, active, portal-name matched, a verified first-party
+     logo - so the ONLY reason it is refused is that rippling is not autonomous. A 404 here is the
+     hard check holding: weaken the autonomous filter and this test goes green, which it must not. */
+  await seedAttachableWorld({ atsName: 'rippling' });
+  assert.equal((await attach({ job_id: JOB })).statusCode, 404);
+  assert.equal(generateCalls.length, 0, 'onboarding must not spend a build on an assisted-tier posting');
+});
+
 test('creates the application through the real pipeline and answers with its id', async () => {
   await seedAttachableWorld();
   const response = await attach({ job_id: JOB });

@@ -576,14 +576,24 @@ test('controlled portal variants exercise every real adapter selector family', (
 });
 
 test('the jobs board may only source from portals Litos can finish alone', () => {
-  // The guarantee behind "only surface jobs we can complete autonomously". POLLABLE_JOB_BOARDS is
-  // constrained to AutonomousPortalFamily at compile time; this asserts the runtime lists agree, so
-  // a widening that somehow slips past the type checker still fails here.
+  // The guarantee behind "onboarding only surfaces jobs we can complete autonomously". Every pollable
+  // board is EITHER fully autonomous (finished end-to-end, surfaced in the onboarding match) OR an
+  // assisted exception: pollable and fully fillable, but its final human-check + send belongs to the
+  // applicant, so it is surfaced on the dashboard only (fill-and-handoff) and never in onboarding.
+  // rippling is the one assisted exception (Cloudflare-Turnstile-gated on submit). Onboarding's gate
+  // is boardConditions -> AUTONOMOUS_PORTAL_FAMILIES, so an assisted board can never leak into it.
+  const ASSISTED_EXCEPTIONS = new Set<string>(['rippling']);
   for (const board of POLLABLE_JOB_BOARDS) {
+    if (ASSISTED_EXCEPTIONS.has(board)) {
+      // Assisted: polled and fillable, but NEVER autonomously completed and NEVER autonomous-listed.
+      assert.equal(portalCanAutoSubmit(board), false, `${board} is assisted and must not auto-submit`);
+      assert.equal(isAutonomousPortalFamily(board), false, `${board} is assisted and must not be autonomous`);
+      continue;
+    }
     assert.equal(portalCanAutoSubmit(board), true, `${board} is polled but cannot finish alone`);
     assert.ok(isAutonomousPortalFamily(board), board);
   }
-  // The portals that must never reach the board, and why.
+  // The portals that must never reach the board at all, and why.
   for (const blocked of ['smartrecruiters', 'jazzhr', 'paylocity'] as const) {
     assert.equal(portalCanAutoSubmit(blocked), false, blocked);
     assert.equal(isAutonomousPortalFamily(blocked), false, blocked);
@@ -592,6 +602,9 @@ test('the jobs board may only source from portals Litos can finish alone', () =>
   // Workable can finish alone and has a public-board fetcher, so it belongs on the jobs board.
   assert.equal(isAutonomousPortalFamily('workable'), true);
   assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes('workable'), true);
+  // rippling is pollable but assisted: it must be BOTH in POLLABLE and out of AUTONOMOUS.
+  assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes('rippling'), true);
+  assert.equal(isAutonomousPortalFamily('rippling'), false);
 });
 
 test('managed controlled-portal actions include reviewed fields, resume upload, and final submit', () => {

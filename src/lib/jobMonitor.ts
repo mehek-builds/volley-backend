@@ -20,18 +20,25 @@ import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 // To add a board: make the portal genuinely autonomous in portalSubmission.ts first (an adapter that
 // reaches a real receipt), and it becomes available here automatically.
 // Two different questions, and a source has to satisfy BOTH:
-//   1. Can Litos finish an application on that portal alone?  -> AutonomousPortalFamily
-//   2. Can this module actually poll that portal's boards?     -> needs a fetchSourceJobs branch
+//   1. Can this module actually poll that portal's boards?     -> needs a fetchSourceJobs branch
+//   2. Can Litos FINISH an application on that portal?          -> AutonomousPortalFamily (submits
+//      end-to-end) OR the assisted tier: fillable, but the final human-check + send belongs to the
+//      applicant. POLLABLE is therefore AutonomousPortalFamily PLUS the assisted exceptions listed
+//      below. The onboarding match filters on AUTONOMOUS_PORTAL_FAMILIES only, so assisted boards are
+//      ingested and surfaced on the dashboard (fill-and-handoff), never recommended during onboarding.
 //
-// Rippling, Breezy and Recruitee answered yes to (1) as far back as 2026-07-29/08-19 and sat unpolled
-// for months - a gap the 2026-08-04 audit named explicitly ("Rippling and Breezy are already proven
-// single-step and CAPTCHA-free but have no fetchSourceJobs branch"). Wired 2026-08-29. Rippling and
-// Breezy could not reuse the single-fetch-then-normalize shape the other five share: both publish a
-// list endpoint with no description (Rippling has no date either), so surfacing either one costs one
-// detail request per distinct posting. See fetchRipplingJobs and fetchBreezyJobs.
+// Rippling is the one assisted exception. It is pollable and fully fillable, but its Apply press is
+// gated by an invisible Cloudflare Turnstile challenge (2026-08-20 press-window witness), so it is
+// CAPTCHA_GATED in portalSubmission.ts, not autonomous. It stays here so its jobs are still ingested
+// for the dashboard fill-and-handoff flow.
+//
+// Rippling, Breezy and Recruitee were wired 2026-08-29. Rippling and Breezy could not reuse the
+// single-fetch-then-normalize shape the other five share: both publish a list endpoint with no
+// description (Rippling has no date either), so surfacing either one costs one detail request per
+// distinct posting. See fetchRipplingJobs and fetchBreezyJobs.
 export const POLLABLE_JOB_BOARDS = [
   'greenhouse', 'lever', 'ashby', 'workable', 'rippling', 'breezy', 'recruitee', 'crelate',
-] as const satisfies readonly AutonomousPortalFamily[];
+] as const satisfies readonly (AutonomousPortalFamily | 'rippling')[];
 
 export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
 

@@ -232,7 +232,7 @@ test('certified inventory deduplicates aliases and excludes legacy null fingerpr
   }, 'legacy rows remain browseable but add zero to every certified counter until repolled');
 });
 
-test('a discovery-only Rippling source reaches current-drain certification only through durable logo proof', async () => {
+test('a discovery-only Rippling source is polled and durable-logo-verified but stays out of the autonomous certified inventory', async () => {
   const { career_page_sources, monitored_jobs } = schema;
   await db.delete(monitored_jobs);
   await db.delete(career_page_sources);
@@ -318,14 +318,20 @@ test('a discovery-only Rippling source reaches current-drain certification only 
     last_seen_at: verifiedAt,
     is_active: true,
   });
+  /* Assisted tier: rippling is polled and its logo is durably proven above, but it is CAPTCHA-gated
+     on submit, so it is NOT autonomous and boardInventoryMetrics (which counts only the autonomous
+     public inventory the onboarding floor is measured on) must not count it. All zero is the point:
+     an assisted board can never inflate the floor or leak into onboarding, no matter how well it is
+     polled and verified. Its jobs are surfaced only through the separate dashboard fill-and-handoff
+     path. */
   assert.deepEqual(await boardInventoryMetrics(db, drainStartedAt), {
-    surfacedPostings: 1,
-    surfacedGroupedRoles: 1,
-    surfacedSponsorOnly: 1,
+    surfacedPostings: 0,
+    surfacedGroupedRoles: 0,
+    surfacedSponsorOnly: 0,
     surfacedInternships: 0,
-    certifiedUniqueJobs: 1,
-    certifiedUniqueGroupedRoles: 1,
-    certifiedUniqueSponsorJobs: 1,
+    certifiedUniqueJobs: 0,
+    certifiedUniqueGroupedRoles: 0,
+    certifiedUniqueSponsorJobs: 0,
     certifiedUniqueInternships: 0,
   });
 
@@ -355,5 +361,7 @@ test('a discovery-only Rippling source reaches current-drain certification only 
   const eligibleAfterUnsafe = await db.select({ token: career_page_sources.board_token })
     .from(career_page_sources).where(pollingSourceEligibilityPredicate());
   assert.deepEqual(eligibleAfterUnsafe.map((row) => row.token), ['utility']);
-  assert.equal((await boardInventoryMetrics(db, drainStartedAt)).certifiedUniqueJobs, 1);
+  // Still zero certified autonomous inventory: the poll-eligible, logo-verified rippling source is
+  // assisted, not autonomous, so it never counts toward the floor.
+  assert.equal((await boardInventoryMetrics(db, drainStartedAt)).certifiedUniqueJobs, 0);
 });
