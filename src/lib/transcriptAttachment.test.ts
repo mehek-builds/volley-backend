@@ -567,10 +567,7 @@ test('a scoped miss refuses instead of falling through to the unscoped resolver'
  * pre-fill delivery measurement and its final review measurement, and every submit reads it. */
 test('transcript_supported is written by both prepares and read by all three submits', () => {
   const runner = routeSource('submissionRunner.ts');
-  /* Three, not two, since the discovery-learned carry: the direct prepare binds its measured
-   * capability into the re-issued audit (relearnCapabilitiesAfterDiscovery's `measured`) as well
-   * as into the hold patch and the final review. A fourth would be a new write site to justify. */
-  assert.equal(runner.match(/transcript_supported: transcriptSupported/g)?.length, 3,
+  assert.equal(runner.match(/transcript_supported: transcriptSupported/g)?.length, 2,
     'the direct prepare must bind and persist its measured capability');
   assert.equal(runner.match(/transcript_supported: managedFormSnapshot\.transcript_supported/g)?.length, 2,
     'the managed prepare must mirror the exact bounded snapshot capability at both writes');

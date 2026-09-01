@@ -7801,6 +7801,17 @@ async function prepareManaged(
     coverLetterSupported: managedFormSnapshot.cover_letter_supported,
     transcriptSupported: managedFormSnapshot.transcript_supported,
   });
+  /* The exact bounded snapshot capabilities, written once here and read by the carry, the hold
+   * patch and the final review below, so the three cannot disagree about what was measured. */
+  const measuredCapabilities = {
+    managed_form_snapshot: managedFormSnapshot,
+    ...(managedFormSnapshot.cover_letter_supported !== undefined
+      ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
+      : {}),
+    ...(managedFormSnapshot.transcript_supported !== undefined
+      ? { transcript_supported: managedFormSnapshot.transcript_supported }
+      : {}),
+  };
   const relearned = await relearnCapabilitiesAfterDiscovery({
     row,
     packet,
@@ -7810,15 +7821,7 @@ async function prepareManaged(
     approvedEnvelope: prepareEnvelope,
     measuredEnvelope: measuredPrepareEnvelope,
     priorSnapshot: priorManagedFormSnapshot,
-    measured: {
-      managed_form_snapshot: managedFormSnapshot,
-      ...(managedFormSnapshot.cover_letter_supported !== undefined
-        ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
-        : {}),
-      ...(managedFormSnapshot.transcript_supported !== undefined
-        ? { transcript_supported: managedFormSnapshot.transcript_supported }
-        : {}),
-    },
+    measured: measuredCapabilities,
     runId,
     log: fastify.log,
   });
@@ -7842,14 +7845,8 @@ async function prepareManaged(
     patch: {
       submission_run_id: runId,
       questions: mergedQuestions,
-      managed_form_snapshot: managedFormSnapshot,
+      ...measuredCapabilities,
       ...(discoveryMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
-      ...(managedFormSnapshot.cover_letter_supported !== undefined
-        ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
-        : {}),
-      ...(managedFormSnapshot.transcript_supported !== undefined
-        ? { transcript_supported: managedFormSnapshot.transcript_supported }
-        : {}),
       ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
       ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
     },
@@ -9019,6 +9016,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       coverLetterSupported,
       transcriptSupported,
     });
+    /* Written once, read by the carry and the hold patch. See the managed path's measuredCapabilities. */
+    const directMeasuredCapabilities = { cover_letter_supported: coverLetterSupported, transcript_supported: transcriptSupported };
     const relearned = await relearnCapabilitiesAfterDiscovery({
       row,
       packet,
@@ -9035,7 +9034,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       }),
       measuredEnvelope: directPrepareEnvelope,
       priorSnapshot: undefined,
-      measured: { cover_letter_supported: coverLetterSupported, transcript_supported: transcriptSupported },
+      measured: directMeasuredCapabilities,
       runId,
       log: fastify.log,
     });
@@ -9059,8 +9058,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         browser_session_id: session.id,
         questions: mergedQuestions,
         ...(discoveryMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
-        cover_letter_supported: coverLetterSupported,
-        transcript_supported: transcriptSupported,
+        ...directMeasuredCapabilities,
         ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
         ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
       },
