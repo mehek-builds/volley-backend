@@ -1947,6 +1947,16 @@ export const career_page_sources = pgTable('career_page_sources', {
   // which deliberately reads as "no baseline, never alert". See rejectionSpikeExceedsBaseline.
   last_poll_listed_count: integer('last_poll_listed_count'),
   last_poll_normalized_count: integer('last_poll_normalized_count'),
+  // How many of that same poll's normalized postings got a CONSTRUCTED action URL - the bare
+  // Greenhouse embed application form built from token + id - instead of the readable hosted job
+  // page their own absolute_url validated to. Greenhouse only; every other provider leaves it NULL
+  // because no other normalizer constructs. Written with the two counts above, under the same
+  // conditions, and read as a rate against last_poll_normalized_count: a board that is wholly
+  // constructed every day is an employer-hosted board working as designed, while a board FLIPPING
+  // from validated to constructed is provider URL-format drift silently demoting every posting_url
+  // (and every notification email's original-listing link) to an application form on a poll that
+  // counts as a success. See constructionSpikeExceedsBaseline.
+  last_poll_constructed_count: integer('last_poll_constructed_count'),
   // Set when this company has an H-1B filing record (see sponsor_employers). NULL means either
   // "checked, nothing found" or "never checked" - the difference is visible in the generated data
   // file, and a test asserts every board company appears there, so it cannot silently be the

@@ -44,6 +44,7 @@ import {
   monitorQuerySchema,
   REJECTION_SPIKE_LISTED_FRACTION,
   REJECTION_SPIKE_MIN_DELTA,
+  constructionSpikeExceedsBaseline,
   rejectionSpikeExceedsBaseline,
   shouldKeepPostingsOnEmptyFetch,
   shouldKeepPostingsOnFullyRejectedFetch,
@@ -419,8 +420,11 @@ test('a fully rejected fetch preserves live rows and is recorded, never reported
     'the source must still advance through the oldest-first queue');
   assert.doesNotMatch(guardHelper, /last_successful_poll_at/,
     'a preserved fault must never mint success evidence');
-  assert.doesNotMatch(guardHelper, /last_poll_listed_count|last_poll_normalized_count/,
-    'a preserved fault must never become the rejection baseline the next poll is judged against');
+  assert.doesNotMatch(
+    guardHelper,
+    /last_poll_listed_count|last_poll_normalized_count|last_poll_constructed_count/,
+    'a preserved fault must never become the baseline the next poll is judged against',
+  );
 });
 
 test('a rejection spike is a jump against the previous poll, never a fixed rejected fraction', () => {
@@ -459,6 +463,44 @@ test('a rejection spike is a jump against the previous poll, never a fixed rejec
     'a shrinking board at its steady rate stays quiet too');
   assert.equal(rejectionSpikeExceedsBaseline(0, 0, 600, 360), false,
     'a zero previous list carries no rate; pollSource never stores one, but defend anyway');
+});
+
+test('a board flipping from validated to constructed action URLs alerts on the same terms', () => {
+  // The blind spot the rejection counts cannot see. Since the employer-hosted embed fallback, a
+  // Greenhouse posting whose absolute_url fails validation is CONSTRUCTED from token + id rather
+  // than dropped - so Greenhouse-wide format drift now normalizes every posting, clears the
+  // fully-rejected guard AND the rejection-spike check, and only silently demotes every posting_url
+  // from the readable hosted job page to the bare embed application form.
+  assert.equal(constructionSpikeExceedsBaseline(2239, 0, 2239, 2239), true,
+    'a hosted board going wholly constructed is the drift this exists to catch');
+  assert.equal(constructionSpikeExceedsBaseline(600, 600, 600, 600), false,
+    'an employer-hosted board is 100% constructed every day BY DESIGN and must never page');
+  assert.equal(constructionSpikeExceedsBaseline(600, 240, 600, 500), true,
+    'a mixed board drifting from 40% to 83% constructed is a fault');
+  assert.equal(constructionSpikeExceedsBaseline(null, null, 600, 600), false,
+    'no baseline, no alert: the first completed poll only writes the baseline');
+  assert.equal(constructionSpikeExceedsBaseline(600, null, 600, 600), false,
+    'a source polled before the constructed count existed has no baseline either');
+  assert.equal(constructionSpikeExceedsBaseline(60, 0, 60, 20), false,
+    'a jump below the absolute floor stays quiet on a small board');
+  assert.equal(constructionSpikeExceedsBaseline(2239, 2239, 2239, 0), false,
+    'recovery to validated URLs is an improvement, not a spike');
+
+  // Same rate-scaling as the rejections, and for the same reason: growth is not drift.
+  assert.equal(constructionSpikeExceedsBaseline(60, 24, 600, 240), false,
+    'tenfold growth at an unchanged 40% constructed rate is growth');
+  assert.equal(constructionSpikeExceedsBaseline(60, 24, 600, 500), true,
+    'the same growth WITH a drifted rate still alerts');
+  assert.equal(constructionSpikeExceedsBaseline(0, 0, 600, 600), false,
+    'a zero previous normalized list carries no rate; pollSource never stores one');
+
+  // The two predicates share one comparison and one pair of floors, because they are the same
+  // fault measured on either side of the same fallback.
+  assert.equal(
+    constructionSpikeExceedsBaseline(600, 240, 600, 500),
+    rejectionSpikeExceedsBaseline(600, 360, 600, 100),
+    'the constructed and rejected halves must clear the same bar',
+  );
 });
 
 test('multi-request provider cursor progress survives between source polls', () => {
