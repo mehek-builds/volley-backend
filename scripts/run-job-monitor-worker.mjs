@@ -125,6 +125,17 @@ export function loadConfig(environment = process.env, now = () => new Date()) {
       name: 'JOB_MONITOR_MAX_PASSES',
       max: 10_000,
     }),
+    /* THE LOGO QUEUE MUST NOT BE ABLE TO STARVE POLLING. maxPasses is the only other escape from a
+       logo queue that will not drain, and at the retry cadence a rate-limited homepage actually
+       produces (~7.4 minutes a pass, measured in prod) 10,000 passes is about FORTY-EIGHT DAYS -
+       against a cycle that is meant to come round every two hours. Default this to the cycle
+       interval: one cycle's worth of waiting is generous for a genuinely transient failure, and
+       past it the logo queue has to yield so jobs keep being ingested. */
+    logoDrainDeadlineMs: integerSetting(
+      environment.JOB_MONITOR_LOGO_DRAIN_DEADLINE_MS,
+      2 * 60 * 60 * 1000,
+      { name: 'JOB_MONITOR_LOGO_DRAIN_DEADLINE_MS', max: MAX_TIMER_MS },
+    ),
     finalRecountMaxAttempts: integerSetting(
       environment.JOB_MONITOR_FINAL_RECOUNT_MAX_ATTEMPTS,
       20,
@@ -401,6 +412,10 @@ export async function runCompleteDrain({
   let pass = 0;
   let finalRecountAttempts = 0;
   let metricsTimeoutAttempts = 0;
+  /* Wall-clock, not passes: what went wrong in prod was a queue that retried forever without ever
+     reducing remaining_sources, so a counter measured in passes never meaningfully expired. */
+  let logoWaitStartedAt = null;
+  let logoDeadlineReached = false;
   let initializeDrain = initializeDrainPending;
 
   while (!shouldStop()) {
@@ -451,14 +466,52 @@ export async function runCompleteDrain({
         await sleepFn(config.retryMs);
         continue;
       }
-      if (pollingComplete && !logoComplete && logos.retryAfterMs > 0) {
-        logger.log(JSON.stringify({
-          event: 'logo_transient_retry_scheduled',
-          pass,
-          retry_ms: logos.retryAfterMs,
-          drain_started_at: drainStartedAt,
-        }));
-        await sleepFn(logos.retryAfterMs);
+      /* THE YIELD. Polling for this drain is already done here; the only thing left is the logo
+         queue, and waiting on it costs the NEXT poll cycle. A source whose homepage answers 429 or
+         times out forever is classified transient forever, so remaining_sources never reaches zero
+         and this wait never ends on its own. Measured in prod 2026-09-01: one drain sat here for 36
+         hours over 14 such sources, the board ingested nothing the whole time, and the worker
+         reported healthy throughout because nothing had failed - it was still, technically, waiting.
+
+         So the wait is bounded in wall clock. Past the deadline the logo queue yields, the cycle
+         finishes, jobs are ingested, and the same sources are picked up again next cycle: nothing is
+         abandoned, it just stops being able to hold everything else hostage. */
+      if (pollingComplete && !logoComplete) {
+        /* The injected clock, not Date.now: this file takes its time from `now` everywhere else,
+           and a deadline that cannot be advanced in a test is a deadline nothing can prove. */
+        if (logoWaitStartedAt === null) logoWaitStartedAt = now().getTime();
+        const waitedMs = now().getTime() - logoWaitStartedAt;
+        /* An absent or non-numeric deadline means NO deadline, never a NaN one. Math.min against
+           NaN silently poisons the sleep duration, which is how a missing setting would have turned
+           a bounded wait into an immediate spin. */
+        const deadlineMs = Number.isFinite(config.logoDrainDeadlineMs)
+          ? config.logoDrainDeadlineMs
+          : Number.POSITIVE_INFINITY;
+        if (waitedMs >= deadlineMs) {
+          logoDeadlineReached = true;
+          logoComplete = true;
+          logger.error(JSON.stringify({
+            event: 'logo_drain_deadline_reached',
+            pass,
+            waited_ms: waitedMs,
+            deadline_ms: deadlineMs,
+            remaining_logo_sources: logos.remainingSources,
+            drain_started_at: drainStartedAt,
+          }));
+          continue;
+        }
+        if (logos.retryAfterMs > 0) {
+          logger.log(JSON.stringify({
+            event: 'logo_transient_retry_scheduled',
+            pass,
+            retry_ms: logos.retryAfterMs,
+            waited_ms: waitedMs,
+            deadline_ms: deadlineMs,
+            drain_started_at: drainStartedAt,
+          }));
+          /* Never sleep past the deadline, or a single long backoff overshoots it. */
+          await sleepFn(Math.min(logos.retryAfterMs, deadlineMs - waitedMs));
+        }
       }
 
       // Both cached queue states are complete. Continue immediately into the final proof phase. In
@@ -485,7 +538,9 @@ export async function runCompleteDrain({
       await sleepFn(config.retryMs);
       continue;
     }
-    if (!finalLogos.complete) {
+    /* Once the deadline has been reached the final proof stops demanding a drained logo queue,
+       otherwise the yield above just moves the same stall into this loop. */
+    if (!finalLogos.complete && !logoDeadlineReached) {
       logoComplete = false;
       if (finalLogos.retryAfterMs > 0) await sleepFn(finalLogos.retryAfterMs);
       continue;
@@ -572,19 +627,26 @@ export async function runCompleteDrain({
       logo_scheduled_crelate_circuit_sources: finalLogos.scheduledCrelateCircuitSources,
       logo_failure_summaries: finalLogos.failureSummaries,
       logo_crelate_circuit: finalLogos.crelateCircuit,
+      logo_drain_deadline_reached: logoDeadlineReached,
     };
     const floors = inventoryFloorAssessment(monitor.body);
     const metricsComplete = monitor.body.metrics_deferred !== true;
     const publicGateEnabled = monitor.body.public_verified_evidence_gate_enabled === true;
+    /* A drain that YIELDED on the logo queue still certifies, and this is the whole point of the
+       deadline. Requiring a drained logo queue here would simply move the 36-hour stall from the
+       pass loop into this one: the queue is no more drainable at the final proof than it was
+       before. The yield is recorded in the proof rather than hidden, so an uncertifiable logo queue
+       is visible as its own fact instead of as a board that quietly stopped ingesting jobs. */
+    const logoQueueSettled = finalQueueProof.logo_verification_complete === true
+      && finalQueueProof.remaining_logo_sources === 0;
     const certified = monitor.status === 200
       && metricsComplete
       && floors.valid
       && floors.met
       && publicGateEnabled
       && finalQueueProof.polling_complete === true
-      && finalQueueProof.logo_verification_complete === true
       && finalQueueProof.remaining_polling_sources === 0
-      && finalQueueProof.remaining_logo_sources === 0;
+      && (logoQueueSettled || logoDeadlineReached);
     logMonitorPass(logger, 'final_monitor_recount', pass, monitor, drainStartedAt, {
       final_recount_attempt: finalRecountAttempts,
       logo_verification_complete: true,

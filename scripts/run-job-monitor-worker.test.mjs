@@ -310,6 +310,9 @@ test('a completed queue always gets a fresh HTTP 200 final recount before comple
     logo_scheduled_crelate_circuit_sources: 0,
     logo_failure_summaries: [],
     logo_crelate_circuit: { state: 'closed', retry_at: null },
+    /* False on the ordinary path, and that is the assertion worth having: a queue that drained on
+       its own must never look like one that ran out of patience. */
+    logo_drain_deadline_reached: false,
   });
   assert.equal(certifiedDrainProofComplete(result), true);
   assert.equal(sequence.length, 0);
@@ -483,6 +486,78 @@ test('a deferred transient logo retry sleeps without resetting the drain cursor'
   assert.deepEqual(sleeps, [123]);
   assert.equal(messages.log.some((entry) => entry.event === 'logo_transient_retry_scheduled'), true);
   assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
+});
+
+test('a logo queue that will not drain yields so polling is not starved', async () => {
+  /* THE PROD INCIDENT, 2026-09-01. Fourteen sources whose homepages answered 429, timeout or 522
+     were classified transient, rescheduled forever, and remaining_sources never reached zero. The
+     drain sat in this loop for 36 hours, the board ingested nothing, and the worker looked healthy
+     the whole time because nothing had actually failed. maxPasses was the only other escape, and at
+     the retry cadence a rate-limited homepage really produces it is about forty-eight days. */
+  const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
+  const logoPath = '/internal/job-monitor/verify-logos?limit=100';
+  const stuck = () => ({
+    path: logoPath,
+    response: logos(false, { retryAfterMs: 60_000, scheduledTransientSources: 1 }),
+  });
+  const sequence = [
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
+    stuck(),
+    /* The final proof re-reads the queue, and it is still stuck. It must not re-enter the wait. */
+    stuck(),
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+  ];
+  const requester = sequenceRequester(sequence);
+  const sleeps = [];
+  /* Elapsed time, not passes: the clock moves a minute per read against a one-millisecond budget,
+     so the very first check is already past due. */
+  const now = () => new Date(Date.parse(DRAIN_STARTED_AT) + (tick++ * 60_000));
+  let tick = 0;
+  const { logger, messages } = silentLogger();
+
+  const result = await runCompleteDrain({
+    config: { ...testConfig(), logoDrainDeadlineMs: 1 },
+    requestJson: requester.requestJson,
+    sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
+    logger,
+    now,
+  });
+
+  /* Certified DESPITE the logo queue, which is the entire point: jobs keep being ingested. */
+  assert.equal(result.certified, true);
+  assert.equal(
+    messages.error.some((entry) => entry.event === 'logo_drain_deadline_reached'),
+    true,
+    'yielding on the logo queue must be reported, never silent',
+  );
+  assert.deepEqual(sleeps, [], 'a queue already past its deadline must not be waited on at all');
+  assert.equal(sequence.length, 0, 'the drain must reach its final recount');
+});
+
+test('an absent logo deadline means no deadline, never a NaN one', async () => {
+  /* Math.min against an undefined setting yields NaN, which would turn a bounded wait into an
+     immediate spin. testConfig has no logoDrainDeadlineMs, so this is that case. */
+  const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
+  const logoPath = '/internal/job-monitor/verify-logos?limit=100';
+  const sequence = [
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
+    { path: logoPath, response: logos(false, { retryAfterMs: 123, scheduledTransientSources: 1 }) },
+    { path: logoPath, response: logos(true) },
+    { path: logoPath, response: logos(true) },
+    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+  ];
+  const requester = sequenceRequester(sequence);
+  const sleeps = [];
+  const { logger } = silentLogger();
+  const result = await runCompleteDrain({
+    config: testConfig(),
+    requestJson: requester.requestJson,
+    sleepFn: async (milliseconds) => { sleeps.push(milliseconds); },
+    logger,
+    now: () => new Date(DRAIN_STARTED_AT),
+  });
+  assert.equal(result.certified, true);
+  assert.deepEqual(sleeps, [123], 'the backoff must survive an unset deadline intact');
 });
 
 test('floor assessment enforces only configured hard floors', () => {
