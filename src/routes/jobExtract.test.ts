@@ -1,4 +1,4 @@
-import { test, describe } from 'node:test';
+import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -6,9 +6,14 @@ import {
   jobExtractBodySchema,
   clipJdText,
   jobDescriptionSourceUrl,
+  monitoredInventoryLookupKeys,
+  monitoredJobDescriptionMatch,
+  findMonitoredJobDescription,
   MAX_JD_TEXT_CHARS,
+  type MonitoredInventoryJob,
 } from './jobExtract';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
+import { db } from '../db/index';
 
 // POST /jobs/extract lets "New application" go from a pasted URL to a reviewable JD without a
 // side-channel copy-paste step (2026-07-24 product decision). No live network/DB in the test env
@@ -268,6 +273,20 @@ describe('a form-only page is refused rather than frozen into a packet', () => {
     assert.match(route, /leadRequirementCandidates\(fullText\)\.length > 0/);
   });
 
+  test('the route serves a monitored inventory match before ever paying for a browser run', () => {
+    const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
+    assert.ok(
+      route.indexOf('findMonitoredJobDescription(body.job_url)') < route.indexOf('runManagedBrowser(extractionUrl'),
+      'the inventory lookup must sit ahead of the managed-browser run',
+    );
+    // The lookup may only short-circuit with a GOOD result: a lookup error or a stored description
+    // that states no requirement must fall through to the browser, never become a new refusal.
+    assert.match(route, /monitored inventory lookup failed; falling back to browser extraction/);
+    assert.match(route, /monitored inventory description states no requirement; falling back to browser extraction/);
+    // The same requirement bar the browser path applies, on the same clipped text.
+    assert.match(route, /leadRequirementCandidates\(monitored\.jdText\)\.length > 0/);
+  });
+
   test('the route refuses on no stated requirement, using the documented paste-manually contract', () => {
     const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
     assert.match(route, /leadRequirementCandidates\(jdText\)\.length === 0/);
@@ -279,5 +298,257 @@ describe('a form-only page is refused rather than frozen into a packet', () => {
       route.indexOf("job_extract_empty") < route.indexOf("job_extract_no_requirements"),
       'the empty-page refusal must stay ahead of the form-only one',
     );
+  });
+});
+
+/* THE INVENTORY-FIRST PATH, added 2026-09-01 on live evidence: POST /jobs/extract transiently
+ * 502ed on https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager while
+ * that exact posting sat in monitored_jobs with a full substantive description the board was
+ * already serving. When the monitor holds the posting, the stored description is strictly better
+ * than a fresh render, so the route now answers from inventory first and only falls back to the
+ * managed browser.
+ *
+ * Matching is two-staged on purpose. String equality against apply_url/posting_url (over a small
+ * set of paste-shape variants) only NOMINATES candidate rows; a candidate becomes a match only
+ * when both its stored apply_url and the pasted URL canonicalize to the SAME application URL under
+ * the row's source-owned family, board token, and external id - the exact bar
+ * repairReviewPortalFromMonitoredJob applies to stored packet state. */
+
+const BREEZY_POSTING_URL = 'https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager';
+const BREEZY_DESCRIPTION = [
+  'Alert Alarm is hiring a Field Project Manager.',
+  'What we look for:',
+  'You have 3+ years of experience managing field installation projects',
+  'You are comfortable with scheduling software and Excel',
+  'You hold a valid driver license and can travel across the region',
+].join('\n');
+
+function breezyJob(overrides: Partial<MonitoredInventoryJob> = {}): MonitoredInventoryJob {
+  return {
+    external_id: 'f6d5662ca263',
+    apply_url: `${BREEZY_POSTING_URL}/apply`,
+    posting_url: BREEZY_POSTING_URL,
+    title: 'Field Project Manager',
+    description: BREEZY_DESCRIPTION,
+    ats_name: 'breezy',
+    board_token: 'alertalarm',
+    ...overrides,
+  };
+}
+
+describe('monitoredInventoryLookupKeys', () => {
+  test('always includes the raw pasted URL', () => {
+    assert.ok(monitoredInventoryLookupKeys(BREEZY_POSTING_URL).includes(BREEZY_POSTING_URL));
+  });
+
+  test('covers trailing-slash and /apply paste shapes so either stored form is found', () => {
+    const keys = monitoredInventoryLookupKeys(BREEZY_POSTING_URL);
+    assert.ok(keys.includes(`${BREEZY_POSTING_URL}/`));
+    assert.ok(keys.includes(`${BREEZY_POSTING_URL}/apply`));
+  });
+
+  test('a pasted /apply form also nominates the bare overview the monitor stores', () => {
+    const keys = monitoredInventoryLookupKeys(`${BREEZY_POSTING_URL}/apply`);
+    assert.ok(keys.includes(BREEZY_POSTING_URL));
+  });
+
+  test('strips tracking state so a copied link still nominates the stored row', () => {
+    const keys = monitoredInventoryLookupKeys(`${BREEZY_POSTING_URL}?utm_source=board#detail`);
+    assert.ok(keys.includes(BREEZY_POSTING_URL));
+  });
+
+  test('includes the per-ATS extraction rewrite, so a Workable form URL finds its overview row', () => {
+    const keys = monitoredInventoryLookupKeys('https://apply.workable.com/acme/j/D4CA268A39/apply/');
+    assert.ok(keys.includes('https://apply.workable.com/acme/j/D4CA268A39/'));
+  });
+});
+
+describe('monitoredJobDescriptionMatch', () => {
+  test('the live Breezy posting URL matches its monitored row and returns the stored description', () => {
+    const match = monitoredJobDescriptionMatch(BREEZY_POSTING_URL, breezyJob());
+    assert.ok(match);
+    assert.equal(match.jdText, BREEZY_DESCRIPTION);
+    assert.equal(match.pageTitle, 'Field Project Manager');
+  });
+
+  test('the /apply form of the same posting matches the same row', () => {
+    assert.ok(monitoredJobDescriptionMatch(`${BREEZY_POSTING_URL}/apply`, breezyJob()));
+  });
+
+  test('the stored description passes the route requirement gate, as the live posting did', () => {
+    assert.ok(leadRequirementCandidates(clipJdText(BREEZY_DESCRIPTION)).length > 0);
+  });
+
+  test('a different tenant on the same platform never matches', () => {
+    assert.equal(
+      monitoredJobDescriptionMatch(
+        'https://othertenant.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager',
+        breezyJob(),
+      ),
+      undefined,
+    );
+  });
+
+  test('a different posting under the same tenant never matches', () => {
+    assert.equal(
+      monitoredJobDescriptionMatch('https://alertalarm.breezy.hr/p/0a1b2c3d4e5f-office-manager', breezyJob()),
+      undefined,
+    );
+  });
+
+  test('a row whose source family is not autonomous fails closed to the browser path', () => {
+    assert.equal(
+      monitoredJobDescriptionMatch(BREEZY_POSTING_URL, breezyJob({ ats_name: 'jobvite' })),
+      undefined,
+    );
+  });
+
+  test('a row without an executable board token fails closed to the browser path', () => {
+    assert.equal(monitoredJobDescriptionMatch(BREEZY_POSTING_URL, breezyJob({ board_token: null })), undefined);
+    assert.equal(monitoredJobDescriptionMatch(BREEZY_POSTING_URL, breezyJob({ board_token: '' })), undefined);
+  });
+
+  /* THE COMMONEST PASTE SHAPE THERE IS. canonicalMonitoredPortalUrl refuses any query string
+     outside Greenhouse, which is right for a stored provider-owned URL and wrong for one a student
+     pasted: a link copied off LinkedIn or an aggregator carries `?utm_source=` or `?lever-source=`.
+     Without the tracking-stripped second attempt, exactly those URLs missed the inventory and paid
+     for a browser run. */
+  test('a pasted URL carrying tracking state still matches its monitored row', () => {
+    const match = monitoredJobDescriptionMatch(`${BREEZY_POSTING_URL}?utm_source=board#details`, breezyJob());
+    assert.ok(match);
+    assert.equal(match.jdText, BREEZY_DESCRIPTION);
+  });
+
+  test('a Lever URL carrying its source parameter still matches', () => {
+    assert.ok(monitoredJobDescriptionMatch('https://jobs.lever.co/acme/abc123?lever-source=LinkedIn', {
+      external_id: 'abc123',
+      apply_url: 'https://jobs.lever.co/acme/abc123/apply',
+      posting_url: 'https://jobs.lever.co/acme/abc123',
+      title: 'Software Engineer Intern',
+      description: BREEZY_DESCRIPTION,
+      ats_name: 'lever',
+      board_token: 'acme',
+    }));
+  });
+
+  /* GREENHOUSE IS WHY THE RAW ATTEMPT COMES FIRST: its embed URL carries the posting's identity in
+     the query, so a tracking-strip applied before the raw try would destroy the match outright. */
+  test('a Greenhouse embed URL, whose identity lives in its query, still matches', () => {
+    assert.ok(monitoredJobDescriptionMatch(
+      'https://job-boards.greenhouse.io/embed/job_app?for=acme&token=4012345',
+      {
+        external_id: '4012345',
+        apply_url: 'https://boards.greenhouse.io/acme/jobs/4012345',
+        posting_url: 'https://boards.greenhouse.io/acme/jobs/4012345',
+        title: 'Data Engineer',
+        description: BREEZY_DESCRIPTION,
+        ats_name: 'greenhouse',
+        board_token: 'acme',
+      },
+    ));
+  });
+
+  /* Stripping tracking state must not loosen identity: the tenant and posting id are still proven. */
+  test('tracking state does not let a wrong-tenant URL through', () => {
+    assert.equal(
+      monitoredJobDescriptionMatch(
+        'https://othertenant.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager?utm_source=board',
+        breezyJob(),
+      ),
+      undefined,
+    );
+  });
+
+  test('a row with an empty stored description falls back to the browser', () => {
+    assert.equal(monitoredJobDescriptionMatch(BREEZY_POSTING_URL, breezyJob({ description: '   ' })), undefined);
+  });
+
+  test('an oversized stored description is clipped to the same cap as browser text', () => {
+    const match = monitoredJobDescriptionMatch(
+      BREEZY_POSTING_URL,
+      breezyJob({ description: `${BREEZY_DESCRIPTION}\n${'x'.repeat(MAX_JD_TEXT_CHARS + 5000)}` }),
+    );
+    assert.ok(match);
+    assert.equal(match.jdText.length, MAX_JD_TEXT_CHARS);
+  });
+
+  test('a Lever overview URL matches a row whose stored apply_url is the /apply form', () => {
+    const match = monitoredJobDescriptionMatch('https://jobs.lever.co/acme/10746b3d-1760-4573-9b63-b93f5a5e4fc0', {
+      external_id: '10746b3d-1760-4573-9b63-b93f5a5e4fc0',
+      apply_url: 'https://jobs.lever.co/acme/10746b3d-1760-4573-9b63-b93f5a5e4fc0/apply',
+      posting_url: 'https://jobs.lever.co/acme/10746b3d-1760-4573-9b63-b93f5a5e4fc0',
+      title: 'Software Engineer Intern',
+      description: BREEZY_DESCRIPTION,
+      ats_name: 'lever',
+      board_token: 'acme',
+    });
+    assert.ok(match);
+    assert.equal(match.pageTitle, 'Software Engineer Intern');
+  });
+
+  test('a Greenhouse board URL matches a row stored under the native board host', () => {
+    const match = monitoredJobDescriptionMatch('https://job-boards.greenhouse.io/acme/jobs/4012345', {
+      external_id: '4012345',
+      apply_url: 'https://boards.greenhouse.io/acme/jobs/4012345',
+      posting_url: 'https://boards.greenhouse.io/acme/jobs/4012345',
+      title: 'Data Engineer',
+      description: BREEZY_DESCRIPTION,
+      ats_name: 'greenhouse',
+      board_token: 'acme',
+    });
+    assert.ok(match);
+  });
+});
+
+describe('findMonitoredJobDescription', () => {
+  function mockInventory(rows: unknown[]) {
+    return mock.method(db, 'select', (() => ({
+      from: () => ({
+        innerJoin: () => ({
+          where: () => ({
+            orderBy: () => ({
+              limit: async () => rows,
+            }),
+          }),
+        }),
+      }),
+    })) as unknown as typeof db.select);
+  }
+
+  test('returns the first canonically matching candidate with its row id', async () => {
+    const select = mockInventory([
+      // Nominated by URL equality but canonically a different posting: must be skipped, not served.
+      { id: 'aaaaaaaa-1111-4111-8111-111111111111', ...breezyJob({ external_id: 'somethingelse' }) },
+      { id: 'bbbbbbbb-2222-4222-8222-222222222222', ...breezyJob() },
+    ]);
+    try {
+      const found = await findMonitoredJobDescription(BREEZY_POSTING_URL);
+      assert.ok(found);
+      assert.equal(found.jobId, 'bbbbbbbb-2222-4222-8222-222222222222');
+      assert.equal(found.jdText, BREEZY_DESCRIPTION);
+      assert.equal(found.pageTitle, 'Field Project Manager');
+    } finally {
+      select.mock.restore();
+    }
+  });
+
+  test('returns undefined when the inventory holds no candidate for the URL', async () => {
+    const select = mockInventory([]);
+    try {
+      assert.equal(await findMonitoredJobDescription(BREEZY_POSTING_URL), undefined);
+    } finally {
+      select.mock.restore();
+    }
+  });
+
+  test('returns undefined when every nominated candidate fails the canonical bar', async () => {
+    const select = mockInventory([
+      { id: 'cccccccc-3333-4333-8333-333333333333', ...breezyJob({ ats_name: 'jobvite' }) },
+    ]);
+    try {
+      assert.equal(await findMonitoredJobDescription(BREEZY_POSTING_URL), undefined);
+    } finally {
+      select.mock.restore();
+    }
   });
 });
