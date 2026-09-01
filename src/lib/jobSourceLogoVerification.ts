@@ -292,12 +292,18 @@ function decodeHtml(value: string): string {
     .replace(/&nbsp;/gi, ' ');
 }
 
-/* Segments need whitespace on BOTH sides of the separator, so hyphenated and slashed brand names
-   ("Rent-A-Center", "TCP/IP Labs") survive intact. Measured 2026-08-31: 1,896 enabled sources sat
-   failed on homepage:identity_mismatch, and the dominant shape was a brand named in a title
-   segment the old lead-only split never reached - anthropic.com's "Home \ Anthropic" being the
-   canonical example (backslash was not a separator at all, and the brand trails). */
-const TITLE_SEGMENT_SEPARATOR_RE = /\s+[|:\\/·•–—-]\s+/;
+/* Two classes of separator, split differently on purpose. Hyphen, slash, backslash and colon
+   appear INSIDE real brands ("Rent-A-Center", "TCP/IP Labs", "Re:Build"), so they only separate
+   when whitespace flanks them. Pipes, middle dots (u00b7, u2022) and en/em dashes (u2013, u2014)
+   appear in no brand, and title templates routinely set them tight ("Home", em dash, "Acme"), so
+   they separate with or without spaces. The dash and dot characters are written as escapes: they
+   are match data here, not prose, and prose em dashes are banned in this codebase. Measured
+   2026-08-31: 1,896 enabled sources sat failed on homepage:identity_mismatch, and the dominant
+   shape was a brand named in a title segment the old lead-only split never reached -
+   anthropic.com's "Home \ Anthropic" being the canonical example (backslash was not a separator
+   at all, and the brand trails). */
+const TITLE_SEGMENT_SEPARATOR_RE = /\s+[:\\/-]\s+|\s*[|\u00b7\u2022\u2013\u2014]\s*/;
+const TRAILING_TITLE_NOISE_RE = /\s+(?:careers|jobs|official site)$/i;
 
 function homepageIdentityAgrees(companyName: string, originalDomain: string, html: string, finalUrl: URL): boolean {
   const title = decodeHtml(html.match(/<title[^>]*>([\s\S]{0,400}?)<\/title>/i)?.[1] ?? '')
@@ -320,12 +326,36 @@ function homepageIdentityAgrees(companyName: string, originalDomain: string, htm
   const finalLabel = normalizeName(finalUrl.hostname.replace(/^www\./, '').split('.')[0] ?? '');
   if (target.length < 2 || originalLabel.length < 2 || finalLabel.length < 2) return false;
   const hostAgrees = target === originalLabel || target === finalLabel;
-  /* ANY segment, not only the lead: brands trail their titles ("Home \ Anthropic") as often as
-     they lead them. This stays a two-signal check - the domain label must independently equal the
-     company name via hostAgrees, so a lookalike host naming the brand mid-title still fails. */
-  const titleBrand = title.replace(/\s+(?:careers|jobs|official site)$/i, '').trim();
-  const pageAgrees = [ogSiteName, applicationName, title, titleBrand, ...title.split(TITLE_SEGMENT_SEPARATOR_RE)]
-    .filter(Boolean)
+  /* The LEAD or the TRAIL segment, never the middle. Brands lead their titles or trail them
+     ("Home \ Anthropic"); the middle segments are where taglines, marketing copy and
+     domain-marketplace boilerplate live. Accepting ANY segment (review finding 2026-09-01) let an
+     expired domain's marketplace lander pass: "acme.co - Acme - available at Brandpa" names the
+     brand in its middle segment, the host signal still agrees because the label of the DEAD
+     domain matches, and the lander's favicon would have become the verified logo. This stays a
+     two-signal check either way; the edge rule is what keeps a page that merely mentions the
+     brand from completing it.
+
+     The careers/jobs suffix strip applies to each edge segment too, not only the whole title:
+     "Home | Acme Careers" trails with "Acme Careers", and stripping only the full title left
+     exactly that shape failing (same review).
+
+     A DOMAIN-SHAPED candidate never counts as the page naming the company. normalizeName strips
+     legal suffixes, so the lander's lead segment "acme.co" would normalize straight to "acme":
+     a page naming the dead domain is not a page naming the employer, and the marketplace title
+     leads with exactly that. The cost of this rule is a monogram for a site whose title names
+     only its own hostname, which is the conservative direction. */
+  const segments = title.split(TITLE_SEGMENT_SEPARATOR_RE).map((value) => value.trim()).filter(Boolean);
+  const edgeSegments = segments.length ? [...new Set([segments[0], segments[segments.length - 1]])] : [];
+  const pageAgrees = [
+    ogSiteName,
+    applicationName,
+    title,
+    title.replace(TRAILING_TITLE_NOISE_RE, ''),
+    ...edgeSegments,
+    ...edgeSegments.map((segment) => segment.replace(TRAILING_TITLE_NOISE_RE, '')),
+  ]
+    .map((value) => value.trim())
+    .filter((value) => Boolean(value) && !BARE_DOMAIN_RE.test(value.toLowerCase()))
     .some((value) => normalizeName(value) === target);
   return hostAgrees && pageAgrees;
 }

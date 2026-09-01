@@ -460,5 +460,81 @@ test('a provider that redirects forever costs a bounded number of requests', asy
     return new Response(null, { status: 302, headers: { location: 'https://acme.recruitee.com/' } });
   });
   assert.equal(requests, 4);
-  assert.deepEqual(result, { verified: false, reason: 'http_302' });
+  /* redirect_limit, not the generic http_302: an exhausted budget on a PROVIDER-INTERNAL hop and
+     a refused off-provider hop are different operational facts, one says raise the cap and the
+     other says do not, and folding them together made the whitelisted redirect_limit reason
+     unreachable. The refused case keeps its original status (test above). */
+  assert.deepEqual(result, { verified: false, reason: 'redirect_limit' });
+});
+
+test('a followed redirect strips provisional mode of its identity pass', async () => {
+  /* The rebranding hole (review finding 2026-09-01): a released slug 301s to a DIFFERENT tenant
+     on the same provider host, and provisional mode used to adopt that tenant's identity, which
+     the verified write path then stamped onto the old token's live jobs. Once a redirect is
+     followed, the responder is no longer the token's author by construction, so the catalog name
+     must agree in every mode. */
+  const logo = 'https://lever-client-logos.s3-us-west-2.amazonaws.com/globex.png';
+  const recycled = await verifyAtsSourceBranding({
+    ...candidate('lever', 'acme', 'acme'),
+    identity_mode: 'provisional',
+  }, async (input) => {
+    const url = String(input);
+    if (url === 'https://jobs.lever.co/acme') {
+      return new Response(null, { status: 301, headers: { location: 'https://jobs.lever.co/globex' } });
+    }
+    if (url === logo) return image();
+    return html(`<title>Globex</title><meta property="og:title" content="Globex jobs">
+      <meta property="og:image" content="${logo}">`);
+  });
+  assert.deepEqual(recycled, { verified: false, reason: 'identity_mismatch' });
+
+  /* The same shape with an AGREEING name is the genuine rename this lane exists for. */
+  const renamed = await verifyAtsSourceBranding({
+    ...candidate('lever', 'globex', 'Globex'),
+    identity_mode: 'provisional',
+  }, async (input) => {
+    const url = String(input);
+    if (url === 'https://jobs.lever.co/globex') {
+      return new Response(null, { status: 301, headers: { location: 'https://jobs.lever.co/globex-inc' } });
+    }
+    if (url === logo) return image();
+    return html(`<title>Globex</title><meta property="og:title" content="Globex jobs">
+      <meta property="og:image" content="${logo}">`);
+  });
+  assert.equal(renamed.verified, true);
+});
+
+test('a breezy rename keeps its actionable redirect reason instead of a wrong-tenant download', async () => {
+  /* The friendly_id pin rejects a renamed tenant's payload anyway, so following the hop only
+     fetched megabytes of the wrong tenant's JSON and then reported malformed_response, hiding
+     the rename from the reason an operator would act on (review finding 2026-09-01). */
+  let requests = 0;
+  const result = await verifyAtsSourceBranding(candidate('breezy', 'acme', 'Acme'), async () => {
+    requests += 1;
+    return new Response(null, { status: 301, headers: { location: 'https://acme-corp.breezy.hr/json' } });
+  });
+  assert.equal(requests, 1);
+  assert.deepEqual(result, { verified: false, reason: 'http_301' });
+});
+
+test('follows a greenhouse redirect onto the EU cluster', async () => {
+  /* The EU hosts are as first-party as the US ones (GREENHOUSE_ACTION_HOSTS agrees); omitting
+     them left the commit's own motivating migration class failing for the largest provider
+     (review finding 2026-09-01). */
+  const logo = 'https://recruiting.cdn.greenhouse.io/external_greenhouse_job_boards/logos/000/000/115/original/acme.jpg';
+  const urls: string[] = [];
+  const result = await verifyAtsSourceBranding(candidate('greenhouse', 'acme', 'Acme'), async (input) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.startsWith('https://job-boards.greenhouse.io/')) {
+      return new Response(null, {
+        status: 301,
+        headers: { location: 'https://job-boards.eu.greenhouse.io/embed/job_board?for=acme' },
+      });
+    }
+    if (url === logo) return image();
+    return html(`<img class="logo" alt="Acme logo" src="${logo}">`);
+  });
+  assert.equal(urls[1], 'https://job-boards.eu.greenhouse.io/embed/job_board?for=acme');
+  assert.equal(result.verified, true);
 });

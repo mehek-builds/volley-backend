@@ -44,10 +44,11 @@ export type AtsSourceBrandingOptions = {
 
 const USER_AGENT = 'LitosAtsBrandingVerifier/1.0';
 const REQUEST_TIMEOUT_MS = 10_000;
-/* Bounded because a provider that answers 301 with itself forever must cost three requests, not a
-   worker slot. Measured 2026-08-31: 2,234 enabled sources sat failed on ats:http_301/302/307 alone,
-   almost all of them token renames and regional migrations the provider itself announces via the
-   redirect - recoverable inventory as long as the target stays on provider-owned hosts. */
+/* Bounded because a provider that answers 301 with itself forever must cost the initial request
+   plus three redirect hops (four requests, pinned by test), not a worker slot. Measured
+   2026-08-31: 2,234 enabled sources sat failed on ats:http_301/302/307 alone, almost all of them
+   token renames and regional migrations the provider itself announces via the redirect -
+   recoverable inventory as long as the target stays on provider-owned hosts. */
 const MAX_PROVIDER_REDIRECTS = 3;
 const MAX_HTML_BYTES = 4_000_000;
 const MAX_JSON_BYTES = 6_000_000;
@@ -205,6 +206,18 @@ function providerInternalRedirect(
   }
 }
 
+/* An abandoned response pins its pooled socket until GC dumps it. Every non-success path below
+   must release the body before failing or looping: this code runs per source across tens of
+   thousands of verifications, and the 3xx and error responses are the COMMON case here, which is
+   the exact opposite of the usual fetch-and-read shape (review finding 2026-09-01). */
+async function discardBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    /* already consumed, locked, or errored; nothing left to release */
+  }
+}
+
 async function fetchText(
   fetcher: typeof fetch,
   url: string,
@@ -227,19 +240,29 @@ async function fetchText(
       const next = location && allowedRedirectHost
         ? providerInternalRedirect(location, target, allowedRedirectHost)
         : null;
-      if (!next || hop === MAX_PROVIDER_REDIRECTS) fail(`http_${response.status}`);
+      await discardBody(response);
+      if (!next) fail(`http_${response.status}`);
+      /* A provider-internal redirect with no budget left is its own class. Folding it into
+         http_3xx made a provider self-redirect loop indistinguishable from a refused
+         off-provider hop, and left the whitelisted redirect_limit reason unreachable
+         (review finding 2026-09-01): one says raise the cap, the other says do not. */
+      if (hop === MAX_PROVIDER_REDIRECTS) fail('redirect_limit');
       target = next;
       continue;
     }
-    if (!response.ok) fail(`http_${response.status}`);
+    if (!response.ok) {
+      await discardBody(response);
+      fail(`http_${response.status}`);
+    }
     const type = responseType(response);
     if (expectedType === 'json' ? !type.includes('json') : !type.includes('html')) {
+      await discardBody(response);
       fail('unexpected_content_type');
     }
     return new TextDecoder().decode(await readBounded(response, maxBytes));
   }
-  /* Unreachable: the final iteration either returns a body or fails on the redirect above.
-     TypeScript needs the terminal statement; a reason is still named in case that ever changes. */
+  /* Unreachable: the final iteration either returns a body or fails above. TypeScript needs the
+     terminal statement; the reason matches the in-loop budget failure in case that ever changes. */
   return fail('redirect_limit');
 }
 
@@ -295,7 +318,10 @@ async function proveImage(
   });
   /* Keep the status so 429 and 5xx responses can be retried without treating a permanent 404 as
      provider pressure. The URL itself is never included in the persisted reason. */
-  if (!response.ok) fail(`http_${response.status}`);
+  if (!response.ok) {
+    await discardBody(response);
+    fail(`http_${response.status}`);
+  }
   const bytes = await readBounded(response, MAX_IMAGE_BYTES);
   const contentType = responseType(response).split(';', 1)[0];
   if (!hasImageSignature(bytes, contentType)) fail('invalid_logo_asset');
@@ -308,7 +334,12 @@ async function greenhouseBranding(token: string, fetcher: typeof fetch): Promise
     `https://job-boards.greenhouse.io/embed/job_board?for=${encodeURIComponent(token)}`,
     'html',
     MAX_HTML_BYTES,
-    (host) => host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io',
+    /* Kept in lockstep with GREENHOUSE_ACTION_HOSTS in lib/jobMonitor.ts: the EU cluster is as
+       first-party as the US one, and omitting it here left the commit's own motivating class,
+       an EU-cluster migration, failing http_301 for the largest provider in the catalog
+       (review finding 2026-09-01). */
+    (host) => host === 'job-boards.greenhouse.io' || host === 'boards.greenhouse.io'
+      || host === 'job-boards.eu.greenhouse.io' || host === 'boards.eu.greenhouse.io',
   );
   for (const tag of htmlTags(html, 'img')) {
     const classes = tagAttribute(tag, 'class')?.split(/\s+/) ?? [];
@@ -407,7 +438,12 @@ async function breezyBranding(token: string, fetcher: typeof fetch): Promise<Ext
     `https://${token}.breezy.hr/json`,
     'json',
     MAX_JSON_BYTES,
-    (host) => /^[a-z0-9-]+\.breezy\.hr$/.test(host),
+    /* Exactly this tenant's host, not any *.breezy.hr. The friendly_id pin below rejects a
+       renamed tenant's payload anyway, so following a rename hop only downloaded up to 6MB of
+       the wrong tenant's JSON and then degraded the actionable http_301 (a redirect an operator
+       can chase) into malformed_response (review finding 2026-09-01). Same-tenant
+       canonicalization hops, the one recoverable class here, still pass. */
+    (host) => host === `${token}.breezy.hr`,
   );
   const payload = parseJson(raw);
   if (!Array.isArray(payload) || payload.length === 0) fail('malformed_response');
@@ -604,8 +640,10 @@ function fetcherWithSignal(fetcher: typeof fetch, signal: AbortSignal | undefine
  * follows a bounded number of redirects only while they stay on that provider's own hosts (token
  * renames, EU-cluster migrations), and refuses every other redirect, generic vendor artwork,
  * social banners, arbitrary third-party image hosts, and any provider identity that disagrees
- * with the source catalog. A candidate is promoted only after the returned image also answers as
- * a bounded, recognizable image payload.
+ * with the source catalog. When a redirect WAS followed, the catalog name must agree in every
+ * identity mode, provisional included, because the responder is then whoever the provider
+ * redirected to rather than the token's author by construction. A candidate is promoted only
+ * after the returned image also answers as a bounded, recognizable image payload.
  */
 export async function verifyAtsSourceBranding(
   source: AtsSourceBrandingCandidate,
@@ -614,12 +652,31 @@ export async function verifyAtsSourceBranding(
   options: AtsSourceBrandingOptions = {},
 ): Promise<AtsSourceBrandingResult> {
   const boundedFetcher = fetcherWithSignal(fetcher, options.signal);
+  /* Whether any hop of this verification answered 3xx. A refused redirect fails outright, so if
+     extraction SUCCEEDS with this flag set, a redirect was followed, and the page that finally
+     answered is whoever the provider redirected to, not the token's author by construction. */
+  let sawRedirect = false;
+  const redirectAwareFetcher = (async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ) => {
+    const response = await boundedFetcher(input, init);
+    if ([301, 302, 303, 307, 308].includes(response.status)) sawRedirect = true;
+    return response;
+  }) as typeof fetch;
   let extracted: ExtractedBranding;
   try {
     const expectedName = source.company_name.trim();
     if (!expectedName || expectedName.length > 200) fail('invalid_source');
-    extracted = await extractBranding(source, boundedFetcher);
-    if (source.identity_mode !== 'provisional' && !namesAgree(expectedName, extracted.companyName)) {
+    extracted = await extractBranding(source, redirectAwareFetcher);
+    /* Provisional sources normally take the ATS's word for the identity, because the page at the
+       token is that company's by construction. A FOLLOWED REDIRECT breaks the construction: the
+       provider can 301 a released slug to a different tenant on the same host, and adopting that
+       page's identity rebrands the source and every job its old feed still ingests (review
+       finding 2026-09-01). So once a redirect was followed, the catalog name must agree in every
+       mode: a genuine same-company rename passes, a recycled slug fails. */
+    if (!namesAgree(expectedName, extracted.companyName)
+      && (source.identity_mode !== 'provisional' || sawRedirect)) {
       fail('identity_mismatch');
     }
   } catch (error) {

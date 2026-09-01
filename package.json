@@ -115,6 +115,7 @@
     "db:notifications": "node scripts/apply-notifications-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node --import tsx scripts/resolve-company-domains.mjs",
+    "logo:requeue-recovered": "node scripts/requeue-recovered-logo-failures.mjs",
     "db:job-pay": "node scripts/apply-job-pay-schema.mjs",
     "db:employment-type-index": "node scripts/apply-employment-type-index.mjs",
     "db:description-digest": "node scripts/apply-description-digest.mjs",
