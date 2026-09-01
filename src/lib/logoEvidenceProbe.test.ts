@@ -50,11 +50,16 @@ describe('servableImageType', () => {
     assert.equal(servableImageType('text/plain', svg), 'image/svg+xml');
   });
 
-  test('an ico only counts when a PNG is inside, whatever the header', () => {
+  test('an ico counts either way, preferring its embedded PNG', () => {
+    /* role-quick-website#477 made the route serve a DIB-only container as image/x-icon, which
+       browsers draw; before that it dropped them and this check refused them to match. */
     assert.equal(servableImageType('image/x-icon', ico(PNG)), 'image/png');
-    assert.equal(servableImageType('image/x-icon', ico(new Uint8Array([0x28, 0]))), null);
-    /* Ico magic under a generic header still gets the ico rule, not a pass. */
-    assert.equal(servableImageType('application/octet-stream', ico(new Uint8Array([0x28, 0]))), null);
+    assert.equal(servableImageType('image/x-icon', ico(new Uint8Array([0x28, 0]))), 'image/x-icon');
+    /* Ico magic under a generic header still gets the ico rule. */
+    assert.equal(
+      servableImageType('application/octet-stream', ico(new Uint8Array([0x28, 0]))),
+      'image/x-icon',
+    );
   });
 
   test('an HTML error page with an image URL is not a logo', () => {

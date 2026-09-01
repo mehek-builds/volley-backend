@@ -38,13 +38,16 @@ import {
 import { JOB_SOURCES } from '../lib/jobSources';
 import { discoverJobSources, type JobSourceDiscoveryResult } from '../lib/jobSourceDiscovery';
 import { CATALOG_DOMAIN_CANDIDATE_METHOD, catalogBrandedJobSources } from '../lib/jobSourceBrandCatalog';
-import { verifyCatalogSourceLogo } from '../lib/jobSourceLogoVerification';
+import {
+  VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD,
+  verifyCatalogSourceLogo,
+} from '../lib/jobSourceLogoVerification';
 import {
   VERIFIED_ATS_DURABLE_COPY_LOGO_METHOD,
   VERIFIED_ATS_SOURCE_LOGO_METHOD,
   verifyAtsSourceBranding,
 } from '../lib/atsSourceBranding';
-import { persistDurableAtsLogo } from '../lib/durableAtsLogo';
+import { persistDurableAtsLogo, persistDurableHomepageLogo } from '../lib/durableAtsLogo';
 import {
   isTransientLogoVerificationReason,
   retryTransientLogoVerification,
@@ -574,10 +577,15 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
 }
 const VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD =
   'first_party_ats_identity_and_homepage_logo_asset';
+/* The same ATS-bound homepage proof, served from our storage rather than the employer's, so the
+   method column keeps saying where the bytes a job seeker receives actually come from. */
+const VERIFIED_ATS_BOUND_HOMEPAGE_DURABLE_COPY_LOGO_METHOD =
+  'first_party_ats_identity_and_homepage_logo_asset_durable_copy';
 const VERIFIER_ISSUED_SOURCE_LOGO_METHODS = [
   VERIFIED_ATS_SOURCE_LOGO_METHOD,
   VERIFIED_ATS_DURABLE_COPY_LOGO_METHOD,
   VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD,
+  VERIFIED_ATS_BOUND_HOMEPAGE_DURABLE_COPY_LOGO_METHOD,
 ] as const;
 /**
  * The two numbers that bound how many BYTES a single board request can pull out of Postgres.
@@ -4443,13 +4451,20 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             const homepageResult = await verifyCatalogSourceLogo({
               company_name: atsResult.company_name,
               company_domain: candidate.company_domain,
-            }, { signal });
+            }, {
+              signal,
+              /* Keep the bytes the verifier proves. Employers whose infrastructure answers this
+                 verifier and refuses everyone else were otherwise verified-but-monogrammed. */
+              persistDurableLogo: (asset) => persistDurableHomepageLogo(asset, undefined, signal),
+            });
             return homepageResult.verified
               ? {
                 verified: true,
                 companyName: atsResult.company_name,
                 companyLogoUrl: homepageResult.company_logo_url,
-                method: VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD,
+                method: homepageResult.method === VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD
+                  ? VERIFIED_ATS_BOUND_HOMEPAGE_DURABLE_COPY_LOGO_METHOD
+                  : VERIFIED_ATS_BOUND_HOMEPAGE_LOGO_METHOD,
                 providerIdentity: true,
               }
               : {

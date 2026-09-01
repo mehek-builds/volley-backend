@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { verifyCatalogSourceLogo, VERIFIED_HOMEPAGE_LOGO_METHOD } from './jobSourceLogoVerification';
+import {
+  verifyCatalogSourceLogo,
+  VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD,
+  VERIFIED_HOMEPAGE_LOGO_METHOD,
+} from './jobSourceLogoVerification';
 
 const publicDns = async () => ['93.184.216.34'];
 const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
@@ -215,4 +219,97 @@ test('an unspaced em dash still separates title segments', async () => {
     { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
   );
   assert.equal(result.verified, true);
+});
+
+test('a proven homepage asset is kept as our own copy when a store is wired', async () => {
+  /* Verification proves the asset to the VERIFIER's fetch, which is not the same as proving it
+     to a job seeker: measured 2026-09-01, D.A. Davidson, Truecaller and Life Trading answered
+     here and refused the website, CI and the public, so the row read verified and rendered a
+     monogram. Keeping the bytes ends that whole class. */
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Acme</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const persistedAssets: { company_domain: string; bytes: Uint8Array; content_type: string }[] = [];
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      fetcher: fetcher as typeof fetch,
+      resolveHost: publicDns,
+      persistDurableLogo: async (asset) => {
+        persistedAssets.push(asset);
+        return 'https://api.trylitos.com/storage/logo/homepage/acme.example/deadbeef.png';
+      },
+    },
+  );
+  assert.deepEqual(result, {
+    verified: true,
+    company_logo_url: 'https://api.trylitos.com/storage/logo/homepage/acme.example/deadbeef.png',
+    method: VERIFIED_HOMEPAGE_DURABLE_COPY_LOGO_METHOD,
+  });
+  assert.equal(persistedAssets.length, 1, 'the store was handed the proven asset exactly once');
+  assert.equal(persistedAssets[0].company_domain, 'acme.example');
+  assert.equal(persistedAssets[0].content_type, 'image/png');
+  assert.deepEqual(
+    persistedAssets[0].bytes,
+    png,
+    'the copy is the bytes this verifier proved, not a refetch',
+  );
+});
+
+test('a store that refuses leaves the employer URL exactly as it was', async () => {
+  /* Storage is an improvement on serving, never a new way to fail: an SVG (which the store
+     rightly will not serve from our origin) and an outage both fall through to the proven
+     remote URL, so this can only add coverage. */
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/favicon.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response('<html><head><title>Acme</title><link rel="icon" href="/favicon.png"></head></html>', {
+      headers: { 'content-type': 'text/html' },
+    });
+  };
+  const result = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      fetcher: fetcher as typeof fetch,
+      resolveHost: publicDns,
+      persistDurableLogo: async () => { throw new Error('unsafe_url'); },
+    },
+  );
+  assert.deepEqual(result, {
+    verified: true,
+    company_logo_url: 'https://acme.example/favicon.png',
+    method: VERIFIED_HOMEPAGE_LOGO_METHOD,
+  });
+});
+
+test('a copy rescues an asset whose URL carries a query, which no URL could', async () => {
+  /* The query rule exists because a signed or cache-busting URL expires. That objection is about
+     the URL, and a copy is not one, so these assets become usable instead of logo_missing. */
+  const fetcher = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/logo.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response(
+      '<html><head><title>Acme</title><link rel="icon" href="/logo.png?v=8f21c"></head></html>',
+      { headers: { 'content-type': 'text/html' } },
+    );
+  };
+  const withoutStore = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    { fetcher: fetcher as typeof fetch, resolveHost: publicDns },
+  );
+  assert.equal(withoutStore.verified, false, 'an expiring URL is still refused on its own');
+
+  const withStore = await verifyCatalogSourceLogo(
+    { company_name: 'Acme', company_domain: 'acme.example' },
+    {
+      fetcher: fetcher as typeof fetch,
+      resolveHost: publicDns,
+      persistDurableLogo: async () => 'https://api.trylitos.com/storage/logo/homepage/acme.example/beef.png',
+    },
+  );
+  assert.equal(withStore.verified, true);
 });
