@@ -601,6 +601,13 @@ const listQuerySchema = z.object({
   title: z.string().trim().max(200).optional(),
   location: z.string().trim().max(200).optional(),
   company: z.string().trim().max(200).optional(),
+  /* The exact employer board, for callers that already KNOW the source. The company filter is a
+     substring match over display names, which cannot address one source when names collide (the
+     board carries several distinct companies literally named "Careers", and two real companies
+     named "Crisp"). career_page_sources.career_url is the source's identity, so this filter is
+     exact-match https-only: the website's logo route uses it to fetch one source's verified
+     evidence instead of paging a name that matches thousands of rows. */
+  career_url: z.string().trim().url().startsWith('https://').max(4000).optional(),
   remote: z.enum(['true', 'false']).optional(),
   /* Show only postings where visa sponsorship is confirmed. A filter anyone may ask for - the
      public board at /browse-jobs offers it as a checkbox - and one that some accounts get whether
@@ -2919,6 +2926,7 @@ export function boardConditions(f: {
   title?: string;
   location?: string;
   company?: string;
+  career_url?: string;
   remote?: 'true' | 'false';
   sponsorOnly?: boolean;
   employmentType?: string;
@@ -2983,6 +2991,8 @@ export function boardConditions(f: {
     if (clauses.length) conditions.push(clauses.length === 1 ? clauses[0]! : or(...clauses)!);
   }
   if (f.company) conditions.push(ilike(monitored_jobs.company_name, `%${f.company}%`));
+  /* Exact match, never a pattern: this is a source key, not a search box. */
+  if (f.career_url) conditions.push(eq(career_page_sources.career_url, f.career_url));
   if (f.remote) {
     conditions.push(eq(monitored_jobs.remote, f.remote === 'true'));
   } else if (f.targeting?.remote_only) {
@@ -3131,6 +3141,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       title: title ?? null,
       location: location ?? null,
       company: company ?? null,
+      career_url: parsed.data.career_url ?? null,
       remote: remote ?? null,
       sponsor_only: sponsorOnly,
       employment_type: parsed.data.employment_type ?? null,
@@ -3646,6 +3657,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       && !title
       && !location
       && !company
+      && !parsed.data.career_url
       && !remote
       && !parsed.data.employment_type
       && !sponsorOnly
@@ -3667,6 +3679,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       title: title ?? null,
       location: location ?? null,
       company: company ?? null,
+      career_url: parsed.data.career_url ?? null,
       remote: remote ?? null,
       sponsor_only: sponsorOnly,
       employment_type: parsed.data.employment_type ?? null,
