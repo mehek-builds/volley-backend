@@ -598,6 +598,9 @@ describe('jobDescriptionSourceUrl on the boards whose form lives on its own rout
       'https://confluence.pinpointhq.com/postings/c7fe935e-f408-4892-a204-dfd7fd2f70d8',
       'https://alertalarm.breezy.hr/p/f6d5662ca263-alert-alarm-field-project-manager',
       'https://acme.recruitee.com/careers',
+      'https://jobs.crelate.com/portal/canonrecruiting/job/apply/general',
+      'https://www.pinpointhq.com/postings/demo/applications/new',
+      'https://app.teamtailor.com/jobs/1-demo/applications/new',
     ]) {
       assert.equal(jobDescriptionSourceUrl(posting), posting);
     }

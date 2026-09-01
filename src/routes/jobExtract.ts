@@ -34,17 +34,24 @@ const LEVER_HOSTS = new Set(['jobs.lever.co', 'jobs.eu.lever.co']);
  * apply_url and posting_url) and the browser read both land on the posting. Per host on purpose,
  * exactly like Workable and Lever above: a trailing form segment means whatever the board says it
  * means, so nothing is stripped on a host we have not checked. */
-const CRELATE_APPLICATION_PATH = /^\/(portal\/[^/]+\/job)\/apply\/([^/]+)\/?$/i;
+/* The job code is Crelate's 26-character id, the same shape APPLY_PATHS.crelate accepts, so the
+   tenant's general-consideration form (/job/apply/general) is not rewritten to a page that is not a
+   posting. */
+const CRELATE_APPLICATION_PATH = /^\/(portal\/[^/]+\/job)\/apply\/([a-z0-9]{26})\/?$/i;
 const RECRUITEE_APPLICATION_PATH = /^\/(o\/[^/]+)\/c\/new\/?$/i;
 const TEAMTAILOR_APPLICATION_PATH = /^\/(jobs\/[^/]+)\/applications\/new\/?$/i;
 const PINPOINT_APPLICATION_PATH = /^\/((?:[a-z]{2}\/)?postings\/[^/]+)\/applications\/new\/?$/i;
 const BREEZY_APPLICATION_PATH = /^\/(p\/[^/]+)\/apply\/?$/i;
 const SEPARATE_FORM_ROUTES: ReadonlyArray<{ host: (hostname: string) => boolean; path: RegExp; posting: (match: RegExpMatchArray) => string }> = [
   { host: (h) => h === 'jobs.crelate.com', path: CRELATE_APPLICATION_PATH, posting: (m) => `/${m[1]}/${m[2]}` },
-  { host: (h) => /^[a-z0-9-]+\.recruitee\.com$/i.test(h), path: RECRUITEE_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
-  { host: (h) => /^[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/i.test(h), path: TEAMTAILOR_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
-  { host: (h) => /^[a-z0-9-]+\.pinpointhq\.com$/i.test(h), path: PINPOINT_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
-  { host: (h) => /^[a-z0-9-]+\.breezy\.hr$/i.test(h), path: BREEZY_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  /* Tenant subdomains only: the vendor's own www/app/api hosts serve no posting, so a form-shaped
+     path there is left exactly as pasted. Teamtailor's regional tenants (<tenant>.na.teamtailor.com)
+     are real career sites and are read like any other; whether the submission side supports them
+     is HOSTS.teamtailor's question, not this reader's. */
+  { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+\.recruitee\.com$/i.test(h), path: RECRUITEE_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/i.test(h), path: TEAMTAILOR_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+\.pinpointhq\.com$/i.test(h), path: PINPOINT_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+\.breezy\.hr$/i.test(h), path: BREEZY_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
 ];
 
 /**
