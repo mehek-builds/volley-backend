@@ -351,6 +351,28 @@ function strictSourceToken(
     : normalizeExecutableAtsBoardToken(provider, boardToken);
 }
 
+/**
+ * Which regional embed host a constructed Greenhouse action URL should use. REGION ONLY: the
+ * payload URL's content is never trusted, its host merely selects between two first-party
+ * constants, because an EU-silo tenant's embed route does not exist on the US host (see the EU
+ * hosts in GREENHOUSE_ACTION_HOSTS and the host preservation in canonicalMonitoredPortalUrl).
+ * Anything unparseable or non-EU, including every employer-hosted custom domain, gets the default
+ * host - the same one the board API that listed the posting answers from.
+ */
+function greenhouseEmbedHost(raw: unknown): string {
+  if (typeof raw === 'string') {
+    try {
+      const host = new URL(raw).hostname.toLowerCase();
+      if (host === 'boards.eu.greenhouse.io' || host === 'job-boards.eu.greenhouse.io') {
+        return 'job-boards.eu.greenhouse.io';
+      }
+    } catch {
+      /* Unparseable payload URL: the default host below. */
+    }
+  }
+  return 'job-boards.greenhouse.io';
+}
+
 export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): NormalizedJob[] {
   const jobs = (payload as { jobs?: unknown[] } | null)?.jobs;
   if (!Array.isArray(jobs)) throw new Error('Greenhouse board returned an invalid jobs payload');
@@ -387,9 +409,13 @@ export function normalizeGreenhouseJobs(payload: unknown, boardToken?: string): 
            (see greenhouseEmbeddedBoards.embeddedGreenhouseApplicationUrl), so the apply path is the
            already-proven one. Nothing from absolute_url survives into the row either way.
            Non-numeric ids stay dropped: a constructed URL is only as sound as its parts, and every
-           live Greenhouse id is a plain global counter (measured across 26,702 ids). */
+           live Greenhouse id is a plain global counter (measured across 26,702 ids). The 7-digit
+           floor GREENHOUSE_JOB_ID applies in greenhouseEmbeddedBoards is deliberately NOT applied
+           here: that floor is an embed-detection heuristic for arbitrary company pages, and ids
+           here come from the token-scoped board API, where the 18 measured sub-7-digit ids are
+           genuine postings. */
         if (!/^[1-9]\d{0,11}$/.test(id)) return [];
-        postingUrl = `https://job-boards.greenhouse.io/embed/job_app?for=${encodeURIComponent(expectedToken)}&token=${id}`;
+        postingUrl = `https://${greenhouseEmbedHost(job.absolute_url)}/embed/job_app?for=${encodeURIComponent(expectedToken)}&token=${id}`;
       }
     }
     if (!id || !title || !postingUrl) return [];
@@ -881,6 +907,14 @@ export type SourceJobFetch = {
   listed_external_ids: string[];
   preserve_external_ids: string[];
   detail_progress?: DetailFetchProgress;
+  /**
+   * The first-party tenant slug this fetch actually validated against, when the provider itself
+   * redirected the list request away from the configured token (a renamed Recruitee subdomain).
+   * The caller must PERSIST this on the source row: the stored posting URLs live on the adopted
+   * host, and the submission-time canonicalizer binds them to the source's configured token, so an
+   * unpersisted adoption produces jobs that display but can never be applied to.
+   */
+  adopted_board_token?: string;
 };
 
 export type DetailFetchOptions = {
@@ -1609,9 +1643,10 @@ function uniqueListedExternalIds(
 
 /**
  * The tenant slug a followed Recruitee list fetch actually landed on, or null for anything that is
- * not exactly a first-party `https://{slug}.recruitee.com/api/offers/` URL. Deliberately strict:
- * the adopted slug goes through the same executable-token normalization as a configured one, so a
- * redirect to any other host, path, or shape changes nothing.
+ * not exactly a first-party `https://{slug}.recruitee.com/api/offers/` URL on default port with no
+ * credentials - the same rejections every other first-party URL check in this file makes.
+ * normalizeExecutableAtsBoardToken is the single slug authority (DNS-label rules), exactly as for
+ * a configured token, so a redirect to any other host, path, or shape changes nothing.
  */
 function recruiteeTenantFromFinalUrl(finalUrl: string): string | null {
   if (!finalUrl) return null;
@@ -1621,10 +1656,14 @@ function recruiteeTenantFromFinalUrl(finalUrl: string): string | null {
   } catch {
     return null;
   }
-  if (url.protocol !== 'https:' || url.pathname !== '/api/offers/') return null;
-  const match = /^([a-z0-9](?:[a-z0-9-]{0,198}[a-z0-9])?)\.recruitee\.com$/.exec(url.hostname.toLowerCase());
-  if (!match) return null;
-  return normalizeExecutableAtsBoardToken('recruitee', match[1]);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port
+    || url.pathname !== '/api/offers/') return null;
+  const host = url.hostname.toLowerCase();
+  const suffix = '.recruitee.com';
+  if (!host.endsWith(suffix)) return null;
+  const slug = host.slice(0, -suffix.length);
+  if (!slug || slug.includes('.')) return null;
+  return normalizeExecutableAtsBoardToken('recruitee', slug);
 }
 
 export async function fetchSourceJobBatch(
@@ -1646,6 +1685,7 @@ export async function fetchSourceJobBatch(
   const payload = await response.json();
   let jobs: NormalizedJob[];
   let listedExternalIds: string[] | undefined;
+  let adoptedBoardToken: string | undefined;
   switch (source.ats_name) {
     case 'greenhouse': {
       jobs = normalizeGreenhouseJobs(payload, boardToken);
@@ -1698,7 +1738,8 @@ export async function fetchSourceJobBatch(
          lookalike redirects fall back to the configured token and fail validation exactly as
          before. Injected test fetchers whose Response carries no url also fall back. */
       const redirectedToken = recruiteeTenantFromFinalUrl(response.url);
-      jobs = normalizeRecruiteeJobs(payload, redirectedToken ?? boardToken);
+      if (redirectedToken && redirectedToken !== boardToken) adoptedBoardToken = redirectedToken;
+      jobs = normalizeRecruiteeJobs(payload, adoptedBoardToken ?? boardToken);
       listedExternalIds = uniqueListedExternalIds(
         (payload as { offers: unknown[] }).offers,
         (raw) => externalIdentifier((raw as Record<string, unknown>).id),
@@ -1717,6 +1758,7 @@ export async function fetchSourceJobBatch(
        malformed IDENTITY excludes a listed posting there. */
     listed_external_ids: listedExternalIds ?? jobs.map((job) => job.external_id),
     preserve_external_ids: [],
+    ...(adoptedBoardToken ? { adopted_board_token: adoptedBoardToken } : {}),
   };
 }
 

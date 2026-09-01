@@ -333,6 +333,89 @@ test('a partial action-URL drift is detected as a rejection spike against the pr
   assert.equal(await activeJobCount(SPIKE_SOURCE_ID), 60);
 });
 
+const RENAME_SOURCE_ID = '92000000-0000-4000-8000-000000000004';
+const RENAME_RIVAL_SOURCE_ID = '92000000-0000-4000-8000-000000000005';
+
+function recruiteeSourceValues(id: string, token: string, company: string) {
+  const now = new Date();
+  return {
+    id,
+    company_name: company,
+    ats_name: 'recruitee',
+    board_token: token,
+    career_url: `https://${token}.recruitee.com`,
+    company_domain: `${token}.example`,
+    company_logo_url: `https://${token}.example/logo.png`,
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: now,
+    portal_company_name: company,
+    portal_name_mismatch: false,
+    enabled: true,
+  };
+}
+
+function recruiteeOffersPayload(tenant: string) {
+  const description = `<p>${'Design, build, and operate reliable billing-platform software with the payments team. '.repeat(3)}</p>`;
+  return JSON.stringify({
+    offers: [{
+      id: 707,
+      slug: 'platform-engineer',
+      title: 'Platform Engineer',
+      careers_url: `https://${tenant}.recruitee.com/o/platform-engineer`,
+      description,
+      published_at: new Date().toISOString(),
+    }],
+  });
+}
+
+function recruiteeRedirectResponse(tenant: string) {
+  const response = respond(recruiteeOffersPayload(tenant));
+  Object.defineProperty(response, 'url', { value: `https://${tenant}.recruitee.com/api/offers/` });
+  return response;
+}
+
+test('a provider tenant rename is adopted durably, and a token collision preserves instead', async () => {
+  /* The rename must reach career_page_sources.board_token: the stored posting URLs live on the
+     adopted host, and canonicalMonitoredPortalUrl binds a row's URLs to its source's CONFIGURED
+     token, so an unpersisted adoption would ingest jobs that display but can never be applied to.
+     Persisting also removes the per-poll redirect hop and survives the provider retiring it. */
+  await db.insert(schema.career_page_sources).values(
+    recruiteeSourceValues(RENAME_SOURCE_ID, 'billwerk', 'Frisbii'),
+  );
+  globalThis.fetch = async () => recruiteeRedirectResponse('frisbii');
+  const adopted = await monitor.pollSource(await sourceRow(RENAME_SOURCE_ID));
+  assert.equal(adopted.ok, true, JSON.stringify(adopted));
+  assert.equal(adopted.jobs, 1);
+  const renamedRow = await sourceRow(RENAME_SOURCE_ID);
+  assert.equal(renamedRow.board_token, 'frisbii',
+    'the adopted tenant must be persisted atomically with the job window');
+  assert.equal(renamedRow.last_error, null);
+  const [storedJob] = await db.select({ posting_url: schema.monitored_jobs.posting_url })
+    .from(schema.monitored_jobs)
+    .where(eq(schema.monitored_jobs.source_id, RENAME_SOURCE_ID));
+  assert.equal(storedJob?.posting_url, 'https://frisbii.recruitee.com/o/platform-engineer');
+
+  /* A second stale slug redirecting onto a tenant another source already owns must NOT rename or
+     ingest a duplicate: the collision lands queryably in last_error, existing rows stay up, and
+     the decision is left to the operator. */
+  await db.insert(schema.career_page_sources).values(
+    recruiteeSourceValues(RENAME_RIVAL_SOURCE_ID, 'billwerk-legacy', 'Billwerk Legacy'),
+  );
+  const rival = await monitor.pollSource(await sourceRow(RENAME_RIVAL_SOURCE_ID));
+  assert.equal(rival.ok, false);
+  assert.match(rival.ok === false ? rival.error : '', /already tracks/);
+  const rivalRow = await sourceRow(RENAME_RIVAL_SOURCE_ID);
+  assert.equal(rivalRow.board_token, 'billwerk-legacy', 'a collision must never rename');
+  assert.match(rivalRow.last_error ?? '', /tenant 'frisbii', which 'Frisbii' already tracks/);
+  assert.ok(rivalRow.last_polled_at, 'the source must still advance through the queue');
+  assert.equal(rivalRow.last_successful_poll_at, null);
+  const rivalJobs = await db.select({ id: schema.monitored_jobs.id })
+    .from(schema.monitored_jobs)
+    .where(eq(schema.monitored_jobs.source_id, RENAME_RIVAL_SOURCE_ID));
+  assert.equal(rivalJobs.length, 0, 'a duplicate tenant must not be ingested twice');
+});
+
 test('an empty completed poll never writes a 0/0 baseline for later polls to spike against', async () => {
   /* A brand-new board with nothing listed and nothing live slips PAST the empty-fetch guard (there
      is nothing to preserve) and completes as a success. That poll must not store a zero baseline:

@@ -37,6 +37,17 @@ export const PROVIDER_START_INTERVALS_MS: Readonly<Record<string, number>> = {
 };
 
 /**
+ * Start spacing bounds only the FIRST request of a poll. That is the whole poll for Workable and
+ * Recruitee (one list request each), but a Crelate poll makes two metadata requests and then up to
+ * 600 per-posting detail requests at 8-way concurrency against the same shared host, so spaced
+ * starts alone still overlap into exactly the burst that 429d every Crelate source. Multi-request
+ * paced families therefore also cap how many of their polls run at once.
+ */
+export const PROVIDER_MAX_IN_FLIGHT: Readonly<Record<string, number>> = {
+  crelate: 1,
+};
+
+/**
  * A paced provider applies its limit across requests, not across one scheduler invocation. Key the
  * process-wide barriers by the clock function so production calls share Date.now while tests can
  * use isolated deterministic clocks. Every start re-reads this map, which also coordinates
@@ -51,7 +62,6 @@ type PollQueueOptions = {
   concurrency?: number;
   timeBudgetMs?: number;
   workableStartIntervalMs?: number;
-  providerStartIntervalsMs?: Readonly<Record<string, number>>;
   startReserveMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -103,7 +113,6 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   const timeBudgetMs = options.timeBudgetMs ?? POLL_TIME_BUDGET_MS;
   const providerIntervals: Record<string, number> = {
     ...PROVIDER_START_INTERVALS_MS,
-    ...(options.providerStartIntervalsMs ?? {}),
     ...(options.workableStartIntervalMs !== undefined
       ? { workable: options.workableStartIntervalMs }
       : {}),
@@ -126,15 +135,12 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
     for (const queue of paced.values()) if (queue.length > 0) return true;
     return false;
   };
-  const nextStartFor = (family: string) => nextPacedStartByClock.get(now)?.get(family);
-  const setNextStartFor = (family: string, at: number) => {
-    let barriers = nextPacedStartByClock.get(now);
-    if (!barriers) {
-      barriers = new Map();
-      nextPacedStartByClock.set(now, barriers);
-    }
-    barriers.set(family, at);
-  };
+  /* Resolved once: the clock is fixed for the whole invocation, and sharing the Map is exactly
+     what coordinates overlapping invocations on the same clock. */
+  const barriers = nextPacedStartByClock.get(now) ?? new Map<string, number>();
+  nextPacedStartByClock.set(now, barriers);
+  const inFlightByFamily = new Map<string, number>();
+  const startedPacedFamilies = new Set<string>();
   const resultSlots: Array<{ settled: boolean; value?: TResult }> = [];
   const active = new Set<Promise<void>>();
   const allStarted: Promise<void>[] = [];
@@ -146,6 +152,12 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   const startPoll = (source: TSource) => {
     const slot = { settled: false } as { settled: boolean; value?: TResult };
     resultSlots.push(slot);
+    const family = source.ats_name;
+    const paceThisFamily = providerIntervals[family] !== undefined;
+    if (paceThisFamily) {
+      startedPacedFamilies.add(family);
+      inFlightByFamily.set(family, (inFlightByFamily.get(family) ?? 0) + 1);
+    }
     let operation: Promise<TResult>;
     try {
       operation = Promise.resolve(poll(source));
@@ -163,21 +175,21 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
       },
     ).finally(() => {
       active.delete(task);
+      if (paceThisFamily) inFlightByFamily.set(family, (inFlightByFamily.get(family) ?? 1) - 1);
     });
     active.add(task);
     allStarted.push(task);
   };
 
-  const waitForPacedStartBarriers = async () => {
-    while (true) {
-      const barriers = nextPacedStartByClock.get(now);
-      if (!barriers || barriers.size === 0) return;
-      let latest = -Infinity;
-      for (const at of barriers.values()) latest = Math.max(latest, at);
-      const wait = latest - now();
-      if (wait <= 0) return;
-      await sleep(wait);
+  const waitForOwnPacedCooldowns = async () => {
+    /* SNAPSHOT, then wait. Only the families THIS invocation started need their final cooldown
+       held under the caller's lock, and the target is captured once - re-reading the live barrier
+       would let an overlapping invocation string this one along for its whole paced drain. */
+    let holdUntil = -Infinity;
+    for (const family of startedPacedFamilies) {
+      holdUntil = Math.max(holdUntil, barriers.get(family) ?? -Infinity);
     }
+    while (now() < holdUntil) await sleep(holdUntil - now());
   };
 
   while ((ordinary.length > 0 || pacedRemaining()) && firstError === noError) {
@@ -186,8 +198,11 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
       let startedPaced = false;
       for (const [family, queue] of paced) {
         if (queue.length === 0) continue;
-        if (currentTime < (nextStartFor(family) ?? currentTime)) continue;
-        setNextStartFor(family, currentTime + providerIntervals[family]);
+        if (currentTime < (barriers.get(family) ?? currentTime)) continue;
+        if ((inFlightByFamily.get(family) ?? 0) >= (PROVIDER_MAX_IN_FLIGHT[family] ?? Infinity)) {
+          continue;
+        }
+        barriers.set(family, currentTime + providerIntervals[family]);
         startPoll(queue.shift()!);
         startedPaced = true;
         break;
@@ -210,10 +225,15 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
       let soonestStart = Infinity;
       for (const [family, queue] of paced) {
         if (queue.length === 0) continue;
-        soonestStart = Math.min(soonestStart, nextStartFor(family) ?? now());
+        soonestStart = Math.min(soonestStart, barriers.get(family) ?? now());
       }
       const wait = Math.min(soonestStart - now(), startDeadline - now());
-      if (wait <= 0) continue;
+      if (wait <= 0) {
+        /* Barrier already passed, so the family is blocked by its in-flight cap, not by time.
+           Sleeping cannot release it; only a completing poll can. */
+        if (active.size > 0) await Promise.race(active);
+        continue;
+      }
       await sleep(wait);
       continue;
     }
@@ -224,9 +244,10 @@ export async function pollSourcesWithinBudget<TSource extends PollSource, TResul
   // A caller can release its distributed lock as soon as this function settles. Wait for every
   // started request, including siblings of a rejected request, before returning or rethrowing.
   await Promise.allSettled(allStarted);
-  // Hold that lock through the final provider cooldowns too. This keeps the boundary safe even if
-  // the next invocation lands in a fresh process that cannot see the in-memory barriers.
-  await waitForPacedStartBarriers();
+  // Hold that lock through the final cooldown of every family this invocation started. This keeps
+  // the boundary safe even if the next invocation lands in a fresh process that cannot see the
+  // in-memory barriers.
+  await waitForOwnPacedCooldowns();
   if (firstError !== noError) throw firstError;
 
   const results = resultSlots.map((slot) => {

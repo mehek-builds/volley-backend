@@ -103,6 +103,15 @@ test('Greenhouse never stores a payload URL that fails strict validation; it con
       content: DESCRIPTION,
     }],
   }, 'acme'), []);
+
+  /* Region survives construction: an EU-silo tenant's embed route does not exist on the US host,
+     so a failed EU-hosted URL selects the EU embed host. The payload host picks between two
+     first-party constants and nothing else. */
+  const [euJob] = normalizeGreenhouseJobs(
+    greenhouse('https://boards.eu.greenhouse.io/acme/jobs/101?utm_source=linkedin'),
+    'acme',
+  );
+  assert.equal(euJob?.posting_url, 'https://job-boards.eu.greenhouse.io/embed/job_app?for=acme&token=101');
 });
 
 test('Greenhouse accepts its own gh_jid tracking suffix and canonicalizes it away', () => {
@@ -158,6 +167,18 @@ test('Recruitee adopts the tenant recruitee.com itself redirects to, and only th
   );
   assert.equal(renamed.jobs.length, 1);
   assert.equal(renamed.jobs[0].posting_url, 'https://frisbii.recruitee.com/o/platform-engineer');
+  /* The adoption is surfaced for the caller to PERSIST: stored URLs live on the adopted host, and
+     the submission-time canonicalizer binds a row's URLs to its source's configured token, so an
+     unpersisted adoption would ingest jobs that display but can never be applied to. */
+  assert.equal(renamed.adopted_board_token, 'frisbii');
+
+  /* A fetch that lands where it was sent adopts nothing. */
+  const settled = await fetchSourceJobBatch(
+    { ats_name: 'recruitee', board_token: 'frisbii' },
+    async () => respondFrom('https://frisbii.recruitee.com/api/offers/'),
+  );
+  assert.equal(settled.adopted_board_token, undefined);
+  assert.equal(settled.jobs.length, 1);
 
   /* Anything that is not exactly a first-party offers URL falls back to the configured token, so
      the new-tenant offers fail validation exactly as before the adoption existed. */
@@ -166,6 +187,8 @@ test('Recruitee adopts the tenant recruitee.com itself redirects to, and only th
     'https://attacker.example/api/offers/',
     'https://frisbii.recruitee.com/somewhere-else/',
     'http://frisbii.recruitee.com/api/offers/',
+    'https://frisbii.recruitee.com:8443/api/offers/',
+    'https://user:pass@frisbii.recruitee.com/api/offers/',
     '',
   ]) {
     const fetched = await fetchSourceJobBatch(
@@ -174,6 +197,7 @@ test('Recruitee adopts the tenant recruitee.com itself redirects to, and only th
     );
     assert.deepEqual(fetched.jobs, [], finalUrl || '(no response url)');
     assert.deepEqual(fetched.listed_external_ids, ['303'], finalUrl || '(no response url)');
+    assert.equal(fetched.adopted_board_token, undefined, finalUrl || '(no response url)');
   }
 });
 
