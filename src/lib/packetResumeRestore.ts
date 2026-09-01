@@ -163,8 +163,9 @@ export function restoredPacketAcknowledgement(input: {
  * the identity comparison, and ONLY that hash; the caller has to have proven, with
  * deliveryDriftIsLitosLearnedOnly, that what moved it is a fact the form taught Litos after she
  * approved. Every other condition is the restore's: an acknowledgement existed and bound the prior
- * audit exactly, both audits carry the current delivery binding on the same channel, the resume
- * bytes are identical, and the re-issued audit says the same thing about the packet.
+ * audit exactly, both audits carry the current delivery binding in the same mode (the channel and
+ * runtime inside the hash are the caller's to pin, and deliveryDriftIsLitosLearnedOnly does), the
+ * resume bytes are identical, and the re-issued audit says the same thing about the packet.
  */
 export function relearnedCapabilitiesAcknowledgement(input: {
   priorAudit: PacketAudit | undefined;

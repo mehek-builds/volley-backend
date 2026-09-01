@@ -4383,7 +4383,13 @@ export function deliveryDriftIsLitosLearnedOnly(input: {
  * relearnedCapabilitiesAcknowledgement), over a capability that was known and then changed, over a
  * form inventory that moved since a previous probe, or over a re-scored audit that now says
  * something different about the packet. In every one of those cases it returns null having at most
- * persisted a fresh audit, and the hold that follows clears the acknowledgement as it always did.
+ * persisted a fresh audit, which the hold that follows writes back over with the run's own review
+ * (the audit she acknowledged, acknowledgement cleared) exactly as it always did.
+ *
+ * Not carried, by construction: a form that takes a cover letter or a transcript she attached. The
+ * approved packet was audited with both stripped, the measured one carries the file, and the
+ * pre-probe check refuses; those forms still take the second approve. Stated so the Greenhouse
+ * cover-letter case is not filed as a regression of this change.
  */
 async function relearnCapabilitiesAfterDiscovery(input: {
   row: ResumeRow;
@@ -4427,10 +4433,17 @@ async function relearnCapabilitiesAfterDiscovery(input: {
     ...input.measured,
     questions: [...input.verifiedQuestions],
   };
-  const reissuedBindings = createEmployerDeliveryBindings(input.packet, measuredReview, {
-    mode: input.mode,
-    envelope: input.measuredEnvelope,
-  });
+  /* THE AUDIT-SIDE READING OF THE QUESTIONS, never the fill's. input.packet.questions is the live
+   * reading (option snaps with their claims, per-page-load selectors, flapping input types); every
+   * other constructor of a delivery binding hashes the audit's own question set, and the submit path
+   * rebuilds its packet from that set. Hashing the live reading here would freeze bytes the submit
+   * packet can never reproduce, and the transport assert would throw after the claim on any packet
+   * with a snapped question. Mirrors the audit route. */
+  const reissuedBindings = createEmployerDeliveryBindings(
+    { ...input.packet, questions: submissionPacketQuestions(input.verifiedQuestions) },
+    measuredReview,
+    { mode: input.mode, envelope: input.measuredEnvelope },
+  );
   let reissued: Awaited<ReturnType<typeof createAndPersistPacketAudit>>;
   try {
     reissued = await createAndPersistPacketAudit(fresh, {
