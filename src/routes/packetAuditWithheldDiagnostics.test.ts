@@ -25,9 +25,18 @@ const classifyWith = (message: string) => classifySubmissionStop({
   providerUnconfigured: false,
 });
 
-test('the measured provider teardown is recognised as a provider session failure', () => {
-  assert.equal(isProviderSessionFailureMessage(OBSERVED), true);
-  assert.equal(classifyWith(OBSERVED), 'provider_session_failure');
+/* THE PLAYWRIGHT SENTENCE MUST NOT MATCH, and this pins why.
+ *
+ * Matching it would let the stop say 'provider_session_failure' instead of 'unclassified' - but the
+ * predicate also feeds submissionFailureOutcome, which ranks providerSessionFailure ABOVE
+ * uncertainAfterClaim, while the needsExit override is skipped whenever the row already carries an
+ * unverified_submission. A run that DID press Submit and then lost the browser while reading the
+ * confirmation would be told "Nothing was sent. Try this one again in a few minutes" and filed for
+ * retry - producing a second application to an employer that already has one. */
+test('Playwright target-closed is NOT treated as a provider session failure', () => {
+  assert.equal(isProviderSessionFailureMessage(OBSERVED), false);
+  assert.equal(isProviderSessionFailureMessage('page.screenshot: Target page, context or browser has been closed'), false);
+  assert.equal(classifyWith(OBSERVED), 'unclassified');
 });
 
 test('the two Stratus phrases it already matched still match', () => {

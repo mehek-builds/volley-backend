@@ -11688,27 +11688,32 @@ function unverifiedSubmissionPatch(
   };
 }
 
-/* THE PROVIDER TEARING THE BROWSER DOWN IS A PROVIDER SESSION FAILURE, AND IT DID NOT SAY SO.
+/* WHY PLAYWRIGHT'S TARGET-CLOSED SENTENCE IS DELIBERATELY NOT MATCHED HERE.
  *
- * Measured live 2026-09-02 on DSI Innovations (Recruitee, run 35a497e0): the managed run reached
- * "Filling your answers" at 13:02:47 and stopped at 13:07:17 - 270_000ms later, exactly Stratus'
- * MANAGED_RUN_TIMEOUT_MS. The provider closed the browser out from under the in-flight wait, so
- * Playwright threw its own sentence rather than either of the two Stratus phrases below, nothing
- * matched, and the row recorded `reason: 'unclassified'`.
+ * A provider teardown mid-run really does produce
+ * "Target page, context or browser has been closed", and matching it would let the stop record say
+ * 'provider_session_failure' instead of 'unclassified'. That was tried and REVERTED, because this
+ * predicate does not only name the stop: submissionFailureOutcome ranks providerSessionFailure
+ * ABOVE uncertainAfterClaim, and the needsExit override that would restore the honest
+ * "Litos pressed Send" sentence is skipped whenever the row already carries an
+ * unverified_submission.
  *
- * That is the one classification the stop vocabulary calls "deliberately not guessed at", and it
- * costs a real fact: the run DID stop because the session went away, and the record said only that
- * nobody knew. The Playwright shape is distinctive - it names page, context and browser together -
- * and is emitted only when the target is gone, which is the definition of this reason.
+ * The measured consequence, on a row whose earlier attempt was resolved 'not_sent': run two presses
+ * Submit successfully, the provider tears the browser down while the confirmation is being read,
+ * Stratus returns Playwright's sentence verbatim, and the applicant is told "Nothing was sent. Try
+ * this one again in a few minutes" and filed in the retry bucket - for an application the employer
+ * actually has. Before, the same message fell through to "The final submission was attempted, but
+ * Litos could not verify the employer confirmation. Check the portal or your email before trying
+ * again." Naming the stop is worth very little; turning "go look before you retry" into an
+ * affirmative "nothing was sent" is worth a duplicate application, which cannot be taken back.
  *
- * NOTHING IS RELAXED. 'provider_session_failure' is deliberately absent from PRECEDES_CLICK, so a
- * row classified here keeps its claim and takes the same conservative exit 'unclassified' took.
- * This names the stop; it does not make one re-runnable. Only the before-submit variant, which is
- * proved by where the throw happens rather than by any message, releases a claim. */
+ * The two phrases below stay because Stratus emits them for a session that never opened, which is
+ * pre-click by construction. Anything whose throw site is not structurally known must keep the
+ * uncertain exit. If this is ever revisited, the classification must be gated on positive pre-click
+ * evidence from the run rather than on the text of an error, and it must not feed
+ * submissionFailureOutcome's ranking. */
 export function isProviderSessionFailureMessage(message: string): boolean {
-  return /sandbox stream was closed|not accepting commands/i.test(message)
-    || /target (?:page|closed)[^.]*?(?:context|browser) has been closed/i.test(message)
-    || /target page, context or browser has been closed/i.test(message);
+  return /sandbox stream was closed|not accepting commands/i.test(message);
 }
 
 /**
