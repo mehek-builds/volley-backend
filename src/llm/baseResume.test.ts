@@ -2,6 +2,8 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyBulletRepairs,
+  BASE_RESUME_GENERATION_FALLBACK_MODEL,
+  BASE_RESUME_GENERATION_MODEL,
   BASE_RESUME_MODEL_CALL_CAP_MS,
   BASE_RESUME_REPAIR_CALL_CAP_MS,
   baseResumeModelTimeoutMs,
@@ -12,7 +14,12 @@ import {
   parseSpecText,
   priorityEntriesForBaseResume,
 } from './baseResume';
-import { baseResumeRepairAllowed } from '../routes/baseResume';
+import {
+  BACKSTOP_REPAIR_ALLOWANCE_MS,
+  baseResumeBackstopAllowed,
+  baseResumeRepairAllowed,
+  REPAIR_PASS_BUDGET_MS,
+} from '../routes/baseResume';
 import type { BaseResumeEvent } from './baseResume';
 import type { ExperienceBankEntry } from '../db/schema';
 
@@ -49,12 +56,39 @@ test('base generation and repair calls obey their interactive caps', () => {
 test('a grounded local base spec can never enter either repair branch', () => {
   const local = { ...SPEC, generation_method: 'local_fallback' as const };
   assert.equal(baseResumeRepairAllowed(local.generation_method, 0), false);
-  assert.equal(baseResumeRepairAllowed(local.generation_method, 17_999), false);
+  assert.equal(baseResumeRepairAllowed(local.generation_method, REPAIR_PASS_BUDGET_MS - 1), false);
+  assert.equal(baseResumeBackstopAllowed(local.generation_method), false);
   assert.equal(baseResumeRepairAllowed(undefined, 0), true);
   /* 18s, not 35s: the window covers generation plus repairs, repairs run 1.3-1.7s each live, and
-   * the stage carries a sub-30-second promise the old ceiling could not keep. */
-  assert.equal(baseResumeRepairAllowed(undefined, 17_999), true);
-  assert.equal(baseResumeRepairAllowed(undefined, 18_001), false);
+   * the stage carries a sub-30-second promise the old ceiling could not keep. The boundary is
+   * inclusive: a pass may START at exactly the budget and still run its full call cap. */
+  assert.equal(baseResumeRepairAllowed(undefined, REPAIR_PASS_BUDGET_MS - 1), true);
+  assert.equal(baseResumeRepairAllowed(undefined, REPAIR_PASS_BUDGET_MS), true);
+  assert.equal(baseResumeRepairAllowed(undefined, REPAIR_PASS_BUDGET_MS + 1), false);
+});
+
+test('the repair window survives a worst-case generation, and the backstop is not elapsed-gated', () => {
+  /* The one relationship that actually broke the old numbers apart would pass silently: if the
+   * generation cap ever meets or exceeds the window, every build's first repair check fails and
+   * every weak verb ships (or dies at the fail-closed gate) for every student. Pin it. */
+  assert.ok(
+    REPAIR_PASS_BUDGET_MS > BASE_RESUME_MODEL_CALL_CAP_MS,
+    'a worst-case generation must leave the loop at least one repair pass',
+  );
+  /* The backstop is the last thing between a floor-injected bullet and a nothing-saved build
+   * (measured live 2026-08-29), so no amount of elapsed time may gate it - only a local-fallback
+   * spec skips it. Its own allowance stays under the shared repair call cap. */
+  assert.equal(baseResumeBackstopAllowed(undefined), true);
+  assert.equal(baseResumeBackstopAllowed('local_fallback'), false);
+  assert.ok(BACKSTOP_REPAIR_ALLOWANCE_MS <= BASE_RESUME_REPAIR_CALL_CAP_MS);
+  assert.equal(baseResumeRepairTimeoutMs(BACKSTOP_REPAIR_ALLOWANCE_MS), BACKSTOP_REPAIR_ALLOWANCE_MS);
+});
+
+test('the generation models are the measured pair, spelled exactly', () => {
+  /* A typo here does not error: the fallback chain converts an unknown-model 404 into a degraded
+   * local-fallback resume that logs outcome=success. This is the only tripwire. */
+  assert.equal(BASE_RESUME_GENERATION_MODEL, 'claude-haiku-4-5-20251001');
+  assert.equal(BASE_RESUME_GENERATION_FALLBACK_MODEL, 'claude-sonnet-5');
 });
 
 function bankEntry(over: Partial<ExperienceBankEntry>): ExperienceBankEntry {
