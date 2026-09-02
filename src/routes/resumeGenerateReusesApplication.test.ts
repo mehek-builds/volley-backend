@@ -45,8 +45,31 @@ test('a row already with the employer keeps the packet it sent', () => {
 test('a genuinely new posting still inserts exactly one row', () => {
   assert.match(resumeRoute, /canonicalApplicationId = randomUUID\(\);\n\s+await tx\.insert\(applications\)\.values\(\{/);
   assert.match(resumeRoute, /application_fingerprint: `legacy:\$\{resumeId\}`/);
-  // Exactly one insert into applications survives in this route.
-  assert.equal(resumeRoute.split('tx.insert(applications)').length - 1, 1);
+});
+
+/* A bare resume tailoring carries status 'resume_ready' and no portal binding. Adopting a prepared
+ * application with it would strip that row's portal and answered questions, so it keeps its own row. */
+test('a resume-only generation never adopts a prepared application', () => {
+  assert.match(resumeRoute, /\} else if \(!body\.application\) \{/);
+  const bareIndex = resumeRoute.indexOf('} else if (!body.application) {');
+  const adoptIndex = resumeRoute.indexOf('const ownedLive = await tx.select()');
+  assert.ok(bareIndex > 0 && adoptIndex > bareIndex, 'the resume-only branch must precede the adoption branch');
+});
+
+/* THE ADOPTED ROW CARRIES A NEW PACKET, SO THE OLD PACKET'S PROJECTIONS GO WITH IT.
+ * selected_resume_artifact_id left in place would send the PREVIOUS tailored resume to the employer
+ * while the review displayed the new one. submission_state left in place would carry a stale
+ * needs_attention and its attention_reason onto a packet that was never attempted. */
+test('adoption clears every projection derived from the packet it replaced', () => {
+  const setBlock = resumeRoute.slice(
+    resumeRoute.indexOf('await tx.update(applications).set({'),
+    resumeRoute.indexOf('}).where(eq(applications.id, existing.id));'),
+  );
+  assert.match(setBlock, /submission_state: 'not_started'/);
+  assert.match(setBlock, /selected_resume_artifact_id: null/);
+  assert.match(setBlock, /resume_attached: false/);
+  assert.match(setBlock, /resume_source: 'none'/);
+  assert.match(setBlock, /resume_attached_at: null/);
 });
 
 test('canonical intake still owns the fingerprint ladder this lookup mirrors', () => {

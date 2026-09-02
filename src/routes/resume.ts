@@ -1499,6 +1499,27 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         canonicalArtifactId = randomUUID();
         if (body.application_id) {
           canonicalApplicationId = body.application_id;
+        } else if (!body.application) {
+          /* A bare resume tailoring carries no portal, no questions and status 'resume_ready'.
+             It must never adopt a prepared application: repointing a ready_to_submit packet at a
+             resume-only one would strip the portal binding and the answered questions from a row
+             the student had already prepared. This path keeps its own row. */
+          canonicalApplicationId = randomUUID();
+          await tx.insert(applications).values({
+            id: canonicalApplicationId,
+            user_id: userId,
+            legacy_generated_resume_id: resumeId,
+            job_id: effectiveJobId,
+            company_scope_key: canonicalCompanyScope({ companyName: body.company }),
+            company_name: body.company,
+            role: body.role,
+            portal_url: canonicalApplicationPortalUrl,
+            source_surface: 'dashboard',
+            tracker_state: 'applying',
+            review_state: 'ready',
+            selected_resume_artifact_id: null,
+            application_fingerprint: `legacy:${resumeId}`,
+          });
         } else {
           /* TAILORING THE SAME POSTING TWICE MUST NOT FORK THE TRACKER.
              This path used to insert unconditionally with a `legacy:${resumeId}` fingerprint. Because
@@ -1530,12 +1551,24 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             const alreadyWithEmployer = existing.submission_state === 'submitted'
               || isAppliedOrLaterTrackerState(existing.tracker_state);
             if (!alreadyWithEmployer) {
+              /* The adopted row is carrying a NEW packet, so every projection derived from the old
+                 one is cleared with it. Leaving selected_resume_artifact_id and resume_attached in
+                 place would point the send at the PREVIOUS tailored resume while the review showed
+                 the new one - the employer would receive the wrong document. Leaving submission_state
+                 in place would carry a stale needs_attention and its attention_reason onto a packet
+                 that has not been attempted, which is what makes a freshly prepared application still
+                 read as parked. The insert path below sets exactly these same values. */
               await tx.update(applications).set({
                 legacy_generated_resume_id: resumeId,
                 ...(effectiveJobId ? { job_id: effectiveJobId } : {}),
                 ...(canonicalApplicationPortalUrl ? { portal_url: canonicalApplicationPortalUrl } : {}),
                 tracker_state: 'applying',
                 review_state: 'ready',
+                submission_state: 'not_started',
+                selected_resume_artifact_id: null,
+                resume_attached: false,
+                resume_source: 'none',
+                resume_attached_at: null,
                 updated_at: new Date(),
               }).where(eq(applications.id, existing.id));
             }
