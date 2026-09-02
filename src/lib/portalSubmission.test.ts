@@ -75,6 +75,7 @@ import { resolveProfileField } from './profileFieldResolution';
 import {
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+  MANAGED_READ_ONLY_ACTION_TYPES,
   type ManagedDiscoveredQuestion,
 } from './browserbase';
 import type { ReferralSourceEvidence } from './referralSource';
@@ -103,6 +104,29 @@ test('only an exact SmartRecruiters oneclick form can become an attended handoff
   assert.equal(canonicalSmartRecruitersOneClickUrl('https://jobs.lever.co/acme/abc123/apply'), undefined);
   assert.equal(canonicalSmartRecruitersOneClickUrl(undefined), undefined);
 });
+
+/* THE WORKABLE CONSENT BOUNDARY, restated once here and compared everywhere below.
+ *
+ * These are deliberately NOT imported from portalSubmission: an imported constant compared against
+ * itself pins nothing. They are written out independently so that changing the boundary in the
+ * module fails HERE, in one place, with the old and new selector side by side, instead of in eight
+ * scattered string literals that a partial edit can leave half-updated. That half-updated state is
+ * the actual bug this pins: before 2026-09-02 there were five hand-copied decline sites in
+ * portalSubmission.ts and they had drifted into four different selectors.
+ *
+ * Every part of them is a `data-ui` hook or an input name, and none of it is human-readable text.
+ * Workable localizes the dialog's aria-label and its decline label out of the tenant account's
+ * languages.default, so an English text pin here would be an English-tenant-only product. */
+const WORKABLE_COOKIE_DIALOG = 'div[role="dialog"][data-ui="cookie-consent"]';
+const WORKABLE_COOKIE_BACKDROP = 'div[data-ui="backdrop"]';
+const WORKABLE_COOKIE_DECLINE = `${WORKABLE_COOKIE_DIALOG} button[data-ui="cookie-consent-decline"]`;
+const WORKABLE_FORM_READY =
+  'input[name="firstname"], input[name="email"], input[type="file"][data-ui="resume"]';
+// The barrier names the FORM as well as the two overlay nodes, so an unbooted client-rendered shell
+// (no form, and therefore also no dialog) can never satisfy it by being empty.
+const WORKABLE_COOKIE_CLEARED = `body:has(${WORKABLE_FORM_READY})`
+  + `:not(:has(${WORKABLE_COOKIE_DIALOG}))`
+  + `:not(:has(${WORKABLE_COOKIE_BACKDROP}))`;
 
 function isGreenhousePreflightClick(action: { type: string; label?: string }) {
   return action.type === 'click'
@@ -1467,16 +1491,10 @@ function workablePhoneUploadFixture(
       if (selector === 'input[name="phone"]'
         || selector === 'input[name="phone"][type="tel"]:visible') return phone;
       if (selector === 'input[required], textarea[required], select[required]') return requiredLocator;
-      if (selector === 'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"]') {
-        return cookieDialog;
-      }
-      if (selector === 'div[data-ui="backdrop"]') return cookieBackdrop;
-      if (selector === 'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"] button:has-text("Decline all")') {
-        return declineCookies;
-      }
-      if (selector === 'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))') {
-        return cookieOverlayCleared;
-      }
+      if (selector === WORKABLE_COOKIE_DIALOG) return cookieDialog;
+      if (selector === WORKABLE_COOKIE_BACKDROP) return cookieBackdrop;
+      if (selector === WORKABLE_COOKIE_DECLINE) return declineCookies;
+      if (selector === WORKABLE_COOKIE_CLEARED) return cookieOverlayCleared;
       if (selector === WIDENED_WORKABLE_PHONE_COUNTRY_OPENER) {
         return countryTrigger;
       }
@@ -4729,6 +4747,14 @@ test('Workable phone evidence actions are all optional, value-free, and bounded'
   // which can only find the dialog once the app is there.
   assert.equal(actions[0]?.label, 'workable_application_form_ready');
   assert.equal(actions[1]?.label, 'workable_cookie_preflight');
+  // It is the SHARED boundary, so the evidence run cannot be the site that keeps a stale selector.
+  assert.equal(actions[1]?.selector, WORKABLE_COOKIE_DECLINE);
+  assert.equal(actions[1]?.requireUnique, true);
+  /* And there is deliberately NO cleared barrier here. An evidence run exists to come home with a
+   * diagnosis; a required wait that a stuck consent dialog could fail would turn the run that is
+   * supposed to explain a failure into a second unexplained failure. A dialog it could not clear is
+   * itself part of the finding, and lands in `skipped`. */
+  assert.equal(actions.some((item) => item.label?.endsWith('_cleared')), false);
 });
 
 test('structural evidence redaction strips values and text while keeping the diagnosis', () => {
@@ -4869,7 +4895,7 @@ test('managed Workable phone selects exact UAE and proves the value before the r
   });
   assert.deepEqual(actions[lateCookieDeclineIndex], {
     type: 'click',
-    selector: 'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"] button:has-text("Decline all")',
+    selector: WORKABLE_COOKIE_DECLINE,
     label: 'workable_cookie_final_decline',
     optional: true,
     timeout: 10_000,
@@ -4877,7 +4903,7 @@ test('managed Workable phone selects exact UAE and proves the value before the r
   });
   assert.deepEqual(actions[lateCookieClearedIndex], {
     type: 'waitForSelector',
-    selector: 'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))',
+    selector: WORKABLE_COOKIE_CLEARED,
     label: 'workable_cookie_final_cleared',
     optional: false,
     timeout: 10_000,
@@ -5262,7 +5288,16 @@ test('Workable opens the exact application route and clears optional-cookie over
   const clearedIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight_cleared');
   const firstNameIndex = actions.findIndex((action) => action.label === 'first_name');
   assert.ok(declineIndex >= 0, 'Workable must dismiss the cookie overlay without accepting optional cookies');
-  assert.equal(actions[declineIndex]?.selector, 'button:has-text("Decline all")');
+  /* The decline is addressed by data-ui, never by its label. Workable localizes declineAll out of
+   * the tenant account's languages.default, so `button:has-text("Decline all")` found the control
+   * only on English tenants; measured 2026-09-02, apply.workable.com/eopae serves the same bundle
+   * with languages.default "el" and <html lang="el">. Scoped to its own dialog, and requireUnique,
+   * so an ambiguous match refuses BEFORE the runner's click branch turns it into a rethrown
+   * UNAUTHORIZED_EMPLOYER_MUTATION instead of an absorbable skip. */
+  assert.equal(actions[declineIndex]?.selector, WORKABLE_COOKIE_DECLINE);
+  assert.doesNotMatch(actions[declineIndex]!.selector!, /has-text|aria-label/,
+    'the decline must carry no tenant-language text');
+  assert.equal(actions[declineIndex]?.requireUnique, true);
   assert.equal(actions[declineIndex]?.optional, true);
   /* MEASURED 2026-09-02, EQL Tech application 9bbf3ba1, two runs: the decline used to sit at index
    * 0, before the form-ready wait, on a client-rendered shell reached with domcontentloaded. Its
@@ -5275,11 +5310,73 @@ test('Workable opens the exact application route and clears optional-cookie over
   assert.ok(clearedIndex > declineIndex, 'the cleared barrier follows the decline');
   assert.equal(actions[clearedIndex]?.type, 'waitForSelector');
   assert.equal(actions[clearedIndex]?.optional, false, 'a consent dialog that stays up must fail closed under its own name');
-  assert.equal(
-    actions[clearedIndex]?.selector,
-    'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))',
-  );
+  /* Bounded by MANAGED_FILL_TIMEOUT_MS, which is the whole cost argument for making it required:
+   * ten seconds under the overlay's own name instead of the thirty silent seconds Playwright's
+   * default click timeout spends on an intercepted pointer. The runner clamps a waitForSelector
+   * timeout to 100..20000ms, so an unset one would not even be the same bound. */
+  assert.equal(actions[clearedIndex]?.timeout, 10_000);
+  assert.equal(actions[clearedIndex]?.timeout, actions[readyIndex]?.timeout);
+  /* The barrier names the FORM as well as the two overlay nodes. Without the `body:has(form)` arm
+   * it is TRUE of the un-booted loader-cube shell - no dialog and no backdrop, because nothing has
+   * rendered yet - so it would pass in milliseconds and hand the same intercepted click back. */
+  assert.equal(actions[clearedIndex]?.selector, WORKABLE_COOKIE_CLEARED);
+  assert.ok(actions[clearedIndex]!.selector!.startsWith(`body:has(${WORKABLE_FORM_READY})`),
+    'the barrier must require the application form, or an empty shell satisfies it');
   assert.ok(firstNameIndex > clearedIndex, 'Workable form readiness and the cleared overlay must precede fixed-field filling');
+});
+
+/* ONE cookie boundary, pushed by one helper, at every site that has one.
+ *
+ * The bug this pins is drift, and it had already happened: five hand-copied decline sites in
+ * portalSubmission.ts carrying four different selectors, two of them with no cleared wait at all
+ * and only one with the uniqueness assertion. Reading the source is the only way to assert that a
+ * SIXTH site cannot be written by copying the nearest neighbour instead of calling the helper. */
+test('every Workable consent decline in the source comes from the one shared boundary helper', () => {
+  /* Comments are stripped first, deliberately: the block comment above the constants QUOTES the
+   * dead English pins to explain why they are dead, and that explanation is the most valuable line
+   * in the file. What must not survive is a pin in the CODE. Only whole-line `//` comments are
+   * removed alongside block comments, so no `https://` inside a string literal is damaged. */
+  const source = readFileSync('src/lib/portalSubmission.ts', 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  const occurrences = (needle: string) => source.split(needle).length - 1;
+
+  // The dead English pins are gone from the code outright, not merely unused.
+  assert.equal(occurrences('has-text("Decline all")'), 0, 'no English text pin may survive in code');
+  assert.equal(occurrences('aria-label="Cookie Consent"'), 0, 'no English aria-label pin may survive in code');
+
+  // Each selector is written exactly once, in its own const, and referenced by name after that.
+  assert.equal(occurrences('button[data-ui="cookie-consent-decline"]'), 1);
+  assert.equal(occurrences("'div[role=\"dialog\"][data-ui=\"cookie-consent\"]'"), 1);
+  assert.equal(occurrences("'div[data-ui=\"backdrop\"]'"), 1);
+
+  // Exactly one push of a decline action, inside the helper, and every managed site calls it.
+  assert.equal(occurrences('selector: WORKABLE_COOKIE_DECLINE_SELECTOR'), 1,
+    'a managed decline action may only be built inside pushWorkableCookieBoundaryActions');
+  assert.equal(occurrences('pushWorkableCookieBoundaryActions(actions, {'), 3,
+    'the preflight, the terminal boundary and the evidence probe each call the helper once');
+  // And exactly one Playwright twin, called by both direct-path sites.
+  assert.equal(occurrences('async function clearWorkableCookieOverlay('), 1);
+  assert.equal(occurrences('clearWorkableCookieOverlay(page)'), 2,
+    'navigateToApplicationForm and the direct phone fill both go through the twin');
+  assert.equal(occurrences('WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR'), 3,
+    'the cleared barrier is defined once and read once by the helper and once by the twin');
+});
+
+/* The trim protection is a PREFIX, not a list of the four labels that exist today. greenhouse's
+ * preflight has always been matched that way; Workable's was an enumeration, so a fifth boundary
+ * label would have been silently trimmable while its own comment claimed it was protected. */
+test('every workable_cookie_ label is protected from the budget trim by its prefix, not by name', () => {
+  const source = readFileSync('src/lib/portalSubmission.ts', 'utf8');
+  assert.match(source, /greenhouse_cookie_preflight\|workable_cookie_\|/,
+    'the protection must match the workable_cookie_ prefix');
+  assert.doesNotMatch(source, /workable_cookie_\(\?:/,
+    'an enumeration of today\'s four labels goes stale the moment a fifth boundary is added');
+  // Every label the helper can mint really does start with that prefix.
+  for (const label of ['workable_cookie_preflight', 'workable_cookie_preflight_cleared',
+    'workable_cookie_final_decline', 'workable_cookie_final_cleared']) {
+    assert.ok(label.startsWith('workable_cookie_'), label);
+  }
 });
 
 test('Workable clears the consent overlay before its first pointer action on the fill, submit and discovery plans', () => {
@@ -5296,15 +5393,33 @@ test('Workable clears the consent overlay before its first pointer action on the
     const openerIndex = actions.findIndex((action) => action.label === 'phone_country_open');
     const firstPointerIndex = actions.findIndex((action) => action.type === 'click' && action.label !== 'workable_cookie_preflight');
     assert.ok(readyIndex >= 0 && declineIndex > readyIndex && clearedIndex > declineIndex, `${name}: ready, decline, cleared, in that order`);
+    assert.equal(actions[clearedIndex]?.optional, false, `${name}: the barrier fails closed`);
     assert.ok(openerIndex > clearedIndex, `${name}: the phone country opener runs behind the cleared barrier`);
     assert.equal(firstPointerIndex, openerIndex, `${name}: the opener is the first pointer action, and nothing clicks before the barrier`);
-    // The barrier is the last thing before the fixed fields, and nothing mutates ahead of it.
+    /* "Mutation" is stratus's own classification, read from the exported mirror of its
+     * READ_ONLY_ACTIONS set rather than from a list retyped here: a new mutating action type added
+     * to the protocol would silently fall out of a hand-maintained array and stop being checked at
+     * exactly the moment it most needed to be. `click` is excluded separately because the decline
+     * itself is one, and it is the one click the boundary is allowed to make. */
     const firstMutationIndex = actions.findIndex((action) =>
-      ['fill', 'fillByLabelText', 'upload', 'select', 'press', 'confirmAndSubmit'].includes(action.type));
+      !MANAGED_READ_ONLY_ACTION_TYPES.has(action.type) && action.type !== 'click');
     assert.ok(firstMutationIndex > clearedIndex, `${name}: no employer-page mutation before the cleared barrier`);
+    // And the only click ahead of the barrier is the decline the boundary itself pushes.
+    assert.deepEqual(
+      actions.slice(0, clearedIndex).filter((action) => action.type === 'click').map((action) => action.label),
+      ['workable_cookie_preflight'],
+      `${name}: nothing but the consent decline may click before the overlay is proven gone`,
+    );
   }
 });
 
+/* THE TRIM ARM HAS TO ACTUALLY TRIM, or the test is a tautology dressed as a budget proof.
+ *
+ * MEASURED on this packet: with no questions the fill plan is 28 actions and the submit plan 24;
+ * with 100 reviewed questions both land on exactly MANAGED_ACTION_LIMIT, which is only reachable by
+ * being clipped there. Discovery is 21 either way, because a discovery pass carries no reviewed
+ * answers at all - so its arm proves the boundary survives an UNTRIMMED build, which is a different
+ * and weaker claim, and it says so rather than pretending to exercise a trim it cannot reach. */
 test('the Workable preflight barrier survives every budget trim', () => {
   const packet = {
     ...capturePacket,
@@ -5314,12 +5429,20 @@ test('the Workable preflight barrier survives every budget trim', () => {
       answer: `Grounded answer ${index + 1}`,
     })),
   };
-  const plans = {
+  const trimmed = {
     fill: buildManagedPortalActions('workable', packet),
     submit: buildManagedPortalActions('workable', packet, true),
-    discovery: buildManagedDiscoveryActions('workable', packet),
   };
-  for (const [name, actions] of Object.entries(plans)) {
+  const untrimmed = { discovery: buildManagedDiscoveryActions('workable', packet) };
+
+  for (const [name, actions] of Object.entries(trimmed)) {
+    assert.equal(actions.length, MANAGED_ACTION_LIMIT,
+      `${name} must sit exactly on the budget, or this arm never exercises the trim it claims to`);
+  }
+  assert.ok(untrimmed.discovery.length < MANAGED_ACTION_LIMIT,
+    'a Workable discovery plan carries no reviewed answers, so it cannot be grown into a trim');
+
+  for (const [name, actions] of Object.entries({ ...trimmed, ...untrimmed })) {
     assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${name} exceeded the managed action budget`);
     const labels = actions.map((action) => action.label);
     const readyIndex = labels.indexOf('workable_application_form_ready');
@@ -5329,40 +5452,106 @@ test('the Workable preflight barrier survives every budget trim', () => {
     assert.ok(declineIndex > readyIndex, `${name} lost or moved the cookie decline`);
     assert.ok(clearedIndex > declineIndex, `${name} lost or moved the cleared barrier`);
     assert.equal(actions[clearedIndex]?.optional, false, `${name}: the barrier must still fail closed after the trim`);
+    assert.equal(actions[clearedIndex]?.selector, WORKABLE_COOKIE_CLEARED, `${name}: and it is still the same barrier`);
   }
+
+  /* The terminal boundary is the other half of the same protected prefix, and it survives the trim
+   * too. Only the fill and submit plans carry one: it is pushed with the phone terminal re-reads,
+   * and a discovery pass has no phone block to re-read. */
+  for (const [name, actions] of Object.entries(trimmed)) {
+    const labels = actions.map((action) => action.label);
+    const finalDecline = labels.indexOf('workable_cookie_final_decline');
+    assert.ok(finalDecline > labels.indexOf('workable_cookie_preflight_cleared'),
+      `${name} lost the terminal cookie decline`);
+    assert.ok(labels.indexOf('workable_cookie_final_cleared') > finalDecline,
+      `${name} lost or reordered the terminal cleared barrier`);
+  }
+  assert.equal(untrimmed.discovery.some((action) => action.label?.startsWith('workable_cookie_final')), false,
+    'a discovery pass has no phone terminal block, so it has no terminal boundary either');
 });
 
+/* The DIRECT (non-managed) path runs the same boundary through the same Playwright twin, in the
+ * same order, against the same selectors. It used to be the odd one out: a count-then-click
+ * snapshot on the bare English text pin, taken before the app had mounted, with no cleared wait at
+ * all. Tolerant here on purpose - this function only opens the form - but it must still be the
+ * boundary and not a different shape of it. */
 test('direct Workable preparation reaches the same form and declines optional cookies', async () => {
   let currentUrl = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
   const events: string[] = [];
+  let dialogUp = true;
   const fakePage = {
     url: () => currentUrl,
     goto: async (destination: string) => {
       currentUrl = destination;
       events.push(`goto:${destination}`);
     },
-    locator: (selector: string) => ({
-      first: () => selector === 'button:has-text("Decline all")'
-        ? {
-          count: async () => 1,
-          isVisible: async () => true,
-          click: async () => { events.push('decline'); },
-        }
-        : {
-          waitFor: async () => { events.push('ready'); },
+    locator: (selector: string) => {
+      events.push(`locator:${selector}`);
+      const node = {
+        count: async () => (selector === WORKABLE_COOKIE_CLEARED ? (dialogUp ? 0 : 1) : (dialogUp ? 1 : 0)),
+        isVisible: async () => (selector === WORKABLE_COOKIE_CLEARED ? !dialogUp : dialogUp),
+        click: async () => {
+          if (selector !== WORKABLE_COOKIE_DECLINE) throw new Error(`unexpected click on ${selector}`);
+          events.push('decline');
+          dialogUp = false;
         },
-    }),
+        waitFor: async () => {
+          if (selector === WORKABLE_FORM_READY) { events.push('ready'); return; }
+          if (selector !== WORKABLE_COOKIE_CLEARED) throw new Error(`unexpected wait on ${selector}`);
+          if (dialogUp) throw new Error('overlay still up');
+          events.push('cleared');
+        },
+      };
+      return { ...node, first: () => node, nth: () => node };
+    },
   } as unknown as Page;
 
   await navigateToApplicationForm(fakePage, 'workable');
 
   assert.equal(currentUrl, 'https://apply.workable.com/mercari/j/EC5A1078C4/apply');
-  // Ready first, then decline: the same order as the managed preflight, for the same reason.
-  assert.deepEqual(events, [
+  // Ready first, then decline, then the cleared wait: the same order as the managed preflight.
+  assert.deepEqual(events.filter((event) => !event.startsWith('locator:')), [
     'goto:https://apply.workable.com/mercari/j/EC5A1078C4/apply',
     'ready',
     'decline',
+    'cleared',
   ]);
+  // And every selector it reached for is one of the boundary's own, never a hand-copied variant.
+  const queried = new Set(events.filter((event) => event.startsWith('locator:')).map((event) => event.slice(8)));
+  assert.deepEqual([...queried].sort(), [
+    WORKABLE_COOKIE_CLEARED, WORKABLE_COOKIE_DECLINE, WORKABLE_COOKIE_DIALOG, WORKABLE_FORM_READY,
+  ].sort());
+});
+
+/* The other half of the twin's contract, on the tolerant caller. The fail-closed caller is already
+ * covered end to end by 'direct Workable phone fails closed when the late cookie backdrop does not
+ * unmount', which drives the real fillPortal through this same twin; what is pinned here is that a
+ * decline the twin could not click does NOT go on to claim the barrier passed, and does not throw
+ * out of a navigation whose only job is to open the page. */
+test('a Workable consent dialog the shared twin cannot clear never reaches its barrier', async () => {
+  const events: string[] = [];
+  const fakePage = {
+    url: () => 'https://apply.workable.com/mercari/j/EC5A1078C4/apply',
+    goto: async () => undefined,
+    locator: (selector: string) => {
+      const node = {
+        // The dialog is up and stays up: the decline click throws, exactly as a click on a control
+        // behind a focus trap does, and the barrier can never match.
+        count: async () => (selector === WORKABLE_COOKIE_CLEARED ? 0 : 1),
+        isVisible: async () => selector !== WORKABLE_COOKIE_CLEARED,
+        click: async () => { events.push(`click:${selector}`); throw new Error('intercepted'); },
+        waitFor: async () => { events.push(`wait:${selector}`); throw new Error('overlay still up'); },
+      };
+      return { ...node, first: () => node, nth: () => node };
+    },
+  } as unknown as Page;
+
+  await navigateToApplicationForm(fakePage, 'workable');
+  // Navigation is tolerant: it neither throws nor pretends the overlay went away.
+  assert.ok(events.includes(`click:${WORKABLE_COOKIE_DECLINE}`),
+    'the navigation half still declines through the shared twin');
+  assert.equal(events.includes(`wait:${WORKABLE_COOKIE_CLEARED}`), false,
+    'a decline that could not be clicked never reaches the barrier wait');
 });
 
 test('Workable never ticks the GDPR consent checkbox', () => {

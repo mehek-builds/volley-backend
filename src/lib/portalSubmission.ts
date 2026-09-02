@@ -4909,12 +4909,14 @@ function isProtectedManagedAction(
   // from that flag, and a document she attached is silently left off. The `upload` action it decides
   // about is deliberately NOT protected - a fill is what the budget is for giving up.
   //
-  // Workable's form-ready barrier is also a required wait, and the final cookie decline and cleared
-  // barrier belong to the same protected sequence: dropping either one can strand a fresh
-  // pointer-intercepting cookie overlay directly in front of the phone country control. The
-  // preflight cleared barrier is protected for the same reason at the other end of the plan: it is
-  // what keeps that overlay from stopping the very first pointer action (see
-  // pushWorkableManagedPreflightActions).
+  // Workable's form-ready barrier is also a required wait, and EVERY action in a Workable cookie
+  // boundary belongs to the same protected sequence: dropping either half of either pair can strand
+  // a fresh pointer-intercepting cookie overlay in front of a control the run is about to click -
+  // the phone country trigger at the front of the plan, the atomic submit at the back. They are
+  // matched by the `workable_cookie_` PREFIX rather than by an enumeration of the four labels that
+  // exist today, exactly as greenhouse_cookie_preflight already is: pushWorkableCookieBoundaryActions
+  // is the only thing that mints these labels, and a fifth boundary added there must not have to
+  // remember to come back and edit a list here to keep its own barrier alive.
   // resume_upload_verify is protected as a required evidence read one step further along: it says
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
@@ -4923,7 +4925,7 @@ function isProtectedManagedAction(
   // they are tolerant corroboration behind the strict pre-upload proofs, and under budget pressure
   // giving one of them up is strictly better than blocking a submit or giving up a reviewed
   // answer. managedResultFilledFields treats their absence as the ordinary remounted-widget case.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|preflight_cleared|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
     .test(label);
 }
 
@@ -5445,16 +5447,54 @@ const WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR = '.iti__selected-dial-code:visib
 const WORKABLE_LOCATION_SELECTOR = `${WORKABLE_ADDRESS_SELECTOR}, body:not(:has(${WORKABLE_ADDRESS_SELECTOR})) ${WORKABLE_LEGACY_CITY_SELECTOR}`;
 const WORKABLE_COVER_LETTER_SELECTOR =
   'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
-const WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR = 'button:has-text("Decline all")';
-const WORKABLE_COOKIE_DIALOG_SELECTOR =
-  'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"]';
+/* THE CONSENT DIALOG IS ADDRESSED STRUCTURALLY, because every word inside it is the TENANT's
+ * language and not a language this run gets to choose.
+ *
+ * Workable serves one careers bundle to every tenant (careers.320235cb522085e6.js, byte-identical
+ * hash on both tenants read below) and localizes both the decline label and the dialog's aria-label
+ * out of it: declineAll is "Decline all", "Afvis alle", "Alles weigeren", "Rechazar todas",
+ * "Tout refuser", and a Greek-script string on Greek tenants; ariaLabel is localized the same way.
+ * The language comes from the ACCOUNT's `languages.default` through i18next's htmlTag detector, and a
+ * `?lng=` is honoured only when the account itself lists that language, so it is a property of the
+ * employer.
+ *
+ * MEASURED 2026-09-02 over curl: apply.workable.com/eqltech reports languages.default "en" and
+ * serves `<html lang="en">`; apply.workable.com/eopae reports "el" and serves `<html lang="el">`,
+ * from the same bundle hash. So `button:has-text("Decline all")` and `[aria-label="Cookie Consent"]`
+ * were English-tenant selectors: on a Greek, French, Dutch, Danish or Spanish tenant the decline
+ * would match nothing, the dialog arm of the cleared barrier would not recognise the dialog, and the
+ * BACKDROP arm would hold the required barrier down until it timed out. That is a fail-closed
+ * managed Workable run on every non-English employer, before a single field is filled.
+ *
+ * The `data-ui` hooks carry no language at all, so the decline and the barrier are written against
+ * those. Verified against a real Chromium selector engine on synthetic markup carrying the Greek
+ * strings: the data-ui decline matches once, the English text pin matches nothing. */
+const WORKABLE_COOKIE_DIALOG_SELECTOR = 'div[role="dialog"][data-ui="cookie-consent"]';
 const WORKABLE_COOKIE_BACKDROP_SELECTOR = 'div[data-ui="backdrop"]';
-const WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR =
-  `${WORKABLE_COOKIE_DIALOG_SELECTOR} ${WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR}`;
-const WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR =
-  `body:not(:has(${WORKABLE_COOKIE_DIALOG_SELECTOR})):not(:has(${WORKABLE_COOKIE_BACKDROP_SELECTOR}))`;
+/* The bundle carries exactly ONE `cookie-consent-decline`; the settings modal has its own
+ * accept-in-modal and save-settings controls and no second decline. It is scoped to its own dialog
+ * anyway, so a future modal that grows one cannot make the match ambiguous, and every cookie
+ * boundary in this file - the preflight, the terminal, the evidence probe and both direct-path
+ * sites - pushes THIS constant. There is no second copy to drift. */
+const WORKABLE_COOKIE_DECLINE_SELECTOR =
+  `${WORKABLE_COOKIE_DIALOG_SELECTOR} button[data-ui="cookie-consent-decline"]`;
 const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
   `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
+/* THE BARRIER REQUIRES THE FORM, not merely the absence of an overlay, and that is what makes it a
+ * barrier rather than a coin flip. An apply page is a client-rendered shell reached with
+ * `domcontentloaded`: before the React boot lands, the document is a loader cube with no dialog and
+ * no backdrop, so a bare `body:not(:has(dialog)):not(:has(backdrop))` is TRUE of the empty shell and
+ * passes instantly while the consent dialog is still seconds from mounting. Requiring a form control
+ * in the same sentence means the barrier can only be satisfied by a page that has both mounted the
+ * application AND has no overlay over it, which is the state the plan actually needs. It also makes
+ * a slow boot fail here, under the overlay's own name and inside MANAGED_FILL_TIMEOUT_MS, instead of
+ * thirty silent seconds later at a click. Measured in a real Chromium selector engine: the comma
+ * list inside `:has()` resolves, the loader-cube shell does NOT match, form-with-dialog does not
+ * match, form-with-a-lone-backdrop does not match, and the declined form matches once. */
+const WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR =
+  `body:has(${WORKABLE_APPLICATION_FORM_READY_SELECTOR})`
+  + `:not(:has(${WORKABLE_COOKIE_DIALOG_SELECTOR}))`
+  + `:not(:has(${WORKABLE_COOKIE_BACKDROP_SELECTOR}))`;
 const WORKABLE_CHOICE_UNCONFIRMED_ATTR = 'data-litos-choice-unconfirmed-v1';
 
 /**
@@ -5511,8 +5551,10 @@ export function managedApplicationUsesAtomicSubmitV4(
  * shell around it), THEN decline, THEN require the overlay gone before anything that clicks. The
  * cleared wait is REQUIRED, exactly like workable_cookie_final_cleared: a dialog that stays up
  * would otherwise cost 30 seconds at the opener and an opaque sentence about a click, while this
- * costs at most MANAGED_FILL_TIMEOUT_MS and fails with the overlay's own name. It matches the
- * moment no dialog and no backdrop exist, so a page that never shows the dialog passes at once.
+ * costs at most MANAGED_FILL_TIMEOUT_MS and fails with the overlay's own name. The barrier names
+ * the FORM as well as the two overlay nodes (see WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR), so a
+ * page whose app has not booted cannot satisfy it by being empty, and a page that never shows the
+ * dialog still passes the moment the form is there.
  * NOTHING IS WEAKENED: the decline stays optional and the form-ready wait stays optional, exactly
  * as before; only their order changed and a barrier was added. */
 function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
@@ -5523,17 +5565,52 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
+  pushWorkableCookieBoundaryActions(actions, {
+    decline: 'workable_cookie_preflight',
+    cleared: 'workable_cookie_preflight_cleared',
+  });
+}
+
+/* ONE cookie boundary, emitted at every site that needs one, because the pair drifted five ways.
+ *
+ * Before this there were five hand-copied decline sites in this file and they had already diverged:
+ * the terminal boundary was dialog-scoped and requireUnique, the preflight and the evidence probe
+ * were a bare page-wide text match with neither, the direct navigation was a count-then-click
+ * snapshot with no cleared wait at all, and only two of the five waited for the overlay to go. Each
+ * new site copied whichever neighbour it was written next to. This helper is the only place a
+ * Workable consent decline is written, so the selector, the uniqueness assertion and the barrier
+ * move together or not at all.
+ *
+ * WHY requireUnique ON THE DECLINE. The preflight now runs after the form has mounted, which puts
+ * it in the same position as the terminal decline: a real click, on a discovery or fill run that
+ * stratus containment has armed (browserbase.ts sends both with MANAGED_PREPARE_SCAN_OPTIONS, and
+ * any non-read-only action makes the run a mutation). In the runner a click whose selector matches
+ * a number of nodes other than one reaches prepareManagedReadOnlyClick and throws
+ * UNAUTHORIZED_EMPLOYER_MUTATION, which the optional catch RETHROWS: an ambiguous consent dialog
+ * would kill the whole run with a containment violation. requireUnique moves that check earlier, to
+ * a plain Error thrown before the click branch is reached, which `optional` absorbs into `skipped`.
+ * Today's bundle ships exactly one decline so neither path fires; this is the guard for the day it
+ * ships two.
+ *
+ * The cleared barrier is REQUIRED wherever it is asked for, and omitted entirely (never made
+ * optional) on the evidence run, which must always come home. */
+function pushWorkableCookieBoundaryActions(
+  actions: ManagedBrowserAction[],
+  labels: { decline: string; cleared?: string },
+) {
   actions.push({
     type: 'click',
-    selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
-    label: 'workable_cookie_preflight',
+    selector: WORKABLE_COOKIE_DECLINE_SELECTOR,
+    label: labels.decline,
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
+    requireUnique: true,
   });
+  if (!labels.cleared) return;
   actions.push({
     type: 'waitForSelector',
     selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
-    label: 'workable_cookie_preflight_cleared',
+    label: labels.cleared,
     optional: false,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
@@ -5782,20 +5859,9 @@ function pushWorkableManagedPhoneTerminalActions(
   if (!raw) return;
   const plan = workablePhonePlan(phone);
   if (!plan) return;
-  actions.push({
-    type: 'click',
-    selector: WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR,
-    label: 'workable_cookie_final_decline',
-    optional: true,
-    timeout: MANAGED_FILL_TIMEOUT_MS,
-    requireUnique: true,
-  });
-  actions.push({
-    type: 'waitForSelector',
-    selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
-    label: 'workable_cookie_final_cleared',
-    optional: false,
-    timeout: MANAGED_FILL_TIMEOUT_MS,
+  pushWorkableCookieBoundaryActions(actions, {
+    decline: 'workable_cookie_final_decline',
+    cleared: 'workable_cookie_final_cleared',
   });
   // Bridge the remount before reading, exactly as the early block does, and just as optionally: a
   // widget that never comes back costs one bounded wait, never the run.
@@ -5869,31 +5935,29 @@ export function buildWorkablePhoneEvidenceActions(): ManagedBrowserAction[] {
     timeout: MANAGED_FILL_TIMEOUT_MS,
     ...(requireVisible ? { requireVisible } : {}),
   });
-  return [
-    // Same order as pushWorkableManagedPreflightActions, for the same reason: the decline can only
-    // find the dialog once the app has mounted, and the form is the proof of that. No required
-    // cleared barrier here, because an evidence run must always come home.
-    {
-      type: 'waitForSelector',
-      selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
-      label: 'workable_application_form_ready',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    },
-    {
-      type: 'click',
-      selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
-      label: 'workable_cookie_preflight',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    },
+  const actions: ManagedBrowserAction[] = [];
+  // Same order as pushWorkableManagedPreflightActions, for the same reason: the decline can only
+  // find the dialog once the app has mounted, and the form is the proof of that.
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
+    label: 'workable_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  // Through the same helper as every other cookie boundary, so the evidence run cannot be the site
+  // that keeps a stale selector. No `cleared` label, so no barrier: an evidence run must always come
+  // home, and a consent dialog it could not clear is itself part of the finding.
+  pushWorkableCookieBoundaryActions(actions, { decline: 'workable_cookie_preflight' });
+  actions.push(
     probe('tel_inputs', 'input[type="tel"]', 'name', true),
     probe('iti_containers', '.iti', 'className', true),
     probe('named_phone_inputs', WORKABLE_PHONE_READBACK_NAMED_SELECTOR, 'type', true),
     probe('readback_matches', WORKABLE_PHONE_READBACK_SELECTOR, 'name', true),
     probe('iframes', 'iframe', 'src', true),
     probe('phone_container_html', WORKABLE_PHONE_CONTAINER_SELECTOR, 'outerHTML'),
-  ];
+  );
+  return actions;
 }
 
 /**
@@ -9318,6 +9382,30 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
 const SMARTRECRUITERS_APPLY_LINK_SELECTOR =
   'a[href^="/oneclick-ui/company/"][href*="/publication/"], a[href^="https://jobs.smartrecruiters.com/oneclick-ui/company/"][href*="/publication/"]';
 
+/* The Playwright twin of pushWorkableCookieBoundaryActions, so the direct (non-managed) path cannot
+ * hold a different opinion about what the consent dialog is or when it is gone. Same dialog
+ * selector, same one decline, same cleared barrier that names the form as well as the two overlay
+ * nodes.
+ *
+ * Returns TRUE when the page is provably free of the overlay, FALSE when a dialog was up and could
+ * not be cleared. The caller decides what that is worth: navigateToApplicationForm ignores it (it
+ * only opens the page, and its next step is another read), while the phone fill turns it into
+ * failClosed(), because everything it does after this point is a real click. */
+async function clearWorkableCookieOverlay(page: Page): Promise<boolean> {
+  const dialogs = page.locator(WORKABLE_COOKIE_DIALOG_SELECTOR);
+  if (await dialogs.count().catch(() => 0) > 0) {
+    const dialog = await uniqueVisibleLocator(dialogs);
+    const decline = await uniqueVisibleLocator(page.locator(WORKABLE_COOKIE_DECLINE_SELECTOR));
+    if (!dialog || !decline) return false;
+    if (!await decline.click().then(() => true).catch(() => false)) return false;
+  }
+  // Safe when no dialog ever appeared, and fail-closed when a lone backdrop or a stuck dialog stays.
+  return page.locator(WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR).first()
+    .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+    .then(() => true)
+    .catch(() => false);
+}
+
 export async function navigateToApplicationForm(page: Page, portal: SupportedPortal): Promise<void> {
   if (portalFamily(portal) === 'workable') {
     const currentUrl = page.url();
@@ -9331,11 +9419,9 @@ export async function navigateToApplicationForm(page: Page, portal: SupportedPor
     await page.locator(WORKABLE_APPLICATION_FORM_READY_SELECTOR).first()
       .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
       .catch(() => undefined);
-    const declineOptionalCookies = page.locator(WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR).first();
-    if ((await declineOptionalCookies.count()) > 0
-      && (await declineOptionalCookies.isVisible().catch(() => false))) {
-      await declineOptionalCookies.click().catch(() => undefined);
-    }
+    // Tolerant here on purpose: this function only opens the form, and a dialog it could not clear
+    // is caught again, fail-closed, by the boundary in front of the first real click.
+    await clearWorkableCookieOverlay(page).catch(() => false);
     return;
   }
   if (portal !== 'smartrecruiters') return;
@@ -9481,25 +9567,10 @@ async function fillWorkablePhone(
 
   let countryTrigger: Locator | null = null;
   if (plan.country) {
-    const cookieDialogs = page.locator(WORKABLE_COOKIE_DIALOG_SELECTOR);
-    const cookieDialogCount = await cookieDialogs.count().catch(() => 0);
-    if (cookieDialogCount > 0) {
-      const cookieDialog = await uniqueVisibleLocator(cookieDialogs);
-      const declineOptionalCookies = await uniqueVisibleLocator(
-        page.locator(WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR),
-      );
-      if (!cookieDialog || !declineOptionalCookies
-        || !await declineOptionalCookies.click().then(() => true).catch(() => false)) {
-        return failClosed();
-      }
-    }
-    // Waiting on a body selector that can only match after both overlay nodes unmount is safe when
-    // no cookie dialog appeared, and it fails closed if a lone backdrop or a stuck dialog remains.
-    const cookieOverlayCleared = await page.locator(WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR).first()
-      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
-      .then(() => true)
-      .catch(() => false);
-    if (!cookieOverlayCleared) return failClosed();
+    // The same boundary the managed plans push, through the same helper: decline the dialog if it
+    // is up, then refuse to go on until the form is there with neither overlay node over it. This
+    // is the fail-closed site, because every step after it is a real click on the employer page.
+    if (!await clearWorkableCookieOverlay(page)) return failClosed();
 
     countryTrigger = await uniqueVisibleLocator(page.locator(WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR));
     if (!countryTrigger || !await countryTrigger.click().then(() => true).catch(() => false)) {
