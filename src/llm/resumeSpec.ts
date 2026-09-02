@@ -467,6 +467,21 @@ How to use it:
         maxOutputTokens: 16384,
         timeoutMs: remainingGenerationMs(),
         jsonSchema: { name: 'litos_resume_spec', schema: RESUME_JSON_SCHEMA },
+        /* LOW, AND THE QUALITY FLOOR DOES NOT MOVE, because this model is not the quality gate.
+         *
+         * Every spec this call returns goes through the same deterministic validators
+         * (resumeValidate.ts, the policy pass, the final content gate in routes/resume.ts), and a
+         * spec that fails them triggers the same feedback retry to Claude it always did. So effort
+         * here buys latency and sets the retry rate; it cannot change what is allowed to ship.
+         *
+         * It matters because this call IS the onboarding build the student watches: measured on a
+         * guest walk, a validation-failed first pass plus the retry put the build at 30 seconds
+         * against a 25-second budget, and the first attempt's reasoning time was the largest single
+         * share. Selection-from-a-bank with the rules stated in the prompt is the shape of task the
+         * cheaper effort tier handles; when it does not, the validator catches it - which is the
+         * same net quality at a faster common case. Same tier parse.ts already uses for its two
+         * structured-extraction calls. */
+        reasoningEffort: 'low',
       });
       return parseGeneratedResumeSpec(generated.text, 'OpenAI', 'completed');
     } catch (error) {

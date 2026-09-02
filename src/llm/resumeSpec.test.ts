@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   normalizeSpec,
   RESUME_GENERATION_INTERACTIVE_BUDGET_MS,
@@ -85,4 +86,15 @@ test('resume prompt pins every application-specific tailoring rule', () => {
   assert.match(RESUME_SYSTEM_PROMPT, /copy the JD's exact\s+multi-word terminology/);
   assert.match(RESUME_SYSTEM_PROMPT, /company values or operating principles/);
   assert.match(RESUME_SYSTEM_PROMPT, /Exact language never overrides truth/);
+});
+
+test('the interactive first attempt runs at low effort, and the validator is why that is safe', () => {
+  /* This call is the onboarding build a student watches against a 25-second budget, and reasoning
+     time was its largest single share. Low effort is safe ONLY because the model is not the
+     quality gate: every returned spec passes through the deterministic validators, and a weak one
+     triggers the same Claude feedback retry it always did. If the gate ever moves into the model -
+     validators removed or made advisory - this pin should fail and force that conversation. */
+  const source = readFileSync(new URL('./resumeSpec.ts', import.meta.url), 'utf8');
+  const openAICall = source.slice(source.indexOf('generateOpenAIText({'), source.indexOf('return parseGeneratedResumeSpec(generated.text'));
+  assert.match(openAICall, /reasoningEffort: 'low'/);
 });
