@@ -15,9 +15,8 @@ import {
   storedOptionAnswerIsCurrent,
 } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
+import { answerCompensation } from '../engine/compensation';
 import {
-  resolveSalary,
-  storedSalaryOf,
   type StoredSalaryProfile,
 } from './salary';
 import {
@@ -7926,10 +7925,16 @@ export function resolveKnownAnswer(
         : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
     }
     case 'desired_salary': {
-      resolveSalary(
-        { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
-        storedSalaryOf(ap),
-      );
+      /* THE COMPENSATION STANDARD IS THE ANSWER PATH. src/engine/compensation.ts implements the
+       * rule Mehek set on 2026-07-23: a stated range answers its MEDIAN in the posting's own unit
+       * and currency; no range refuses rather than guesses. It binds unit and currency to the
+       * range it PARSED, which is exactly the property the ad-hoc salary.ts re-derivation from the
+       * label got wrong and was refuted on twice. Tier 2 (no stated range, no researched median
+       * supplied) returns null here, which becomes the honest "left for you" the applicant then
+       * answers - never a fabricated figure. A regression test pins that this arm keeps calling the
+       * standard, so it cannot be silently orphaned again. */
+      const compensation = answerCompensation({ jdText: jdText ?? '', numericOnly: inputType === 'number' });
+      if (compensation) return { value: compensation.value };
       return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }
     case 'date_of_birth':

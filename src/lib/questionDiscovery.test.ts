@@ -5116,3 +5116,59 @@ test('a skip on a blank answer survives the refresh that fills the blank in', ()
     'a skip taken against a different value is shed with it, key omitted rather than undefined',
   );
 });
+
+// THE DESIRED-SALARY ARM ANSWERS THROUGH THE COMPENSATION STANDARD, AND NOTHING ELSE.
+//
+// Measured 2026-09-02 (session log blocker 45): src/engine/compensation.ts implements Mehek's rule
+// (stated range -> median in the posting's own unit and currency; no range -> refuse, never guess),
+// but resolveKnownAnswer's desired_salary arm called the ad-hoc salary.ts, discarded its result,
+// and refused unconditionally - so a posting stating $130k-$150k still asked the applicant. These
+// pin the arm to the standard so it cannot be silently orphaned again, and pin the one property the
+// ad-hoc module was refuted on twice: the currency binds to the parsed range, not to the label.
+test('desired salary is answered from the posting range through the compensation standard', () => {
+  // A stated USD annual range -> its median, in the posting's own unit and currency.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'What are your salary expectations for this position?',
+      'text',
+      {},
+      'Compensation: $130,000 - $150,000 per year. Great team, remote US.',
+    ),
+    { value: 'USD 140,000 per year' },
+  );
+  // A numeric-only field takes the bare median, no unit or currency decoration.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Expected base salary',
+      'number',
+      {},
+      'Salary range $130,000-$150,000 per year',
+    ),
+    { value: '140000' },
+  );
+});
+
+test('desired salary binds currency to the parsed range, not to the label', () => {
+  // The refutation that sank PR #846: a GBP posting must never receive a USD figure. The standard
+  // parses the range and carries GBP with it, so this is answered in GBP.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Desired salary',
+      'text',
+      {},
+      'Salary: £57,800 - £75,000 per year',
+    ),
+    { value: 'GBP 66,400 per year' },
+  );
+});
+
+test('desired salary with no stated range is left for the applicant, never guessed', () => {
+  const r = resolveKnownAnswer(
+    'What are your compensation expectations?',
+    'text',
+    {},
+    'A wonderful opportunity with lots of growth. No pay figure anywhere.',
+  );
+  assert.ok(r && 'skipReason' in r, 'a posting with no range must refuse, not fabricate a figure');
+  assert.match(r.skipReason, /salary question left for you/);
+});
