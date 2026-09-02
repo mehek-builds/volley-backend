@@ -145,15 +145,30 @@ export function releaseExpiredAttendedHandoffClaim(
  * the not_sent_proven fact in the SAME transaction as this write; a released row whose ledger still
  * folds to blocked_unverified/'opened' would be unblocked at the packet and still blocked at the
  * duplicate gate.
+ *
+ * A LIVE SEND IS NEVER RELEASED. This runs inside repairExpiredAttendedHandoffClaim, which the
+ * dashboard's submission poll calls every few seconds while a send is in flight. A send that has
+ * claimed and opened its attempt but not yet authorized the employer boundary carries `attempt_opened`
+ * alone for its whole pre-boundary window (buildPacket, the drift assert, the remote captcha probe),
+ * so attemptNeverReachedEmployer answers true of it - true, but describing a run that is still
+ * running, not one that stopped. The discriminator is the row's status: that live run holds
+ * `submitting`/`submission_claimed`, while the wedge this release exists for handed control back to
+ * the applicant at `needs_attention` with an invented "go look at the portal" record. So the status
+ * guard, mirroring expiredAttendedHandoffClaimIsReleasable above, is what stops a poll from tearing
+ * down a send it merely caught mid-flight.
  */
 export function attemptNeverReachedEmployerIsReleasable(
   review: Pick<
     ApplicationReviewState,
-    'submission_claim_id' | 'submission_claimed_at' | 'submitted_at' | 'receipt'
+    'status' | 'submission_claim_id' | 'submission_claimed_at' | 'submitted_at' | 'receipt'
     | 'security_code' | 'unverified_submission' | 'submission_run_id'
   >,
 ): boolean {
   if (!review.submission_claimed_at || !review.submission_claim_id) return false;
+  /* The parked, human-facing state is the only one this releases. A run still in flight holds
+   * `submitting` or `submission_claimed` and carries `attempt_opened` alone until it authorizes the
+   * boundary; releasing it here is exactly the poll-kills-the-send defect this guard forecloses. */
+  if (review.status !== 'needs_attention') return false;
   if (review.submitted_at || review.receipt || review.security_code) return false;
   const unverified = review.unverified_submission;
   if (unverified) {

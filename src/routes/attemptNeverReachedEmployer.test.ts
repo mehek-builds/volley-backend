@@ -237,6 +237,50 @@ describe('the guard that must not be weakened: a genuinely pressed, unconfirmed 
   });
 });
 
+describe('round 2: a live send caught mid-flight by a poll is never released', () => {
+  /* THE REFUTATION THIS CLOSES. repairExpiredAttendedHandoffClaim runs on every
+   * GET /applications/:id/submission, which the dashboard polls every few seconds while a send is in
+   * flight. Between claimSubmission and assertFinalRunnerBoundaryClear a live send holds `submitting`
+   * with `attempt_opened` alone - no boundary yet - so attemptNeverReachedEmployer answers true of it.
+   * The release arm is gated on that predicate AND on attemptNeverReachedEmployerIsReleasable; without
+   * a status check the second predicate also answered true, and a poll tore the live claim down, after
+   * which the runner died at the boundary. The status guard is the discriminator: the run in flight is
+   * `submitting`/`submission_claimed`, the wedge this releases handed control back at `needs_attention`. */
+  test('a submitting run with a held claim and only its opening fact is not releasable', () => {
+    const liveSend = claimedRunning();
+    assert.equal(liveSend.status, 'submitting');
+    assert.equal(liveSend.submission_claimed_at, CLAIMED_AT);
+    assert.equal(liveSend.unverified_submission, undefined);
+    // The ledger fact the live send carries is exactly the one the phantom row carries.
+    assert.equal(attemptNeverReachedEmployer(OPENED_ONLY), true);
+    // ...and yet the row must not be released, because it is not the parked, human-facing state.
+    assert.equal(attemptNeverReachedEmployerIsReleasable(liveSend), false);
+  });
+
+  test('a submission_claimed run is equally protected', () => {
+    assert.equal(
+      attemptNeverReachedEmployerIsReleasable(claimedRunning({ status: 'submission_claimed' })),
+      false,
+    );
+  });
+
+  test('only the parked needs_attention wedge remains releasable', () => {
+    /* The contrast, pinned beside the live-send cases so a future change cannot re-open the release
+     * to a running status without failing here. */
+    const parked = claimedRunning({
+      status: 'needs_attention',
+      submission_attempted_at: CLAIMED_AT,
+      unverified_submission: {
+        at: CLAIMED_AT,
+        cause: 'no_confirmation_state',
+        portal_url: PORTAL,
+        submission_run_id: 'b478f200-98a4-45d2-9fc7-d29941bc002d',
+      },
+    });
+    assert.equal(attemptNeverReachedEmployerIsReleasable(parked), true);
+  });
+});
+
 describe('defect 2: the applicant-facing text never claims a press the ledger does not record', () => {
   test('the never-pressed sentence names no press and no portal', () => {
     const reason = unverifiedSubmissionReason({
