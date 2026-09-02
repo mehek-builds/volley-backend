@@ -58,6 +58,11 @@ export type SubmissionStopReason =
    * to the employer. assertVerifiedBuiltPacket runs ahead of every transport - including before the
    * managed browser is opened - so nothing was filled and nothing was pressed. */
   | 'packet_drift_before_send'
+  /** The read-only destination probe could not be run or did not land on the employer page, so the
+   * run refused to build a fill-and-submit list at all. The probe is its own stateless remote call
+   * made BEFORE buildManagedPortalActions and before the employer boundary is authorized, and it
+   * asks for no screenshot and presses nothing, so no control can have been pressed under it. */
+  | 'destination_unverified_before_send'
   /** Anything else. Deliberately not guessed at, and never treated as pre-click. */
   | 'unclassified';
 
@@ -110,6 +115,13 @@ const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStop
    * before it calls transport(), and the managed send asserts before it opens a browser session. No
    * arm of that gate can run after a click. */
   'packet_drift_before_send',
+  /* Backed by ManagedDestinationUnverifiedError, per the membership rule above. The throw site is
+   * the destination probe, which is a separate read-only run made before the action list exists and
+   * before assertFinalRunnerBoundaryClear, so this run's press is structurally unreachable from it.
+   * Membership is what stops the measured 2026-09-02 shape recurring: the probe threw a BARE Error,
+   * which classified 'unclassified', which is not pre-click, so the claim stayed on the row and the
+   * applicant was told Litos had pressed Send on a run that never opened a form. */
+  'destination_unverified_before_send',
 ]);
 
 export function stopReasonPrecedesClick(reason: SubmissionStopReason): boolean {
@@ -130,6 +142,7 @@ export function classifySubmissionStop(input: {
   packetDocumentExpired: boolean;
   actionBudget: boolean;
   packetDriftBeforeSend?: boolean;
+  destinationUnverifiedBeforeSend?: boolean;
   confirmationUnproven: boolean;
   providerSessionFailureBeforeSubmit: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
@@ -147,6 +160,11 @@ export function classifySubmissionStop(input: {
    * earliest of them: the packet is compared to its audit before a transport is chosen, so none of
    * the signals below can even have been produced on a run that stops here. */
   if (input.packetDriftBeforeSend) return 'packet_drift_before_send';
+  /* Ranked immediately after the drift refusal and above every post-run reading, mirroring
+   * submissionFailureOutcome, because it is the next-earliest stop: the probe runs before the
+   * action list is assembled, so none of the signals below can have been produced by a run that
+   * stops here. */
+  if (input.destinationUnverifiedBeforeSend) return 'destination_unverified_before_send';
   if (input.noSubmitControl) return 'no_submit_control';
   if (input.confirmationUnproven) return 'confirmation_unproven';
   if (input.fieldProofFailedBeforeSubmit) return 'field_proof_failed_before_submit';

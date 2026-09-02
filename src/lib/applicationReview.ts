@@ -1070,7 +1070,7 @@ export type ApplicationReviewState = {
    * whatever run took it. Presence of this record proves a release occurred; it is never read as a
    * licence for anything, and a later run that takes a fresh claim leaves it in place as history. */
   claim_released?: {
-    cause: 'attended_handoff_expired';
+    cause: 'attended_handoff_expired' | 'attempt_never_reached_employer';
     claim_id?: string;
     released_at: string;
   };

@@ -810,6 +810,40 @@ export function submissionAttemptRetrySafety(
   };
 }
 
+/* DID THIS ATTEMPT EVER REACH THE EMPLOYER BOUNDARY? The one question that separates "Litos may
+ * have sent this" from "Litos provably did not".
+ *
+ * The ledger already states the rule this reads: once `boundary_authorized` exists, no
+ * machine-authored not-sent proof may close the attempt, because an authorization is durable
+ * employer-boundary risk. The contrapositive is what nothing was asking. Before that event exists,
+ * the run provably never crossed the boundary, so a `typed_pre_click_stop` is admissible and the
+ * attempt can be closed by the machine that opened it.
+ *
+ * Measured 2026-09-02, The Maven Group "Cyber Test Engineer" (crelate), attempt 22b9663a: the send
+ * opened an attempt, the first live provider call failed 456 ms later, and the run left the attempt
+ * carrying `attempt_opened` alone. That folds to blocked_unverified/'opened', which blocks every
+ * further send on the packet and every other application to that employer, and the row it wrote
+ * told the applicant Litos had pressed Send. 69 employers were in that state on one account, every
+ * one of them asking about a page Litos itself never loaded.
+ *
+ * `press_observed` is checked as well as `boundary_authorized`, even though a press cannot be
+ * recorded without one. A predicate that licenses a not-sent proof must not depend on an ordering
+ * invariant enforced elsewhere; if the two ever disagree this answers false, which is the direction
+ * that cannot cost an application.
+ *
+ * Exactly one `attempt_opened` is required rather than at least one, so a malformed attempt - which
+ * folds to 'invalid_sequence' rather than to 'opened' - is never closed by this route. */
+export function attemptNeverReachedEmployer(
+  events: readonly SubmissionAttemptEventRecord[],
+): boolean {
+  if (events.length === 0) return false;
+  if (events.filter((event) => event.event_kind === 'attempt_opened').length !== 1) return false;
+  return !events.some((event) => event.event_kind === 'boundary_authorized'
+    || event.event_kind === 'press_observed'
+    || event.event_kind === 'submission_confirmed'
+    || event.event_kind === 'not_sent_proven');
+}
+
 export function frozenPostingIdentityFromEvent(event: SubmissionAttemptEventRecord): FrozenPostingIdentity {
   return {
     // Legacy cutover facts freeze the normalized portal URL but predate the stored ATS key.

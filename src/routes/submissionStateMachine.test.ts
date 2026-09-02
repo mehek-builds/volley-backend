@@ -20,11 +20,27 @@ test('post-click failures retain the claimed row and become uncertain attention'
   assert.match(failureWriter, /sql`\$\{generated_resumes\.spec\} = \$\{JSON\.stringify\(latest\.spec\)\}::jsonb`/);
   assert.match(runner, /await recordSubmissionRunnerFailure\(actedOnRow, cause, securityCodeAttemptFingerprint\)/);
   assert.match(runner, /await lockSubmissionAttemptUser\(tx, row\.user_id\)[\s\S]*?const \[latest\] = await tx\.select\(\)\.from\(generated_resumes\)/);
-  /* The intent, not the formatting. This asserted the exact one-line ternary and broke when a
-     third stop reason (NoSubmitControlError) was added and the expression wrapped. What matters is
-     that an uncertain-after-claim failure still lands on needs_attention rather than failed. */
-  assert.match(runner, /uncertainAfterClaim\s*\|\|\s*providerSessionFailure\s*\n?\s*\?\s*'needs_attention'/);
+  /* The intent, not the formatting - SECOND TIME OF ASKING. This asserted the exact one-line
+     ternary, broke when NoSubmitControlError was added and the expression wrapped, was rewritten to
+     pin `uncertainAfterClaim || providerSessionFailure` instead, and broke again the moment two
+     more terms joined the same disjunction. Pinning an adjacency is pinning the formatting under
+     another name.
+
+     What matters, and all that matters, is that uncertainAfterClaim is still a TERM in the status
+     expression that yields needs_attention: an uncertain-after-claim failure must not land on
+     'failed', which submitRequestDisposition treats as un-runnable. Written so any number of other
+     terms may join it. */
+  assert.match(
+    runner,
+    /const status: TerminalRunStatus \| 'submit_requested' = [^;]*\buncertainAfterClaim\b[^;]*\?\s*\n?\s*'needs_attention'/,
+  );
   assert.match(runner, /const uncertainAfterClaim = Boolean\(current\.submission_claimed_at\)/);
+  /* THE READ THAT DECIDES WHETHER THE ROW MAY BE CALLED PRE-CLICK. These exact events were already
+     loaded in this writer and were only ever scanned for a terminal fact; passing the employer
+     boundary question into submissionFailureReview is what stops a run that never crossed the
+     boundary inventing an unverified_submission and keeping its claim. */
+  assert.match(failureWriter, /const employerBoundaryReached = openingEvent/);
+  assert.match(failureWriter, /submissionFailureReview\(latestReview, cause, undefined, \{ employerBoundaryReached \}\)/);
 });
 
 test('submit-request state transition is conditional so a replay cannot reset submitted state', async () => {
