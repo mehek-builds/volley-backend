@@ -91,7 +91,7 @@ test('the candidate row set is ALL THREE of canonical intake arms', () => {
    * the portal URL but no job_id, and the upsert manufactures the mirror image by rewriting the
    * fingerprint while preserving a merged-in job_id. */
   assert.match(resumeRoute, /const aliases = ownedLive\.filter\(\(row\) => canonicalAliasMatches\(row, \{/);
-  assert.match(resumeRoute, /const matches = \[canonicalRow, \.\.\.adoptable, \.\.\.aliases\]/);
+  assert.match(resumeRoute, /\[canonicalRow, \.\.\.adoptable, \.\.\.aliases\]/);
   // Deduplicated by id, because the three arms overlap.
   assert.match(resumeRoute, /all\.findIndex\(\(other\) => other\.id === row\.id\) === index/);
   assert.match(canonical, /export function canonicalAliasMatches/);
@@ -170,8 +170,28 @@ test('the request portal URL is normalized before matching and before the finger
   assert.doesNotMatch(branch.replace(/\/\*[\s\S]*?\*\//g, ''), /portalUrl: canonicalApplicationPortalUrl/);
   assert.match(branch, /portalUrl: normalizedPortalUrl,[\s\S]*portalUrl: normalizedPortalUrl,/);
   // Guarded: the schema admits http:// and canonicalPortalUrl requires https outside tests.
-  assert.match(resumeRoute, /\} catch \{\s*\n\s*normalizedPortalUrl = null;/);
+  assert.match(resumeRoute, /normalizedPortalUrl = null;\n\s*portalIdentityUnusable = Boolean\(canonicalApplicationPortalUrl\);/);
   assert.match(canonical, /const portalUrl = canonicalPortalUrl\(input\.portalUrl \?\? undefined\);/);
+});
+
+/* FAILING TO NORMALIZE IS NOT THE SAME AS HAVING NO PORTAL.
+ *
+ * resumeGenerateBodySchema declares portal_url as z.string().url(), which admits http:// and other
+ * schemes; canonicalPortalUrl throws on those outside tests. Leaving normalizedPortalUrl null while
+ * a URL WAS supplied drops the exclusive cascade onto the company + role rung - the one arm that can
+ * adopt a different posting at the same employer, which is the branch's original critical. An
+ * identity Litos cannot canonicalize must therefore adopt NOTHING. */
+test('an unusable portal URL adopts nothing rather than falling to company and role', () => {
+  assert.match(resumeRoute, /portalIdentityUnusable = Boolean\(canonicalApplicationPortalUrl\)/);
+  assert.match(resumeRoute, /const matches = \(portalIdentityUnusable \? \[\] : \[canonicalRow, \.\.\.adoptable, \.\.\.aliases\]\)/);
+});
+
+/* A row with no portal of its own is not this posting when this packet has one. The alias arm can
+ * reach such a row on a job_id match alone; adopting it strands a ready_to_submit packet on a row
+ * whose portal_url is null and - since the identity is deliberately not rewritten - can never
+ * acquire one, so every send against it 409s for good. */
+test('a portal-less row is not adopted for a packet that has a portal', () => {
+  assert.match(resumeRoute, /\.filter\(\(row\) => !normalizedPortalUrl \|\| Boolean\(row\.portal_url\)\)/);
 });
 
 test('a resume-only generation still never adopts a prepared application', () => {

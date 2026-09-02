@@ -1566,10 +1566,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
              therefore carries no portal identity rather than failing the request - the cascade falls
              to the job row if there is one, and otherwise to company and role. */
           let normalizedPortalUrl: string | null = null;
+          let portalIdentityUnusable = false;
           try {
             normalizedPortalUrl = canonicalPortalUrl(canonicalApplicationPortalUrl ?? undefined);
           } catch {
+            /* FAILING TO NORMALIZE IS NOT THE SAME AS HAVING NO PORTAL, and conflating the two is how
+               the first cut's worst bug comes back. Leaving normalizedPortalUrl null while a URL was
+               in fact supplied drops the exclusive cascade onto the company + role rung, which is
+               precisely the arm that can adopt a DIFFERENT posting at the same employer. A URL Litos
+               cannot canonicalize means the identity is unknown, and an unknown identity must adopt
+               nothing at all. */
             normalizedPortalUrl = null;
+            portalIdentityUnusable = Boolean(canonicalApplicationPortalUrl);
           }
           const identity = {
             jobId: effectiveJobId,
@@ -1633,10 +1641,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             companyName: body.company,
             role: body.role,
           }));
-          const matches = [canonicalRow, ...adoptable, ...aliases]
+          /* A ROW WITH NO PORTAL OF ITS OWN IS NOT THIS POSTING, when this packet has one.
+             The alias arm can reach such a row on a job_id match alone. Adopting it would leave a
+             ready_to_submit packet on a row whose portal_url is still null - and since the identity
+             the fingerprint was derived from is deliberately not rewritten here, that row can never
+             acquire one, so every send attempt against it 409s for good. Excluding it costs an extra
+             Tracker row that canonical intake will merge later; adopting it costs a dead application. */
+          const matches = (portalIdentityUnusable ? [] : [canonicalRow, ...adoptable, ...aliases])
             .filter((row): row is typeof applications.$inferSelect => Boolean(row))
             .filter((row, index, all) => all.findIndex((other) => other.id === row.id) === index)
-            .filter((row) => !alreadyWithEmployer(row));
+            .filter((row) => !alreadyWithEmployer(row))
+            .filter((row) => !normalizedPortalUrl || Boolean(row.portal_url));
           /* Deterministic, and ranked the way upsertCanonicalApplicationForUser ranks: a row that
              already carries a packet outranks an empty one, and the ordered select breaks the
              remaining tie. Left to `.find` over an unordered select, which row a re-tailor adopted
