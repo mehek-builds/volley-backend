@@ -48,7 +48,7 @@ describe('submissionAuthorityEnvelopeForPacket', () => {
     const expected = submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId: PACKET,
       projectionState: 'none',
-      retrySafetyKind: 'no_evidence',
+      retrySafety: { kind: 'no_evidence' },
       revision: '3',
     });
     assert.ok(expected);
@@ -60,6 +60,47 @@ describe('submissionAuthorityEnvelopeForPacket', () => {
         revision: '3',
       }),
       expected,
+    );
+  });
+
+  it('emits the unattempted builder envelope, byte for byte, for none + safe_not_sent too', () => {
+    /* The board and the per-packet submission response must publish ONE shape for a packet whose
+     * attempt was proven never to reach the employer. They did not: the board published
+     * safe_not_sent while the builder refused it, so /applications/:id/submission carried no
+     * envelope and the dashboard's send gate refused a packet the ledger had just proven un-sent
+     * (The Maven Group, crelate, 2026-09-02, the first packet healed by PR #861). */
+    const safety = {
+      kind: 'safe_not_sent' as const,
+      attemptId: ATTEMPT,
+      proofKind: 'typed_pre_click_stop' as const,
+      resolvedAt: '2026-08-28T08:00:00.000Z',
+    };
+    const expected = submissionAuthorityEnvelopeForUnattemptedPacket({
+      packetId: PACKET,
+      projectionState: 'none',
+      retrySafety: safety,
+      revision: '3',
+    });
+    assert.ok(expected, 'a proven not-sent attempt is provably safe and gets the first-send envelope');
+    assert.deepEqual(expected.retry_safety, safety);
+    assert.deepEqual(
+      submissionAuthorityEnvelopeForPacket({
+        packetId: PACKET,
+        projection: { state: 'none' },
+        retrySafety: safety,
+        revision: '3',
+      }),
+      expected,
+    );
+    // A malformed resolvedAt is refused at the builder rather than emitted for the client to reject.
+    assert.equal(
+      submissionAuthorityEnvelopeForUnattemptedPacket({
+        packetId: PACKET,
+        projectionState: 'none',
+        retrySafety: { ...safety, resolvedAt: 'yesterday' },
+        revision: '3',
+      }),
+      undefined,
     );
   });
 

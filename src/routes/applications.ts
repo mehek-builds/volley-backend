@@ -235,7 +235,7 @@ async function unattemptedPacketSubmissionAuthority(
     const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId,
       projectionState: projections.byPacketId.get(packetId)?.state,
-      retrySafetyKind: projections.retrySafetyByPacketId.get(packetId)?.kind,
+      retrySafety: projections.retrySafetyByPacketId.get(packetId),
       revision: projections.revision,
     });
     return envelope ? { submission_authority: envelope } : {};
