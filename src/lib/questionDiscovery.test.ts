@@ -5079,3 +5079,40 @@ test('otherLinkAnswer prefers a true link no sibling control has claimed, and fa
   assert.equal(otherLinkAnswer({ linkedin_url: profile.linkedin_url }), null);
   assert.equal(otherLinkAnswer({}), null);
 });
+
+/* THE SKIP THAT DIED IN ITS OWN SAVE. Measured live on DSI Innovations 2026-09-02, first deploy of
+ * the answer-binding rule: the dashboard's skip action stores {answer: '', answer_state: 'skipped'}
+ * and THIS refresh runs inside that same save, restoring the resolver's value beside the skip. The
+ * binding rule read '' -> 'May 2028' as a replaced answer and dropped the skip in the very request
+ * that wrote it. A blank is not an answer to be bound to: a skip beside an empty answer is about
+ * the control, so the machine filling in the blank carries it. Only a non-empty answer that
+ * CHANGES sheds it, because that skip licensed a value she is no longer looking at. */
+test('a skip on a blank answer survives the refresh that fills the blank in', () => {
+  const profile = { grad_date: 'May 2028', grad_year: 2028 };
+  const skippedBlank = refreshKnownQuestionAnswers(
+    [{ question: 'expected graduation year', answer: '', answer_state: 'skipped' as const }],
+    profile,
+    undefined,
+  );
+  assert.equal(skippedBlank[0]!.answer, 'May 2028', 'the resolver value still lands');
+  assert.equal(skippedBlank[0]!.answer_state, 'skipped', 'and her skip rides with it');
+
+  const skippedSame = refreshKnownQuestionAnswers(
+    [{ question: 'expected graduation year', answer: 'May 2028', answer_state: 'skipped' as const }],
+    profile,
+    undefined,
+  );
+  assert.equal(skippedSame[0]!.answer_state, 'skipped', 'an unchanged value keeps it');
+
+  const skippedReplaced = refreshKnownQuestionAnswers(
+    [{ question: 'expected graduation year', answer: '2027', answer_state: 'skipped' as const }],
+    profile,
+    undefined,
+  );
+  assert.equal(skippedReplaced[0]!.answer, 'May 2028');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(skippedReplaced[0]!, 'answer_state'),
+    false,
+    'a skip taken against a different value is shed with it, key omitted rather than undefined',
+  );
+});
