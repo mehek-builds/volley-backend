@@ -208,14 +208,33 @@ export function packetAuditSha256(value: unknown): string {
  * ONE-TIME COST, stated because it is real: audits minted before this hashed the full snapshot, so
  * an already-acknowledged packet mismatches once and re-approving re-binds it. Those packets refuse
  * to send today anyway, so this strictly improves them. */
+export const SUBMITTED_APPLICATION_COMPANIES_KEY = 'submitted_application_companies' as const;
+
+/**
+ * One ApplicationProfileLike with the send log removed, or the value unchanged when it carries none.
+ *
+ * EXPORTED BECAUSE THE SNAPSHOT IS NOT THE ONLY PLACE THE LOG RIDES. The employer-delivery
+ * projection binds `applicationProfile` and `applicantSnapshot` as separate `'json'` fields
+ * (employerDeliveryIdentity.ts), so stripping only the snapshot left the log inside the delivery
+ * hash and the send refused on 'browser employer-delivery payload changed after packet approval'
+ * instead - the second of the two issues the live refusal reported. Both callers strip through this
+ * one function so they cannot disagree about what the binding covers.
+ */
+export function applicationProfileBindingValue(profile: unknown): unknown {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return profile;
+  const record = profile as Record<string, unknown>;
+  if (!(SUBMITTED_APPLICATION_COMPANIES_KEY in record)) return profile;
+  const { [SUBMITTED_APPLICATION_COMPANIES_KEY]: _sendLog, ...bound } = record;
+  return bound;
+}
+
 export function applicantSnapshotBindingValue(snapshot: unknown): unknown {
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
   const record = snapshot as Record<string, unknown>;
   const profile = record.application_profile;
-  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return snapshot;
-  if (!('submitted_application_companies' in (profile as Record<string, unknown>))) return snapshot;
-  const { submitted_application_companies: _sendLog, ...boundProfile } = profile as Record<string, unknown>;
-  return { ...record, application_profile: boundProfile };
+  const bound = applicationProfileBindingValue(profile);
+  if (bound === profile) return snapshot;
+  return { ...record, application_profile: bound };
 }
 
 /** The applicant-snapshot binding. Always minted and checked through the projection above. */

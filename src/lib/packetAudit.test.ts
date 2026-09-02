@@ -10,6 +10,7 @@ import {
   packetAuditSha256,
   applicantSnapshotSha256,
   applicantSnapshotBindingValue,
+  applicationProfileBindingValue,
   PacketAuditValidationError,
   type CreatePacketAuditInput,
   type PacketAudit,
@@ -580,4 +581,32 @@ test('stripping the send log does not mutate the caller snapshot', () => {
   applicantSnapshotSha256(snapshot);
   assert.deepEqual(snapshot.application_profile.submitted_application_companies, ['Akuna'],
     'the fill reads this object after the binding is taken');
+});
+
+/* THE LOG RIDES IN THROUGH TWO FIELDS, AND CODE REVIEW CAUGHT THE SECOND ONE.
+ *
+ * The first version of this fix stripped the send log only from applicantSnapshotSha256. The
+ * employer-delivery projection binds `applicationProfile` AND `applicantSnapshot` as separate 'json'
+ * fields, so the log stayed inside the delivery hash and the send still refused - on 'browser
+ * employer-delivery payload changed after packet approval', which is exactly the second of the two
+ * issues the live Maven Group refusal reported. Both strips go through one function now. */
+test('the send log is stripped from a bare application profile too, not just from the snapshot', () => {
+  const withLog = { phone: '+1 213 574 6270', submitted_application_companies: ['Akuna', 'Databricks'] };
+  const grown = { phone: '+1 213 574 6270', submitted_application_companies: ['Akuna', 'Databricks', 'Exa'] };
+  assert.deepEqual(applicationProfileBindingValue(withLog), { phone: '+1 213 574 6270' });
+  assert.equal(
+    packetAuditSha256(applicationProfileBindingValue(withLog)),
+    packetAuditSha256(applicationProfileBindingValue(grown)),
+    'a bare applicationProfile must narrow the same way the nested one does',
+  );
+});
+
+test('the profile projection keeps every other field and does not mutate its input', () => {
+  const profile = { phone: '1', gpa: '3.89', submitted_application_companies: ['Akuna'] };
+  const bound = applicationProfileBindingValue(profile) as Record<string, unknown>;
+  assert.deepEqual(bound, { phone: '1', gpa: '3.89' });
+  assert.deepEqual(profile.submitted_application_companies, ['Akuna'], 'the fill reads this after');
+  // No log key means the value is returned unchanged, so identity is the cheap signal callers use.
+  const noLog = { phone: '1' };
+  assert.equal(applicationProfileBindingValue(noLog), noLog);
 });

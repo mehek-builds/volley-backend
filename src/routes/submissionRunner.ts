@@ -10096,7 +10096,17 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);
     } catch (error) {
       if (!(error instanceof EmployerBoundPacketDriftError)) throw error;
-      await writeReviewWithRunnerNotSentFact(row, nextReview(claimedReview, {
+      /* THE WRITE CAN REFUSE, AND A REFUSAL IS NOT A HANDLED STOP.
+       *
+       * writeReviewWithRunnerNotSentFact returns false rather than throwing when the row moved under
+       * this run (a changed submission_run_id or submission_claim_id) or when the attempt already
+       * carries boundary_authorized, press_observed or submission_confirmed - the last three being
+       * exactly the cases where a machine not-sent proof must never be written. Returning here on
+       * false would swallow the drift entirely: no review update, no ledger fact, no stop record, and
+       * the row keeps its claim with nothing said. That is strictly worse than the bare throw this
+       * block replaced, which at least reached fail(). So a refused write rethrows, and fail() now
+       * classifies it as the typed pre-click stop rather than as 'unclassified'. */
+      const closed = await writeReviewWithRunnerNotSentFact(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: packetDriftAttentionReason(error.issues),
         submission_error: error.message,
@@ -10112,6 +10122,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         proofKind: 'typed_pre_click_stop',
         evidenceCode: 'employer_bound_packet_drift_before_send',
       });
+      if (!closed) throw error;
       return;
     }
     // There is no Playwright Page on this path - the actions run inside the remote runner - so
