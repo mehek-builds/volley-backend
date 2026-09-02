@@ -1867,6 +1867,28 @@ function managedOptionProbeTarget(
   };
 }
 
+/* WHETHER THE PROBE ITSELF EXPECTED A CLOSED CONTROL HERE.
+ *
+ * The one honest answer to "does this field have an option inventory at all", and it must be asked
+ * of the PROBE rather than re-derived from the options, because the whole situation is that the
+ * option read failed. discoveredQuestionControlType decides closedness from field.options, so on a
+ * failed probe it answers from the very evidence that is missing: a Greenhouse react-select reports
+ * inputType 'text' with no DOM options until its menu opens, and would be called open text.
+ * managedOptionProbeTarget already knows better - it returns undefined exactly when the control was
+ * never expected to be closed, and MANAGED_FIXED_CLOSED_CONTROL_IDS keeps school/degree/discipline/
+ * end-month closed no matter what the DOM said.
+ *
+ * discoveryRoleCapability defaults to TRUE here, the opposite of the probe planner's default,
+ * because the two callers want opposite failure directions: the planner spends a budget and should
+ * under-probe, while this decides whether to DROP a blocker and must over-keep. */
+export function managedOptionProbeExpectsClosedControl(
+  field: { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; required?: boolean },
+  portal?: SupportedPortal,
+  discoveryRoleCapability = true,
+): boolean {
+  return managedOptionProbeTarget(field, discoveryRoleCapability, portal) !== undefined;
+}
+
 /**
  * Which controls this pass should read, in the order a budget cut should keep.
  *
