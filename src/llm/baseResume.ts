@@ -177,7 +177,26 @@ export function priorityEntriesForBaseResume(
   if (bank.length === 0) return [];
   const explicitlySelected = bank.find((entry) => entry.id === selectedEntryId);
   if (explicitlySelected) return [explicitlySelected];
-  const rankedByRecency = bank
+  /* THE LEGACY FALLBACK MAY NOT REQUIRE AN ENTRY THE FLOOR IS GUARANTEED TO DROP. The gate
+   * (baseResumeSelectionIssues) demands every priority entry appear on the page, while
+   * enforceExperienceBulletFloor drops any entry that cannot reach minBulletsPerEntry grounded
+   * bank variants - and on this path there is no sparse allowance, because allowSparsePriority
+   * covers only the explicitly selected entry above. So a current entry whose bank row holds one
+   * bullet variant made the two rules contradict by construction: the model includes it, the
+   * floor removes it, the fail-closed ATS gate refuses the build, and a rebuild reproduces it
+   * deterministically - the student is stranded with nothing saved, forever. Reproduced live
+   * 2026-09-02/03 on production trial accounts ("required current or role-defining entry
+   * missing: Events Coordinator at Smith Pre-Health Society" on every build). A one-variant
+   * current role is still perfectly selectable - the model may put it on the page and the floor
+   * will drop it with an honest warning - it just cannot be MANDATORY. The explicit selection
+   * above is untouched: a student who confirmed a sparse entry has the continue_with_found
+   * escape, which is the allowance this path lacks. */
+  const groundedVariants = (entry: ExperienceBankEntry): number =>
+    (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
+      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
+      .length;
+  const survivable = bank.filter((entry) => groundedVariants(entry) >= RESUME_CONTENT_LIMITS.minBulletsPerEntry);
+  const rankedByRecency = survivable
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) =>
       Number(isCurrentEntry(b.entry)) - Number(isCurrentEntry(a.entry)) ||
