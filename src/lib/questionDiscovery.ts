@@ -2560,7 +2560,17 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         } = withProvenance;
         return withApplicantClaim as T;
       }
-      return { ...withoutProvenance(), answer: known.value };
+      /* A skip belongs to the answer it was taken against, so a recomputed value drops it the
+       * same way withoutProvenance drops answer_source. An unchanged value keeps it. The key is
+       * omitted, never set to undefined: these rows are compared as records. */
+      if (known.value.trim() === withProvenance.answer.trim()) {
+        return { ...withoutProvenance(), answer: known.value };
+      }
+      const {
+        answer_state: _skipOnAReplacedAnswer,
+        ...rewrittenWithoutStaleSkip
+      } = withoutProvenance() as T & { answer_state?: unknown };
+      return { ...rewrittenWithoutStaleSkip, answer: known.value } as T;
     }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
       || Boolean(label && isRefusedQuestion(label));

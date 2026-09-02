@@ -73,6 +73,7 @@ import {
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   type ApplicationProfileLike,
+  type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
 import { resolveProfileField } from '../lib/profileFieldResolution';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
@@ -6574,4 +6575,94 @@ test('delivery drift counts as Litos-learned only when the probe alone moved it'
   });
   assert.equal(judge({ packet: someoneElse }), false);
   assert.equal(judge({ packet: packetFor({ jdText: 'The posting was edited.' }) }), false);
+});
+
+/* A QUESTION SHE ALREADY SKIPPED MUST NOT COME BACK AS WORK.
+ *
+ * The reason above is a warning, and a warning is worth saying once. Measured live on DSI
+ * Innovations (Recruitee) 2026-09-02: the posting's phone control is react-phone-number-input,
+ * which virtualises about 240 country rows, so discovery reads two of them and the saved answer
+ * "United States" matches neither. The refusal is correct. What was wrong is that it repeated: the
+ * optional list is a term of `safe` in the submit gate, so the row went back to needs_attention on
+ * every fill, and because the option list is truncated the same way next time, nothing the
+ * applicant could do would change it. She skipped the question, which is the escape the record is
+ * supposed to offer, and discovery raised it again anyway. That is a loop with no exit. */
+test('an optional unmatched select the applicant skipped is not raised again', async () => {
+  const base: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const discovered = [{
+    label: 'Are you legally authorized to work in the United States?',
+    selector: 'select[name="question_1"]',
+    inputType: 'select',
+    maxLength: null,
+    options: ['Yes, with sponsorship', 'Yes, without sponsorship', 'No'],
+  }] satisfies DiscoveredQuestion[];
+  const profile = { work_authorized: true, needs_sponsorship: true };
+
+  const skipped = await discoverAndResolveQuestions(
+    discovered,
+    { user_id: 'user-1' } as ResumeRow,
+    {
+      ...base,
+      questions: [{
+        id: 'work-auth',
+        question: 'Are you legally authorized to work in the United States?',
+        answer: 'Yes',
+        kind: 'required',
+        required: false,
+        answer_state: 'skipped',
+      }],
+    },
+    profile,
+    true,
+    'greenhouse',
+  );
+  assert.deepEqual(skipped.optionalAttentionReasons, [], 'her skip is the answer to this warning');
+  assert.deepEqual(skipped.attentionReasons, []);
+
+  // The suppression is her decision doing the work, not the branch going quiet on its own.
+  const notSkipped = await discoverAndResolveQuestions(
+    discovered,
+    { user_id: 'user-1' } as ResumeRow,
+    base,
+    profile,
+    true,
+    'greenhouse',
+  );
+  assert.equal(notSkipped.optionalAttentionReasons.length, 1, 'an unskipped mismatch still reports');
+
+  /* A REQUIRED field left empty at the portal is still her work, whatever she marked. The employer
+   * validates it and the submit fails, so a skip must not buy silence here. */
+  const requiredSkipped = await discoverAndResolveQuestions(
+    [{ ...discovered[0]!, required: true }],
+    { user_id: 'user-1' } as ResumeRow,
+    {
+      ...base,
+      questions: [{
+        id: 'work-auth',
+        question: 'Are you legally authorized to work in the United States?',
+        answer: 'Yes',
+        kind: 'required',
+        required: true,
+        answer_state: 'skipped',
+      }],
+    },
+    profile,
+    true,
+    'greenhouse',
+  );
+  assert.equal(
+    requiredSkipped.attentionReasons.length,
+    1,
+    'a skip cannot silence a required control the employer will reject as empty',
+  );
 });

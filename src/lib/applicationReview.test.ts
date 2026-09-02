@@ -18,6 +18,7 @@ import {
   type ApplicationReviewQuestion,
   type ApplicationReviewState,
 } from './applicationReview';
+import { discoverAndResolveQuestions, type ResumeRow } from '../routes/submissionRunner';
 import { PACKET_VISIBLE_QUESTION_FIELDS, packetVisibleQuestions } from './packetAudit';
 import {
   frozenJobEmployerContext,
@@ -1132,4 +1133,204 @@ test('the projection passes non-question shapes straight through to the canonica
   assert.equal(packetVisibleQuestions(null), null);
   assert.equal(packetVisibleQuestions('not a list'), 'not a list');
   assert.deepEqual(packetVisibleQuestions([null, 'raw']), [null, 'raw']);
+});
+
+/* 'skipped' IS ABOUT THE CONTROL, NOT ABOUT THE ANSWER.
+ *
+ * The merge used to clear answer_state outright whenever an answer was present. For the two machine
+ * states that is right: 'unanswered' and 'litos_refused' both say Litos had nothing to type, and an
+ * answer settles them. 'skipped' says something the answer cannot settle, because it is the
+ * applicant's instruction about the control: "the value is United States, the portal's menu will
+ * not take it, leave the field alone." Clearing it made her decision unrepresentable, so discovery
+ * re-raised the same question on the next fill and the row never became sendable. */
+test('a skipped question keeps its skip when an answer sits beside it', () => {
+  // Her reviewed row leads the collision, the way mergeDiscoveredPortalQuestions orders them.
+  const merged = normalizeApplicationReviewQuestions([
+    {
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'United States',
+      kind: 'required',
+      required: false,
+      answer_state: 'skipped',
+    },
+    {
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'United States',
+      kind: 'required',
+      required: false,
+      portal_selector: 'input[name="calling-code"]',
+    },
+  ]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]!.answer_state, 'skipped', 'her skip survives the fresh discovery read');
+  assert.equal(merged[0]!.answer, 'United States', 'and the answer beside it is untouched');
+});
+
+test('an answer still settles the two machine states', () => {
+  for (const state of ['unanswered', 'litos_refused'] as const) {
+    const merged = normalizeApplicationReviewQuestions([
+      {
+        id: 'gpa',
+        question: 'Please indicate your overall GPA.',
+        answer: '',
+        kind: 'required',
+        required: false,
+        answer_state: state,
+      },
+      {
+        id: 'gpa',
+        question: 'Please indicate your overall GPA.',
+        answer: '3.89',
+        kind: 'required',
+        required: false,
+      },
+    ]);
+    assert.equal(merged[0]!.answer, '3.89');
+    assert.equal(merged[0]!.answer_state, undefined, `${state} is resolved by an answer arriving`);
+  }
+});
+
+/* THE HAZARD THIS PAIR OF RULES EXISTS TO CLOSE.
+ *
+ * normalizeApplicationReviewQuestions reads `question.answer_state ?? existing.answer_state`, so a
+ * later row carrying a state wins outright. Discovery re-mints its rows on every run and used to
+ * default an optional one to 'unanswered', which is the machine saying "Litos has nothing to type".
+ * That default landing on a question the applicant had SKIPPED overwrote her decision one fill
+ * later and put the question back in front of her, which is the loop this branch was written to
+ * end. The mint now carries her skip forward instead (see unansweredRequiredQuestion in
+ * routes/submissionRunner.ts), so the collision below should not arise in practice.
+ *
+ * This test pins the precedence itself: if a machine state ever reaches the merge beside her skip,
+ * the merge is honest about which one it keeps, and a future change to either side has to look at
+ * this expectation rather than silently move the answer. */
+test('a machine answer_state arriving beside a skip is documented, not silently ignored', () => {
+  const merged = normalizeApplicationReviewQuestions([
+    {
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'United States',
+      kind: 'required',
+      required: false,
+      answer_state: 'skipped',
+    },
+    {
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: '',
+      kind: 'required',
+      required: false,
+      answer_state: 'unanswered',
+    },
+  ]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(
+    merged[0]!.answer_state,
+    'unanswered',
+    'the later row still wins the merge, which is why the mint must not emit one over her skip',
+  );
+});
+
+/* And the mint, which is the side that was actually changed. */
+test('re-discovery does not re-mint a skipped optional question as unanswered', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Lead consulting projects.',
+    role: 'Manager',
+    portal_url: 'https://example.recruitee.com/o/manager/c/new',
+    ats_name: 'recruitee',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'sponsorship',
+      question: 'Will you now or in the future require sponsorship?',
+      answer: '',
+      kind: 'required',
+      required: false,
+      answer_state: 'skipped',
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'Will you now or in the future require sponsorship?',
+      selector: 'textarea[name="q1"]',
+      inputType: 'textarea',
+      maxLength: 500,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    {},
+    true,
+    'recruitee',
+  );
+
+  const question = result.questions.find((q) => /sponsorship/i.test(q.question));
+  if (question) {
+    assert.notEqual(
+      question.answer_state,
+      'unanswered',
+      'a machine default must not overwrite the applicant decision it re-discovers',
+    );
+  }
+});
+
+/* THE WRITE THAT NEVER LANDED.
+ *
+ * Measured live on DSI Innovations 2026-09-02: the optional country-calling-code question was
+ * marked SKIPPED in the dashboard, the UI confirmed "Saved. These answers are on this application
+ * now", and the stored row came back with answer_state absent. mergeSubmittedApplicationReviewQuestions
+ * is the writer behind PUT /review/answers and it dropped the state whenever an answer was present,
+ * so the escape the send gate honours could never be recorded for a question that HAS an answer,
+ * which is exactly the shape this question has. */
+test('a skip posted beside an answer is actually stored', () => {
+  const merged = mergeSubmittedApplicationReviewQuestions(
+    [{
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'United States',
+      kind: 'required',
+      required: false,
+    }],
+    [{
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'United States',
+      kind: 'required',
+      required: false,
+      answer_state: 'skipped',
+    }],
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]!.answer_state, 'skipped', 'the dashboard said Saved, so it must be saved');
+  assert.equal(merged[0]!.answer, 'United States');
+});
+
+test('an answer posted over a machine state still clears it', () => {
+  for (const state of ['unanswered', 'litos_refused'] as const) {
+    const merged = mergeSubmittedApplicationReviewQuestions(
+      [{
+        id: 'gpa',
+        question: 'Please indicate your overall GPA.',
+        answer: '',
+        kind: 'required',
+        required: false,
+        answer_state: state,
+      }],
+      [{
+        id: 'gpa',
+        question: 'Please indicate your overall GPA.',
+        answer: '3.89',
+        kind: 'required',
+        required: false,
+      }],
+    );
+    assert.equal(merged[0]!.answer, '3.89');
+    assert.equal(merged[0]!.answer_state, undefined, `${state} is settled by her answering`);
+  }
 });
