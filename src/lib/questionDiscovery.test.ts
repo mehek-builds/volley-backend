@@ -5172,3 +5172,23 @@ test('desired salary with no stated range is left for the applicant, never guess
   assert.ok(r && 'skipReason' in r, 'a posting with no range must refuse, not fabricate a figure');
   assert.match(r.skipReason, /salary question left for you/);
 });
+
+test('a pay-history question is never answered with the posting median', () => {
+  // "Current/previous salary" asks what she EARNED, not what she expects. The posting median is a
+  // fabrication as an answer to that, so it is refused even when the JD states a range.
+  for (const label of [
+    'What is your current salary?',
+    'Previous salary',
+    'Most recent annual compensation',
+    'Salary history',
+    'What was your last drawn salary?',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, 'Compensation: $130,000 - $150,000 per year');
+    assert.ok(r && 'skipReason' in r, `pay history must refuse, not answer: "${label}"`);
+  }
+  // ...while the desired forms still answer through the standard.
+  assert.deepEqual(
+    resolveKnownAnswer('Expected salary', 'text', {}, 'Compensation: $130,000 - $150,000 per year'),
+    { value: 'USD 140,000 per year' },
+  );
+});

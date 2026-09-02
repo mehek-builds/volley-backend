@@ -2681,6 +2681,14 @@ const PROGRAMMING_LANGUAGE_PROFICIENCY_QUESTION =
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
+/* A question about HER OWN pay history, not the compensation she expects. "Current salary",
+ * "previous/last/most recent salary", "salary history": the compensation standard answers the
+ * posting's median, which is the right answer to "what do you expect" and a fabrication as an
+ * answer to "what did you earn". These stay refused (left for her), the behaviour before the
+ * standard was wired in. The desired forms ("salary expectations", "expected/desired compensation")
+ * carry none of these words, so this never blocks them. */
+const SALARY_HISTORY_QUESTION =
+  /\b(current|present|previous|prior|last|latest|most\s+recent|existing)\b[^.?!]{0,40}\b(salary|compensat|pay|wage|remunerat|earn)|\b(salary|compensat|pay|wage)\s+history\b/i;
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
@@ -7932,7 +7940,15 @@ export function resolveKnownAnswer(
        * label got wrong and was refuted on twice. Tier 2 (no stated range, no researched median
        * supplied) returns null here, which becomes the honest "left for you" the applicant then
        * answers - never a fabricated figure. A regression test pins that this arm keeps calling the
-       * standard, so it cannot be silently orphaned again. */
+       * standard, so it cannot be silently orphaned again.
+       *
+       * BUT the median answers "what do you expect", not "what did you earn". SALARY_QUESTION is
+       * broad enough to catch "current salary" and "salary history", and answering those with the
+       * posting's median would fabricate her pay history. Those stay refused, the pre-standard
+       * behaviour. The desired forms carry none of the history words, so this never blocks them. */
+      if (SALARY_HISTORY_QUESTION.test(label)) {
+        return { skipReason: `your own pay history is yours to answer: "${label.slice(0, 60)}"` };
+      }
       const compensation = answerCompensation({ jdText: jdText ?? '', numericOnly: inputType === 'number' });
       if (compensation) return { value: compensation.value };
       return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
