@@ -73,6 +73,8 @@ Set these for Production (and Preview if you want):
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `INTERNAL_CRON_SECRET` | random secret shared with the GitHub Actions job-monitor workflow |
 | `JOB_MONITOR_SOURCES_JSON` | optional JSON array of extra Greenhouse, Lever, Ashby, or Workable boards loaded by each daily monitor run |
+| `INGESTION_STALL_CHECK_INTERVAL_MS` | how often the API samples whether the board is still being fed. Default 600000 (10 minutes), floored at 60000. This is the real DETECTION latency for stalled ingestion; `ingestion-stall-alert.yml` only reports what this recorded, because GitHub delivers that workflow every 3.5-5 hours whatever cron it declares |
+| `INGESTION_STALL_THRESHOLD_MS` | how much ingestion silence the in-process monitor treats as stalled. Default 10800000 (180 minutes), matching the endpoint's own default. A full drain is bounded by the two-hour cycle, so anything under about three hours is ordinary |
 | `SUBMISSION_CUTOVER_MODE` | submission migration fence: `off`, `drain`, or `freeze`; unset is `off`, and any other nonempty value fails closed to effective `freeze` |
 | `LITOS_ATS_API_SUBMISSION_ENABLED` | set to literal `true` only when employer-authorized ATS submission channels may POST applications |
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
@@ -330,6 +332,20 @@ fresh current-drain proof to count, so a preserved stale row cannot satisfy the 
 worker sleeps for two hours only after a successful complete drain. Configure an external alert on
 the age of the last `complete_drain` log, because a failed drain intentionally retries rather than
 declaring success.
+
+That alert is `/internal/job-monitor/ingestion-health`, and the process that watches it runs inside
+the **API** service, not the worker. This is deliberate: on 2026-09-01 the worker sat in a
+logo-verification retry loop reporting SUCCESS and polling nothing for seven and a half hours, so a
+check hosted inside the worker would have been wedged by the loop it was meant to report. The API
+samples the board every `INGESTION_STALL_CHECK_INTERVAL_MS`, logs `ingestion_stall_alert` with
+`alert: true` on every stalled sample, and keeps what it observed for twelve hours so that a stall
+which begins and ends between two reads is still reported. `ingestion-stall-alert.yml` reads that
+record rather than sampling the board itself, because GitHub delivered every scheduled workflow in
+this repository only five to eight times a day from 2026-08-27 onward regardless of the cron
+declared. Detection latency is the interval above; GitHub notification latency is 3.5-5 hours and
+cannot be improved from that file. The monitor's memory is in-process, so an API restart clears it
+and a multi-replica API would keep one record per replica; an ongoing stall is re-observed within
+one interval either way.
 
 The 500,000-row PostgreSQL 16 benchmark uses 5,000 sources, 60,000 grouped roles, and a cursor at
 90 percent depth. The measured deep posting, searched posting, and grouped cursor queries complete

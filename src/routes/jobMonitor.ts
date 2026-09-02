@@ -96,6 +96,8 @@ import {
 } from '../lib/jobPollScheduler';
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 import { ingestionHealth } from '../lib/ingestionHealth';
+import { readBoardFreshness } from '../lib/boardFreshness';
+import { peekIngestionStallMonitor } from '../lib/ingestionStallMonitor';
 import {
   hasTargeting,
   isRemoteLocation,
@@ -4558,22 +4560,31 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: 'Invalid ingestion-health query', detail: parsed.error.issues });
     }
-    /* No monitor lock. This is a read, and a health check that cannot run while the thing it is
-       watching is busy is a health check that goes quiet exactly when it matters most. */
-    const [row] = await db.select({
-      newest_seen_at: sql<Date | null>`max(${monitored_jobs.last_seen_at})`,
-      active_jobs: sql<number>`count(*)::int`,
-    }).from(monitored_jobs).where(eq(monitored_jobs.is_active, true));
+    /* The read itself lives in lib/boardFreshness because the in-process stall monitor issues the
+       same one. Two copies of this query would eventually disagree about what freshness means. */
+    const row = await readBoardFreshness();
 
     /* The verdict lives in lib/ingestionHealth so its fail-closed branches can be tested without a
        database - a board that has never been polled is the most stalled a board can be, and that
        case is exactly the one an integration test is worst at reaching. */
-    const health = ingestionHealth(row?.newest_seen_at ?? null, parsed.data.threshold_minutes * 60_000);
+    const health = ingestionHealth(row.newest_seen_at, parsed.data.threshold_minutes * 60_000);
+
+    /* WHAT WAS OBSERVED, not just what is true this instant. A caller that reaches this endpoint
+       every few hours cannot see a stall that began and ended between its reads, and GitHub's
+       scheduler has been delivering this repository's crons five to eight times a day since
+       2026-08-27 regardless of the cron declared. The monitor samples continuously inside this
+       process and keeps the record below, so a sparse reader is late rather than blind.
+       `monitor_running: false` means no one is sampling and must read as a failure, not as
+       silence. */
+    const monitor = peekIngestionStallMonitor();
     return reply.send({
       ...health,
       threshold_minutes: parsed.data.threshold_minutes,
-      active_jobs: row?.active_jobs ?? 0,
+      active_jobs: row.active_jobs,
       checked_at: new Date().toISOString(),
+      observed: monitor
+        ? monitor.snapshot()
+        : { monitor_running: false, reason: 'The in-process ingestion stall monitor was never started in this process.' },
     });
   });
 
