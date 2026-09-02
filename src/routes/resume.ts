@@ -93,7 +93,8 @@ import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
-import { canonicalIdentityMatches } from './canonicalApplications';
+import { canonicalApplicationFingerprint, canonicalIdentityMatches } from './canonicalApplications';
+import { isAppliedOrLaterTrackerState } from '../lib/canonicalApplicationLifecycle';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
@@ -1552,11 +1553,42 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             companyName: body.company,
             role: body.role,
           };
+          /* THE ROW SET IS canonical intake's ROW SET, not merely its predicate.
+             upsertCanonicalApplicationForUser matches a canonically fingerprinted row by EXACT
+             fingerprint and reserves identity matching for rows still stamped `legacy:`. Applying the
+             predicate to every live row instead would adopt rows written by the extension and the
+             website - which canonical intake would only ever have matched exactly - so the two would
+             agree on the predicate and disagree on what it is allowed to touch. */
+          const fingerprint = canonicalApplicationFingerprint({
+            jobId: effectiveJobId,
+            portalUrl: canonicalApplicationPortalUrl ?? null,
+            companyScopeKey,
+            role: body.role,
+          });
+          /* A ROW THAT REACHED THE EMPLOYER IS NEVER ADOPTED, AND THIS IS THE ONLY PLACE THAT CAN SAY SO.
+             linkGeneratedPacketToCanonicalApplication sets legacy_generated_resume_id and
+             selected_resume_artifact_id UNCONDITIONALLY - only the three lifecycle columns sit inside
+             its terminalLifecycle CASE - and it then deselects the application_artifacts row that was
+             actually attached. On a submitted row that repoints the Tracker at a resume the employer
+             never received, and authoritativeSubmissionProjection compares exactly those two columns,
+             so the packet that really was sent starts reporting document_tuple_incomplete.
+             The helper cannot be narrowed instead: managedPrepare is its other caller and depends on
+             the current behaviour for a row the caller named explicitly. Implicit adoption is what
+             brings a submitted row into its reach, so the guard belongs here, and it excludes rather
+             than adopts - a posting already with the employer gets its own row and the send path
+             refuses the duplicate on its own terms. */
+          const alreadyWithEmployer = (row: typeof applications.$inferSelect) =>
+            row.submission_state === 'submitted' || isAppliedOrLaterTrackerState(row.tracker_state);
+          const canonicalRow = ownedLive.find((row) => row.application_fingerprint === fingerprint);
+          const adoptable = ownedLive.filter((row) => row.application_fingerprint.startsWith('legacy:')
+            && canonicalIdentityMatches(row, identity));
+          const matches = [canonicalRow, ...adoptable]
+            .filter((row): row is typeof applications.$inferSelect => Boolean(row))
+            .filter((row) => !alreadyWithEmployer(row));
           /* Deterministic, and ranked the way upsertCanonicalApplicationForUser ranks: a row that
              already carries a packet outranks an empty one, and the ordered select breaks the
              remaining tie. Left to `.find` over an unordered select, which row a re-tailor adopted
              was decided by the query plan - in precisely the duplicated state this exists to end. */
-          const matches = ownedLive.filter((row) => canonicalIdentityMatches(row, identity));
           const existing = matches.find((row) => Boolean(row.legacy_generated_resume_id)) ?? matches[0];
           if (existing) {
             /* NOTHING IS WRITTEN TO THE ROW HERE, DELIBERATELY.

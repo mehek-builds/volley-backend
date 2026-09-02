@@ -18,8 +18,8 @@ const artifactVersions = readFileSync('src/lib/resumeArtifactVersions.ts', 'utf8
  * index on (user_id, application_fingerprint) could never collide and the insert always succeeded. */
 
 test('the match is the shared canonical predicate, not a second copy of it', () => {
-  assert.match(resumeRoute, /import \{ canonicalIdentityMatches \} from '\.\/canonicalApplications'/);
-  assert.match(resumeRoute, /ownedLive\.filter\(\(row\) => canonicalIdentityMatches\(row, identity\)\)/);
+  assert.match(resumeRoute, /import \{ canonicalApplicationFingerprint, canonicalIdentityMatches \} from '\.\/canonicalApplications'/);
+  assert.match(resumeRoute, /&& canonicalIdentityMatches\(row, identity\)\)/);
   assert.match(canonical, /export function canonicalIdentityMatches/);
 });
 
@@ -52,8 +52,43 @@ test('canonicalIdentityMatches returns on jobId, then on portalUrl, before compa
  * existing state rather than resetting it. A hand-rolled update alongside it could only duplicate
  * or contradict it - the first cut did both, clearing submission_state and the resume pointers on a
  * row whose prepared hold the link helper then had to reconcile. */
+/* A ROW THAT REACHED THE EMPLOYER IS NEVER ADOPTED.
+ *
+ * linkGeneratedPacketToCanonicalApplication sets legacy_generated_resume_id and
+ * selected_resume_artifact_id UNCONDITIONALLY - only the three lifecycle columns sit inside its
+ * terminalLifecycle CASE - so adopting a submitted row would repoint the Tracker at a resume the
+ * employer never received, and authoritativeSubmissionProjection compares exactly those two columns.
+ * The ranked pick makes this sharper, not softer: it PREFERS a row that already carries a packet,
+ * and a submitted row always has one. */
+test('a row already with the employer is excluded from adoption', () => {
+  assert.match(resumeRoute, /const alreadyWithEmployer = \(row: typeof applications\.\$inferSelect\) =>\s*\n\s*row\.submission_state === 'submitted' \|\| isAppliedOrLaterTrackerState\(row\.tracker_state\)/);
+  assert.match(resumeRoute, /\.filter\(\(row\) => !alreadyWithEmployer\(row\)\)/);
+  // The exclusion must be applied to the candidate set, before the ranked pick.
+  const exclIdx = resumeRoute.indexOf('.filter((row) => !alreadyWithEmployer(row))');
+  const pickIdx = resumeRoute.indexOf('const existing = matches.find');
+  assert.ok(exclIdx > 0 && pickIdx > exclIdx, 'exclusion must precede the pick');
+  // And the helper really does set the document pointers unconditionally - the reason for all this.
+  const setBlock = artifactVersions.slice(
+    artifactVersions.indexOf('const [linked] = await tx.update(applications).set({'),
+    artifactVersions.indexOf('}).where(and('),
+  );
+  assert.match(setBlock, /legacy_generated_resume_id: input\.generatedResumeId,/);
+  assert.match(setBlock, /selected_resume_artifact_id: input\.artifactId,/);
+  assert.doesNotMatch(setBlock.split('tracker_state:')[0], /terminalLifecycle/);
+});
+
+/* Canonical intake matches a canonically fingerprinted row by EXACT fingerprint and reserves
+ * identity matching for rows still stamped `legacy:`. Applying the predicate to every live row
+ * would adopt rows the extension and website created, which intake would only match exactly. */
+test('the candidate row set mirrors canonical intake, not just its predicate', () => {
+  assert.match(resumeRoute, /const canonicalRow = ownedLive\.find\(\(row\) => row\.application_fingerprint === fingerprint\)/);
+  assert.match(resumeRoute, /row\.application_fingerprint\.startsWith\('legacy:'\)/);
+  assert.match(resumeRoute, /canonicalApplicationFingerprint\(\{/);
+  assert.match(canonical, /const adoptable = owned\.filter\(\(row\) =>\s*\n?\s*row\.application_fingerprint\.startsWith\('legacy:'\)/);
+});
+
 test('adoption writes nothing to the row and leaves the link helper to repoint it', () => {
-  const adoptStart = resumeRoute.indexOf('const matches = ownedLive.filter');
+  const adoptStart = resumeRoute.indexOf('const canonicalRow = ownedLive.find');
   // fromIndex: `canonicalApplicationId = randomUUID()` also appears in the earlier resume-only
   // branch, so the adoption branch must be bounded by the NEXT one after the match.
   const branch = resumeRoute.slice(adoptStart, resumeRoute.indexOf('canonicalApplicationId = randomUUID();', adoptStart));
@@ -68,7 +103,7 @@ test('adoption writes nothing to the row and leaves the link helper to repoint i
  * Rewriting them without re-deriving the fingerprint leaves a row whose stored identity names a
  * posting it no longer points at, which canonical intake would then reclaim as a separate row. */
 test('adoption never rewrites the identity the fingerprint is derived from', () => {
-  const adoptStart = resumeRoute.indexOf('const matches = ownedLive.filter');
+  const adoptStart = resumeRoute.indexOf('const canonicalRow = ownedLive.find');
   // fromIndex: `canonicalApplicationId = randomUUID()` also appears in the earlier resume-only
   // branch, so the adoption branch must be bounded by the NEXT one after the match.
   const branch = resumeRoute.slice(adoptStart, resumeRoute.indexOf('canonicalApplicationId = randomUUID();', adoptStart));
@@ -77,7 +112,8 @@ test('adoption never rewrites the identity the fingerprint is derived from', () 
   const code = branch.replace(/\/\*[\s\S]*?\*\//g, '');
   assert.doesNotMatch(code, /job_id:/);
   assert.doesNotMatch(code, /portal_url:/);
-  assert.doesNotMatch(code, /application_fingerprint/);
+  // Assignment form: the branch legitimately READS application_fingerprint to match on it.
+  assert.doesNotMatch(code, /application_fingerprint:/);
 });
 
 /* The read and the write must not interleave with a concurrent generation for this user - which is
