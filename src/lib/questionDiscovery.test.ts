@@ -22,6 +22,7 @@ import {
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  otherLinkAnswer,
   PROVIDER_HANDLE_ONLY_SCRIPT,
   questionRequiresHumanAttention,
   refreshKnownQuestionAnswers,
@@ -4950,4 +4951,131 @@ test('the offer rule does not claim a location choice that mentions return offer
     resolveKnownAnswer('do you have any upcoming offer deadlines?', 'select', { has_outstanding_offers: false }, undefined),
     { value: 'No' },
   );
+});
+
+/* ---- the two Lever profile labels that were stored empty ----
+ *
+ * MEASURED IN PROD 2026-09-02 15:25 UTC on Apollo Research "Product Security Engineer" (Lever,
+ * packet 0a5081aa-ee6f-4733-be63-e83437dfd2e6). Two optional text questions carried EMPTY answers
+ * although the profile held them: "current company org" (Tonee, AI Engineer, September 2025 to
+ * Present, in current_employer) and "other url urls[other]" (the GitHub, which had gone into its
+ * own urls[GitHub] control). Pronouns, location, the essays and the referral on the same packet
+ * were all answered, so both misses were classification, not data.
+ */
+test('"current company org" and its spellings classify as the current employer and answer from the profile', () => {
+  const profile = {
+    current_employer: 'Tonee',
+    most_recent_employer: 'Tonee',
+    employer_history: ['Tonee', 'Previous Co'],
+  };
+  for (const label of [
+    'current company org',
+    'current company',
+    'current org',
+    'current organization',
+    'current organisation',
+    'current employer',
+    'employer',
+    'employer name',
+    'name of employer',
+    'who do you work for',
+    'who do you currently work for?',
+    'where do you currently work?',
+  ]) {
+    assert.equal(classifyField(label), 'current_employer', label);
+    assert.deepEqual(resolveKnownAnswer(label, 'text', profile, undefined), { value: 'Tonee' }, label);
+  }
+});
+
+test('a past employer, a polar question and an attribute of the employer are never the current employer', () => {
+  const profile = { current_employer: 'Tonee', most_recent_employer: 'Tonee' };
+  for (const label of [
+    'previous company',
+    'previous employer',
+    'former employer',
+    'prior organization',
+    'employer history',
+    'may we contact your current employer?',
+    'does your current employer sponsor visas?',
+    'current company website',
+    'current employer email address',
+    'current company size',
+    'current employer title',
+    'previous employer (before your current company)',
+  ]) {
+    assert.notEqual(classifyField(label), 'current_employer', label);
+    const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
+    assert.ok(!(resolved && 'value' in resolved && resolved.value === 'Tonee'), label);
+  }
+});
+
+test('a "current" ask never gets a past employer, unless the label itself admits the most recent one', () => {
+  const leftTonee = { most_recent_employer: 'Previous Co', employer_history: ['Previous Co'] };
+  // No current job on file: the most recent one is a PAST job and "current company" stays empty.
+  assert.equal(classifyField('current company'), 'current_employer');
+  assert.equal(resolveKnownAnswer('current company', 'text', leftTonee, undefined), null);
+  assert.equal(resolveKnownAnswer('current employer', 'text', leftTonee, undefined), null);
+  // The label admits the most recent employer, so the fallback is a true answer.
+  for (const label of ['current employer (or most recent)', 'current or most recent employer', 'current / last company']) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', leftTonee, undefined), { value: 'Previous Co' }, label);
+  }
+  // And with a current job on file the current one wins on those same labels.
+  const both = { current_employer: 'Tonee', most_recent_employer: 'Tonee' };
+  assert.deepEqual(resolveKnownAnswer('current or most recent employer', 'text', both, undefined), { value: 'Tonee' });
+  // "most recent employer" with only a current job on file: the current job is the most recent one.
+  assert.equal(classifyField('most recent employer'), 'most_recent_employer');
+  assert.equal(classifyField('most recent company'), 'most_recent_employer');
+  assert.deepEqual(resolveKnownAnswer('most recent employer', 'text', { current_employer: 'Tonee' }, undefined), { value: 'Tonee' });
+});
+
+test('"other url urls[other]" classifies as the other-link slot and answers the GitHub as the accepted duplicate', () => {
+  const profile = {
+    linkedin_url: 'https://linkedin.com/in/mehekmandal',
+    github_url: 'https://github.com/mehek-builds',
+  };
+  for (const label of ['other url urls[other]', 'other url', 'other website', 'other link', 'urls[other]', 'any other links', 'additional url']) {
+    assert.equal(classifyField(label), 'other_url', label);
+    assert.deepEqual(resolveKnownAnswer(label, 'text', profile, undefined), { value: 'https://github.com/mehek-builds' }, label);
+  }
+  // The Lever links block, in the spelling the run discovers each control under.
+  assert.equal(classifyField('linkedin url urls[linkedin]'), 'linkedin_url');
+  assert.equal(classifyField('github url urls[github]'), 'github_url');
+  assert.equal(classifyField('portfolio url urls[portfolio]'), 'portfolio_url');
+});
+
+test('the other-link slot is empty when the profile has no links, and a named network keeps its own rule', () => {
+  assert.equal(resolveKnownAnswer('other url urls[other]', 'text', {}, undefined), null);
+  assert.equal(resolveKnownAnswer('other website', 'text', { full_name: 'Mehek Mandal' }, undefined), null);
+  // A profile with ONLY a LinkedIn never duplicates it into "other" beside the LinkedIn control.
+  assert.equal(resolveKnownAnswer('other url', 'text', { linkedin_url: 'https://linkedin.com/in/mehekmandal' }, undefined), null);
+  // A portfolio field is the portfolio field, and absent on the profile it stays empty: never GitHub.
+  assert.equal(classifyField('portfolio url'), 'portfolio_url');
+  assert.equal(classifyField('portfolio or other website'), 'portfolio_url');
+  assert.equal(resolveKnownAnswer('portfolio url', 'text', { github_url: 'https://github.com/mehek-builds' }, undefined), null);
+  assert.equal(resolveKnownAnswer('portfolio url urls[portfolio]', 'text', { github_url: 'https://github.com/mehek-builds' }, undefined), null);
+  // A polar question asks whether, not which.
+  assert.notEqual(classifyField('do you have any other links?'), 'other_url');
+});
+
+test('otherLinkAnswer prefers a true link no sibling control has claimed, and falls back to the GitHub', () => {
+  const profile = {
+    linkedin_url: 'https://linkedin.com/in/mehekmandal',
+    github_url: 'https://github.com/mehek-builds',
+    portfolio_url: 'https://mehek.build',
+  };
+  const leverBlock = ['linkedin url urls[linkedin]', 'github url urls[github]', 'portfolio url urls[portfolio]'];
+  // Every link already has a control: the GitHub, as the accepted duplicate.
+  assert.deepEqual(otherLinkAnswer(profile, leverBlock), { value: profile.github_url });
+  // No portfolio control on the form: the portfolio is the link the form lacks a slot for.
+  assert.deepEqual(otherLinkAnswer(profile, ['linkedin url urls[linkedin]', 'github url urls[github]']), { value: profile.portfolio_url });
+  // Only a LinkedIn control, and no portfolio on file: GitHub before LinkedIn.
+  assert.deepEqual(otherLinkAnswer({ linkedin_url: profile.linkedin_url, github_url: profile.github_url }, ['linkedin profile']), { value: profile.github_url });
+  // LinkedIn is never written into "other" beside a LinkedIn control, even when it is the only link.
+  assert.equal(otherLinkAnswer({ linkedin_url: profile.linkedin_url }, ['linkedin url urls[linkedin]']), null);
+  assert.deepEqual(otherLinkAnswer({ linkedin_url: profile.linkedin_url }, ['first name', 'last name']), { value: profile.linkedin_url });
+  // Siblings unseen: GitHub, then the portfolio, never LinkedIn, and nothing from an empty profile.
+  assert.deepEqual(otherLinkAnswer(profile), { value: profile.github_url });
+  assert.deepEqual(otherLinkAnswer({ portfolio_url: profile.portfolio_url, linkedin_url: profile.linkedin_url }), { value: profile.portfolio_url });
+  assert.equal(otherLinkAnswer({ linkedin_url: profile.linkedin_url }), null);
+  assert.equal(otherLinkAnswer({}), null);
 });
