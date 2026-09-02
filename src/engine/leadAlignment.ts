@@ -706,6 +706,43 @@ export function offersRatherThanRequires(clause: string): boolean {
     || statesTermsOfEngagement(main);
 }
 
+/* A STATED PAY FIGURE IS NOT A REQUIREMENT, and this is the compensation half of the same idea as
+ * offersRatherThanRequires: what the role pays is something the employer states, never something an
+ * applicant proves. It exists alongside that function rather than inside it because it is topical,
+ * not grammatical - it reads for a pay noun next to a money amount - and it deliberately stays
+ * NARROW so it never deletes a real ask.
+ *
+ * WHY IT IS NARROW, and measured against the exact trap the module header records twice. The salary
+ * lines that leaked into the ask list were the flavour statesTermsOfEngagement cannot reach because
+ * they do not open with a determiner: "New York: Weekly base salary of 5,800 USD". A topical filter
+ * that keyed off the pay noun alone would have deleted the most role-defining asks of any
+ * compensation, payroll, benefits or finance posting - "Experience with compensation and benefits
+ * administration", "Manage compensation budgets up to $5M" - which is the same class of overreach
+ * that cost real leads before. Two guards keep it off those:
+ *   1. A MONEY AMOUNT must be present: a currency symbol on a digit, or a number carrying a currency
+ *      code or a per-period. A duty ABOUT pay states no figure, so it survives.
+ *   2. A responsibility VERB disqualifies the clause: "manage", "administer", "own", "forecast" and
+ *      the rest name work the applicant does, and a figure inside such a clause is the scope of a
+ *      duty, not the pay on offer. Only a bare declarative figure ("Base salary of $120,000")
+ *      drops out.
+ * Both conditions must hold, so the reachable target is a line whose whole content is "the role
+ * pays X", which no experience bullet could ever be the proof of. */
+const COMPENSATION_PAY_NOUN =
+  /\b(?:base\s+salary|salary|salaries|total\s+compensation|compensation|base\s+pay|pay\s+range|pay\s+rate|hourly\s+rate|stipend|signing\s+bonus|wages?)\b/i;
+const COMPENSATION_MONEY_AMOUNT =
+  /(?:[$£€]\s?\d|\b\d[\d,]*(?:\.\d+)?\s*(?:USD|SGD|GBP|EUR|CAD|AUD|dollars?|per\s+(?:hour|week|month|year|annum)|\/\s*(?:hr|hour|wk|week|mo|month|yr|year)))/i;
+/* A denylist, so a verb missing from it lets a duty slip through and be filtered - which is why the
+   British -ise/-yse spellings sit here beside the American ones (analyse/optimise/organise), along
+   with reconcile, a finance duty verb. Adding a verb only makes the filter MORE conservative (it
+   keeps more asks), so this is the safe direction to err. */
+const COMPENSATION_RESPONSIBILITY_VERB =
+  /\b(?:manage|managing|administer|administering|own|owning|oversee|overseeing|build|building|design|designing|develop|developing|process|processing|handle|handling|negotiate|negotiating|allocate|allocating|track|tracking|report|reporting|analy[sz](?:e|ing)|forecast|forecasting|audit|auditing|calculat(?:e|ing)|review|reviewing|benchmark|benchmarking|run|running|lead|leading|support|supporting|maintain|maintaining|drive|driving|reconcile|reconciling|optimi[sz](?:e|ing)|organi[sz](?:e|ing)|prioriti[sz](?:e|ing))\b/i;
+
+export function statesCompensationAmount(clause: string): boolean {
+  if (COMPENSATION_RESPONSIBILITY_VERB.test(clause)) return false;
+  return COMPENSATION_PAY_NOUN.test(clause) && COMPENSATION_MONEY_AMOUNT.test(clause);
+}
+
 /**
  * The posting's PRIMARY ASKS: the only clauses a lead entry may be justified against.
  *
@@ -769,6 +806,9 @@ export function leadRequirementCandidates(jdText: string, context?: JdContext): 
     if (value.length < 12 || value.length > MAX_REQUIREMENT_CHARS) continue;
     // What the employer gives is not what the applicant must prove. See offersRatherThanRequires.
     if (offersRatherThanRequires(value)) continue;
+    // A stated pay figure ("Weekly base salary of 5,800 USD") is the same kind of thing, reached the
+    // topical way because it does not open with a determiner. See statesCompensationAmount.
+    if (statesCompensationAmount(value)) continue;
     const key = foldForCitation(value);
     if (!key || seen.has(key)) continue;
     seen.add(key);

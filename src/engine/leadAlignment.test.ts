@@ -8,6 +8,7 @@ import {
   offersRatherThanRequires,
   selectJdAlignedLead,
   sharedCitationTerms,
+  statesCompensationAmount,
 } from './leadAlignment';
 import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
@@ -340,6 +341,61 @@ test('a posting that yields no asks rejects a citation quoted from its text', ()
     },
   }, thin);
   assert.match(leadAlignmentIssues(s, thin)[0], /cannot cite a lead requirement/);
+});
+
+/* A STATED PAY FIGURE IS NOT AN ASK. Measured live 2026-09-02 on the Hudson River Trading
+ * internship: "New York: Weekly base salary of 5,800 USD" and the benefits sentence were extracted
+ * as primary asks, so the model was told to rank the applicant's evidence against the pay the role
+ * offers. statesCompensationAmount drops the amount-bearing lines; it is deliberately NARROW, so it
+ * never deletes a real requirement OF the applicant, including comp/HR/finance duties that mention
+ * money (which the module header's two reverts show is the failure mode to avoid). */
+test('statesCompensationAmount fires on a stated pay figure', () => {
+  for (const line of [
+    'New York: Weekly base salary of 5,800 USD',
+    'Singapore: Weekly base salary of 7,650 SGD',
+    'The annual base salary for this position is $225,000.',
+    'Compensation: $120,000 - $150,000 per year',
+    'Hourly rate: $30/hr',
+    'Stipend of 2,000 USD per month',
+  ]) {
+    assert.equal(statesCompensationAmount(line), true, line);
+  }
+});
+
+test('statesCompensationAmount never deletes a requirement that merely mentions money or pay', () => {
+  for (const line of [
+    'Programming experience in Python, C or C++ is required',
+    '5+ years of software engineering experience',
+    'Manage a $5M engineering budget',
+    'Experience with compensation and benefits administration',
+    'Design payroll systems processing $2M monthly',
+    'Administer 401(k) plans with $50M in assets',
+    'Negotiate salaries for new hires',
+    'Manage compensation budgets up to $5M',
+    'Forecast total compensation costs across 500 employees',
+    'Own the compensation platform used by 3M users',
+    'Build pay-per-click ad systems',
+    // British spellings must not slip a comp/finance duty through the denylist.
+    'Analyse salary trends against $50k market benchmarks',
+    'Reconcile payroll and compensation ledgers up to $2M',
+  ]) {
+    assert.equal(statesCompensationAmount(line), false, line);
+  }
+});
+
+test('a stated pay figure is dropped from the asks while every real requirement stays', () => {
+  const jd = [
+    'What you will do',
+    'Ship features to production with a small team',
+    'Requirements',
+    'Programming experience in Python, C or C++ is required',
+    'A passion for writing elegant, readable, efficient code',
+    'Compensation',
+    'New York: Weekly base salary of 5,800 USD',
+  ].join('\n');
+  const asks = leadRequirementCandidates(jd);
+  assert.ok(!asks.some((a) => /base salary|5,800/i.test(a)), 'a stated pay figure leaked into the asks');
+  assert.ok(asks.some((a) => /Python, C or C\+\+/.test(a)), 'the real programming requirement was lost');
 });
 
 test('evidence the lead entry does not hold is rejected, even when it is a real bullet elsewhere', () => {
