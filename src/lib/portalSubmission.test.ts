@@ -4724,9 +4724,11 @@ test('Workable phone evidence actions are all optional, value-free, and bounded'
   const telProbe = actions.find((item) => item.label === 'phone_evidence:tel_inputs');
   assert.equal(telProbe?.requireVisible, true);
   assert.equal(container?.requireVisible, undefined);
-  // The cookie boundary rides ahead of the probes, or a fresh consent dialog hides the whole form.
-  assert.equal(actions[0]?.label, 'workable_cookie_preflight');
-  assert.equal(actions[1]?.label, 'workable_application_form_ready');
+  // The cookie boundary rides ahead of the probes, or a fresh consent dialog hides the whole form:
+  // the form-ready wait first (the proof the client-rendered app has mounted), then the decline,
+  // which can only find the dialog once the app is there.
+  assert.equal(actions[0]?.label, 'workable_application_form_ready');
+  assert.equal(actions[1]?.label, 'workable_cookie_preflight');
 });
 
 test('structural evidence redaction strips values and text while keeping the diagnosis', () => {
@@ -5257,11 +5259,77 @@ test('Workable opens the exact application route and clears optional-cookie over
   const actions = buildManagedPortalActions('workable', capturePacket, true);
   const declineIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight');
   const readyIndex = actions.findIndex((action) => action.label === 'workable_application_form_ready');
+  const clearedIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight_cleared');
   const firstNameIndex = actions.findIndex((action) => action.label === 'first_name');
   assert.ok(declineIndex >= 0, 'Workable must dismiss the cookie overlay without accepting optional cookies');
   assert.equal(actions[declineIndex]?.selector, 'button:has-text("Decline all")');
-  assert.ok(readyIndex > declineIndex, 'Workable must wait for the candidate form after cookie preflight');
-  assert.ok(firstNameIndex > readyIndex, 'Workable form readiness must precede fixed-field filling');
+  assert.equal(actions[declineIndex]?.optional, true);
+  /* MEASURED 2026-09-02, EQL Tech application 9bbf3ba1, two runs: the decline used to sit at index
+   * 0, before the form-ready wait, on a client-rendered shell reached with domcontentloaded. Its
+   * optional pre-check matched nothing because the app had not mounted, the consent dialog then
+   * mounted with the form, and its backdrop took the first pointer action (phone_country_open,
+   * `locator.click: Timeout 30000ms exceeded.`). The form is the proof the app has mounted, so it
+   * comes first, the decline second, and a required cleared barrier third. */
+  assert.ok(readyIndex >= 0 && readyIndex < declineIndex,
+    'Workable must wait for the candidate form BEFORE the cookie preflight, or the decline matches nothing');
+  assert.ok(clearedIndex > declineIndex, 'the cleared barrier follows the decline');
+  assert.equal(actions[clearedIndex]?.type, 'waitForSelector');
+  assert.equal(actions[clearedIndex]?.optional, false, 'a consent dialog that stays up must fail closed under its own name');
+  assert.equal(
+    actions[clearedIndex]?.selector,
+    'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))',
+  );
+  assert.ok(firstNameIndex > clearedIndex, 'Workable form readiness and the cleared overlay must precede fixed-field filling');
+});
+
+test('Workable clears the consent overlay before its first pointer action on the fill, submit and discovery plans', () => {
+  const packet = { ...capturePacket, phone: '+1 213 555 0100' };
+  const plans = {
+    fill: buildManagedPortalActions('workable', packet),
+    submit: buildManagedPortalActions('workable', packet, true, 'https://apply.workable.com/eqltech/j/82B0C510DF/apply'),
+    discovery: buildManagedDiscoveryActions('workable', packet),
+  };
+  for (const [name, actions] of Object.entries(plans)) {
+    const readyIndex = actions.findIndex((action) => action.label === 'workable_application_form_ready');
+    const declineIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight');
+    const clearedIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight_cleared');
+    const openerIndex = actions.findIndex((action) => action.label === 'phone_country_open');
+    const firstPointerIndex = actions.findIndex((action) => action.type === 'click' && action.label !== 'workable_cookie_preflight');
+    assert.ok(readyIndex >= 0 && declineIndex > readyIndex && clearedIndex > declineIndex, `${name}: ready, decline, cleared, in that order`);
+    assert.ok(openerIndex > clearedIndex, `${name}: the phone country opener runs behind the cleared barrier`);
+    assert.equal(firstPointerIndex, openerIndex, `${name}: the opener is the first pointer action, and nothing clicks before the barrier`);
+    // The barrier is the last thing before the fixed fields, and nothing mutates ahead of it.
+    const firstMutationIndex = actions.findIndex((action) =>
+      ['fill', 'fillByLabelText', 'upload', 'select', 'press', 'confirmAndSubmit'].includes(action.type));
+    assert.ok(firstMutationIndex > clearedIndex, `${name}: no employer-page mutation before the cleared barrier`);
+  }
+});
+
+test('the Workable preflight barrier survives every budget trim', () => {
+  const packet = {
+    ...capturePacket,
+    phone: '+1 213 555 0100',
+    questions: Array.from({ length: 100 }, (_, index) => ({
+      question: `Why are you interested in area ${index + 1}?`,
+      answer: `Grounded answer ${index + 1}`,
+    })),
+  };
+  const plans = {
+    fill: buildManagedPortalActions('workable', packet),
+    submit: buildManagedPortalActions('workable', packet, true),
+    discovery: buildManagedDiscoveryActions('workable', packet),
+  };
+  for (const [name, actions] of Object.entries(plans)) {
+    assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${name} exceeded the managed action budget`);
+    const labels = actions.map((action) => action.label);
+    const readyIndex = labels.indexOf('workable_application_form_ready');
+    const declineIndex = labels.indexOf('workable_cookie_preflight');
+    const clearedIndex = labels.indexOf('workable_cookie_preflight_cleared');
+    assert.ok(readyIndex >= 0, `${name} lost the form-ready wait to the trim`);
+    assert.ok(declineIndex > readyIndex, `${name} lost or moved the cookie decline`);
+    assert.ok(clearedIndex > declineIndex, `${name} lost or moved the cleared barrier`);
+    assert.equal(actions[clearedIndex]?.optional, false, `${name}: the barrier must still fail closed after the trim`);
+  }
 });
 
 test('direct Workable preparation reaches the same form and declines optional cookies', async () => {
@@ -5289,10 +5357,11 @@ test('direct Workable preparation reaches the same form and declines optional co
   await navigateToApplicationForm(fakePage, 'workable');
 
   assert.equal(currentUrl, 'https://apply.workable.com/mercari/j/EC5A1078C4/apply');
+  // Ready first, then decline: the same order as the managed preflight, for the same reason.
   assert.deepEqual(events, [
     'goto:https://apply.workable.com/mercari/j/EC5A1078C4/apply',
-    'decline',
     'ready',
+    'decline',
   ]);
 });
 

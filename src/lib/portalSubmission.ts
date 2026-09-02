@@ -4911,7 +4911,10 @@ function isProtectedManagedAction(
   //
   // Workable's form-ready barrier is also a required wait, and the final cookie decline and cleared
   // barrier belong to the same protected sequence: dropping either one can strand a fresh
-  // pointer-intercepting cookie overlay directly in front of the phone country control.
+  // pointer-intercepting cookie overlay directly in front of the phone country control. The
+  // preflight cleared barrier is protected for the same reason at the other end of the plan: it is
+  // what keeps that overlay from stopping the very first pointer action (see
+  // pushWorkableManagedPreflightActions).
   // resume_upload_verify is protected as a required evidence read one step further along: it says
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
@@ -4920,7 +4923,7 @@ function isProtectedManagedAction(
   // they are tolerant corroboration behind the strict pre-upload proofs, and under budget pressure
   // giving one of them up is strictly better than blocking a submit or giving up a reviewed
   // answer. managedResultFilledFields treats their absence as the ordinary remounted-widget case.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|preflight_cleared|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
     .test(label);
 }
 
@@ -5475,7 +5478,51 @@ export function managedApplicationUsesAtomicSubmitV4(
   }
 }
 
+/* THE CONSENT DIALOG IS DECLINED AFTER THE APP HAS MOUNTED, NOT BEFORE, and the order is the fix.
+ *
+ * MEASURED 2026-09-02 00:59:52Z and 01:00:31Z, EQL Tech application 9bbf3ba1 on apply.workable.com,
+ * two consecutive managed runs (the discovery pass, then the prepare fill): stratus 502
+ * SANDBOX_RUN_FAILED `locator.click: Timeout 30000ms exceeded.`, runProgress action index 9,
+ * label phone_country_open, 33 seconds per run. A click TIMEOUT is not a missing element (that
+ * refuses as `found 0`): the opener matched exactly once and never became actionable, which in
+ * Playwright means something else took the pointer at its centre for the whole 30 seconds.
+ *
+ * What sits there, read from Workable's careers bundle (ui.v2026.31.0, careers.320235cb522085e6.js):
+ * the shell renders its cookie-consent component whenever no consent cookie exists, with `backdrop`
+ * defaulting to true, so a fresh sandbox context gets `div[role="dialog"][data-ui="cookie-consent"]
+ * [aria-modal="true"]` plus a full-page `div[data-ui="backdrop"]` and a focus trap on every apply
+ * page. Its gate (a `gtm` config with auth, env and id, and `cookieConsentDisabled` not true) is
+ * Workable's own hardcoded GTM container and the account default, so this is every tenant.
+ *
+ * Why the decline queued at index 0 since 7739c7d could never see it: the apply page is a
+ * client-rendered shell (a 7.8KB document holding only the loader cube) and browserbase.ts
+ * navigates with waitUntil 'domcontentloaded', after which stratus enters the action loop with no
+ * settle. The React boot awaits its config and locale promises past DOMContentLoaded, so at the
+ * instant the optional decline is pre-checked the document holds no "Decline all" button, the
+ * runner records `workable_cookie_preflight: nothing matched` and moves on, and the dialog mounts
+ * with the form a moment later. The fills after it are all optional and cannot stop the run, and
+ * Playwright's fill and press check visibility and editability but never pointer interception; the
+ * first pointer action in the plan is the phone country opener, and it is the first thing the
+ * backdrop stops. The terminal boundary (pushWorkableManagedPhoneTerminalActions) already knew
+ * this dialog intercepts the pointer; it stands at the END of the plan and cannot help the fixed
+ * fields.
+ *
+ * So: wait for the form first (the proof the app has mounted, and the consent dialog mounts in the
+ * shell around it), THEN decline, THEN require the overlay gone before anything that clicks. The
+ * cleared wait is REQUIRED, exactly like workable_cookie_final_cleared: a dialog that stays up
+ * would otherwise cost 30 seconds at the opener and an opaque sentence about a click, while this
+ * costs at most MANAGED_FILL_TIMEOUT_MS and fails with the overlay's own name. It matches the
+ * moment no dialog and no backdrop exist, so a page that never shows the dialog passes at once.
+ * NOTHING IS WEAKENED: the decline stays optional and the form-ready wait stays optional, exactly
+ * as before; only their order changed and a barrier was added. */
 function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
+    label: 'workable_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
   actions.push({
     type: 'click',
     selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
@@ -5485,9 +5532,9 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   });
   actions.push({
     type: 'waitForSelector',
-    selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
-    label: 'workable_application_form_ready',
-    optional: true,
+    selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
+    label: 'workable_cookie_preflight_cleared',
+    optional: false,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
 }
@@ -5823,17 +5870,20 @@ export function buildWorkablePhoneEvidenceActions(): ManagedBrowserAction[] {
     ...(requireVisible ? { requireVisible } : {}),
   });
   return [
-    {
-      type: 'click',
-      selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
-      label: 'workable_cookie_preflight',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    },
+    // Same order as pushWorkableManagedPreflightActions, for the same reason: the decline can only
+    // find the dialog once the app has mounted, and the form is the proof of that. No required
+    // cleared barrier here, because an evidence run must always come home.
     {
       type: 'waitForSelector',
       selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
       label: 'workable_application_form_ready',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+    {
+      type: 'click',
+      selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
+      label: 'workable_cookie_preflight',
       optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
@@ -9275,14 +9325,17 @@ export async function navigateToApplicationForm(page: Page, portal: SupportedPor
     if (destination !== currentUrl && detectPortal(destination) === 'workable') {
       await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     }
+    // Form first, then the decline. The page is a client-rendered shell behind a domcontentloaded
+    // goto, so a decline checked before the app has mounted matches nothing and the consent
+    // dialog then stands over the form (see pushWorkableManagedPreflightActions).
+    await page.locator(WORKABLE_APPLICATION_FORM_READY_SELECTOR).first()
+      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+      .catch(() => undefined);
     const declineOptionalCookies = page.locator(WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR).first();
     if ((await declineOptionalCookies.count()) > 0
       && (await declineOptionalCookies.isVisible().catch(() => false))) {
       await declineOptionalCookies.click().catch(() => undefined);
     }
-    await page.locator(WORKABLE_APPLICATION_FORM_READY_SELECTOR).first()
-      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
-      .catch(() => undefined);
     return;
   }
   if (portal !== 'smartrecruiters') return;
