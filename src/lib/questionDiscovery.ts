@@ -16,6 +16,7 @@ import {
 } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
 import {
+  collectCurrencies,
   detectCurrency,
   findStatedRanges,
   statedRangeInLabel,
@@ -440,10 +441,33 @@ const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later
  * sponsorship" is its own frame because a petition is filed BY an employer, never by a candidate.
  * And sponsorship "independently" or "on your own" asks whether she already HOLDS one, which is a
  * different fact from needing one; needs_sponsorship cannot answer it either. */
+/* WIDENED AGAIN 2026-09-02 (round 4), after a probe answered "Yes" to nine more of both shapes.
+ *
+ * PAST: the subject list read "did you" and "did your", so "in your last role in the united states,
+ * did AN employer need to sponsor you?" walked straight past it, as did "were you required to
+ * obtain sponsorship for your us internship last summer?" and "when you worked in the united states
+ * before, did anyone need to sponsor you?". Each of those is a question about a history
+ * needs_sponsorship does not record, and "Yes" to it is a claim she has never made. Six of the nine
+ * answered even with no posting country supplied, and two answered on the scoped authority path.
+ *
+ * THIRD PARTY: the noun list was a list of the people an employer sponsors, and every noun it did
+ * not happen to carry - interns, contractors, researchers, a workforce, nationals - reached the
+ * commencement arm. The adjective allowance of two words was beaten by three ("the company's
+ * international employees", "our overseas engineering team members"), and a possessive apostrophe
+ * broke the \w+ filler outright. The filler now takes four tokens and allows an apostrophe, and the
+ * nouns cover the ordinary words for other people at work. The list is still a convenience: what
+ * makes the rule safe is that these labels ask about somebody who is not this applicant, so a
+ * miss fails toward answering and every miss found is pinned as a test. */
 const THIRD_PARTY_SPONSORSHIP_SUBJECT_SRC =
-  String.raw`(?:for|of|to|on behalf of)\s+(?:\w+\s+){0,2}(?:direct reports?|reports|colleagues?|(?:new )?hires?|employees?|team members?|staff|candidates?|clients?|spouse|dependents?|family members?|partner|someone else|another person|others)\b`;
+  String.raw`(?:for|of|to|on behalf of)\s+(?:[\w'’-]+\s+){0,4}(?:direct reports?|reports|colleagues?|(?:new )?hires?|employees?|team members?|teams?|staff|personnel|workforce|workers?|candidates?|clients?|customers?|interns?|contractors?|subcontractors?|consultants?|freelancers?|temps?|apprentices?|trainees?|graduates?|students?|volunteers?|researchers?|scientists?|engineers?|developers?|designers?|analysts?|associates?|professionals?|specialists?|technicians?|nationals?|spouse|dependents?|family members?|partner|someone else|another person|others)\b`;
 const PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME = new RegExp(
   String.raw`\b(?:have you ever|had you|did you|did your|has (?:a|any|your) (?:prior |previous |former |past |current |last )?employer|(?:prior|previous|former|past|last) employer|previously|in the past|ever (?:been|required|needed|had|received)|been sponsored)\b`
+  + String.raw`|\bdid\s+(?:an|any|anyone|another|someone|somebody)\b`
+  + String.raw`|\b(?:in|at|during|from|for|on)\s+your\s+(?:last|previous|prior|former|past|earlier)\s+(?:role|job|position|internship|placement|employment|employer)\b`
+  + String.raw`|\b(?:last|previous|prior|former|past)\s+(?:summer|autumn|fall|winter|spring|year|semester|term|internship|placement|role|job|position)\b`
+  + String.raw`|\bwhen\s+you\s+(?:worked|studied|interned|were)\b`
+  + String.raw`|\bbefore\b[^?]{0,20}\bdid\b`
+  + String.raw`|\bwere\s+you\s+(?:ever\s+)?(?:required|sponsored|asked|obliged|obligated)\b`
   + String.raw`|\b${THIRD_PARTY_SPONSORSHIP_SUBJECT_SRC}`
   + String.raw`|\bpetitions?\s+for\s+sponsorship\b`
   + String.raw`|\byour\s+(?:\w+\s+){0,2}(?:spouse|dependents?|family members?|partner)\b`
@@ -2824,12 +2848,18 @@ const PAY_NOUN_SRC = String.raw`salar(?:y|ies)|compensation|pay|remuneration|wag
 /* The nouns a pay word can modify. "expected salary currency" asks which currency, "expected salary
  * range" asks for two numbers; a single median answers neither. */
 const PAY_QUALIFYING_NOUN_SRC =
-  String.raw`currenc(?:y|ies)|structure|equity|stock|bonus(?:es)?|frequenc(?:y|ies)|schedule|range`;
+  String.raw`currenc(?:y|ies)|structure|equity|stock|bonus(?:es)?|frequenc(?:y|ies)|schedule|range|bands?|brackets?`;
 /* "range" is here as well as in the qualifying nouns above, because a label can ask for one at a
  * distance from the noun it qualifies: "expected salary (please state a range)" reads as an
- * expectation of salary right up to the parenthesis, and a single median is not a range. */
+ * expectation of salary right up to the parenthesis, and a single median is not a range.
+ *
+ * "band" and "bracket" are a range under another name, and both are ordinary wording on a European
+ * form: "expected salary band" and "expected salary bracket" each took TixTrack's median as if it
+ * were one band (probe, 2026-09-02). "Gross or net?" is a third shape of the same defect: the field
+ * wants to be told WHICH basis is being quoted, and a gross annual median typed into it says
+ * nothing about which of the two it is. */
 const NON_FIGURE_SALARY_ASK =
-  /\b(?:currenc(?:y|ies)|structure|equity|stock|bonus(?:es)?|frequenc(?:y|ies)|schedule|ranges?)\b/i;
+  /\b(?:currenc(?:y|ies)|structure|equity|stock|bonus(?:es)?|frequenc(?:y|ies)|schedule|ranges?|bands?|brackets?)\b|\b(?:gross|net)\b\s*(?:or|vs\.?|versus|\/)\s*\b(?:gross|net)\b/i;
 const EXPECTED_SALARY_QUESTION = new RegExp(
   String.raw`\b(?:${EXPECTATION_SRC})\b(?:\s+\w+){0,2}\s+\b(?:${PAY_NOUN_SRC})\b(?!\s+(?:${PAY_QUALIFYING_NOUN_SRC})\b)`
   + String.raw`|\b(?:${PAY_NOUN_SRC})\b\s+\b(?:${EXPECTATION_SRC})\b`,
@@ -2850,31 +2880,190 @@ const OPEN_SALARY_CONTROL = /^(?:text|textarea|number)?$/i;
  * holds too: "expected salary (usd)" against a description stating "£45,000 - £55,000".
  *
  * So a currency named in the label must be the range's own currency (a bare "$" range is USD), and
- * a pay period named in the label must also be named by the range's own context. Neither check can
- * refuse the plain label the fill exists for: "what are your salary expectations for this position?"
- * names no currency and no period, so both arms pass it through. */
+ * a pay period named in the label must be the period the range itself was stated in. Neither check
+ * can refuse the plain label the fill exists for: "what are your salary expectations for this
+ * position?" names no currency and no period, so both arms pass it through.
+ *
+ * THE UNIT HAS TO BE PROVED, NOT MERELY LEFT UNCONTRADICTED. Round 3 wrote both arms as "refuse on
+ * a unit I can see is different", and an adversarial probe of 128 cases (2026-09-02) took twenty of
+ * them apart from the other side: a unit the reader CANNOT SEE is not a unit that agrees.
+ *
+ *   - detectCurrency returns null for three different label shapes and round 3 skipped the currency
+ *     comparison for all three. "expected salary" names no currency (fill). "expected salary in
+ *     kronor" names one the four-word table does not carry, as do swedish krona, rupees, yen,
+ *     zloty, canadian dollars, australian dollars, bare pounds and bare francs. "expected salary
+ *     (gbp or eur)" and "expected salary, state in eur or sek" name TWO. Eleven such labels took
+ *     TixTrack's US median. Every one of them now refuses, and the vocabulary below is a
+ *     convenience rather than the guard: a currency-shaped token this file cannot resolve to
+ *     exactly one code refuses just as a mismatched one does, so a currency nobody has thought of
+ *     yet fails closed.
+ *   - PAY_PERIOD_PATTERNS carried four periods, so "expected biweekly salary" (the hyphenated
+ *     spelling was caught, the unhyphenated one was not), fortnightly, per fortnight, quarterly and
+ *     per pay period all read as "no period named" and took an ANNUAL figure.
+ *   - Worst of the three, the period arm accepted a period word found ANYWHERE in the 200-character
+ *     window rather than one qualifying the range. "Base annual salary range of $130,000 - $150,000,
+ *     paid out monthly." answered "expected monthly salary" with 140000, a twelve-fold
+ *     overstatement, and so did an annual range in a description that merely reviews performance
+ *     monthly or states a 40-hour week. The period is now read from the SENTENCE the range was
+ *     written in, and a sentence naming two periods is unreadable rather than agreeable. */
 const BARE_DOLLAR_RANGE = /(?:^|[^a-z])\$/i;
-const PAY_PERIOD_PATTERNS: readonly RegExp[] = [
-  /\bper\s+hour\b|\bhourly\b|\ban\s+hour\b|\/\s*(?:hr|hour)\b|\bp\/h\b/i,
-  /\bper\s+day\b|\bdaily\b|\ba\s+day\b|\/\s*day\b|\bper\s+diem\b/i,
-  /\bper\s+week\b|\bweekly\b|\ba\s+week\b|\/\s*(?:wk|week)\b|\bpart-?\s?time\s+hours\b|\bh\s*\/\s*week\b|\bhours?\s*\/\s*week\b|\bhours\s+per\s+week\b/i,
-  /\bper\s+month\b|\bmonthly\b|\ba\s+month\b|\/\s*(?:mo|month)\b/i,
+
+/* THE PERIODS A LABEL OR A RANGE CAN BE STATED IN, most specific spelling first: "semi-monthly"
+ * contains "monthly" and "bi-weekly" contains "weekly", so each pattern consumes its matches before
+ * the next one reads what is left. */
+type PayPeriod = 'hour' | 'day' | 'week' | 'biweek' | 'semimonth' | 'month' | 'quarter' | 'year' | 'pay period';
+const PAY_PERIOD_VOCABULARY: ReadonlyArray<readonly [PayPeriod, RegExp]> = [
+  ['semimonth', /\bsemi-?monthly\b|\btwice\s+(?:a|per)\s+month\b|\bbi-?monthly\b/gi],
+  ['biweek', /\bbi-?weekly\b|\bfortnight(?:ly)?\b|\bevery\s+(?:two|2)\s+weeks\b/gi],
+  ['pay period', /\bper\s+pay\s+(?:period|cycle|check)\b|\bpay\s+(?:period|cycle)\b|\bper\s+paycheck\b/gi],
+  ['hour', /\bper\s+hour\b|\bhourly\b|\ban\s+hour\b|\/\s*(?:hr|hour)\b|\bp\/h\b/gi],
+  ['day', /\bper\s+day\b|\bdaily\b|\ba\s+day\b|\/\s*day\b|\bper\s+diem\b/gi],
+  ['week', /\bper\s+week\b|\bweekly\b|\ba\s+week\b|\/\s*(?:wk|week)\b|\bpart-?\s?time\s+hours\b|\bh\s*\/\s*week\b|\bhours?\s*\/\s*week\b|\bhours\s+per\s+week\b/gi],
+  ['month', /\bper\s+month\b|\bmonthly\b|\ba\s+month\b|\/\s*(?:mo|month)\b|\bper\s+calendar\s+month\b|\bpcm\b/gi],
+  ['quarter', /\bquarterly\b|\bper\s+quarter\b/gi],
+  ['year', /\bannual(?:ly|i[sz]ed)?\b|\bper\s+(?:year|annum)\b|\byearly\b|\ba\s+year\b|\/\s*(?:yr|year|annum)\b|\bp\.a\.\b/gi],
 ];
+function payPeriodsIn(text: string): Set<PayPeriod> {
+  const found = new Set<PayPeriod>();
+  let rest = text;
+  for (const [period, pattern] of PAY_PERIOD_VOCABULARY) {
+    const stripped = rest.replace(pattern, ' ');
+    if (stripped === rest) continue;
+    found.add(period);
+    rest = stripped;
+  }
+  return found;
+}
+
+/* A range means what the sentence it was written in says it means, and nothing a later sentence
+ * says about performance reviews or working hours can change that. The split keeps a decimal
+ * intact ("$20.50 - $25.50" is one number twice, not two sentences) and treats a newline and a
+ * semicolon as ends, because a description states two cities' ranges on one line as often as on
+ * two. */
+const SENTENCE_END = /(?<=[.;!?\n])(?!\d)/;
+function splitIntoSentences(text: string): string[] {
+  return text.split(SENTENCE_END);
+}
+function sentenceAt(text: string, index: number): string {
+  let start = 0;
+  for (const sentence of splitIntoSentences(text)) {
+    const end = start + sentence.length;
+    if (index < end) return sentence;
+    start = end;
+  }
+  return text;
+}
+function rangeKey(range: StatedRange): string {
+  return `${range.min}:${range.max}:${range.currency ?? ''}`;
+}
 function rangeCurrencyOf(range: StatedRange, context: string): string | null {
   if (range.currency) return range.currency;
   return BARE_DOLLAR_RANGE.test(context) ? 'USD' : detectCurrency(context);
 }
-/* The label's unit against the unit the range was stated in. `context` is the text the range was
- * read out of: the label itself for a label-range, the description window for a jd-range. */
-function labelUnitMatchesRange(label: string, context: string, range: StatedRange): boolean {
-  const labelCurrency = detectCurrency(label);
-  if (labelCurrency) {
-    const rangeCurrency = rangeCurrencyOf(range, context);
-    /* An unmarked range beside a label that names a currency cannot be shown to be in that
-     * currency, and a figure typed into a currency-named field claims it is. Held. */
-    if (rangeCurrency !== labelCurrency) return false;
+/* The period the RANGE was stated in: the one named by the sentence that states it. `null` is a
+ * range stated with no period at all; 'unreadable' is a sentence naming two of them, or a range
+ * this function could not find a sentence for, and both of those refuse. */
+function rangePeriodOf(context: string, range: StatedRange): PayPeriod | 'unreadable' | null {
+  const key = rangeKey(range);
+  const stating = splitIntoSentences(context)
+    .filter((sentence) => findStatedRanges(sentence).some((found) => rangeKey(found) === key));
+  if (stating.length === 0) return 'unreadable';
+  const periods = new Set<PayPeriod>();
+  for (const sentence of stating) for (const period of payPeriodsIn(sentence)) periods.add(period);
+  if (periods.size > 1) return 'unreadable';
+  return periods.size === 1 ? [...periods][0]! : null;
+}
+
+/* THE CURRENCIES A LABEL NAMES, counted rather than identified. A pair maps to a code where one
+ * code is right and to null where the name covers several ("kronor" is Swedish, Norwegian, Danish
+ * and Icelandic; a bare "dollars" or "pounds" or "francs" names a family, not a currency), and a
+ * null is treated exactly like a mismatch. Qualified names come first so the bare entries below
+ * only ever read what is left. */
+const LABEL_CURRENCY_WORDS: ReadonlyArray<readonly [RegExp, string | null]> = [
+  [/\b(?:us|u\.s\.|united\s+states|american)\s+dollars?\b/gi, 'USD'],
+  [/\bcanadian\s+dollars?\b/gi, 'CAD'],
+  [/\baustralian\s+dollars?\b/gi, 'AUD'],
+  [/\bnew\s+zealand\s+dollars?\b/gi, 'NZD'],
+  [/\bsingapore(?:an)?\s+dollars?\b/gi, 'SGD'],
+  [/\bhong\s+kong\s+dollars?\b/gi, 'HKD'],
+  [/\bswedish\s+kron(?:or|a|er)\b/gi, 'SEK'],
+  [/\bnorwegian\s+kron(?:er|e|or)\b/gi, 'NOK'],
+  [/\bdanish\s+kron(?:er|e|or)\b/gi, 'DKK'],
+  [/\b(?:pounds?\s+sterling|british\s+pounds?)\b/gi, 'GBP'],
+  [/\bswiss\s+francs?\b/gi, 'CHF'],
+  [/\bjapanese\s+yen\b|\byen\b/gi, 'JPY'],
+  [/\beuros?\b/gi, 'EUR'],
+  [/\bdirhams?\b/gi, 'AED'],
+  [/\brupees?\b/gi, 'INR'],
+  [/\bzlot(?:y|ych)\b/gi, 'PLN'],
+  [/\bkorean\s+won\b/gi, 'KRW'],
+  [/\bshekels?\b/gi, 'ILS'],
+  [/\bringgit\b/gi, 'MYR'],
+  [/\bbaht\b/gi, 'THB'],
+  [/\bforint\b/gi, 'HUF'],
+  [/\bkorun(?:a|y)?\b/gi, 'CZK'],
+  [/\bnaira\b/gi, 'NGN'],
+  [/\brands?\b/gi, 'ZAR'],
+  [/\bbrazilian\s+reais\b|\breais\b/gi, 'BRL'],
+  // Names that no single code answers. Each of these refuses exactly as a wrong code does.
+  [/\bkron(?:or|a|e|er)\b/gi, null],
+  [/\bdollars?\b/gi, null],
+  [/\bpounds?\b/gi, null],
+  [/\bfrancs?\b/gi, null],
+  [/\bpesos?\b/gi, null],
+  [/\bdinars?\b/gi, null],
+  [/\briyals?\b/gi, null],
+  [/\brupiah\b/gi, null],
+  [/\bcrowns?\b/gi, null],
+  [/\bshillings?\b/gi, null],
+  [/\blir[ae]\b/gi, null],
+];
+/* A currency symbol this file cannot resolve is still a currency the label named. */
+const UNREADABLE_CURRENCY_SYMBOL = /[¥₽₱₫฿₴₦₡₲₸₾₼﷼]|\bzł|\bkr\b|\bR\$/i;
+function currenciesNamedInLabel(label: string): { codes: Set<string>; unreadable: boolean } {
+  const codes = new Set<string>(collectCurrencies(label));
+  let unreadable = false;
+  let rest = label;
+  for (const [pattern, code] of LABEL_CURRENCY_WORDS) {
+    const stripped = rest.replace(pattern, ' ');
+    if (stripped === rest) continue;
+    rest = stripped;
+    if (code) codes.add(code);
+    else unreadable = true;
   }
-  return PAY_PERIOD_PATTERNS.every((period) => !period.test(label) || period.test(context));
+  if (UNREADABLE_CURRENCY_SYMBOL.test(rest)) unreadable = true;
+  /* A bare "$" is read as USD on the label exactly as it is on the range, which is what lets a
+   * label stating its own range ("expected hourly salary ($20.50 - $25.50 per hour)") answer it. */
+  if (codes.size === 0 && !unreadable && BARE_DOLLAR_RANGE.test(label)) codes.add('USD');
+  return { codes, unreadable };
+}
+function labelCurrencyMatchesRange(label: string, context: string, range: StatedRange): boolean {
+  const named = currenciesNamedInLabel(label);
+  /* A currency token that cannot be resolved to one code, or two of them in one label, is an
+   * unknown unit. A figure typed into such a field claims to be in whichever the reader assumed. */
+  if (named.unreadable || named.codes.size > 1) return false;
+  if (named.codes.size === 0) return true;
+  const rangeCurrency = rangeCurrencyOf(range, context);
+  /* An unmarked range beside a label that names a currency cannot be shown to be in that
+   * currency, and a figure typed into a currency-named field claims it is. Held. */
+  return rangeCurrency !== null && rangeCurrency === [...named.codes][0];
+}
+/* The label's unit against the unit the range was stated in. `context` is the text the range was
+ * read out of: the label itself for a label-range, the description sentence for a jd-range. */
+function labelUnitMatchesRange(label: string, context: string, range: StatedRange): boolean {
+  if (!labelCurrencyMatchesRange(label, context, range)) return false;
+  const labelPeriods = payPeriodsIn(label);
+  // Two periods in one label ("expected monthly salary (annual equivalent)") name no one unit.
+  if (labelPeriods.size > 1) return false;
+  const rangePeriod = rangePeriodOf(context, range);
+  if (rangePeriod === 'unreadable') return false;
+  const labelPeriod = labelPeriods.size === 1 ? [...labelPeriods][0]! : null;
+  /* A field that names no period is asking for the figure a salary field means by default, which
+   * is the annual one. An annual range answers it and a range stated in any other period does not:
+   * "expected salary" against "€4,000 - €5,000 per month" is a twelve-fold understatement typed
+   * with the same confidence as the correct answer. */
+  if (labelPeriod === null) return rangePeriod === null || rangePeriod === 'year';
+  return labelPeriod === rangePeriod;
 }
 /* WHAT THE RANGE IN THE DESCRIPTION IS A RANGE OF.
  *
@@ -2887,30 +3076,55 @@ function labelUnitMatchesRange(label: string, context: string, range: StatedRang
  * "Base salary $130,000 - $150,000 plus equity." answered "expected total compensation" with the
  * base alone.
  *
- * So the window a jd-range is read out of has to say that the range IS the role's pay: it names
- * salary, compensation, base or a pay range, it carries an annual marker or no period at all, and
- * it names none of the benefits and one-off payments that sit next to a salary in a description
- * without being one. A window that names a period or one of those nouns is still usable when the
- * LABEL asks in that same unit - "expected monthly stipend" against a monthly stipend range - and
- * that is the only way it is usable. Kept here rather than tightened in lib/salary.ts because that
- * module is a port of the extension's copy and this rule is not in the extension yet. */
+ * So the text a jd-range is read out of has to say that the range IS the role's pay: it names
+ * salary, compensation, base or a pay range, and it names none of the benefits and one-off
+ * payments that sit next to a salary in a description without being one. A passage that names one
+ * of those nouns is still usable when the LABEL asks for that same thing - "expected monthly
+ * stipend" against a monthly stipend range - and that is the only way it is usable. Kept here
+ * rather than tightened in lib/salary.ts because that module is a port of the extension's copy and
+ * this rule is not in the extension yet.
+ *
+ * AND IT HAS TO BE THE SAME SENTENCE, which is what round 3 left open. Round 3 asked whether a
+ * 200-character window contained a pay word, and a window is not an assertion: the probe of
+ * 2026-09-02 answered "expected salary" with 7500 on "Salary competitive. Relocation allowance of
+ * $5,000 - $10,000.", and with 3500, 4500, 1500 and 750 on the same shape written with tuition
+ * reimbursement, a 401k match, a learning budget and a home-office allowance. That posting shape -
+ * "competitive salary" with no figure, and one benefit figure quoted nearby - is among the
+ * commonest there is. The range must now sit in the SAME SENTENCE as the pay word that claims it,
+ * that sentence must name none of the benefit nouns, and it must not be quoting what somebody
+ * ELSE earns ("Senior engineers earn a salary of $180,000 - $220,000. This intern role pays
+ * competitively." typed a senior band into an intern application). */
 const JD_RANGE_IS_THE_ROLE_PAY = /\bsalar(?:y|ies)\b|\bcompensation\b|\bbase\b|\bpay\s+range\b/i;
-const JD_RANGE_ANNUAL_MARKER =
-  /\bannual(?:ly|i[sz]ed)?\b|\bper\s+(?:year|annum)\b|\byearly\b|\ba\s+year\b|\/\s*(?:yr|year|annum)\b|\bp\.a\.\b/i;
 const JD_RANGE_NOT_THE_SALARY: readonly RegExp[] = [
   /\bstipends?\b/i,
   /\bwellness\b/i,
   /\bbonus(?:es)?\b/i,
   /\bequity\b|\bstock\b|\brsus?\b/i,
   /\bsigning\b|\bsign-?on\b/i,
+  /\ballowances?\b/i,
+  /\breimbursements?\b/i,
+  /\bbudgets?\b/i,
+  /\brelocation\b/i,
+  /\btuition\b/i,
+  /\b401\s?\(?k\)?\b|\bmatch(?:es|ed|ing)?\s+contributions?\b|\bpension\b|\bsuperannuation\b/i,
+  /\bpackage\s+worth\b/i,
+  /\bcommissions?\b/i,
+  /\bote\b|\bon-?target\s+earnings\b/i,
+  /\btotal\s+(?:compensation|package)\b/i,
+  /\bleave\b|\bvacation\b|\bpto\b/i,
 ];
-function jdWindowStatesTheRolePay(window: string, label: string): boolean {
-  if (!JD_RANGE_IS_THE_ROLE_PAY.test(window)) return false;
+/* Somebody else's band, stated as a fact about what they earn. The verb is load-bearing: a posting
+ * that calls its OWN role senior ("the salary range for this senior engineer role is ...") is this
+ * role's pay and still fills. */
+const JD_RANGE_IS_ANOTHER_POPULATION_PAY =
+  /\b(?:senior|staff|principal|lead|director|vice\s+president|vp|manager|mid-?level|entry-?level|junior|graduate|associate|intern)s?\b[^.;!?]{0,60}?\b(?:earns?|earned|makes?|receives?|(?:are|is|were|was)\s+paid)\b/i;
+function jdSentenceStatesTheRolePay(sentence: string, label: string): boolean {
+  if (!JD_RANGE_IS_THE_ROLE_PAY.test(sentence)) return false;
+  if (JD_RANGE_IS_ANOTHER_POPULATION_PAY.test(sentence)) return false;
   for (const noun of JD_RANGE_NOT_THE_SALARY) {
-    if (noun.test(window) && !noun.test(label)) return false;
+    if (noun.test(sentence) && !noun.test(label)) return false;
   }
-  if (JD_RANGE_ANNUAL_MARKER.test(window)) return true;
-  return PAY_PERIOD_PATTERNS.every((period) => !period.test(window) || period.test(label));
+  return true;
 }
 /* The salary words a description writes a range next to, matching lib/salary.ts's own net so the
  * windows this reads are the windows that module would have read. */
@@ -2921,22 +3135,27 @@ function statedRolePayRangeInJd(
   jdText: string,
   label: string,
 ): { range: StatedRange; context: string } | null {
-  const found = new Map<string, { range: StatedRange; context: string }>();
+  const nearAPayWord = new Set<string>();
+  const answerable = new Map<string, { range: StatedRange; context: string }>();
   for (const match of jdText.matchAll(new RegExp(JD_SALARY_CONTEXT_SRC, 'gi'))) {
     const index = match.index ?? 0;
-    const context = jdText.slice(
+    /* The wide window still decides AMBIGUITY: two money ranges written next to the pay words is
+     * not one stated range, whichever of them a sentence would have licensed. */
+    const window = jdText.slice(
       Math.max(0, index - JD_RANGE_WINDOW_BEFORE),
       index + JD_RANGE_WINDOW_AFTER,
     );
-    const ranges = findStatedRanges(context);
-    if (ranges.length === 0 || !jdWindowStatesTheRolePay(context, label)) continue;
-    for (const range of ranges) {
-      found.set(`${range.min}:${range.max}:${range.currency ?? ''}`, { range, context });
+    for (const range of findStatedRanges(window)) nearAPayWord.add(rangeKey(range));
+    const sentence = sentenceAt(jdText, index);
+    if (!jdSentenceStatesTheRolePay(sentence, label)) continue;
+    for (const range of findStatedRanges(sentence)) {
+      answerable.set(rangeKey(range), { range, context: sentence });
     }
   }
   /* Two different ranges in one description is not one stated range, exactly as statedRangeInJd
    * has always held. */
-  return found.size === 1 ? [...found.values()].at(0)! : null;
+  if (nearAPayWord.size !== 1) return null;
+  return answerable.size === 1 ? [...answerable.values()].at(0)! : null;
 }
 /* The one range that answers "what do you expect to be paid": the label's own, or the
  * description's when the description says the range is this role's pay and the units agree. */

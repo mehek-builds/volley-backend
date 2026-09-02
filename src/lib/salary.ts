@@ -11,6 +11,12 @@
 // number of a range) exists only in this copy so far. The extension's salary.ts must take the same
 // change in the same release; until it does, a posting stating "$130,000 - $150,000" fills on the
 // managed path and matches nothing on the extension path.
+//
+// `collectCurrencies` is exported here and not in the extension copy. That is an export keyword and
+// nothing else: no line of logic differs, and the extension copy stays byte-comparable on every
+// statement. questionDiscovery.ts reads it to answer a question detectCurrency cannot, which is how
+// MANY currencies a label names - one, none, or two - because "expected salary (gbp or eur)" and
+// "expected salary in kronor" both come back null from detectCurrency and mean opposite things.
 
 export interface StoredSalaryProfile {
   desired_salary?: string;
@@ -52,7 +58,7 @@ function mapCurrencyToken(token: string): string | null {
   }
 }
 
-function collectCurrencies(text: string): Set<string> {
+export function collectCurrencies(text: string): Set<string> {
   const out = new Set<string>();
   for (const m of text.matchAll(new RegExp(CODE_SRC, 'gi'))) {
     const c = mapCurrencyToken(m[1]);
