@@ -621,7 +621,16 @@ export function mergeSubmittedApplicationReviewQuestions(
      * answer beside it does not settle. Dropping it on save meant she could mark a question skipped,
      * be told "Saved", and have the record come back without it, so discovery raised the same
      * question on the next fill and the row never became sendable. */
-    const submittedAnswerStateForSave = submittedQuestion.answer_state ?? question.answer_state;
+    const storedSkipStillBound = question.answer_state === 'skipped'
+      && submittedQuestion.answer.trim() === question.answer.trim();
+    const submittedAnswerStateForSave = submittedQuestion.answer_state
+      ?? (!submittedQuestion.answer.trim() || storedSkipStillBound ? question.answer_state : undefined);
+    /* And the binding cuts the other way on an EDIT. The dashboard un-skips by omitting the key
+     * (its `answer_state: undefined` never survives JSON), so a bare `??` fallback would resurrect
+     * the stored skip over an answer she just typed to replace it, and the question could never be
+     * un-skipped from the product at all. A skip from the stored side therefore stands only while
+     * the answer is still the one it was taken against; posting 'skipped' explicitly is the skip
+     * action itself and stands on its own. */
     const nextAnswerState = !submittedQuestion.answer.trim()
       || submittedAnswerStateForSave === 'skipped'
       ? submittedAnswerStateForSave

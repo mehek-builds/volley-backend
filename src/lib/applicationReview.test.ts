@@ -1288,3 +1288,47 @@ test('an answer posted over a machine state still clears it', () => {
     assert.equal(merged[0]!.answer_state, undefined, `${state} is settled by her answering`);
   }
 });
+
+/* THE UN-SKIP. The dashboard clears a skip by posting the question with an answer and NO
+ * answer_state (its `answer_state: undefined` is dropped by JSON serialisation), so the save must
+ * not resurrect the stored skip over an answer she just typed to replace it. The skip survives a
+ * no-op save of the same answer, because that is the machine round-tripping her record, not her
+ * changing her mind. */
+test('typing a new answer over a skipped question clears the skip', () => {
+  const stored = [{
+    id: 'calling-code',
+    question: 'Select country calling code',
+    answer: 'United States',
+    kind: 'required' as const,
+    required: false,
+    answer_state: 'skipped' as const,
+  }];
+  const edited = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'Canada',
+      kind: 'required',
+      required: false,
+    }],
+  );
+  assert.equal(edited[0]!.answer, 'Canada');
+  assert.equal(edited[0]!.answer_state, undefined, 'her new answer is her un-skip');
+
+  const roundTripped = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{
+      id: 'calling-code',
+      question: 'Select country calling code',
+      answer: 'United States',
+      kind: 'required',
+      required: false,
+    }],
+  );
+  assert.equal(
+    roundTripped[0]!.answer_state,
+    'skipped',
+    'a save that does not change the answer does not spend her skip',
+  );
+});
