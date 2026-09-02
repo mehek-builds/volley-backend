@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import type { CandidateEducation } from '../engine/resumePolicy';
 import { mergeEducationFallback, missingRenderedEducation, missingRequiredEducation } from './resume';
@@ -87,4 +88,19 @@ test('blank rendered education is held before the preview can be saved', () => {
     missingRenderedEducation({ school: 'University of Southern California', degree: '' }),
     ['resume education degree is blank in the generated preview'],
   );
+});
+
+test('a missing-education build is refused as a fixable profile gap, never as a posting verdict', () => {
+  /* The recovery for "your school/degree are not on file" is to add them, and that gap fails every
+     posting identically - so this refusal must NOT be resume_quality_hold, whose recovery is "try
+     another posting" (the loop measured live 2026-09-02). The gate has to send back the distinct
+     resume_profile_incomplete code that the client routes to a one-field fix, the same way it
+     already treats a missing name or resume email. This is a source-pattern test because the gate
+     itself needs a live request; the pattern is what keeps the two codes from being reconflated. */
+  const source = readFileSync('src/routes/resume.ts', 'utf8');
+  const gate = source.slice(source.indexOf('const educationIssues = missingRequiredEducation(education);'));
+  const block = gate.slice(0, gate.indexOf('const declaredSkills'));
+  assert.match(block, /code: 'resume_profile_incomplete'/, 'the missing-education gate must send the profile-incomplete code');
+  assert.match(block, /field: 'education'/, 'the gate must name the field the client should route the student to fix');
+  assert.doesNotMatch(block, /code: 'resume_quality_hold'/, 'a missing-education gap is not a posting-fit quality hold');
 });

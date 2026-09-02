@@ -54,6 +54,7 @@ import {
 import { planPacketApplicantEmail } from '../lib/packetApplicantEmail';
 import {
   resumeGenerateSuccessResponseSchema,
+  resumeProfileIncompleteResponseSchema,
   resumeQualityHoldResponseSchema,
 } from './resumeResponseSchema';
 import { extractPdfText } from '../lib/pdfText';
@@ -879,9 +880,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     );
     const educationIssues = missingRequiredEducation(education);
     if (educationIssues.length > 0) {
-      return reply.status(422).send(resumeQualityHoldResponseSchema.parse({
+      /* NOT resume_quality_hold. A missing school or degree is not a verdict on this posting, it is
+         a gap in the account that fails every posting identically - so the client must route the
+         student to fix their education, never send them posting-shopping. `field` names what to fix,
+         the same contract the missing-name/resume-email preconditions already use. The quality
+         payload rides along unchanged for logging and for any older client that only reads it. */
+      return reply.status(422).send(resumeProfileIncompleteResponseSchema.parse({
         error: 'Your profile is missing education details, so Litos did not make this resume.',
-        code: 'resume_quality_hold',
+        code: 'resume_profile_incomplete',
+        field: 'education',
         quality: {
           ready_to_attach: false,
           issues: educationIssues,

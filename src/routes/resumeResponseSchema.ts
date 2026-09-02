@@ -33,6 +33,28 @@ export const resumeQualityHoldResponseSchema = z.object({
   quality: resumeQualityResponseSchema.optional(),
 });
 
+/* A PROFILE GAP IS NOT A POSTING VERDICT, and conflating the two is what sent a student in a loop.
+ *
+ * `resume_quality_hold` means "the resume Litos would write is not a fit for THIS posting" - the
+ * honest recovery is another posting, which is why the client offers one. A missing school or
+ * degree is a different kind of fact: it is about the ACCOUNT, not this posting, so it follows the
+ * student to every posting and "try another one" fails identically each time. Measured live
+ * 2026-09-02: the missing-education hold shipped as `resume_quality_hold`, so onboarding told a
+ * student with no degree on file that the posting was "not a fit Litos can write honestly. Try
+ * another posting" and offered "Show me a different one" - the exact dead-end loop the 402
+ * entitlement denial already had carved out for itself.
+ *
+ * This distinct code lets the client route the student to the one place that fixes it, the same way
+ * a missing name or resume email already does. `field` names what is missing so the client can send
+ * them straight to it rather than describing a generic failure. */
+export const resumeProfileIncompleteResponseSchema = z.object({
+  error: z.string(),
+  code: z.literal('resume_profile_incomplete'),
+  field: z.enum(['education']),
+  quality: resumeQualityResponseSchema.optional(),
+});
+export type ResumeProfileIncompleteResponse = z.infer<typeof resumeProfileIncompleteResponseSchema>;
+
 /* WHERE EMPLOYER REPLIES WILL LAND, said out loud in the response.
  *
  * The decision was already frozen into the packet as `spec._applicant_email`, and that was the
