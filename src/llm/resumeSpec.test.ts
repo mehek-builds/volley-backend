@@ -94,7 +94,9 @@ test('the interactive first attempt runs at low effort, and the validator is why
      quality gate: every returned spec passes through the deterministic validators, and a weak one
      triggers the same Claude feedback retry it always did. If the gate ever moves into the model -
      validators removed or made advisory - this pin should fail and force that conversation. */
-  const source = readFileSync(new URL('./resumeSpec.ts', import.meta.url), 'utf8');
+  // Cwd-relative like the other source-reading tests here: the tsconfig is commonjs, so
+  // import.meta is not available to the typechecker even though tsx would run it.
+  const source = readFileSync('src/llm/resumeSpec.ts', 'utf8');
   const openAICall = source.slice(source.indexOf('generateOpenAIText({'), source.indexOf('return parseGeneratedResumeSpec(generated.text'));
   assert.match(openAICall, /reasoningEffort: 'low'/);
 });
