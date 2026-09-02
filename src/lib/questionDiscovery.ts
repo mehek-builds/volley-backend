@@ -2562,8 +2562,17 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       }
       /* A skip belongs to the answer it was taken against, so a recomputed value drops it the
        * same way withoutProvenance drops answer_source. An unchanged value keeps it. The key is
-       * omitted, never set to undefined: these rows are compared as records. */
-      if (known.value.trim() === withProvenance.answer.trim()) {
+       * omitted, never set to undefined: these rows are compared as records.
+       *
+       * AND A BLANK IS NOT AN ANSWER TO BE BOUND TO. The dashboard's skip action clears the answer
+       * ("this optional question will be left blank"), and THIS refresh runs inside the very save
+       * that stores it, restoring the resolver's value beside the skip. Measured live on DSI
+       * 2026-09-02, first deploy of the binding rule: skip saved as {answer:'', skipped}, this line
+       * saw '' become 'United States', called that a replaced answer, and dropped the skip in the
+       * same request that wrote it - the exact loop the rule was shipped to end, now one function
+       * later. A skip taken against an empty answer is about the CONTROL, so the machine filling in
+       * the blank it was taken against carries it; only a NON-EMPTY answer that changes sheds it. */
+      if (!withProvenance.answer.trim() || known.value.trim() === withProvenance.answer.trim()) {
         return { ...withoutProvenance(), answer: known.value };
       }
       const {

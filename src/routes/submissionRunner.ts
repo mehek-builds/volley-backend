@@ -6534,7 +6534,11 @@ export async function discoverAndResolveQuestions(
          * is keyed on the question's LABEL rather than on what the label now answers. The state is
          * dropped rather than set to undefined: a key that exists holding nothing is a different
          * record from a key that was never written, and this one is compared as a record. */
+        // A blank is not an answer to be bound to: a skip stored beside an empty answer is about
+        // the control, and the machine filling in the blank carries it (see the same rule at the
+        // refresh site in questionDiscovery.ts, measured live on DSI 2026-09-02).
         const skipOutlivedItsAnswer = existing.answer_state === 'skipped'
+          && existing.answer.trim() !== ''
           && knownValue.trim() !== existing.answer.trim();
         const { answer_state: _skipOnAReplacedAnswer, ...existingWithoutStaleSkip } = existing;
         questions.push({
