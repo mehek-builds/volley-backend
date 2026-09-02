@@ -195,3 +195,98 @@ test('a label that names its own unit binds the answer to it', () => {
     'USD 140,000 per year',
   );
 });
+
+/* THE 2026-09-02 ROUND-3 ATTACKS (PR #866), pinned with the exact strings the adversarial
+ * verifier executed. Each filled a WRONG figure; under-answering is always safe, a wrong figure
+ * never is, so each must now either parse the RIGHT range or refuse. */
+
+test('B1: the unit binds to the matched figure, never to a benefit on the same line', () => {
+  // ONE line. The stipend's "monthly" was read off the whole line and bound to the salary range,
+  // so an annual-labelled number control was typed 1,680,000.
+  const jd = 'Benefits include a $500 monthly wellness stipend. Salary: $130,000 - $150,000 per year.';
+  const stated = parseStatedCompensation(jd);
+  assert.equal(stated?.median, 140000);
+  assert.equal(stated?.unit, 'year');
+  assert.equal(
+    answerCompensation({ jdText: jd, fieldLabel: 'Expected annual salary' })?.value,
+    'USD 140,000 per year',
+  );
+  assert.equal(
+    answerCompensation({ jdText: jd, numericOnly: true, fieldLabel: 'Expected annual salary' })?.value,
+    '140000',
+  );
+});
+
+test('B1: a figure whose own window names no unit is skipped, and a two-figure line never borrows the line unit', () => {
+  // The only unit on the line belongs to the first figure's sentence; the second figure has none
+  // of its own and the line carries two figures, so it must not inherit "monthly".
+  assert.equal(
+    parseStatedCompensation('Interns get a $500 monthly stipend. Salary: $130,000 - $150,000.'),
+    null,
+  );
+  // A one-figure line may still take the line's unit, since it can only be that figure's.
+  assert.equal(parseStatedCompensation('Salary: $130,000 - $150,000. Per year.')?.unit, 'year');
+});
+
+test('the currency binds to the matched figure too', () => {
+  const stated = parseStatedCompensation(
+    'Benefits include a €500 monthly wellness stipend. Salary: $130,000 - $150,000 per year.',
+  );
+  assert.equal(stated?.currency, 'USD');
+  assert.equal(stated?.median, 140000);
+});
+
+test('B2: a heading lends its anchor only to a bare figure line', () => {
+  // Non-salary money under a "Compensation" heading, each with a noun the exclusion list did not
+  // name. The structural rule: after stripping amounts, currency, separators, unit phrases and
+  // function words, a content word left over means the line is describing something else.
+  const housing = 'Compensation & Benefits\nHousing assistance up to $2,000 per month\nHourly pay: $45 - $55 per hour';
+  assert.deepEqual(parseStatedCompensation(housing), { min: 45, max: 55, median: 50, currency: 'USD', unit: 'hour' });
+  assert.equal(answerCompensation({ jdText: housing })?.value, 'USD 50 per hour');
+
+  const relocation = 'Compensation:\nRelocation support of $3,000 paid monthly for interns\nBase salary: $120,000 per year';
+  assert.equal(parseStatedCompensation(relocation)?.median, 120000);
+  assert.equal(parseStatedCompensation(relocation)?.unit, 'year');
+  assert.equal(answerCompensation({ jdText: relocation })?.value, 'USD 120,000 per year');
+
+  const stipendProse = 'Compensation\nOur monthly wellness stipend program gives every intern flexibility, and the amount currently offered per month is $500';
+  assert.equal(parseStatedCompensation(stipendProse), null);
+  assert.equal(answerCompensation({ jdText: stipendProse }), null);
+});
+
+test('B2: the real bare figure lines still qualify under a heading', () => {
+  assert.equal(parseStatedCompensation('Compensation\n$7K – $10K per month')?.median, 8500);
+  assert.equal(parseStatedCompensation('US Salary Range\n$40 - $55 USD per hour')?.median, 47.5);
+  assert.equal(parseStatedCompensation('Compensation\nHourly $55 – $65 per hour')?.median, 60);
+  assert.equal(parseStatedCompensation('Compensation\nCA$69.6K - CA$87K annually')?.currency, 'CAD');
+  // A line carrying its own anchor word is judged by that word, not by the bare-figure rule.
+  assert.equal(parseStatedCompensation('Compensation\nBase salary: $120,000 per year')?.median, 120000);
+});
+
+test('B2: the belt-and-braces exclusion names the round-3 benefit nouns on an anchored line', () => {
+  assert.equal(parseStatedCompensation('Compensation: housing assistance of $2,000 per month'), null);
+  assert.equal(parseStatedCompensation('Pay: relocation support of $3,000 paid monthly'), null);
+  assert.equal(parseStatedCompensation('Compensation: $5,000 sign-on bonus paid annually'), null);
+  assert.equal(parseStatedCompensation('Compensation: a $5,000 signing bonus, yearly'), null);
+});
+
+test('B4: a label that names its own currency binds the answer to it', () => {
+  const usd = 'Salary: $130,000 - $150,000 per year';
+  assert.equal(
+    answerCompensation({ jdText: usd, numericOnly: true, fieldLabel: 'Expected salary (USD)' })?.value,
+    '140000',
+  );
+  // A USD posting must never type its median into a EUR-labelled field.
+  assert.equal(answerCompensation({ jdText: usd, numericOnly: true, fieldLabel: 'Expected salary in EUR' }), null);
+  assert.equal(answerCompensation({ jdText: usd, fieldLabel: 'Expected salary in euros' }), null);
+  assert.equal(answerCompensation({ jdText: usd, fieldLabel: 'Expected salary in Canadian dollars' }), null);
+  // The same currency, in any spelling, answers.
+  const gbp = 'Salary: £57,800 - £75,000 per year';
+  assert.equal(answerCompensation({ jdText: gbp, fieldLabel: 'Salary in £' })?.value, 'GBP 66,400 per year');
+  assert.equal(answerCompensation({ jdText: gbp, fieldLabel: 'Salary in pounds' })?.value, 'GBP 66,400 per year');
+  assert.equal(answerCompensation({ jdText: gbp, fieldLabel: 'Expected salary in EUR' }), null);
+  // A bare "$" is any dollar, so it agrees with a CAD posting; a qualified one does not.
+  const cad = 'Compensation: CA$69.6K - CA$87K annually';
+  assert.equal(answerCompensation({ jdText: cad, fieldLabel: 'Expected salary ($)' })?.currency, 'CAD');
+  assert.equal(answerCompensation({ jdText: cad, fieldLabel: 'Expected salary in US dollars' }), null);
+});
