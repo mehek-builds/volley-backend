@@ -292,9 +292,22 @@ export function normalizeApplicationReviewQuestions(
      * later read is the fresher read of the employer's own control, so it wins when present. */
     const optionsMeasured = Object.prototype.hasOwnProperty.call(question, 'options');
     const options = optionsMeasured ? (question.options ?? null) : existing.options;
-    const answerState = question.answer.trim()
-      ? undefined
-      : question.answer_state ?? existing.answer_state;
+    /* AN ANSWERED QUESTION MAY STILL BE ONE SHE CHOSE TO LEAVE ALONE.
+     *
+     * This used to clear the state outright whenever an answer was present, on the reading that an
+     * answer resolves the question. That holds for the two MACHINE states: 'unanswered' and
+     * 'litos_refused' both describe Litos having nothing to type, and an answer really does settle
+     * them. It does not hold for 'skipped', which is the applicant's own instruction about the
+     * CONTROL rather than about the answer: "I know what the value is, the portal will not take it,
+     * leave it." Dropping that turned her decision into a fact the record could not hold, so
+     * discovery re-raised the same question on every fill and the row never became sendable.
+     *
+     * Nothing types differently as a result: packetQuestionsForFill does not carry answer_state, so
+     * the answer beside it still reaches the form exactly as before. */
+    const mergedAnswerState = question.answer_state ?? existing.answer_state;
+    const answerState = !question.answer.trim() || mergedAnswerState === 'skipped'
+      ? mergedAnswerState
+      : undefined;
     const { answer_state: _existingAnswerState, ...existingWithoutAnswerState } = existing;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
@@ -599,9 +612,29 @@ export function mergeSubmittedApplicationReviewQuestions(
       ? question
       : { ...questionWithoutProvenance, ...carriedAnswerClaims };
     const { answer_state: _carriedAnswerState, ...carriedForwardWithoutAnswerState } = carriedForward;
-    const nextAnswerState = submittedQuestion.answer.trim()
-      ? undefined
-      : submittedQuestion.answer_state ?? question.answer_state;
+    /* THE WRITER BEHIND PUT /review/answers, and the reason a skip never reached the record.
+     *
+     * Same rule as normalizeApplicationReviewQuestions, and it has to be the same or the skip dies
+     * here instead of there: 'unanswered' and 'litos_refused' are the machine saying it had nothing
+     * to type, and an answer settles them. 'skipped' is the applicant speaking about the CONTROL
+     * ("the value is right, the portal's menu will not take it, leave the field alone"), which an
+     * answer beside it does not settle. Dropping it on save meant she could mark a question skipped,
+     * be told "Saved", and have the record come back without it, so discovery raised the same
+     * question on the next fill and the row never became sendable. */
+    const storedSkipStillBound = question.answer_state === 'skipped'
+      && submittedQuestion.answer.trim() === question.answer.trim();
+    const submittedAnswerStateForSave = submittedQuestion.answer_state
+      ?? (!submittedQuestion.answer.trim() || storedSkipStillBound ? question.answer_state : undefined);
+    /* And the binding cuts the other way on an EDIT. The dashboard un-skips by omitting the key
+     * (its `answer_state: undefined` never survives JSON), so a bare `??` fallback would resurrect
+     * the stored skip over an answer she just typed to replace it, and the question could never be
+     * un-skipped from the product at all. A skip from the stored side therefore stands only while
+     * the answer is still the one it was taken against; posting 'skipped' explicitly is the skip
+     * action itself and stands on its own. */
+    const nextAnswerState = !submittedQuestion.answer.trim()
+      || submittedAnswerStateForSave === 'skipped'
+      ? submittedAnswerStateForSave
+      : undefined;
     return {
       ...carriedForwardWithoutAnswerState,
       answer: submittedQuestion.answer,
@@ -654,7 +687,9 @@ export function mergeSubmittedApplicationReviewQuestions(
     } = question;
     merged.push({
       ...submittedWithoutProvenance,
-      ...(!submittedWithoutProvenance.answer.trim() && submittedAnswerState
+      // Same rule for a question arriving for the first time: her skip stands beside an answer.
+      ...((!submittedWithoutProvenance.answer.trim() || submittedAnswerState === 'skipped')
+        && submittedAnswerState
         ? { answer_state: submittedAnswerState }
         : {}),
     });
