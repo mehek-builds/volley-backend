@@ -4,6 +4,11 @@ import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 
 export const BASE_RESUME_MODEL_CALL_CAP_MS = 15_000;
 export const BASE_RESUME_REPAIR_CALL_CAP_MS = 8_000;
+/* Exported and pinned by a test, because a typo here does not error: generateBaseResumeSpec's
+ * fallback chain converts an unknown-model 404 into a degraded local-fallback resume that logs
+ * outcome=success, so a misspelled id would ship as a silent quality regression. */
+export const BASE_RESUME_GENERATION_MODEL = 'claude-haiku-4-5-20251001';
+export const BASE_RESUME_GENERATION_FALLBACK_MODEL = 'claude-sonnet-5';
 
 export function baseResumeModelTimeoutMs(callerAllowanceMs?: number): number {
   return Math.min(callerAllowanceMs ?? BASE_RESUME_MODEL_CALL_CAP_MS, BASE_RESUME_MODEL_CALL_CAP_MS);
@@ -529,18 +534,26 @@ export async function generateBaseResumeSpec(
     : '';
   const contextBlock = `Education source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}${priorityBlock}`;
 
-  const reader = new BaseResumeStreamReader();
-  try {
+  /* Whether the FAILED attempt painted anything: a retry must clear those pieces before emitting
+   * its own (appending a second full set would double every entry), but a restart when nothing
+   * was painted is noise the client has to process for no change. */
+  let piecesEmitted = false;
+  const attempt = async (model: string, isRetry: boolean): Promise<ResumeSpec> => {
+    const reader = new BaseResumeStreamReader();
+    if (isRetry && piecesEmitted) {
+      onEvent({ type: 'restart' });
+      piecesEmitted = false;
+    }
     const stream = client.messages.stream(
     {
-      model: 'claude-sonnet-5',
-      /* Thinking is OFF, and the whole 15-second onboarding promise rides on it. Sonnet 5 runs
-       * adaptive thinking when the parameter is omitted, and on this exact call that meant ~12
-       * silent seconds before the first entry streamed (measured 2026-08-29 against production:
-       * 12.7s to first piece, 3s for everything after it). The student is watching a build screen
-       * the entire time. Selection quality does not lean on the reasoning pass: the hard rules are
-       * enforced AFTER generation by weakVerbBullets, overlongBullets, baseResumeSelectionIssues
-       * and the grounding prune, all of which fail closed and drive repairs. */
+      model,
+      /* Thinking is OFF explicitly. Haiku 4.5 runs no thinking when the parameter is omitted, so
+       * for the primary model this line is a no-op - it stays because the FALLBACK model below is
+       * Sonnet 5, which runs adaptive thinking when the parameter is omitted, and on this exact
+       * call that meant ~12 silent seconds before the first entry streamed (measured 2026-08-29
+       * against production: 12.7s to first piece, 3s for everything after it). One request shape
+       * serves both models, and quality does not lean on the reasoning pass: every rule is
+       * enforced after generation by the deterministic gates. */
       thinking: { type: 'disabled' },
       /* Sized for the WORST bank, not a typical one. Measured 2026-07-27 on a real two-page resume
        * with 7 bank entries: an 8192 cap truncated mid-object and failed the build outright, and a
@@ -548,11 +561,14 @@ export async function generateBaseResumeSpec(
        * on what is generated, so the higher ceiling costs nothing on a small resume. */
       max_tokens: 16384,
       /* TWO breakpoints, not one. The second caches the per-student context for the retry within
-       * one build, which the comment on contextBlock has always covered. The first caches the
-       * static rules prefix ACROSS students: with only the trailing breakpoint, a new student's
-       * context changed the prefix and the ~3K-token rule block was re-read at full price and
-       * full latency on the very first call of every onboarding, which is the exact call the
-       * 15-second promise is spent on. */
+       * one build. The first caches the static rules prefix ACROSS students so a new student's
+       * context does not force the rule block to be re-read at full price on the very first call
+       * of every onboarding. CAVEAT, measured into the numbers above rather than assumed away:
+       * Haiku 4.5's minimum cacheable prefix is 4096 tokens and the rules prefix alone (~1.8K
+       * tokens) sits under it, so on the primary model the FIRST breakpoint does not produce a
+       * cache entry - the 6-8s Haiku generations were measured with that cache cold. The
+       * breakpoints stay: the second one covers large banks and the within-build retry on both
+       * models, and the first works whenever the fallback model (1024-token minimum) runs. */
       system: [
         { type: 'text', text: BASE_RESUME_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
         { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
@@ -566,7 +582,10 @@ export async function generateBaseResumeSpec(
   );
 
     stream.on('text', (delta) => {
-      for (const event of reader.push(delta)) onEvent(event);
+      for (const event of reader.push(delta)) {
+        piecesEmitted = true;
+        onEvent(event);
+      }
     });
 
     const response = await stream.finalMessage();
@@ -574,14 +593,39 @@ export async function generateBaseResumeSpec(
       throw new Error('Base resume truncated at max_tokens - raise the cap');
     }
     return parseSpecText(reader.text());
-  } catch (error) {
-    const fallback = baseResumeSpecFromEvidence(bank, education, skills, options.priorityEntries);
-    console.warn(`[llm] base_resume provider=local outcome=success entries=${fallback.experience.length} reason=${error instanceof Error ? error.name : 'error'}`);
-    onEvent({ type: 'restart' });
-    onEvent({ type: 'education', education_position: fallback.education_position ?? 'after_experience' });
-    fallback.experience.forEach((entry, index) => onEvent({ type: 'entry', index, entry }));
-    onEvent({ type: 'skills', skills: fallback.skills });
-    return fallback;
+  };
+
+  try {
+    /* Haiku first, and the choice is measured rather than assumed. This call selects entries and
+     * mostly reuses bank wording verbatim; every quality rule is enforced AFTER generation by
+     * weakVerbBullets, overlongBullets, misWordedBullets, the grounding prune and the fail-closed
+     * ATS gate, so the model is not the quality bar here - the gates are. Measured 2026-09-03
+     * across seven banks (five varied trial resumes through the e2e harness plus a real 14-entry
+     * production bank twice): Haiku cleared the same gates with equal-or-fewer violations than
+     * Sonnet (ZERO repair passes on the 14-entry bank where Sonnet needed one or two) and
+     * generated 30-40% faster - 6.3-10.3s full-pipeline runs against Sonnet's 8.4-11.8s on
+     * identical inputs. A slow generation is what the onboarding build screen spends most of its
+     * time on, so this is the single biggest lever on the sub-30s resume-creation promise. */
+    return await attempt(BASE_RESUME_GENERATION_MODEL, false);
+  } catch (primaryError) {
+    /* Sonnet before the local fallback, so generation and repair do not share one provider fate:
+     * both this call and repairBaseResumeBullets now run Haiku, and without this step a Haiku-only
+     * capacity event (429s, a retired or misconfigured model id) would silently turn EVERY
+     * onboarding build into the local-fallback spec - no repairs, a relaxed style gate - while
+     * logging outcome=success. The common outage shapes fail in well under a second, so this
+     * retry usually costs nothing; a genuine double stall is bounded by the same per-call cap. */
+    console.warn(`[llm] base_resume model=${BASE_RESUME_GENERATION_MODEL} outcome=error reason=${primaryError instanceof Error ? primaryError.name : 'error'}; retrying on ${BASE_RESUME_GENERATION_FALLBACK_MODEL}`);
+    try {
+      return await attempt(BASE_RESUME_GENERATION_FALLBACK_MODEL, true);
+    } catch (error) {
+      const fallback = baseResumeSpecFromEvidence(bank, education, skills, options.priorityEntries);
+      console.warn(`[llm] base_resume provider=local outcome=success entries=${fallback.experience.length} reason=${error instanceof Error ? error.name : 'error'}`);
+      onEvent({ type: 'restart' });
+      onEvent({ type: 'education', education_position: fallback.education_position ?? 'after_experience' });
+      fallback.experience.forEach((entry, index) => onEvent({ type: 'entry', index, entry }));
+      onEvent({ type: 'skills', skills: fallback.skills });
+      return fallback;
+    }
   }
 }
 

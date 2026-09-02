@@ -70,15 +70,47 @@ import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 // Overall route allowance. Individual generation and repair calls have much lower interactive caps
 // in llm/baseResume.ts, so an upstream stall degrades to grounded local output instead of using it.
 const REQUEST_DEADLINE_MS = 120_000;
-/* An interactive ceiling, independent of Vercel's much larger kill limit. With one 15s generation
- * and 8s targeted repairs, this prevents quality polishing from recreating a minute-long spinner. */
-const REPAIR_PASS_BUDGET_MS = 35_000;
+/* An interactive ceiling on the generation-plus-loop-repairs window, measured from the start of
+ * generation. 18s, sized from live numbers rather than caution: repairs measured 1.3-1.7s each
+ * against production on 2026-09-02, so even a worst-case 15s generation still gets one repair pass
+ * before this closes, and a typical 5-8s generation comfortably fits all three. The old 35s value
+ * predates targeted repairs (each pass was a full regeneration then) and let a pathological build
+ * run to ~45s of model time before render and checks - past the 30-second promise the whole
+ * onboarding resume stage now carries.
+ *
+ * This window gates the LOOP only. The post-floor backstop deliberately does not share it (see
+ * baseResumeBackstopAllowed): skipping a loop pass ships a resume with warnings, while skipping
+ * the backstop can turn a floor-injected bullet into a fail-closed ATS refusal with nothing saved
+ * - the exact 2026-08-29 failure the backstop exists to prevent - so the backstop runs whenever
+ * the spec came from a model, on its own short allowance.
+ *
+ * Honest worst-case arithmetic, entry-gated (a pass that STARTS at 18s may still run its full
+ * call cap): 15s generation cap + one repair admitted at the 18s boundary running its 8s cap
+ * = 26s of loop model time, + a 4s backstop + render, checks and save. The pathological corner
+ * can graze 30s; every measured real build lands far inside it (Haiku generations run 5-8s, so
+ * the window is typically closed by 12s with all three passes spent). Exported for the tests
+ * that pin this budget against the per-call caps. */
+export const REPAIR_PASS_BUDGET_MS = 18_000;
+/* The backstop is one bounded call whose absence can cost the whole build, so it gets a short
+ * allowance of its own instead of the loop's leftovers. 4s covers the measured 1.3-1.7s repair
+ * comfortably while keeping the worst-case stage under the promise. */
+export const BACKSTOP_REPAIR_ALLOWANCE_MS = 4_000;
 
 export function baseResumeRepairAllowed(
   generationMethod: ResumeSpec['generation_method'],
   elapsedMs: number,
 ): boolean {
   return generationMethod !== 'local_fallback' && elapsedMs <= REPAIR_PASS_BUDGET_MS;
+}
+
+/* Elapsed time is deliberately NOT an input: however slow the build has been, refusing the
+ * backstop converts a slow build into a lost one, which is strictly worse. Only a local-fallback
+ * spec skips it, for the same reason the loop does - the continuity spec must not spend provider
+ * calls on wording. */
+export function baseResumeBackstopAllowed(
+  generationMethod: ResumeSpec['generation_method'],
+): boolean {
+  return generationMethod !== 'local_fallback';
 }
 
 /* Lives in llm/baseResume.ts now (VERB_REPAIR_MENU), so the repair prompt and this route's
@@ -321,6 +353,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
   fastify.post('/resume/base/stream', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+    /* Handler entry, not generation start, because this is what the student's wait actually
+     * measures: the preamble reads and the decrypt below are inside the build screen's wall time,
+     * and a total that starts after them would report the promise kept on the exact request where
+     * a slow bank read broke it. */
+    const requestStartedAt = Date.now();
 
     const email = request.jwtPayload!.email;
     // appProfile and target are read for the ATS gate: the first supplies the contact lines the
@@ -376,6 +413,40 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     const selectedEntryId = recentReview?.selected_entry_id;
     const priorityEntries = priorityEntriesForBaseResume(bank, targetText, selectedEntryId);
 
+    /* Stage timings, kept in the spirit of parse.ts's resume_parse_stage lines and profile.ts's
+     * *_elapsed_ms fields. The onboarding resume stage carries a sub-30-second promise, and a
+     * promise nobody can measure in production is a hope: a slow build looked identical to a
+     * failed one in the logs until these existed (a one-off ~5s profiles UPDATE was observed on
+     * 2026-09-02 and could not be attributed at the time). Declared OUTSIDE the try, and logged on
+     * the error path too, because the builds that die mid-flight are the ones whose timings are
+     * worth the most. */
+    type BuildStage = 'generation' | 'repair' | 'backstop' | 'render' | 'pdf_extract' | 'save';
+    const stageTimings: Partial<Record<BuildStage, number>> = {};
+    let repairPasses = 0;
+    let backstopRan = false;
+    const timed = async <T>(stage: BuildStage, run: () => Promise<T>): Promise<T> => {
+      const startedAt = Date.now();
+      try {
+        return await run();
+      } finally {
+        stageTimings[stage] = (stageTimings[stage] ?? 0) + (Date.now() - startedAt);
+      }
+    };
+    const logBuildTimings = (outcome: 'done' | 'ats_failed' | 'error') =>
+      request.log.info(
+        {
+          userId,
+          outcome,
+          total_elapsed_ms: Date.now() - requestStartedAt,
+          repair_passes: repairPasses,
+          backstop_ran: backstopRan,
+          ...Object.fromEntries(
+            Object.entries(stageTimings).map(([stage, elapsed]) => [`${stage}_elapsed_ms`, elapsed]),
+          ),
+        },
+        'base_resume_build timings',
+      );
+
     try {
       send({ event: 'stage', stage: 'reading' });
       send({
@@ -412,7 +483,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       };
 
       const buildStartedAt = Date.now();
-      let rawSpec = await generate();
+      let rawSpec = await timed('generation', generate);
 
       /* THE HARD RULES, enforced until they hold.
        *
@@ -552,7 +623,9 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
         // Bullet-level defects only: rewrite them in place.
         const targets = repairTargetsFor(weak, overlong, misWorded);
-        const repaired = await repairBaseResumeBullets(rawSpec, [...targets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        repairPasses += 1;
+        const repaired = await timed('repair', () =>
+          repairBaseResumeBullets(rawSpec, [...targets.values()], { timeoutMs: REQUEST_DEADLINE_MS }));
         /* Same-reference return means nothing merged - a malformed reply, a transient model error,
          * or rewrites that failed the deterministic checks. Repainting identical content would
          * clear and redraw the student's finished resume for zero change, so skip it and let the
@@ -610,10 +683,16 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       const lateMisWorded = misWordedBullets(finalSpec);
       if (
         (lateWeak.length > 0 || lateOverlong.length > 0 || lateMisWorded.length > 0)
-        && baseResumeRepairAllowed(finalSpec.generation_method, Date.now() - buildStartedAt)
+        /* NOT the loop's window. A build whose generation and repairs already spent the 18s budget
+         * still gets this one call, because skipping it does not ship a slower resume, it risks
+         * shipping NO resume: the fail-closed gate below refuses the floor-injected bullet and the
+         * student is stranded with nothing saved. Its own 4s allowance bounds the added wait. */
+        && baseResumeBackstopAllowed(finalSpec.generation_method)
       ) {
+        backstopRan = true;
         const lateTargets = repairTargetsFor(lateWeak, lateOverlong, lateMisWorded);
-        const lateRepaired = await repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        const lateRepaired = await timed('backstop', () =>
+          repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: BACKSTOP_REPAIR_ALLOWANCE_MS }));
         if (lateRepaired !== finalSpec) {
           /* Every rewrite the LOOP produced flowed through pruneUngroundedContent above; this one
            * runs after it, so without a re-prune an invented number in a backstop rewrite would be
@@ -681,9 +760,9 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       try {
         /* Same as the tailored path: the base resume gets the same page-filling rule, from the
            same bank, because it is the same document made for a different audience. */
-        const rendered = await renderResumePdf(finalSpec, contact, targetText, bank);
+        const rendered = await timed('render', () => renderResumePdf(finalSpec, contact, targetText, bank));
         printed = rendered.spec;
-        const parsedPdf = await extractPdfText(rendered.buffer);
+        const parsedPdf = await timed('pdf_extract', () => extractPdfText(rendered.buffer));
         const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);
         const finalValidation = validateResumeSpec(
           printed,
@@ -754,6 +833,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       send({ event: 'ats', ...ats });
 
       if (!ats.passed) {
+        logBuildTimings('ats_failed');
         send({ event: 'stage', stage: 'failed' });
         send({
           event: 'error',
@@ -763,10 +843,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       }
 
       const builtAt = new Date();
-      await db
+      await timed('save', () => db
         .update(profiles)
         .set({ base_resume_json: printed, base_resume_built_at: builtAt, updated_at: builtAt })
-        .where(eq(profiles.user_id, userId));
+        .where(eq(profiles.user_id, userId)));
+      logBuildTimings('done');
 
       send({ event: 'stage', stage: 'done' });
       send({
@@ -781,6 +862,10 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       });
     } catch (err) {
       fastify.log.error(err);
+      /* The builds that die mid-flight are the ones whose timings matter most - "a slow build
+         looked identical to a failed one" is above all a statement about this path. timed()'s
+         finally has already recorded every stage that ran, including one that threw. */
+      logBuildTimings('error');
       send({ event: 'stage', stage: 'failed' });
       /* This frame is printed to the student verbatim, so an upstream error may not pass through
          it. Anthropic's own words for an exhausted balance are "Please go to Plans & Billing to

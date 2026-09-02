@@ -4,6 +4,11 @@
 
 ### Changed
 
+- The onboarding base-resume build generates on a faster model behind the same deterministic
+  quality gates (measured equal-or-fewer gate violations with 30-40% less generation time), and
+  its repair window tightened from 35 to 18 seconds so the whole resume-creation stage stays
+  under 30 seconds even in the worst case. The build now logs per-stage timings (generation,
+  repairs, render and checks, save) so a slow build is attributable in production.
 - Resume parsing now races both configured model providers inside one short deadline, cancels the
   losing request, and falls back to bounded local extraction when neither provider responds.
 - Base and job-tailored resume creation now share a 15-second model budget and can continue from
