@@ -10074,7 +10074,46 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       coverLetterSupported: claimedReview.cover_letter_supported,
       transcriptSupported: claimedReview.transcript_supported,
     });
-    assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);
+    /* A DRIFT REFUSAL CLOSES ITS OWN ATTEMPT, because Litos already holds the proof.
+     *
+     * This assert is the earliest employer-bound refusal in the run: no browser has been opened, no
+     * field filled, no control pressed. Left as a bare throw it reached fail(), which writes the
+     * REVIEW but never a ledger fact - the not-sent writers all sit below this line (the consent
+     * hold at ~10101 is the nearest one). The attempt claimSubmission opened therefore stayed open,
+     * and an attempt carrying only `attempt_opened` folds to blocked_unverified/'opened'
+     * (submissionAttemptLedger.ts), which blocks EVERY future application to that employer and puts
+     * "Litos has an earlier attempt ... open the employer's page and tell Litos whether it is there"
+     * in front of the applicant. Measured on this account 2026-09-02: 69 employers in that state,
+     * every one of them asked about a page Litos itself never loaded.
+     *
+     * `typed_pre_click_stop` is the machine proof the ledger already defines for exactly this, and
+     * it is admissible here for the reason the ledger states: no `boundary_authorized` event exists
+     * yet, and its own rule is that only once that event exists may no machine-authored not-sent
+     * proof close the attempt. Before it, the run provably never reached the employer boundary.
+     *
+     * The applicant is never asked to check a portal for this stop, which is the whole point. */
+    try {
+      assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);
+    } catch (error) {
+      if (!(error instanceof EmployerBoundPacketDriftError)) throw error;
+      await writeReviewWithRunnerNotSentFact(row, nextReview(claimedReview, {
+        status: 'needs_attention',
+        attention_reason: packetDriftAttentionReason(error.issues),
+        submission_error: error.message,
+        submission_stop: submissionStopRecord(
+          'packet_drift_before_send',
+          new Date().toISOString(),
+          claimedReview.submission_run_id,
+        ),
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+        submission_authorization: undefined,
+      }), attemptBinding, 'employer-bound-packet-drift', {
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'employer_bound_packet_drift_before_send',
+      });
+      return;
+    }
     // There is no Playwright Page on this path - the actions run inside the remote runner - so
     // neither fillPortal's blocker check nor clickFinalSubmit's guard executes here, and the code
     // below writes status:'submitted' on a receipt screenshot. Without this probe, portalCanAutoSubmit
