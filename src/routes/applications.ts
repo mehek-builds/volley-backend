@@ -2918,8 +2918,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
       }
       if (sendsWithoutAnotherRun && questionGate.requiredQuestionLabels.length > 0) {
+        /* Two sentences over one list. A blank box wants an answer; a paragraph Litos drafted is
+           already written and wants a read, so saying "answer it" sends her looking for a field
+           that is not empty. Same stop and same list either way. */
         return reply.status(422).send({
-          error: 'Answer every required question before submitting.',
+          error: questionGate.draftQuestionLabels.length > 0
+            ? 'Approve or change the answers Litos drafted for you, and answer every required question, before submitting.'
+            : 'Answer every required question before submitting.',
           questions: questionGate.requiredQuestionLabels,
         });
       }
@@ -3472,7 +3477,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       if (handoffQuestionGate.requiredQuestionLabels.length > 0) {
         return reply.status(422).send({
-          error: 'Answer every required question before completing this handoff.',
+          error: handoffQuestionGate.draftQuestionLabels.length > 0
+            ? 'Approve or change the answers Litos drafted for you, and answer every required question, before completing this handoff.'
+            : 'Answer every required question before completing this handoff.',
           questions: handoffQuestionGate.requiredQuestionLabels,
         });
       }
@@ -4015,7 +4022,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (approvalQuestionGate.metadataBlockerCount > 0) {
         approvalIssues.push(`${approvalQuestionGate.metadataBlockerCount} employer question controls have incomplete metadata.`);
       }
-      if (approvalQuestionGate.requiredQuestionLabels.length > 0) {
+      /* Two sentences over one list, because the two states need different actions from her. A blank
+         box wants an answer; a draft is already written and wants a read. Saying "still blank" about
+         a paragraph Litos composed sends her looking for a field that is not empty. */
+      if (approvalQuestionGate.draftQuestionLabels.length > 0) {
+        approvalIssues.push('Approve or change the answer Litos drafted for you before sending.');
+      }
+      if (approvalQuestionGate.requiredQuestionLabels.length > approvalQuestionGate.draftQuestionLabels.length) {
         approvalIssues.push('A required application answer is still blank.');
       }
       if (approvalQuestionGate.optionalQuestionLabels.length > 0) {

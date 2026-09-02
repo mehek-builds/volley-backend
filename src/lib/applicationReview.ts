@@ -51,8 +51,19 @@ export type ApplicationReviewQuestion = {
    * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
    * an employer's privacy statement, applicant terms or code of conduct under the permission she
    * granted once at onboarding, and it exists so that the packet audit shows an acceptance made on
-   * her behalf rather than a tick that reads as if she had made it herself. */
-  answer_source?: 'applicant_review' | 'consent_permission';
+   * her behalf rather than a tick that reads as if she had made it herself.
+   *
+   * 'litos_draft' is A PARAGRAPH LITOS WROTE THAT SHE HAS NOT APPROVED. It is the only value here
+   * that makes an answer LESS sendable than no value at all: an absent answer_source means "some
+   * machine put this here and we cannot say which", which the packet acknowledgement already sorts
+   * into ask-her-next-round, while this one says "Litos composed these words in her name", and
+   * submissionSafety counts it as an unanswered required question until she replaces it or confirms
+   * it. It exists because the essay drafter used to push its paragraph with no flag at all, so a
+   * drafted answer and a profile relay were the same record to every reader.
+   *
+   * It is REPLACED, never annotated: an edit or an explicit confirmation mints 'applicant_review'
+   * over it, and from that moment the answer is byte-identical in status to anything she typed. */
+  answer_source?: 'applicant_review' | 'consent_permission' | 'litos_draft';
   answer_reviewed_at?: string;
   /**
    * The PROFILE VALUE this answer was snapped from, when discovery could read the control's options
@@ -406,7 +417,14 @@ export function mergeSubmittedApplicationReviewQuestions(
         answer_reviewed_at: _answerReviewedAt,
         ...questionWithoutProvenance
       } = question;
-      return questionWithoutProvenance;
+      /* EXCEPT THE DRAFT MARKER, WHICH IS NOT A CLAIM ABOUT HER AND SO CANNOT GO STALE THE WAY ONE
+       * DOES. Stripping it here would be the whole feature undone by omission: a save that never
+       * mentions the drafted question would silently turn "Litos wrote this and she has not read it"
+       * into "some machine put this here", and the send gate would open on a paragraph nobody
+       * approved. Nothing about this record moved, so what it says about itself still holds. */
+      return question.answer_source === 'litos_draft' && question.answer.trim()
+        ? { ...questionWithoutProvenance, answer_source: 'litos_draft' as const }
+        : questionWithoutProvenance;
     }
     const { question: submittedQuestion, index: submittedIndex } = submittedMatch;
     consumedSubmittedIndexes.add(submittedIndex);
@@ -653,7 +671,17 @@ export function mergeSubmittedApplicationReviewQuestions(
       // because they are the same assertion made through two different controls.
       ...(applicantSuppliedAnswer || applicantConfirmedAnswer
         ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
-        : {}),
+        /* AND OTHERWISE THE DRAFT MARKER SURVIVES THE SAVE, byte for byte, exactly as long as the
+         * paragraph does. This is the laundering door for the drafting feature and it is the same
+         * door the 802-answer incident came through: the review screen posts back the whole list it
+         * was shown, so an untouched Save reaches here with the drafted answer unchanged and no
+         * confirmation flag. Without this clause the strip above would leave answer_source absent -
+         * indistinguishable from a profile relay - and a paragraph she never read would clear the
+         * gate. Keyed on `answerUnchanged` because a REPLACED answer is her own bytes, and that case
+         * is already the applicantSuppliedAnswer branch above. */
+        : question.answer_source === 'litos_draft' && answerUnchanged && submittedAnswer
+          ? { answer_source: 'litos_draft' as const }
+          : {}),
       /* Beside the claim and never without it, because it is only meaningful as the other half of
        * that claim. See overriddenResolverValue. */
       ...(overriddenResolverValue ? { answer_override_of: overriddenResolverValue } : {}),
@@ -1606,7 +1634,16 @@ export function applyApplicantReviewedAnswers(
 ): ApplicationReviewState {
   return {
     ...current,
-    questions: questions.map((question) => question.answer.trim()
+    /* THE BLANKET STAMP, MINUS THE ONE RECORD IT MUST NOT TOUCH.
+     *
+     * This function claims every non-blank answer in the body as hers, which is what PUT /review
+     * means by a review round. A LITOS DRAFT is the exception, and skipping it is what keeps this
+     * route from being a second door into the laundering the narrow answers route was fixed for: a
+     * paragraph Litos composed does not become her answer because a whole-list Save went past it.
+     * Approval is per-question and explicit - PUT /applications/:id/review/answers with
+     * `confirmed: true`, or an edit that changes the bytes - and both of those run through
+     * mergeSubmittedApplicationReviewQuestions, which mints 'applicant_review' over the marker. */
+    questions: questions.map((question) => question.answer.trim() && question.answer_source !== 'litos_draft'
       ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
       : question),
     questions_reviewed_at: reviewedAt,
