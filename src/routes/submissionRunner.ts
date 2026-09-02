@@ -3903,12 +3903,16 @@ export function managedFormSnapshotWithStableCapabilities(input: {
   failedFields?: SubmissionPacket['failedFields'];
   prior?: ReturnType<typeof normalizeManagedFormSnapshot>;
   coverLetterSupported: boolean;
+  /* The file half, written beside the wide one so the NEXT prepare's carry reads a file measurement
+   * back rather than a text-inclusive one. See ManagedFormSnapshotV1.cover_letter_attachable. */
+  coverLetterAttachable: boolean;
   transcriptSupported: boolean;
 }): ReturnType<typeof normalizeManagedFormSnapshot> {
   return normalizeManagedFormSnapshot({
     fieldOptions: input.discoveryFailed ? input.prior?.field_options : input.fieldOptions,
     failedFields: input.discoveryFailed ? input.prior?.failed_fields : input.failedFields,
     coverLetterSupported: input.coverLetterSupported,
+    coverLetterAttachable: input.coverLetterAttachable,
     transcriptSupported: input.transcriptSupported,
   });
 }
@@ -7571,11 +7575,19 @@ async function prepareManaged(
    * writes the letter the textarea will carry. The attachment decision stays on the file read:
    * with no file control there is nothing to upload, so the packet carries no file and
    * cover_letter_attached stays false, while the stored letter is kept on the row for the textarea. */
+  /* THE CARRY FOR THE FILE READ COMES FROM THE FILE MEASUREMENT AND FROM NOTHING ELSE.
+   *
+   * cover_letter_supported and current.cover_letter_supported are both text-inclusive now, and
+   * feeding either of them in here as prior/current made the second prepare of a text-only form
+   * report an attachable letter (stableManagedDocumentCapability returns prior ?? current when
+   * nothing was discovered). The packet then carried a PDF the form has nowhere to put and the fill
+   * evidence said the filled form did not record the attachment. So the carry reads
+   * cover_letter_attachable, which is written by this run for the next one; a snapshot from before
+   * that field existed carries nothing and this run's own discovery decides. */
   const coverLetterAttachable = stableManagedDocumentCapability({
     authoritative: greenhouseSchema?.coverLetterSupported,
     discovered: managedResultHasCoverLetterUpload(discoveryResult, portal),
-    prior: priorManagedFormSnapshot?.cover_letter_supported,
-    current: current.cover_letter_supported,
+    prior: priorManagedFormSnapshot?.cover_letter_attachable,
   });
   const coverLetterTakenAsText = discoveredFieldsTakeCoverLetterAsText(discoveredFields);
   const coverLetterSupported = coverLetterAttachable || coverLetterTakenAsText;
@@ -7825,6 +7837,7 @@ async function prepareManaged(
     failedFields,
     prior: priorManagedFormSnapshot,
     coverLetterSupported,
+    coverLetterAttachable,
     transcriptSupported,
   });
   packet.fieldOptions = managedFormSnapshot.field_options;

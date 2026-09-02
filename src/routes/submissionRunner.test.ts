@@ -4874,6 +4874,7 @@ test('managed snapshot keeps prior inventory but persists authoritative document
     fieldOptions: { degree: ['Bachelor’s'] },
     failedFields: [{ controlId: 'school', label: 'School', selector: '#school' }],
     coverLetterSupported: false,
+    coverLetterAttachable: false,
     transcriptSupported: true,
   });
   const repairedTrue = managedFormSnapshotWithStableCapabilities({
@@ -4882,6 +4883,7 @@ test('managed snapshot keeps prior inventory but persists authoritative document
     failedFields: [],
     prior: priorFalse,
     coverLetterSupported: true,
+    coverLetterAttachable: true,
     transcriptSupported: false,
   });
   assert.deepEqual(repairedTrue.field_options, priorFalse.field_options);
@@ -4893,6 +4895,7 @@ test('managed snapshot keeps prior inventory but persists authoritative document
     discoveryFailed: true,
     prior: repairedTrue,
     coverLetterSupported: false,
+    coverLetterAttachable: false,
     transcriptSupported: true,
   });
   assert.deepEqual(clearedFalse.field_options, repairedTrue.field_options);
@@ -6543,7 +6546,65 @@ test('the managed cover-letter capability counts a textarea, and attaches a file
     fieldOptions: {},
     failedFields: [],
     coverLetterSupported: true,
+    coverLetterAttachable: false,
     transcriptSupported: false,
   });
   assert.equal(snapshot.cover_letter_supported, true);
+  assert.equal(snapshot.cover_letter_attachable, false);
+});
+
+/* THE SECOND PREPARE OF A TEXT-ONLY FORM MUST NOT INHERIT THE TEXT HALF AS AN ATTACHMENT.
+ *
+ * stableManagedDocumentCapability returns `prior ?? current` when nothing was discovered, and both
+ * of those used to hold the text-INCLUSIVE cover_letter_supported. So run 1 wrote true for a
+ * TixTrack-shaped form with a cover-letter textarea and no file control, run 2 read that true back
+ * as prior, and the packet claimed an attached PDF the form has nowhere to put. The file half is
+ * persisted separately for exactly this read. */
+test('a re-prepare of a text-only cover-letter form does not inherit an attachment capability', () => {
+  const runOne = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: false,
+    fieldOptions: {},
+    failedFields: [],
+    // The text half is true: the form takes a cover letter, in a textarea.
+    coverLetterSupported: true,
+    // The file half is false: no file control was discovered.
+    coverLetterAttachable: false,
+    transcriptSupported: false,
+  });
+  assert.equal(runOne.cover_letter_supported, true);
+  assert.equal(runOne.cover_letter_attachable, false);
+
+  // Run 2 reads run 1's snapshot back through the same carry the prepare uses.
+  const carriedAttachable = stableManagedDocumentCapability({
+    authoritative: undefined,
+    discovered: false,
+    prior: runOne.cover_letter_attachable,
+  });
+  assert.equal(carriedAttachable, false, 'a text-only form stays unattachable on every later prepare');
+  // The wide value is what run 1 would have handed the file read before the split, and it is what
+  // made the second run attach.
+  assert.equal(
+    stableManagedDocumentCapability({ discovered: false, prior: runOne.cover_letter_supported }),
+    true,
+    'the text-inclusive value is exactly the one the file read must never receive',
+  );
+  // The prepare reads the file half and nothing else into the file carry.
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(
+    runner,
+    /const coverLetterAttachable = stableManagedDocumentCapability\(\{[\s\S]{0,200}?prior: priorManagedFormSnapshot\?\.cover_letter_attachable,\s*\}\)/,
+  );
+  // A real file control still survives a later discovery flake.
+  const withFileControl = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: false,
+    fieldOptions: {},
+    failedFields: [],
+    coverLetterSupported: true,
+    coverLetterAttachable: true,
+    transcriptSupported: false,
+  });
+  assert.equal(
+    stableManagedDocumentCapability({ discovered: false, prior: withFileControl.cover_letter_attachable }),
+    true,
+  );
 });
