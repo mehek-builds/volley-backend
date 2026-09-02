@@ -59,3 +59,20 @@ test('the helper is fail-closed: same envelope builder as /resume/history, nothi
   // the dashboard's fill-run polling off the per-user submission-attempt advisory lock.
   assert.match(helper, /if \(!FIRST_SEND_REVIEW_STATUSES\.has\(reviewStatus\)\) return \{\};/);
 });
+
+test('a filled packet waiting for the final approval carries the first-send envelope', () => {
+  /* A managed prepare parks at ready_for_final_approval through claimPreparation, which writes no
+     ledger event, so the packet projects `none` with `no_evidence` and the dashboard offers
+     /submission/approve from this status alone. When the poll carried no envelope the dashboard's
+     fail-closed display rule rewrote the review into needs_attention and hid the send control
+     (The Maven Group, 2026-09-02). Membership is pinned literally so the status cannot fall out of
+     the set unobserved again, as it did in 101ed24. */
+  const members = applications.slice(
+    applications.indexOf('const FIRST_SEND_REVIEW_STATUSES = new Set(['),
+    applications.indexOf('async function unattemptedPacketSubmissionAuthority('),
+  );
+  for (const status of ['resume_ready', 'questions_ready', 'ready_to_submit', 'ready_for_final_approval', 'needs_attention', 'failed']) {
+    assert.match(members, new RegExp(`'${status}',`), `${status} must stay in FIRST_SEND_REVIEW_STATUSES`);
+  }
+  assert.doesNotMatch(members, /'preparing'|'submitting'|'submitted'/, 'live-fill and sent statuses stay off the envelope read');
+});

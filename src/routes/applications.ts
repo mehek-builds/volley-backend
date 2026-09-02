@@ -197,11 +197,23 @@ const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(
  * projection transaction (and its per-user `pg_advisory_xact_lock`) on every poll of a live fill
  * only to attach nothing. Skipping there is behaviour-identical and keeps the polling hot path off
  * the submission-attempt lock.
+ *
+ * `ready_for_final_approval` BELONGS HERE. A managed prepare parks at that status through
+ * `claimPreparation`, which writes no ledger event; `attempt_opened` is only written by
+ * `claimSubmission` when the applicant approves the filled form. So a filled, never-sent packet
+ * projects `none` with `no_evidence`, exactly the shape the helper turns into an envelope, and the
+ * dashboard offers `/submission/approve` from this status and nowhere else. Without the envelope
+ * the dashboard's fail-closed display rule rewrote a server `ready_for_final_approval` review into
+ * `needs_attention`: no "Send application" control, the "Review the application packet before
+ * Litos fills the company form again" card instead, and the only offered action a NEW submit-request
+ * the server then refuses with PREPARED_RUN_RESTARTABLE. Observed live 2026-09-02 on The Maven
+ * Group (crelate) packet, the first packet of the campaign to reach the send step.
  */
 const FIRST_SEND_REVIEW_STATUSES = new Set([
   'resume_ready',
   'questions_ready',
   'ready_to_submit',
+  'ready_for_final_approval',
   'needs_attention',
   'failed',
 ]);
