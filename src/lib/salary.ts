@@ -109,7 +109,14 @@ function groupDigits(n: number, grouping: NumToken['grouping']): string {
 
 const NUM_SRC = String.raw`\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?`;
 const SEP_SRC = String.raw`(?:\s*[-‐-―~]\s*|\s+(?:to|and|bis)\s+)`;
-const RANGE_SRC = `(${NUM_SRC})\\s*(k)?${SEP_SRC}(${NUM_SRC})\\s*(k)?`;
+// The currency written AGAIN before the second number: "$130,000 - $150,000", "USD 90k to USD 110k".
+// Measured live on TixTrack (2026-09-02), whose description states "Base annual salary range of
+// $130,000 - $150,000" and matched nothing, because the range shape expected the second number to
+// follow the separator directly. Only a currency symbol or code may sit there, never a word, so
+// "130,000 to the 150,000 band" still does not read as a range. Non-capturing on purpose: the four
+// numbered groups below are read by position.
+const REPEATED_CURRENCY_SRC = `(?:(?:${SYMBOL_SRC}|\\b(?:${CURRENCY_CODES.join('|')})\\b)\\s?)?`;
+const RANGE_SRC = `(${NUM_SRC})\\s*(k)?${SEP_SRC}${REPEATED_CURRENCY_SRC}(${NUM_SRC})\\s*(k)?`;
 
 function currencyPrefixAt(text: string, index: number): string {
   const window = text.slice(Math.max(0, index - 8), index);

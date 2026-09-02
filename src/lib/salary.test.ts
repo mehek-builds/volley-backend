@@ -41,3 +41,23 @@ test('a year-shaped pair is never mistaken for a salary range', () => {
   const r = resolveSalary({ label: 'employment dates 2024-2026', field: 'freetext' }, {});
   assert.equal(r.action, 'flag');
 });
+
+test('a range that repeats the currency before the second number is still one range', () => {
+  // TixTrack's description, 2026-09-02: "Base annual salary range of $130,000 - $150,000".
+  const numeric = resolveSalary(
+    { label: 'what are your salary expectations for this position?', field: 'numeric', jdText: 'Base annual salary range of $130,000 - $150,000.' },
+    {},
+  );
+  assert.deepEqual(numeric, { action: 'fill', source: 'jd-range', value: '140000' });
+  const text = resolveSalary(
+    { label: 'what are your salary expectations for this position?', field: 'freetext', jdText: 'Base annual salary range of $130,000 - $150,000.' },
+    {},
+  );
+  assert.deepEqual(text, { action: 'fill', source: 'jd-range', value: '$140,000' });
+  for (const label of ['salary: USD 90,000 to USD 110,000', 'salary $130k - $150k', 'pay range €50.000 - €60.000']) {
+    const r = resolveSalary({ label, field: 'freetext' }, {});
+    assert.equal(r.action, 'fill', label);
+  }
+  // A word between the separator and the second number is not a currency and not a range.
+  assert.equal(resolveSalary({ label: 'salary 130,000 to the 150,000 band', field: 'freetext' }, {}).action, 'flag');
+});
