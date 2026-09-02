@@ -31,7 +31,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { describe, test } from 'node:test';
 import type { ApplicationReviewState } from './applicationReview';
-import { submissionClaimPatch, submissionStopRecord } from './submissionStop';
+import { classifySubmissionStop, stopReasonPrecedesClick, submissionClaimPatch, submissionStopRecord } from './submissionStop';
 import { canStartExtensionSubmission, extensionOutcomePatch } from './extensionSubmission';
 import { submissionProvablyNotSent } from './managedSubmitOutcome';
 import { submitRequestDisposition } from './submissionSafety';
@@ -166,4 +166,45 @@ describe('every claim site goes through the one helper', () => {
     assert.ok('submission_stop' in patch, 'the key must be PRESENT and undefined, so a spread overwrites');
     assert.equal(patch.submission_stop, undefined);
   });
+});
+
+/* A drift refusal is structurally ahead of the click: assertVerifiedBuiltPacket runs before
+   transportVerifiedBuiltPacket calls transport(), and before the managed send opens a session. It
+   was classifying as 'unclassified', which is deliberately NOT pre-click, so the row kept its claim
+   and took the unverified exit for a run that never opened a browser. */
+test('a packet drift before the send classifies as a pre-click stop', () => {
+  const reason = classifySubmissionStop({
+    captchaStop: null,
+    noSubmitControl: false,
+    regenerationRequired: false,
+    packetDocumentExpired: false,
+    actionBudget: false,
+    packetDriftBeforeSend: true,
+    confirmationUnproven: false,
+    providerSessionFailureBeforeSubmit: false,
+    providerSessionFailure: false,
+    runTimedOut: false,
+    providerUnconfigured: false,
+  });
+  assert.equal(reason, 'packet_drift_before_send');
+  assert.equal(stopReasonPrecedesClick(reason), true);
+  assert.equal(submissionStopRecord(reason, '2026-09-02T11:38:20.465Z').before_click, true);
+});
+
+/* The run budget and the provider are read from a run that HAPPENED, so they outrank nothing here -
+   but a drift stop must never be reported as one of them, because those keep the claim. */
+test('a run that timed out is still a timeout even if a drift flag is set', () => {
+  assert.equal(classifySubmissionStop({
+    captchaStop: null,
+    noSubmitControl: false,
+    regenerationRequired: false,
+    packetDocumentExpired: false,
+    actionBudget: false,
+    packetDriftBeforeSend: true,
+    confirmationUnproven: false,
+    providerSessionFailureBeforeSubmit: false,
+    providerSessionFailure: false,
+    runTimedOut: true,
+    providerUnconfigured: false,
+  }), 'run_timed_out');
 });

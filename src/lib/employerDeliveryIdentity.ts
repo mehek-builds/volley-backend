@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ApplicationReviewState } from './applicationReview';
 import type { SubmissionPacket } from './portalSubmission';
-import { packetAuditSha256 } from './packetAudit';
+import { applicantSnapshotBindingValue, applicationProfileBindingValue, packetAuditSha256 } from './packetAudit';
 
 export const EMPLOYER_DELIVERY_BINDING_VERSION = 'employer_delivery_v1' as const;
 
@@ -163,6 +163,28 @@ export function employerDeliveryProjection(packet: SubmissionPacket): Record<str
       projection[key] = [...new Set(
         (value as NonNullable<SubmissionPacket['failedFields']>).map((field) => field.controlId),
       )].sort();
+      continue;
+    }
+    /* LITOS' OWN SEND LOG IS NOT EMPLOYER-DELIVERY BEHAVIOR, and it rides in through two fields.
+     *
+     * `application_profile.submitted_application_companies` is read live from the database on every
+     * buildPacket and lists every company this ACCOUNT has an application at, so any row anywhere
+     * landing rewrites it. It reaches this projection twice: as `applicationProfile` directly, and
+     * again nested inside `applicantSnapshot.application_profile`. Binding either one makes every
+     * approved packet in the account read as "how Litos reaches this employer changed" the moment a
+     * different application lands - and worse, claimSubmission opens THIS employer's attempt before
+     * buildPacket runs, so a send could arrange its own refusal.
+     *
+     * Same narrowing rule as fieldOptions and failedFields above: the snapshot keeps the full value,
+     * only the hash projection drops what is not employer content. The one bit of the log that can
+     * change what this employer sees - whether THIS employer appears in it - changes an ANSWER, and
+     * answers are bound exactly, as `questions` in this same projection. */
+    if (key === 'applicationProfile') {
+      projection[key] = applicationProfileBindingValue(value);
+      continue;
+    }
+    if (key === 'applicantSnapshot') {
+      projection[key] = applicantSnapshotBindingValue(value);
       continue;
     }
     projection[key] = EMPLOYER_DELIVERY_PACKET_FIELDS[key] === 'file'

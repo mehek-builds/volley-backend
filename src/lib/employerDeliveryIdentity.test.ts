@@ -376,3 +376,75 @@ test('destination, runtime, capability policy, and every email envelope field bl
   }
   assert.equal(transports, 0);
 });
+
+/* THE DELIVERY HASH WAS THE SECOND DOOR THE SEND LOG CAME THROUGH.
+ *
+ * `application_profile.submitted_application_companies` is Litos' own send log, read live from the
+ * database on every buildPacket, so any row anywhere in the account landing rewrites it. It reaches
+ * this projection twice - as `applicationProfile` and again nested inside `applicantSnapshot` - and
+ * binding either made every approved packet in the account read as "how Litos reaches this employer
+ * changed" the moment a different application landed. Worse, claimSubmission opens THIS employer's
+ * attempt before buildPacket runs, so a send could arrange its own refusal. Measured on The Maven
+ * Group 305dae5e, 2026-09-02, which refused on BOTH the snapshot and the delivery payload. */
+test('the send log does not move the employer-delivery binding, through either field', () => {
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl: 'https://job-boards.greenhouse.io/embed/job_app?for=dvtrading',
+    portalFamily: 'greenhouse',
+  });
+  const withLog = (companies: string[]): SubmissionPacket => {
+    const base = packet();
+    return {
+      ...base,
+      applicationProfile: { ...base.applicationProfile, submitted_application_companies: companies },
+      applicantSnapshot: {
+        ...(base.applicantSnapshot as Record<string, unknown>),
+        application_profile: {
+          ...((base.applicantSnapshot as { application_profile: Record<string, unknown> }).application_profile),
+          submitted_application_companies: companies,
+        },
+      },
+    } as SubmissionPacket;
+  };
+  const review = { cover_letter_supported: false, transcript_supported: false };
+  // The send narrows with packetForEmployerDelivery before it asserts, and createEmployerDeliveryBindings
+  // narrows the same way internally, so the compare has to be made on the narrowed pair.
+  const before = packetForEmployerDelivery(withLog(['Akuna', 'Databricks']), review, 'browser');
+  const afterOneLanded = packetForEmployerDelivery(
+    withLog(['Akuna', 'Databricks', 'DV Trading']), review, 'browser',
+  );
+
+  assert.equal(
+    employerDeliverySha256(before, envelope),
+    employerDeliverySha256(afterOneLanded, envelope),
+    'an employer joining the send log mid-run must not park every packet in the account',
+  );
+  const bindings = createEmployerDeliveryBindings(before, review, { mode: 'browser', envelope });
+  assert.equal(
+    employerDeliveryBindingIssue(afterOneLanded, bindings, 'browser', envelope),
+    null,
+    'this is the exact compare the send makes after claimSubmission has already opened the attempt',
+  );
+});
+
+test('every other applicationProfile and applicantSnapshot byte still moves the delivery binding', () => {
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl: 'https://job-boards.greenhouse.io/embed/job_app?for=dvtrading',
+    portalFamily: 'greenhouse',
+  });
+  const base = packet();
+  const movedProfile = {
+    ...base,
+    applicationProfile: { ...base.applicationProfile, phone: '+1 000 000 0000' },
+  } as SubmissionPacket;
+  const movedSnapshot = {
+    ...base,
+    applicantSnapshot: {
+      ...(base.applicantSnapshot as Record<string, unknown>),
+      profile: { full_name: 'Someone Else' },
+    },
+  } as SubmissionPacket;
+  assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(movedProfile, envelope));
+  assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(movedSnapshot, envelope));
+});

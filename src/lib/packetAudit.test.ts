@@ -8,6 +8,9 @@ import {
   createResumeEvidencePointer,
   packetAuditIsSubmissionReady,
   packetAuditSha256,
+  applicantSnapshotSha256,
+  applicantSnapshotBindingValue,
+  applicationProfileBindingValue,
   PacketAuditValidationError,
   type CreatePacketAuditInput,
   type PacketAudit,
@@ -530,4 +533,80 @@ test('malformed persisted JSON fails closed instead of throwing in a submission 
     assert.doesNotThrow(() => packetAuditIsSubmissionReady(malformed));
     assert.equal(packetAuditIsSubmissionReady(malformed), false);
   }
+});
+
+/* THE SEND LOG IS GLOBAL, AND IT USED TO INVALIDATE EVERY PACKET IN THE ACCOUNT.
+ *
+ * Measured 2026-09-02: a 69-name `submitted_application_companies` list rode inside
+ * applicantSnapshot into applicantSnapshotSha256. One application landing anywhere added a name, and
+ * from then on every OTHER approved packet refused to send with "applicant snapshot changed after
+ * packet approval" - on packets nobody had touched. */
+test('Litos own send log moving does not change the applicant-snapshot binding', () => {
+  const snapshotWithLog = (companies: string[]) => ({
+    profile: { full_name: 'Mehek Mandal', email: 'mehek@example.com', experience: [], skills: [] },
+    application_profile: { phone: '+1 213 574 6270', submitted_application_companies: companies },
+  });
+  const before = applicantSnapshotSha256(snapshotWithLog(['Akuna', 'Databricks']));
+  const after = applicantSnapshotSha256(snapshotWithLog(['Akuna', 'Databricks', 'The Maven Group']));
+  assert.equal(before, after, 'an unrelated employer joining the send log must not park this packet');
+});
+
+test('every other applicant-snapshot byte still moves the binding', () => {
+  const base = {
+    profile: { full_name: 'Mehek Mandal', email: 'mehek@example.com', experience: [], skills: [] },
+    application_profile: { phone: '+1 213 574 6270', submitted_application_companies: ['Akuna'] },
+  };
+  const movedPhone = {
+    ...base,
+    application_profile: { ...base.application_profile, phone: '+1 000 000 0000' },
+  };
+  const movedName = { ...base, profile: { ...base.profile, full_name: 'Someone Else' } };
+  assert.notEqual(applicantSnapshotSha256(base), applicantSnapshotSha256(movedPhone));
+  assert.notEqual(applicantSnapshotSha256(base), applicantSnapshotSha256(movedName));
+});
+
+test('the projection is shape-safe on snapshots that carry no send log at all', () => {
+  for (const snapshot of [null, 'text', 42, [], { profile: {} }, { application_profile: null }]) {
+    assert.equal(applicantSnapshotSha256(snapshot), packetAuditSha256(applicantSnapshotBindingValue(snapshot)));
+  }
+  // `undefined` was never hashable and still is not: the projection must not quietly make it one.
+  assert.throws(() => applicantSnapshotSha256(undefined), /contains undefined/);
+  // No send log key means nothing to strip, so the binding is the plain snapshot hash.
+  const plain = { profile: { full_name: 'A' }, application_profile: { phone: '1' } };
+  assert.equal(applicantSnapshotSha256(plain), packetAuditSha256(plain));
+});
+
+test('stripping the send log does not mutate the caller snapshot', () => {
+  const snapshot = { application_profile: { phone: '1', submitted_application_companies: ['Akuna'] } };
+  applicantSnapshotSha256(snapshot);
+  assert.deepEqual(snapshot.application_profile.submitted_application_companies, ['Akuna'],
+    'the fill reads this object after the binding is taken');
+});
+
+/* THE LOG RIDES IN THROUGH TWO FIELDS, AND CODE REVIEW CAUGHT THE SECOND ONE.
+ *
+ * The first version of this fix stripped the send log only from applicantSnapshotSha256. The
+ * employer-delivery projection binds `applicationProfile` AND `applicantSnapshot` as separate 'json'
+ * fields, so the log stayed inside the delivery hash and the send still refused - on 'browser
+ * employer-delivery payload changed after packet approval', which is exactly the second of the two
+ * issues the live Maven Group refusal reported. Both strips go through one function now. */
+test('the send log is stripped from a bare application profile too, not just from the snapshot', () => {
+  const withLog = { phone: '+1 213 574 6270', submitted_application_companies: ['Akuna', 'Databricks'] };
+  const grown = { phone: '+1 213 574 6270', submitted_application_companies: ['Akuna', 'Databricks', 'Exa'] };
+  assert.deepEqual(applicationProfileBindingValue(withLog), { phone: '+1 213 574 6270' });
+  assert.equal(
+    packetAuditSha256(applicationProfileBindingValue(withLog)),
+    packetAuditSha256(applicationProfileBindingValue(grown)),
+    'a bare applicationProfile must narrow the same way the nested one does',
+  );
+});
+
+test('the profile projection keeps every other field and does not mutate its input', () => {
+  const profile = { phone: '1', gpa: '3.89', submitted_application_companies: ['Akuna'] };
+  const bound = applicationProfileBindingValue(profile) as Record<string, unknown>;
+  assert.deepEqual(bound, { phone: '1', gpa: '3.89' });
+  assert.deepEqual(profile.submitted_application_companies, ['Akuna'], 'the fill reads this after');
+  // No log key means the value is returned unchanged, so identity is the cheap signal callers use.
+  const noLog = { phone: '1' };
+  assert.equal(applicationProfileBindingValue(noLog), noLog);
 });

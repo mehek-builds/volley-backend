@@ -54,6 +54,10 @@ export type SubmissionStopReason =
   | 'field_proof_failed_before_submit'
   /** The managed run was cut off before it reported anything. Where in the run is unknown. */
   | 'run_timed_out'
+  /** The exact packet no longer matched the audit that authorised it, so the run refused to hand it
+   * to the employer. assertVerifiedBuiltPacket runs ahead of every transport - including before the
+   * managed browser is opened - so nothing was filled and nothing was pressed. */
+  | 'packet_drift_before_send'
   /** Anything else. Deliberately not guessed at, and never treated as pre-click. */
   | 'unclassified';
 
@@ -101,6 +105,11 @@ const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStop
   'applicant_email_regeneration',
   'provider_session_failure_before_submit',
   'field_proof_failed_before_submit',
+  /* Backed by EmployerBoundPacketDriftError, per the membership rule above. The test is where the
+   * throw is, and this one is in assertVerifiedBuiltPacket: transportVerifiedBuiltPacket asserts
+   * before it calls transport(), and the managed send asserts before it opens a browser session. No
+   * arm of that gate can run after a click. */
+  'packet_drift_before_send',
 ]);
 
 export function stopReasonPrecedesClick(reason: SubmissionStopReason): boolean {
@@ -120,6 +129,7 @@ export function classifySubmissionStop(input: {
   regenerationRequired: boolean;
   packetDocumentExpired: boolean;
   actionBudget: boolean;
+  packetDriftBeforeSend?: boolean;
   confirmationUnproven: boolean;
   providerSessionFailureBeforeSubmit: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
@@ -133,6 +143,10 @@ export function classifySubmissionStop(input: {
   if (input.regenerationRequired) return 'applicant_email_regeneration';
   if (input.packetDocumentExpired) return 'packet_document_expired';
   if (input.actionBudget) return 'action_budget';
+  /* Ranked with the other build-time refusals and above every post-run reading, because it is the
+   * earliest of them: the packet is compared to its audit before a transport is chosen, so none of
+   * the signals below can even have been produced on a run that stops here. */
+  if (input.packetDriftBeforeSend) return 'packet_drift_before_send';
   if (input.noSubmitControl) return 'no_submit_control';
   if (input.confirmationUnproven) return 'confirmation_unproven';
   if (input.fieldProofFailedBeforeSubmit) return 'field_proof_failed_before_submit';

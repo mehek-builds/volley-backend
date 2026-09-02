@@ -125,3 +125,31 @@ test('the ATS API channel fails closed before it can describe or send a packet',
   assert.match(branch, /throw new Error\('ATS API delivery is withheld until Litos can verify and send one prebuilt request object'\)/);
   assert.doesNotMatch(branch, /preparedReviewPatch|tryAtsSubmissionChannel|transportVerifiedBuiltPacket/);
 });
+
+/* A DRIFT REFUSAL MUST CLOSE ITS OWN LEDGER ATTEMPT.
+ *
+ * claimSubmission opens an attempt before the packet is built. The drift assert is the earliest
+ * employer-bound refusal after that, and every not-sent writer sits BELOW it, so a bare throw left
+ * the attempt carrying only `attempt_opened` - which folds to blocked_unverified/'opened' and blocks
+ * every future application to that employer behind "open the employer's page and tell Litos whether
+ * it is there". Measured on one account 2026-09-02: 69 employers in that state, each asked about a
+ * page Litos never loaded. */
+test('an employer-bound packet drift closes its attempt instead of asking about the employer page', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const branch = slice(
+    runner,
+    "assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);",
+    'const verificationRequestedAt = new Date();',
+  );
+  assert.match(branch, /catch \(error\)/, 'the drift throw must be handled at this site, not left to fail()');
+  assert.match(branch, /error instanceof EmployerBoundPacketDriftError/,
+    'only the typed drift refusal may take the pre-click exit');
+  assert.match(branch, /if \(!\(error instanceof EmployerBoundPacketDriftError\)\) throw error;/,
+    'every other error must keep its existing path');
+  assert.match(branch, /writeReviewWithRunnerNotSentFact/,
+    'the ledger fact is what unblocks the employer; the review write alone does not');
+  assert.match(branch, /proofKind: 'typed_pre_click_stop'/,
+    'the machine proof the ledger defines for a stop that provably precedes the boundary');
+  assert.match(branch, /packetDriftAttentionReason\(error\.issues\)/,
+    'the sentence names which binding moved and never sends her to the employer page');
+});
