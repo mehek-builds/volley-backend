@@ -206,7 +206,10 @@ describe('parseSpecText', () => {
 
 describe('base resume priority selection', () => {
   test('an onboarding choice is the only mandatory base-resume entry', () => {
-    const chosen = bankEntry({ id: 'chosen', org: 'Selected Lab', title: 'Research Lead', date_range: '2024' });
+    const chosen = bankEntry({
+      id: 'chosen', org: 'Selected Lab', title: 'Research Lead', date_range: '2024',
+      bullet_variants: ['Led a grounded study cohort', 'Published grounded results'],
+    });
     const current = bankEntry({ id: 'current', org: 'Current Office', title: 'Assistant', date_range: '2026 - Present' });
     const roleMatch = bankEntry({ id: 'role', org: 'Product Studio', title: 'Product Manager', date_range: '2025' });
 
@@ -361,11 +364,37 @@ describe('base resume priority selection', () => {
     const priorities = priorityEntriesForBaseResume([sparse, internship], 'Research Assistant');
     assert.ok(!priorities.some((entry) => entry.id === 'sparse'));
     assert.ok(priorities.some((entry) => entry.id === 'internship'));
-    /* The explicit-selection escape is untouched: a confirmed sparse entry stays mandatory,
-     * because continue_with_found gives the floor and the validator their allowance for it. */
+    /* A CONFIRMED sparse selection stays mandatory: continue_with_found is the moment the floor
+     * and the validator gain their allowance for it, so mandatory-ness may follow. */
     assert.deepEqual(
-      priorityEntriesForBaseResume([sparse, internship], 'Research Assistant', 'sparse').map((entry) => entry.id),
+      priorityEntriesForBaseResume([sparse, internship], 'Research Assistant', 'sparse', { sparseSelectionConfirmed: true })
+        .map((entry) => entry.id),
       ['sparse'],
+    );
+  });
+
+  test('an auto-seeded sparse selection is not mandatory until the applicant confirms it', () => {
+    /* Every upload seeds recent_experience_review.selected_entry_id with continue_with_found
+     * false (buildRecentExperienceReview), and the explicit branch used to make that auto-pick
+     * unconditionally mandatory - recreating the nothing-saved dead-end for a one-variant pick,
+     * because no sparse allowance is active without the confirmation. Reproduced live 2026-09-03
+     * on a fresh production trial account. Unconfirmed, the pick falls through to the legacy
+     * fallback and its survivability filter; a multi-variant pick is unaffected either way. */
+    const sparse = bankEntry({
+      id: 'sparse', type: 'leadership', org: 'IISE UF Chapter', title: 'Treasurer',
+      date_range: '2025 - Present', bullet_variants: ['Managed the chapter budget'],
+    });
+    const coop = bankEntry({
+      id: 'coop', org: 'Distribution Center', title: 'Engineering Co-op', date_range: 'Jan 2026 - Jun 2026',
+      bullet_variants: ['Mapped grounded pick paths', 'Built grounded dashboards'],
+    });
+    const unconfirmed = priorityEntriesForBaseResume([sparse, coop], 'Industrial Engineer', 'sparse');
+    assert.ok(!unconfirmed.some((entry) => entry.id === 'sparse'));
+    assert.ok(unconfirmed.some((entry) => entry.id === 'coop'));
+    /* A survivable auto-pick keeps the old behavior: it is the one mandatory entry. */
+    assert.deepEqual(
+      priorityEntriesForBaseResume([sparse, coop], 'Industrial Engineer', 'coop').map((entry) => entry.id),
+      ['coop'],
     );
   });
 });

@@ -173,10 +173,39 @@ export function priorityEntriesForBaseResume(
   bank: ExperienceBankEntry[],
   targetRoleText: string,
   selectedEntryId?: string | null,
+  options: {
+    /* True when the applicant chose to continue with the sparse evidence found - the same
+     * continue_with_found flag that activates the floor's allowSparsePriority and the validator's
+     * sparse allowance. It travels here because mandatory-ness must agree with those allowances:
+     * a sparse selection is mandatory exactly when the pipeline downstream is permitted to keep
+     * it on the page. */
+    sparseSelectionConfirmed?: boolean;
+  } = {},
 ): ExperienceBankEntry[] {
   if (bank.length === 0) return [];
+  const countGroundedVariants = (entry: ExperienceBankEntry): number =>
+    (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
+      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
+      .length;
   const explicitlySelected = bank.find((entry) => entry.id === selectedEntryId);
-  if (explicitlySelected) return [explicitlySelected];
+  /* AN AUTO-SEEDED SELECTION IS NOT A CONFIRMATION. Every upload seeds
+   * recent_experience_review.selected_entry_id (buildRecentExperienceReview picks the most recent
+   * current entry) with continue_with_found false, and this branch used to make that pick
+   * unconditionally mandatory. For a pick whose bank row holds one bullet variant that recreated
+   * the exact dead-end the survivability filter below closes, one branch over: no sparse
+   * allowance is active (allowSparsePriority keys on continue_with_found), so the floor drops the
+   * entry the gate demands, the fail-closed ATS check refuses every build, and nothing is ever
+   * saved. Reproduced live 2026-09-03 on a fresh production trial account ("required current or
+   * role-defining entry missing: Treasurer at Institute of Industrial and Systems Engineers UF
+   * Chapter" on every build, while a sibling account whose auto-pick had three variants built
+   * fine). A sparse selection is mandatory only once the applicant confirms continuing with the
+   * found evidence, which is also the moment the floor and validator gain their allowance for it;
+   * unconfirmed, it falls through to the legacy fallback below and its survivability filter. */
+  if (explicitlySelected) {
+    const survivesTheFloor =
+      countGroundedVariants(explicitlySelected) >= RESUME_CONTENT_LIMITS.minBulletsPerEntry;
+    if (survivesTheFloor || options.sparseSelectionConfirmed) return [explicitlySelected];
+  }
   /* THE LEGACY FALLBACK MAY NOT REQUIRE AN ENTRY THE FLOOR IS GUARANTEED TO DROP. The gate
    * (baseResumeSelectionIssues) demands every priority entry appear on the page, while
    * enforceExperienceBulletFloor drops any entry that cannot reach minBulletsPerEntry grounded
@@ -191,11 +220,7 @@ export function priorityEntriesForBaseResume(
    * will drop it with an honest warning - it just cannot be MANDATORY. The explicit selection
    * above is untouched: a student who confirmed a sparse entry has the continue_with_found
    * escape, which is the allowance this path lacks. */
-  const groundedVariants = (entry: ExperienceBankEntry): number =>
-    (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
-      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
-      .length;
-  const survivable = bank.filter((entry) => groundedVariants(entry) >= RESUME_CONTENT_LIMITS.minBulletsPerEntry);
+  const survivable = bank.filter((entry) => countGroundedVariants(entry) >= RESUME_CONTENT_LIMITS.minBulletsPerEntry);
   const rankedByRecency = survivable
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) =>
