@@ -9,12 +9,14 @@ import { SUBMISSION_AUTHORITY_SCHEMA_VERSION } from './submissionAuthorityRevisi
  * `submission_authority` alone, with an exact-shape parser: exact key sets, snake_case projection
  * fields, camelCase retry-safety fields, millisecond-precision UTC timestamps, and a retry verdict
  * that must describe the same immutable attempt as its sibling projection. Anything that does not
- * parse is quarantined. On the review screen that blocks one send; on the board one unparsable
- * card fails the WHOLE collection and the board renders "Could not load your board".
+ * parse is quarantined, which blocks that packet's send.
  *
- * These builders are the only place the wire shape is written. They return `undefined` instead of
- * emitting anything the client would reject, so a divergence fails closed at the source with a
- * server-side signal, never as a silently quarantined packet.
+ * These builders are the only place the wire shape is written. They never emit anything the client
+ * would reject; they refuse instead, and name why, so a divergence fails closed at the source with
+ * a server-side signal rather than as a silently quarantined packet. The refusal is per packet: a
+ * card the server cannot vouch for is one card that cannot be sent, and the caller publishes the
+ * reason beside it (see PacketSubmissionAuthorityUnavailable) so a reader can tell an unverifiable
+ * card apart from a server that does not speak this contract at all.
  */
 
 /** Exactly what the client's canonicalRevision accepts: a nonnegative decimal within int64. */
@@ -197,17 +199,82 @@ function retrySafetyWire(safety: SubmissionAttemptRetrySafety): WireSubmissionRe
   return safety;
 }
 
+
+/**
+ * Why one card's authority could not be published, in machine-readable form.
+ *
+ * The board publishes one of these beside a card instead of publishing nothing, so a reader can
+ * tell "this card is unverifiable" from "this server does not speak the contract". The vocabulary
+ * is closed and each member names a distinct, reachable class:
+ *
+ *  - `projection_read_failed`: the authoritative projection or the ledger's retry fold could not be
+ *    read for this packet, so the server has no opinion to publish. This is the only reason that
+ *    can appear on every card at once, when the whole batched read failed.
+ *  - `revision_not_canonical`: the collection's revision is not the client's canonical numeric
+ *    shape, so no envelope on this payload could be bound to it.
+ *  - `boundary_authorized`: an employer-boundary authorization is open with no press observed. Every
+ *    managed submission occupies this state between authorizeFinalSubmissionBoundary and the press,
+ *    and stays in it permanently if the runner dies inside that window. The client's confirmed and
+ *    unverified vocabularies have no word for it: it is publishable only as the boundary envelope
+ *    carrying the lease, activation id and capability digests, which no passive surface holds.
+ *  - `unpublishable_receipt_source`: the packet is genuinely confirmed, but on a source or receipt
+ *    source outside the client's vocabulary. Reachable two ways: the unsupported-portal EMAIL
+ *    channel (attempt source `unsupported_email`, receipt source `email_fallback`), and an attended
+ *    receipt retained on a managed or direct opening.
+ *  - `inconsistent_retry_evidence`: the projection and the ledger's retry fold disagree in a way the
+ *    client rejects, such as a `none` projection beside a block.
+ *  - `unpublishable_projection`: any other shape the client's exact-shape parser would quarantine
+ *    (a malformed identifier or timestamp, a projection bound to another packet, an oversize
+ *    receipt text, a non-https final URL).
+ */
+export type SubmissionAuthorityUnavailableReason =
+  | 'projection_read_failed'
+  | 'revision_not_canonical'
+  | 'boundary_authorized'
+  | 'unpublishable_receipt_source'
+  | 'inconsistent_retry_evidence'
+  | 'unpublishable_projection';
+
+/**
+ * The per-card marker a passive collection carries in place of an envelope it cannot publish.
+ *
+ * Deliberately three stable keys with no optional members, so a reader never has to branch on which
+ * fields arrived. It carries no revision: the collection's own `submission_authority_revision` is
+ * the identity, and a marker that restated it would invite a reader to treat the card as bound to a
+ * revision whose authority the server just said it could not establish.
+ *
+ * A marker is NOT authority to send. It says the opposite: this card's send state is unverifiable
+ * from this payload, so the card is not sendable and belongs in review.
+ */
+export type PacketSubmissionAuthorityUnavailable = {
+  schema_version: typeof SUBMISSION_AUTHORITY_SCHEMA_VERSION;
+  packet_id: string;
+  reason: SubmissionAuthorityUnavailableReason;
+};
+
+export type SubmissionAuthorityPublication =
+  | { published: true; envelope: PacketSubmissionAuthorityEnvelope }
+  | { published: false; reason: SubmissionAuthorityUnavailableReason };
+
+/** The marker as it goes on the wire. */
+export function submissionAuthorityUnavailableMarker(
+  packetId: string,
+  reason: SubmissionAuthorityUnavailableReason,
+): PacketSubmissionAuthorityUnavailable {
+  return { schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION, packet_id: packetId, reason };
+}
+
 /**
  * The full public envelope for one packet on a passive collection surface such as the board,
- * where the client requires an envelope on EVERY card and binds both `application_id` and
- * `packet_id` to the card id.
+ * where the client binds both `application_id` and `packet_id` to the card id.
  *
  * Reuses the authoritative projection and the ledger's retry fold; it never re-classifies. The
  * retry verdict for a confirmed or held card is written from the projection's own attempt
  * (attempt id, observation, receipt capture), because the client demands they agree and the fold
  * may name an earlier attempt when a packet holds several.
  *
- * Returns `undefined`, and so no envelope, in exactly the cases the client would reject anyway:
+ * Returns `{ published: false }` with a reason, and so no envelope, in exactly the cases the client
+ * would reject anyway:
  *  - a `none` projection whose retry evidence is a block (inconsistent inputs);
  *  - a held attempt whose reason is `boundary_authorized`: the client accepts that only as a
  *    `boundary_authorized` envelope carrying the lease, activation id and capability digests, facts
@@ -217,49 +284,65 @@ function retrySafetyWire(safety: SubmissionAttemptRetrySafety): WireSubmissionRe
  *    `email_fallback` receipt, an attended receipt retained on a managed opening, a receipt text
  *    over 2000 bytes, a non-https final URL, a projection bound to another packet);
  *  - a non-canonical revision, for the same reason as the unattempted builder.
+ *
+ * The caller publishes the reason as a per-card marker. Failing closed is right, but it is right
+ * PER CARD: one unpublishable card is one card that cannot be sent, never a whole board the reader
+ * has to refuse.
  */
-export function submissionAuthorityEnvelopeForPacket(input: {
+export function submissionAuthorityPublicationForPacket(input: {
   packetId: string;
   projection: AuthoritativeSubmissionProjection | undefined;
   retrySafety: SubmissionAttemptRetrySafety | undefined;
   revision: string | undefined;
-}): PacketSubmissionAuthorityEnvelope | undefined {
+}): SubmissionAuthorityPublication {
   const { packetId, projection, retrySafety, revision } = input;
-  if (!projection || !retrySafety || !canonicalSubmissionAuthorityRevision(revision)) return undefined;
+  const unavailable = (reason: SubmissionAuthorityUnavailableReason): SubmissionAuthorityPublication =>
+    ({ published: false, reason });
+  if (!projection || !retrySafety) return unavailable('projection_read_failed');
+  // The client validator only accepts a canonical numeric revision (digits, <= int64). Requiring
+  // the same here means a divergent revision shape is named at the source instead of being emitted
+  // and silently rejected downstream, which would strand the packet with no signal.
+  if (!canonicalSubmissionAuthorityRevision(revision)) return unavailable('revision_not_canonical');
 
-  const envelope = (
+  const published = (
     wireProjection: WireSubmissionProjection,
     wireRetrySafety: WireSubmissionRetrySafety | null,
-  ): PacketSubmissionAuthorityEnvelope => ({
-    schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
-    revision,
-    state: wireProjection.state,
-    application_id: packetId,
-    packet_id: packetId,
-    projection: wireProjection,
-    retry_safety: wireRetrySafety,
+  ): SubmissionAuthorityPublication => ({
+    published: true,
+    envelope: {
+      schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
+      revision,
+      state: wireProjection.state,
+      application_id: packetId,
+      packet_id: packetId,
+      projection: wireProjection,
+      retry_safety: wireRetrySafety,
+    },
   });
 
   if (projection.state === 'none') {
     if (retrySafety.kind === 'no_evidence') {
-      return submissionAuthorityEnvelopeForUnattemptedPacket({
+      const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
         packetId,
         projectionState: projection.state,
         retrySafetyKind: retrySafety.kind,
         revision,
       });
+      return envelope ? { published: true, envelope } : unavailable('revision_not_canonical');
     }
     if (retrySafety.kind === 'safe_not_sent' && strictTimestamp(retrySafety.resolvedAt)) {
-      return envelope({ state: 'none' }, retrySafetyWire(retrySafety));
+      return published({ state: 'none' }, retrySafetyWire(retrySafety));
     }
-    return undefined;
+    // A block beside an empty projection is the two reads disagreeing, not a state to render.
+    return unavailable('inconsistent_retry_evidence');
   }
 
   if (projection.state === 'unverified') {
-    if (projection.reason === 'boundary_authorized'
-      || !projectionUuid(projection.attemptId)
-      || !strictTimestamp(projection.observedAt)) return undefined;
-    return envelope(
+    if (projection.reason === 'boundary_authorized') return unavailable('boundary_authorized');
+    if (!projectionUuid(projection.attemptId) || !strictTimestamp(projection.observedAt)) {
+      return unavailable('unpublishable_projection');
+    }
+    return published(
       {
         state: 'unverified',
         attempt_id: projection.attemptId,
@@ -276,12 +359,18 @@ export function submissionAuthorityEnvelopeForPacket(input: {
   }
 
   if (projection.state === 'repair_required') {
-    if (projection.reasons.length === 0) return undefined;
+    if (projection.reasons.length === 0) return unavailable('unpublishable_projection');
     // A repair projection bound to a different packet cannot be published under this card.
-    if (typeof projection.packetId === 'string' && projection.packetId !== packetId) return undefined;
-    if (projection.attemptId !== undefined && !projectionUuid(projection.attemptId)) return undefined;
+    if (typeof projection.packetId === 'string' && projection.packetId !== packetId) {
+      return unavailable('unpublishable_projection');
+    }
+    if (projection.attemptId !== undefined && !projectionUuid(projection.attemptId)) {
+      return unavailable('unpublishable_projection');
+    }
     if (projection.canonicalApplicationId !== undefined
-      && !projectionUuid(projection.canonicalApplicationId)) return undefined;
+      && !projectionUuid(projection.canonicalApplicationId)) {
+      return unavailable('unpublishable_projection');
+    }
     // The client rejects `no_evidence` and `safe_not_sent` beside a repair projection, and a block
     // that names a different attempt than the projection. `null` is the honest verdict there: the
     // projection alone already routes the card to review.
@@ -292,7 +381,7 @@ export function submissionAuthorityEnvelopeForPacket(input: {
         ? strictTimestamp(retrySafety.at) && (retrySafety.reason !== 'boundary_authorized'
           || (projectionUuid(retrySafety.leaseId) && strictTimestamp(retrySafety.expiresAt)))
         : strictTimestamp(retrySafety.confirmedAt));
-    return envelope(
+    return published(
       {
         state: 'repair_required',
         reasons: [...projection.reasons],
@@ -309,19 +398,24 @@ export function submissionAuthorityEnvelopeForPacket(input: {
 
   // confirmed
   const receipt = projection.receipt;
+  // Named apart from the shape checks below because it is the class a real, genuinely confirmed
+  // submission lands in: the unsupported-portal email channel and a retained attended receipt both
+  // produce a true send the client has no vocabulary for.
+  if (!CONFIRMED_SOURCES.has(projection.source)
+    || !receiptSourceIsPublishable(projection.source, receipt.source)) {
+    return unavailable('unpublishable_receipt_source');
+  }
   if (projection.packetId !== packetId
     || !projectionUuid(projection.attemptId)
     || !projectionUuid(projection.canonicalApplicationId)
-    || !CONFIRMED_SOURCES.has(projection.source)
     || !CONFIRMED_TRACKER_STAGES.has(projection.trackerStage)
     || !projectionTimestamp(projection.submittedAt)
     || !strictTimestamp(receipt.capturedAt)
     || Date.parse(projection.submittedAt) > Date.parse(receipt.capturedAt)
     || !receipt.confirmationText.trim()
     || Buffer.byteLength(receipt.confirmationText, 'utf8') > 2000
-    || !safeHttpsUrl(receipt.finalUrl)
-    || !receiptSourceIsPublishable(projection.source, receipt.source)) return undefined;
-  return envelope(
+    || !safeHttpsUrl(receipt.finalUrl)) return unavailable('unpublishable_projection');
+  return published(
     {
       state: 'confirmed',
       attempt_id: projection.attemptId,
@@ -339,4 +433,18 @@ export function submissionAuthorityEnvelopeForPacket(input: {
     },
     { kind: 'blocked_confirmed', attemptId: projection.attemptId, confirmedAt: receipt.capturedAt },
   );
+}
+
+/**
+ * The envelope alone, for callers that only need "can this be published".
+ * `undefined` means it cannot; `submissionAuthorityPublicationForPacket` says why.
+ */
+export function submissionAuthorityEnvelopeForPacket(input: {
+  packetId: string;
+  projection: AuthoritativeSubmissionProjection | undefined;
+  retrySafety: SubmissionAttemptRetrySafety | undefined;
+  revision: string | undefined;
+}): PacketSubmissionAuthorityEnvelope | undefined {
+  const publication = submissionAuthorityPublicationForPacket(input);
+  return publication.published ? publication.envelope : undefined;
 }

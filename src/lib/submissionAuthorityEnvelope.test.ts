@@ -4,6 +4,8 @@ import {
   canonicalSubmissionAuthorityRevision,
   submissionAuthorityEnvelopeForPacket,
   submissionAuthorityEnvelopeForUnattemptedPacket,
+  submissionAuthorityPublicationForPacket,
+  submissionAuthorityUnavailableMarker,
 } from './submissionAuthorityEnvelope';
 import type { AuthoritativeSubmissionProjection } from './authoritativeSubmissionProjection';
 
@@ -326,5 +328,110 @@ describe('submissionAuthorityEnvelopeForPacket', () => {
         revision,
       }), undefined, JSON.stringify(revision));
     }
+  });
+});
+
+describe('submissionAuthorityPublicationForPacket', () => {
+  function reason(input: Parameters<typeof submissionAuthorityPublicationForPacket>[0]) {
+    const publication = submissionAuthorityPublicationForPacket(input);
+    return publication.published ? null : publication.reason;
+  }
+
+  it('names why a packet is unpublishable instead of only refusing', () => {
+    // The mainline managed hold: authorized, not yet pressed. The client can only carry this as a
+    // boundary envelope with the lease and capability digests, which no passive surface holds.
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: { state: 'unverified', attemptId: ATTEMPT, observedAt: CAPTURED_AT, reason: 'boundary_authorized' },
+      retrySafety: {
+        kind: 'blocked_unverified',
+        attemptId: ATTEMPT,
+        at: CAPTURED_AT,
+        reason: 'boundary_authorized',
+        leaseId: OTHER_ATTEMPT,
+        expiresAt: CAPTURED_AT,
+      },
+      revision: '3',
+    }), 'boundary_authorized');
+
+    // The unsupported-portal email channel: a real send in a vocabulary the client does not have.
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: {
+        ...confirmedProjection,
+        source: 'unsupported_email',
+        receipt: { ...confirmedProjection.receipt, source: 'email_fallback' },
+      } as AuthoritativeSubmissionProjection,
+      retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: CAPTURED_AT },
+      revision: '3',
+    }), 'unpublishable_receipt_source');
+
+    // An attended receipt retained on a managed opening.
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: {
+        ...confirmedProjection,
+        receipt: { ...confirmedProjection.receipt, source: 'attended_handoff' },
+      } as AuthoritativeSubmissionProjection,
+      retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: CAPTURED_AT },
+      revision: '3',
+    }), 'unpublishable_receipt_source');
+
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: undefined,
+      retrySafety: { kind: 'no_evidence' },
+      revision: '3',
+    }), 'projection_read_failed');
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: { state: 'none' },
+      retrySafety: { kind: 'no_evidence' },
+      revision: '03',
+    }), 'revision_not_canonical');
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: { state: 'none' },
+      retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: CAPTURED_AT },
+      revision: '3',
+    }), 'inconsistent_retry_evidence');
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: { state: 'repair_required', packetId: OTHER_PACKET, reasons: ['packet_missing'] },
+      retrySafety: { kind: 'no_evidence' },
+      revision: '3',
+    }), 'unpublishable_projection');
+    assert.equal(reason({
+      packetId: PACKET,
+      projection: {
+        ...confirmedProjection,
+        receipt: { ...confirmedProjection.receipt, finalUrl: 'http://example.com/receipt' },
+      } as AuthoritativeSubmissionProjection,
+      retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: CAPTURED_AT },
+      revision: '3',
+    }), 'unpublishable_projection');
+  });
+
+  it('publishes the same envelope the envelope-only builder returns', () => {
+    const input = {
+      packetId: PACKET,
+      projection: confirmedProjection,
+      retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: CAPTURED_AT } as const,
+      revision: '3',
+    };
+    const publication = submissionAuthorityPublicationForPacket(input);
+    assert.equal(publication.published, true);
+    assert.deepEqual(
+      publication.published ? publication.envelope : null,
+      submissionAuthorityEnvelopeForPacket(input),
+    );
+  });
+
+  it('marks a card with three stable keys and no invented revision', () => {
+    assert.deepEqual(submissionAuthorityUnavailableMarker(PACKET, 'boundary_authorized'), {
+      schema_version: 'submission-authority-v1',
+      packet_id: PACKET,
+      reason: 'boundary_authorized',
+    });
   });
 });

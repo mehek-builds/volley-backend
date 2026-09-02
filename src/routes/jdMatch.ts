@@ -19,7 +19,10 @@ import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { resolveRevision } from '../lib/buildInfo';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { SUBMISSION_AUTHORITY_SCHEMA_VERSION } from '../lib/submissionAuthorityRevision';
-import { submissionAuthorityEnvelopeForPacket } from '../lib/submissionAuthorityEnvelope';
+import {
+  submissionAuthorityPublicationForPacket,
+  submissionAuthorityUnavailableMarker,
+} from '../lib/submissionAuthorityEnvelope';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -811,7 +814,9 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
        * deployed in between. Null when the deployment supplied no SHA; see lib/buildInfo. */
       revision: resolveRevision().revision,
       /* The passive-collection authority fields. Both are absent when the projection could not be
-       * read, so the client sees an incomplete collection, never a fabricated revision. */
+       * read, so the client sees an incomplete collection, never a fabricated revision. That is the
+       * one condition the client must still refuse the WHOLE payload for: without them nothing
+       * proves the payload came from a server that speaks this contract. */
       ...(submissionAuthority
         ? {
           schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
@@ -820,22 +825,25 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         : {}),
       cards: rows.map((row) => {
         const context = (row.job_context ?? {}) as { company?: string; role?: string; job_id?: string };
-        const envelope = submissionAuthority
-          ? submissionAuthorityEnvelopeForPacket({
+        const publication = submissionAuthority
+          ? submissionAuthorityPublicationForPacket({
             packetId: row.id,
             projection: submissionAuthority.byPacketId.get(row.id),
             retrySafety: submissionAuthority.retrySafetyByPacketId.get(row.id),
             revision: submissionAuthority.revision,
           })
-          : undefined;
-        if (submissionAuthority && !envelope) {
+          // The batched read failed for every packet on the page, so the server has no opinion
+          // about any of them. The collection fields above are absent for the same reason.
+          : ({ published: false, reason: 'projection_read_failed' } as const);
+        if (!publication.published) {
           request.log.warn(
             {
               packetId: row.id,
-              projectionState: submissionAuthority.byPacketId.get(row.id)?.state,
-              retrySafetyKind: submissionAuthority.retrySafetyByPacketId.get(row.id)?.kind,
+              reason: publication.reason,
+              projectionState: submissionAuthority?.byPacketId.get(row.id)?.state,
+              retrySafetyKind: submissionAuthority?.retrySafetyByPacketId.get(row.id)?.kind,
             },
-            'board card has no publishable submission authority envelope; the dashboard fails closed',
+            'board card has no publishable submission authority envelope; it is published as unverifiable',
           );
         }
         return {
@@ -856,7 +864,15 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
           run_revision: row.run_revision,
           review_updated_at: row.review_updated_at,
           stage: deriveStage(row.pipeline_stage, row.status),
-          ...(envelope ? { submission_authority: envelope } : {}),
+          /* Exactly one of these two, always. An envelope is the server vouching for this card's
+           * send state; the marker is the server saying, in machine-readable form, that it cannot,
+           * and why. Silently omitting both was the third possibility, and it made an unverifiable
+           * card indistinguishable from a server that does not speak this contract, which is what
+           * made one such card take the whole board down. The card's own stage and
+           * submission_status are untouched either way, and no envelope is ever invented. */
+          ...(publication.published
+            ? { submission_authority: publication.envelope }
+            : { submission_authority_unavailable: submissionAuthorityUnavailableMarker(row.id, publication.reason) }),
         };
       }),
     });
