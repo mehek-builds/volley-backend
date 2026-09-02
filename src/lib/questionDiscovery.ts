@@ -1533,6 +1533,11 @@ function outstandingOfferAnswer(
    * OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION's blanket "N/A" even when there ARE offers to describe. */
   const isFollowUp = OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION.test(label) && /\boffers?\b|\bdeadlines?\b/i.test(label);
   if (!isFollowUp && !OFFER_DEADLINE_QUESTION.test(label)) return null;
+  /* A question that asks WHERE she wants to work is not asking whether she holds offers, even when
+   * it mentions them: Hudson River Trading's "Please select your top preferred HRT office location.
+   * Return offers will be specific to the office you have selected" was answered "No" from
+   * has_outstanding_offers (2026-09-01), a location choice handed the offer rule's word. */
+  if (isLocationChoiceQuestion(label)) return null;
   // "N/A" is the honest answer to a detail box when the answer above was no; "No" is the honest
   // answer to the question itself.
   if (ap.has_outstanding_offers === false) return { value: isFollowUp ? 'N/A' : 'No' };
@@ -6404,7 +6409,14 @@ export function isCoreIdentityField(label: string): boolean {
   const l = (label ?? '').toLowerCase();
   if (!l) return false;
   if (/\b(?:legal|preferred|maiden|previous|former|nick)\b/.test(l)) return false;
-  if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\b|\bname\s*\*/.test(l)) return true;
+  /* A BARE "Name" CONTROL, not any label that opens with the word. "^name\b" and "\bname\s*\*"
+   * read "Name of School" (Belvedere's required 3,000-option dropdown), "name of post-secondary
+   * institution", "Name of referring employee" and "Name a project you are proud of" as the
+   * applicant's name, and once this predicate governed discovery on every family (2026-09-01)
+   * that would have deleted those questions from the review, the packet and the fill. The bare
+   * control is "Name", "Name *", "Name (required)", or Ashby's welded "name* name"; a label that
+   * says what is being named is a question. */
+  if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\s*(?:\*|\(required\)|\(optional\))?\s*$|^name\s*\*\s+name\b/.test(l)) return true;
   return /\be-?mail\b/.test(l) && !NON_APPLICANT_EMAIL_SUBJECT.test(l);
 }
 
@@ -6787,7 +6799,17 @@ export function discoveredFieldIsFixedPortalProfileControl(
   portal: SupportedPortal,
   field: Pick<DiscoveredQuestion, 'label' | 'selector' | 'durableSelector'>,
 ): boolean {
-  if (isFixedPortalProfileField(portal, normalizeDiscoveredLabel(field.label))) return true;
+  const label = normalizeDiscoveredLabel(field.label);
+  /* THE APPLICANT'S OWN NAME AND EMAIL ARE NEVER A QUESTION FOR HER, on any supported family: every
+   * fixed pass fills them by selector, and isCoreIdentityField is the predicate written for exactly
+   * this claim (see its comment for what it deliberately excludes: legal, preferred, and an email
+   * that is not the applicant's). The inventory already dropped these and the runner already forced
+   * them optional, and the review screen then asked her to type her first name anyway, as an
+   * optional question: The Maven Group (crelate) and Hudson River Trading (greenhouse, "first
+   * name* first name first_name", 2026-09-01). The per-family selector rules below stay for the
+   * controls whose labels do not read as identity. */
+  if (isCoreIdentityField(label)) return true;
+  if (isFixedPortalProfileField(portal, label)) return true;
   if (portal === 'recruitee' || portal === 'manual_recruitee') {
     return recruiteeFixedCandidateSelector(field.durableSelector)
       || recruiteeFixedCandidateSelector(field.selector);
@@ -6823,7 +6845,7 @@ export function normalizeStoredPortalQuestions<T extends {
     const label = (portal === 'paylocity' || portal === 'controlled_paylocity')
       ? paylocityCanonicalFieldLabel({ selector: question.portal_selector }) ?? discoveredLabel
       : discoveredLabel;
-    if (!label || isFixedPortalProfileField(portal, label)) continue;
+    if (!label || isCoreIdentityField(label) || isFixedPortalProfileField(portal, label)) continue;
     if ((portal === 'recruitee' || portal === 'manual_recruitee')
       && recruiteeFixedCandidateSelector(question.portal_selector)) continue;
     if (portal === 'pinpoint' && pinpointFixedApplicationSelector(question.portal_selector)) continue;
