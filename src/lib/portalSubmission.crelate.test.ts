@@ -11,6 +11,7 @@ import {
   detectPortal,
   fillPortal,
   isAutonomousPortalFamily,
+  MANAGED_FINAL_SUBMIT_SELECTOR,
   portalApplicationUrl,
   portalCanAutoSubmit,
   readManagedReceipt,
@@ -96,7 +97,16 @@ test('Crelate is statically autonomous and its managed plan uses only captured c
 
   const submits = actions.filter((action) => action.type === 'confirmAndSubmit');
   assert.equal(submits.length, 1);
-  assert.equal(submits[0].selector, CRELATE_FINAL_SUBMIT_SELECTOR);
+  /* THE MANAGED PRESS CARRIES THE CANONICAL CANDIDATE SET, NOT CRELATE'S EXACT CONTROL. stratus
+   * refuses any other selector on confirmAndSubmit (400 INVALID_CONFIRM_AND_SUBMIT_SELECTOR, before
+   * a browser opens); its v3 chooser narrows to the "SUBMIT APPLICATION" input[type="button"]
+   * itself (text = innerText || value, final pattern "submit ... application", score 3, the only
+   * candidate on the live Maven form).
+   * The exact CRELATE_FINAL_SUBMIT_SELECTOR belongs to the direct path, pinned further down. This
+   * assertion used to expect the exact selector here, which is why every crelate managed send was
+   * rejected from 2026-08-09 until The Maven Group reached the press on 2026-09-02. */
+  assert.equal(submits[0].selector, MANAGED_FINAL_SUBMIT_SELECTOR);
+  assert.notEqual(submits[0].selector, CRELATE_FINAL_SUBMIT_SELECTOR);
   assert.equal(submits[0].optional, false);
   assert.equal(actions.at(-1), submits[0]);
 

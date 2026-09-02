@@ -121,12 +121,35 @@ function proof(
   };
 }
 
+/* THE ATOMIC PRESS CONTRACT, PINNED AS A LITERAL ON THIS SIDE OF THE WIRE.
+ *
+ * stratus-browser-cloud's normalizeManagedActions accepts a confirmAndSubmit only when its selector
+ * is byte-for-byte its own ATOMIC_SUBMIT_SELECTOR (src/managed-browser.js), and answers 400
+ * INVALID_CONFIRM_AND_SUBMIT_SELECTOR before any browser opens otherwise. The two repos deploy
+ * independently, so the string is mirrored here as a literal rather than imported from
+ * MANAGED_FINAL_SUBMIT_SELECTOR: a change to either side's constant fails this test instead of
+ * failing every send in production. Crelate is called out because it was the family that carried
+ * its own exact selector into this action and was refused on every send from 2026-08-09 until The
+ * Maven Group reached the press on 2026-09-02. */
+const STRATUS_ATOMIC_SUBMIT_SELECTOR =
+  'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
+
+test('every family sends the atomic press with the exact selector stratus accepts', () => {
+  assert.equal(MANAGED_FINAL_SUBMIT_SELECTOR, STRATUS_ATOMIC_SUBMIT_SELECTOR);
+  for (const family of AUTONOMOUS_PORTAL_FAMILIES) {
+    const actions = buildManagedPortalActions(family as SupportedPortal, packet, true);
+    const submit = actions.at(-1);
+    assert.equal(submit?.type, 'confirmAndSubmit', `${family} ends on the atomic press`);
+    assert.equal(submit?.selector, STRATUS_ATOMIC_SUBMIT_SELECTOR, `${family} sends the canonical candidate set`);
+  }
+  // The exact crelate control is the DIRECT path's business and never rides the managed press.
+  assert.notEqual(CRELATE_FINAL_SUBMIT_SELECTOR, STRATUS_ATOMIC_SUBMIT_SELECTOR);
+});
+
 test('every managed application submit defaults to v3 and reserves its confirmation barrier', () => {
   for (const family of AUTONOMOUS_PORTAL_FAMILIES) {
     const actions = buildManagedPortalActions(family as SupportedPortal, packet, true);
-    const finalSelector = family === 'crelate'
-      ? CRELATE_FINAL_SUBMIT_SELECTOR
-      : MANAGED_FINAL_SUBMIT_SELECTOR;
+    const finalSelector = MANAGED_FINAL_SUBMIT_SELECTOR;
     assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${family} exceeded the managed action limit`);
     assert.deepEqual(actions.at(-1), {
       type: 'confirmAndSubmit',

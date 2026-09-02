@@ -8604,7 +8604,21 @@ export function buildManagedPortalActions(
       // opaque fingerprints, confirms that form, then clicks that exact node inside this action.
       // Only the measured native Workable path may admit bare Send after its DOM scope proof.
       // Every other managed submit and the direct path retain v3.
-      selector: family === 'crelate' ? CRELATE_FINAL_SUBMIT_SELECTOR : MANAGED_FINAL_SUBMIT_SELECTOR,
+      //
+      // ALWAYS THE CANONICAL SET, ON EVERY FAMILY. stratus's normalizeManagedActions refuses a
+      // confirmAndSubmit whose selector is anything but its own ATOMIC_SUBMIT_SELECTOR
+      // (src/managed-browser.js, "confirmAndSubmit selector must be the version 2 submit candidate
+      // set", HTTP 400 before any browser opens), on purpose: the caller may never aim the atomic
+      // press at a control of its choosing; the chooser policy narrows inside the runner. Crelate
+      // used to be sent its exact send control here, which is the DIRECT path's narrowing
+      // (directSubmitCandidateSelector) and was refused by stratus on every crelate send since the
+      // atomic contract landed - measured 2026-09-02 on The Maven Group, the first crelate packet
+      // ever to reach the press: 400 INVALID_CONFIRM_AND_SUBMIT_SELECTOR, nothing pressed, and the
+      // row left in `submitting` behind an authorized boundary. Crelate's control is an
+      // input[type="button"], squarely inside the canonical set, and its "SUBMIT APPLICATION"
+      // value is what the v3 chooser's final pattern selects on (crelate is not a v4 family;
+      // v4's pristine-candidate read admits only type="submit" and would drop this control).
+      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
