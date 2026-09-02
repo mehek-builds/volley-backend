@@ -48,6 +48,8 @@ import {
   PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE,
   transportVerifiedBuiltPacket,
   verifiedBuiltPacketIssues,
+  submissionFailureReview,
+  EmployerBoundPacketDriftError,
   deliveryDriftIsLitosLearnedOnly,
   managedActionDiagnosticsForLog,
   stableManagedDocumentCapability,
@@ -1417,6 +1419,112 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
     assert.equal(exactAudit.bindings.jdSha256, createHash('sha256').update(jdText, 'utf8').digest('hex'));
     assert.deepEqual(verifiedBuiltPacketIssues(packet, exactAudit, questions, 'full', envelope), []);
   }
+});
+
+/* THE MAVEN GROUP, 305dae5e (Crelate), 2026-09-02, END TO END THROUGH THE REAL PAIR OF FUNCTIONS.
+ *
+ * The send refused on this exact gate and the row then told the applicant "Litos pressed Send and
+ * the page never showed a confirmation it could read", quoted the employer's apply URL, and asked
+ * her to go and look. No browser had been opened. The refusal was an untyped Error, so fail()
+ * matched no instanceof, classifySubmissionStop returned 'unclassified', and 'unclassified' is
+ * deliberately not in PRECEDES_CLICK.
+ *
+ * The error below is the REAL one out of the REAL gate rather than a reconstruction, for the same
+ * reason the kos.ai fixture next door is: a hand-built error tests the classifier against a shape
+ * the gate may no longer throw. The transports counter is asserted at zero in the same breath,
+ * because "no transport ran" is the entire justification for the pre-click classification. */
+test('a drift refusal is recorded as a stop that precedes the click, and never as a press', async () => {
+  const resume = Buffer.from('%PDF-1.4\ndrift fixture\n%%EOF\n');
+  const questions: ApplicationReviewQuestion[] = [];
+  const packetForSchool = (school: string): SubmissionPacket => ({
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    phone: '+1 213 574 6270',
+    jdText: 'Cyber Test Engineer',
+    resume,
+    resumeName: 'resume.pdf',
+    applicantSnapshot: {
+      profile: {
+        full_name: 'Mehek Mandal',
+        email: 'mehek@example.com',
+        experience: [],
+        skills: [],
+        school,
+        grad_year: 2028,
+      },
+      application_profile: {},
+    },
+    questions: packetQuestionsForFill(questions),
+  });
+  const envelope = employerDeliveryEnvelope({
+    channel: 'controlled_browser',
+    destinationUrl: 'https://example.com/apply',
+    portalFamily: 'controlled_test',
+  });
+  const approvedPacket = packetForSchool('USC');
+  const audit = createPacketAudit({
+    ownerId: 'owner-1',
+    applicationId: 'application-1',
+    jdText: approvedPacket.jdText ?? '',
+    spec: {},
+    jobContext: { company: 'The Maven Group', role: 'Cyber Test Engineer' },
+    questions,
+    applicantSnapshot: approvedPacket.applicantSnapshot,
+    resumeEmail: 'resume-alias@example.com',
+    applicantEmail: approvedPacket.email,
+    employerDelivery: createEmployerDeliveryBindings(approvedPacket, {}, { mode: 'full', envelope }),
+    pdfObjectKey: 'users/owner-1/resumes/application-1.pdf',
+    pdfBytes: resume,
+    editedTerms: [],
+    clauses: [{
+      text: approvedPacket.jdText ?? '',
+      start: 0,
+      end: approvedPacket.jdText?.length ?? 0,
+      verdict: 'unscoreable',
+    }],
+    rejected: [],
+    degraded: false,
+    terms: { covered: [], missing: [], edited: [] },
+  });
+  // The one byte of drift, standing in for whatever moved the live snapshot.
+  const drifted = packetForSchool('University of Southern California');
+
+  let transports = 0;
+  let thrown: unknown;
+  try {
+    await transportVerifiedBuiltPacket(drifted, audit, questions, async () => {
+      transports += 1;
+    }, 'full', envelope);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(transports, 0, 'the whole pre-click classification rests on this');
+  assert.ok(thrown instanceof EmployerBoundPacketDriftError,
+    'an untyped Error here is invisible to fail() and becomes a false "Litos pressed Send"');
+
+  const persisted = submissionFailureReview({
+    jd_text: 'jd',
+    status: 'submitting',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: '2026-09-02T11:37:00.000Z',
+    portal_url: 'https://jobs.crelate.com/portal/themavengroup/job/apply/wtmao1bfqg9te5b5jo5jknskxo',
+    submission_run_id: 'run-1',
+    submission_claimed_at: '2026-09-02T11:37:00.000Z',
+    submission_claim_id: 'claim-1',
+    submission_authorization: { source: 'per_application_approval', authorized_at: '2026-09-02T11:36:00.000Z' },
+  }, thrown);
+
+  assert.equal(persisted.submission_stop?.reason, 'packet_drift_before_send');
+  assert.equal(persisted.submission_stop?.before_click, true);
+  assert.equal(persisted.unverified_submission, undefined,
+    'an unverified record asks her to resolve an application that was never made, and blocks every later send to the posting');
+  assert.match(persisted.attention_reason!, /it was not sent/);
+  assert.match(persisted.attention_reason!, /your saved profile details/,
+    'naming the moved binding is what stops the re-approve loop');
+  assert.doesNotMatch(persisted.attention_reason!, /check the portal or your email/i);
+  assert.doesNotMatch(persisted.attention_reason!, /pressed Send/i);
 });
 
 test('an observed employer redirect cannot pass an approved destination check', () => {

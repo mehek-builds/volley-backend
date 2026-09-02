@@ -4174,6 +4174,37 @@ export function verifiedBuiltPacketIssues(
   return issues;
 }
 
+/* THE DRIFT REFUSAL, AS A TYPE RATHER THAN AS A SENTENCE ABOUT ONE.
+ *
+ * THE DEFECT THIS EXISTS FOR, measured on The Maven Group 305dae5e (Crelate, 2026-09-02). Every
+ * assertVerifiedBuiltPacket call site sits AHEAD of the employer transport - transportVerifiedBuiltPacket
+ * asserts and only then calls transport(), and the managed send asserts before runManagedBrowser is
+ * reached at all - so a drift refusal is structurally a run in which no browser ever opened. It threw
+ * a bare Error, so fail() found no `instanceof` it recognised, classifySubmissionStop returned
+ * 'unclassified', and 'unclassified' is deliberately not in PRECEDES_CLICK. The row therefore took
+ * the unverified exit and told the applicant "Litos pressed Send and the page never showed a
+ * confirmation it could read", naming the employer's apply URL and asking her to go and look - for a
+ * run that provably never pressed anything. It then blocked every future send to that posting behind
+ * an unverified record that can only be cleared by answering a question about an application that
+ * does not exist.
+ *
+ * The issues ride on the error because packetDriftAttentionReason already writes the honest sentence
+ * from them ("...so it was not sent. What changed: your saved profile details."), and the send path
+ * was the one caller that could not reach it. Naming the moved binding is the whole reason that
+ * function exists; see APPLICANT_PACKET_DRIFT_PHRASES.
+ *
+ * The message is deliberately unchanged. It is stored in submission_error, matched by operators, and
+ * pinned by existing tests; only the TYPE and the classification derived from it are new. */
+export class EmployerBoundPacketDriftError extends Error {
+  readonly issues: readonly string[];
+
+  constructor(issues: readonly string[]) {
+    super(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
+    this.name = 'EmployerBoundPacketDriftError';
+    this.issues = [...issues];
+  }
+}
+
 function assertVerifiedBuiltPacket(
   packet: SubmissionPacket,
   audit: PacketAudit,
@@ -4183,7 +4214,7 @@ function assertVerifiedBuiltPacket(
 ): void {
   const issues = verifiedBuiltPacketIssues(packet, audit, verifiedQuestions, mode, envelope);
   if (issues.length > 0) {
-    throw new Error(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
+    throw new EmployerBoundPacketDriftError(issues);
   }
 }
 
@@ -11326,13 +11357,19 @@ export function submissionFailureOutcome(input: {
      NOT one in fact. See the arm below for what that inheritance was costing the applicant. */
   requiredFieldConfirmation?: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
+  /* The exact issue strings from a EmployerBoundPacketDriftError, or undefined. Strings rather than
+     a boolean for the same reason actionBudgetStop is a string: packetDriftAttentionReason composes
+     the sentence from them and names the binding that moved, and re-deriving that here would be a
+     second place to keep the wording right. */
+  packetDriftIssues?: readonly string[];
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -11365,6 +11402,26 @@ export function submissionFailureOutcome(input: {
            hunt for. The error's own sentence is used verbatim - it already names the portal and the
            question count, which is what makes this one actionable rather than mysterious. */
         ? `${actionBudgetStop} Nothing was sent. Remove or answer fewer optional questions on this application, then try again.`
+      : packetDrift
+        /* SLOTTED HERE TO MIRROR classifySubmissionStop EXACTLY, which ranks
+           'packet_drift_before_send' immediately after 'action_budget'. That file's own docstring
+           asks for the mirror - "two orderings over the same inputs would disagree eventually, and
+           the disagreement would be a row whose prose says one thing and whose typed record says
+           another". Nothing turns on it today, because EmployerBoundPacketDriftError cannot also be
+           a ManagedRequiredFieldConfirmationError or a ManagedBrowserAssertionFailureError, but the
+           position is the cheapest way to keep it true of a future error that can.
+
+           RANKED ABOVE uncertainAfterClaim for the same reason as every arm around it, and this one
+           had no arm at all until 2026-09-02: the drift gate refuses before a transport is chosen,
+           so nothing was sent. Inheriting uncertainAfterClaim told the applicant Litos had pressed
+           Send and pointed her at the employer's apply URL to look for a confirmation of an
+           application that was never made.
+
+           The sentence is packetDriftAttentionReason's, unchanged and shared with the prepare hold
+           that already said it correctly, so the two halves of the product cannot drift apart on the
+           wording of the same event. It names which binding moved and ends on the step that clears
+           it - reviewing the current packet inside Litos - never on opening the employer's page. */
+        ? packetDriftAttentionReason(packetDriftIssues!)
       : requiredFieldConfirmation
         /* RANKED ABOVE noSubmitControl, AND THAT ORDER IS THE WHOLE ARM.
            ManagedRequiredFieldConfirmationError extends NoSubmitControlError, deliberately and
@@ -11883,6 +11940,13 @@ export function submissionFailureReview(
      failed, and on 2026-08-11 the runner had actually pressed Submit. It classifies as its own
      typed stop, keeps the claim, and takes the unverified exit below. */
   const confirmationUnproven = error instanceof ManagedConfirmationUnprovenError;
+  /* The earliest stop of the pre-click family, and the one that used to be invisible to this
+     function. The exact packet is compared against the audit that authorised it BEFORE a transport
+     is chosen, so a refusal here means no browser was opened, no field was filled and no control was
+     pressed. Left untyped it fell to 'unclassified', which is not pre-click, and the applicant was
+     told Litos had pressed Send and sent to hunt the employer's page for a receipt that could not
+     exist. See EmployerBoundPacketDriftError. */
+  const packetDrift = error instanceof EmployerBoundPacketDriftError ? error : null;
   const runTimedOut = isManagedRunTimeout(message);
 
   /* THE TYPED HALF, written on every arm including the ones that release outright.
@@ -11895,6 +11959,7 @@ export function submissionFailureReview(
       regenerationRequired,
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
+      packetDriftBeforeSend: packetDrift !== null,
       confirmationUnproven,
       fieldProofFailedBeforeSubmit,
       providerSessionFailureBeforeSubmit,
@@ -11924,6 +11989,7 @@ export function submissionFailureReview(
 
   const outcome = submissionFailureOutcome({
     captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure,
+    packetDriftIssues: packetDrift?.issues,
     currentAttentionReason: current.attention_reason,
   });
 
