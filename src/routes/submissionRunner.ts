@@ -8913,8 +8913,31 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
      inputRow, or the run assembles a packet from the key the sweep deleted. */
   let packetAudit = await verifiedPacketForRun(row, current, currentPacketAudit);
   if (!packetAudit.valid) {
+    /* THE ONE FIELD THAT SAYS WHICH BINDING MOVED WAS BEING DROPPED HERE.
+     *
+     * verifyCurrentPacketAudit returns bindingMismatchKeys precisely so a packet_stale can be
+     * diagnosed in production - the type calls them "privacy-safe fixed binding names for
+     * production diagnosis" and they carry no applicant content, only names like 'jd' or
+     * 'applicant_snapshot'. This line logged the code alone, so every stale packet looked
+     * identical in the log and the only way to tell a real edit from a false positive was to
+     * reproduce it live.
+     *
+     * That is not hypothetical: measured 2026-09-02 on Flow Traders `761e0add` (Greenhouse), the
+     * stored audit, the acknowledgement and a freshly recomputed audit ALL carried packet_version
+     * 0385e268 and audit_digest 873801, the fresh audit answered `passed`, and the run still parked
+     * on packet_stale. Three earlier false positives are recorded in this repo the same way
+     * (portalSubmission.ts:6280, questionDiscovery.ts:1922, packetAudit.ts:325). The reason is
+     * a developer token and stays out of the applicant's sentence exactly as before - only the log
+     * line gains it. */
     fastify.log.warn(
-      { applicationId: row.id, code: packetAudit.code },
+      {
+        applicationId: row.id,
+        code: packetAudit.code,
+        reason: packetAudit.reason,
+        ...(packetAudit.bindingMismatchKeys?.length
+          ? { bindingMismatchKeys: packetAudit.bindingMismatchKeys }
+          : {}),
+      },
       'Application preparation withheld because the exact packet audit is missing or stale',
     );
     await writeReview(row, nextReview(current, {

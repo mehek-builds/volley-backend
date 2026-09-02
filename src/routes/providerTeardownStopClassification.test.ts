@@ -54,3 +54,21 @@ test('naming this stop grants nothing - it is still not a pre-click stop', () =>
   // Only the before-submit variant, proved by throw site rather than message, releases a claim.
   assert.equal(stopReasonPrecedesClick('provider_session_failure_before_submit'), true);
 });
+
+/* A packet_stale that names no binding cannot be diagnosed.
+ *
+ * Measured 2026-09-02 on Flow Traders 761e0add: stored audit, acknowledgement and a freshly
+ * recomputed audit all carried packet_version 0385e268 and audit_digest 873801, the fresh audit
+ * answered 'passed', and the run still parked on packet_stale. The verdict knew which binding
+ * moved - bindingMismatchKeys is built for exactly this - and the log line dropped it. */
+test('a withheld packet audit logs the reason and which bindings moved', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const call = runner.slice(
+    runner.indexOf('Application preparation withheld because the exact packet audit') - 900,
+    runner.indexOf('Application preparation withheld because the exact packet audit'),
+  );
+  assert.match(call, /reason: packetAudit\.reason/);
+  assert.match(call, /bindingMismatchKeys: packetAudit\.bindingMismatchKeys/);
+  // The token must still never reach the applicant's sentence.
+  assert.match(runner, /attention_reason: packetAuditClientError\(packetAudit\)\.error/);
+});
