@@ -130,6 +130,19 @@ export function questionMetadataBlockersForOptionProbeFailures(
     if (!controlId || !failedControlIds.has(controlId)) return [];
     const blocker = questionMetadataBlockerForOptionProbeFailure(field);
     if (blocker.kind === 'missing_question_text') return [blocker];
+    /* A PROBE FAILURE AGAINST A CONTROL THAT HAS NO OPTION INVENTORY IS NOT AN OPTION PROBLEM.
+     *
+     * questionMetadataBlockerForOptionProbeFailure returns 'missing_exact_options' for anything that
+     * carries a readable label, with no check that the control is closed. So when the option probe
+     * targets a free-text field and fails - which it does, because there is nothing there to open -
+     * the packet is parked on "Litos could not read the exact options" for a control that can never
+     * have any. Measured on Five Rings 767ed539 (Greenhouse): a `missing_exact_options` blocker whose
+     * own portal_input_type is `text` and whose required is false, on "if you answered yes to the
+     * above, please provide details on competing offers".
+     *
+     * Only the exact-options kind is filtered. `missing_question_text` stays for every control type,
+     * because an unlabelled text field is a real defect and the applicant genuinely cannot answer it. */
+    if (!CLOSED_CONTROL_TYPE.test(discoveredQuestionControlType(field))) return [];
     const question = normalizeReviewQuestionLabel(field.label);
     if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
       || discoveredFieldIsNotAQuestion({ label: question, options: field.options })) return [];
