@@ -400,7 +400,10 @@ test('the send log does not move the employer-delivery binding, through either f
       applicantSnapshot: {
         ...(base.applicantSnapshot as Record<string, unknown>),
         application_profile: {
-          ...((base.applicantSnapshot as { application_profile: Record<string, unknown> }).application_profile),
+          /* Through `unknown`: applicantSnapshot is AutofillApplicantSnapshot | undefined, and
+           ApplicationProfileLike has no index signature, so the direct assertion is the TS2352 the
+           compiler asks to be written this way. The helper only reshapes a fixture. */
+        ...((base.applicantSnapshot as unknown as { application_profile: Record<string, unknown> }).application_profile),
           submitted_application_companies: companies,
         },
       },
