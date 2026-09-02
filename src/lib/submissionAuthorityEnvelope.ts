@@ -100,10 +100,18 @@ export function submissionAuthorityEnvelopeForUnattemptedPacket(input: {
   if (input.projectionState !== 'none' || !canonicalSubmissionAuthorityRevision(input.revision)) {
     return undefined;
   }
+  /* `safe_not_sent` is the ledger's proof, and it covers two shapes: an attempt that never crossed
+   * the boundary (the #861 release, typed_pre_click_stop) and a pressed attempt the applicant
+   * herself checked and attested was not there (applicant_checked_not_sent, admitted by the fold
+   * only after the boundary lease expired). Both are the ledger's verdict, not this builder's; the
+   * builder only refuses to emit a field the client validator would quarantine, hence the uuid
+   * and strict-timestamp checks - the same promise the `unverified` branch keeps below. */
   const safety = input.retrySafety;
   const retrySafety = safety?.kind === 'no_evidence'
     ? { kind: 'no_evidence' as const }
-    : safety?.kind === 'safe_not_sent' && strictTimestamp(safety.resolvedAt)
+    : safety?.kind === 'safe_not_sent'
+      && strictTimestamp(safety.resolvedAt)
+      && projectionUuid(safety.attemptId)
       ? retrySafetyWire(safety)
       : undefined;
   if (!retrySafety || (retrySafety.kind !== 'no_evidence' && retrySafety.kind !== 'safe_not_sent')) {
@@ -362,7 +370,8 @@ export function submissionAuthorityPublicationForPacket(input: {
       });
       if (envelope) return { published: true, envelope };
       return unavailable(
-        retrySafety.kind === 'safe_not_sent' && !strictTimestamp(retrySafety.resolvedAt)
+        retrySafety.kind === 'safe_not_sent'
+          && (!strictTimestamp(retrySafety.resolvedAt) || !projectionUuid(retrySafety.attemptId))
           ? 'unpublishable_projection'
           : 'revision_not_canonical',
       );
