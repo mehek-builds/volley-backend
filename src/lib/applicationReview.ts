@@ -936,12 +936,16 @@ export type ApplicationReviewState = {
   security_code?: SecurityCodeState;
   handoff_expires_at?: string;
   final_approved_at?: string;
-  /* WHETHER THIS FORM HAS A COVER-LETTER FILE CONTROL LITOS CAN ATTACH TO. Nothing more.
+  /* WHETHER THIS FORM TAKES A COVER LETTER LITOS CAN PUT ON IT. Nothing more.
    *
    * Written from hasCoverLetterUpload / managedResultHasCoverLetterUpload, both of which count file
-   * inputs matching COVER_LETTER_UPLOAD_SELECTORS. It is a statement about the PORTAL's capability
-   * and about Litos's ability to use it, and it is deliberately FALSE on JazzHR and Breezy, whose
-   * employers do accept a cover letter but take it as a textarea Litos cannot attach a PDF to.
+   * inputs matching COVER_LETTER_UPLOAD_SELECTORS, and on the managed path also from
+   * discoveredFieldsTakeCoverLetterAsText, which counts a textarea whose label is the cover letter
+   * itself. The second half was added 2026-09-02 (TixTrack, Teamtailor): the textarea was being
+   * filled from the stored letter while this field said the company took none. It used to be
+   * deliberately FALSE on JazzHR, Breezy and Teamtailor for taking the letter as text; a text
+   * control now counts, and whether a PDF is ATTACHED is decided from the file read alone, so
+   * cover_letter_attached stays false on a text-only form.
    *
    * It has never meant "the employer requires a cover letter", and reading it that way is what made
    * Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb unsendable: a complete Greenhouse form, every

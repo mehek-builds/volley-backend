@@ -242,6 +242,7 @@ import {
   consentAcknowledgementLicence,
   isCoreIdentityField,
   isCoverLetterTextQuestion,
+  discoveredFieldsTakeCoverLetterAsText,
   isOpenEndedQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
@@ -5457,10 +5458,19 @@ async function packetForCoverLetterCapability(
   supported: boolean,
   fastify: FastifyInstance,
   controlledTest: boolean,
+  /* The form takes the letter as TEXT and has no file control. The packet still carries no file
+   * (there is nothing to upload and cover_letter_attached must not claim otherwise), but the stored
+   * letter stays on the row this function hands back, because discoverAndResolveQuestions reads it
+   * off that row to fill the textarea. Stripping it, as the unsupported branch does, would make the
+   * textarea branch regenerate a letter the packet had already written. */
+  takenAsText = false,
 ): Promise<{ packet: SubmissionPacket; row: ResumeRow; coverLetterIssue?: string }> {
   if (!supported) {
     const strippedRow = { ...row, spec: strippedCoverLetterSpec(row.spec) } as ResumeRow;
-    return { packet: omitCoverLetter(await buildPacket(strippedRow, controlledTest)), row: strippedRow };
+    return {
+      packet: omitCoverLetter(await buildPacket(strippedRow, controlledTest)),
+      row: takenAsText ? row : strippedRow,
+    };
   }
   /* Always enter the generator gate, including when a letter is already stored. That function now
      revalidates historical artifacts against every current grounding rule and returns immediately
@@ -7550,12 +7560,25 @@ async function prepareManaged(
     packet,
   );
   const savedAnswers = await loadSavedAnswers(row.user_id);
-  const coverLetterSupported = stableManagedDocumentCapability({
+  /* TWO WAYS A FORM TAKES A COVER LETTER, and only one of them is an attachment.
+   *
+   * The file read below governs whether a PDF is attached. The textarea read is the other half,
+   * measured live on TixTrack (Teamtailor, 2026-09-02, application 6703778e): a required "cover
+   * letter" textarea sat empty while the review said "this company does not take a cover letter",
+   * because the capability counted file inputs only. Teamtailor, JazzHR and Breezy take the letter
+   * as text, and discoverAndResolveQuestions already answers that textarea from the stored letter,
+   * so the form does take one; cover_letter_supported now says so, and the compact generation
+   * writes the letter the textarea will carry. The attachment decision stays on the file read:
+   * with no file control there is nothing to upload, so the packet carries no file and
+   * cover_letter_attached stays false, while the stored letter is kept on the row for the textarea. */
+  const coverLetterAttachable = stableManagedDocumentCapability({
     authoritative: greenhouseSchema?.coverLetterSupported,
     discovered: managedResultHasCoverLetterUpload(discoveryResult, portal),
     prior: priorManagedFormSnapshot?.cover_letter_supported,
     current: current.cover_letter_supported,
   });
+  const coverLetterTakenAsText = discoveredFieldsTakeCoverLetterAsText(discoveredFields);
+  const coverLetterSupported = coverLetterAttachable || coverLetterTakenAsText;
   let compactAnswers: ReadonlyMap<string, string> = new Map();
   let packetRow = row;
   try {
@@ -7604,9 +7627,10 @@ async function prepareManaged(
   }
   const coverLetterOutcome = await packetForCoverLetterCapability(
     packetRow,
-    coverLetterSupported,
+    coverLetterAttachable,
     fastify,
     packetUsesControlledResumeFixture(portal),
+    coverLetterTakenAsText,
   );
   /* The same question about the second document, off the same discovery read, and applied to the
    * packet the cover-letter step just produced rather than to a rebuild - see

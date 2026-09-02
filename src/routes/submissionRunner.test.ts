@@ -6522,3 +6522,28 @@ test('delivery drift counts as Litos-learned only when the probe alone moved it'
   assert.equal(judge({ packet: someoneElse }), false);
   assert.equal(judge({ packet: packetFor({ jdText: 'The posting was edited.' }) }), false);
 });
+
+/* TixTrack (Teamtailor, 2026-09-02): a required cover-letter TEXTAREA, no file control. The
+ * capability used to count file inputs only, so the review said the company took no cover letter
+ * while the resolution loop was filling that textarea from the stored letter. The measurement now
+ * has two halves, and only the file half decides whether a PDF is attached. */
+test('the managed cover-letter capability counts a textarea, and attaches a file only for a file control', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /const coverLetterTakenAsText = discoveredFieldsTakeCoverLetterAsText\(discoveredFields\);/);
+  assert.match(runner, /const coverLetterSupported = coverLetterAttachable \|\| coverLetterTakenAsText;/);
+  assert.match(
+    runner,
+    /packetForCoverLetterCapability\(\s*packetRow,\s*coverLetterAttachable,\s*fastify,\s*packetUsesControlledResumeFixture\(portal\),\s*coverLetterTakenAsText,\s*\)/,
+  );
+  // The unattachable branch keeps the stored letter on the row it hands to question resolution
+  // when the form takes the letter as text, and strips it otherwise.
+  assert.match(runner, /row: takenAsText \? row : strippedRow,/);
+  const snapshot = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: false,
+    fieldOptions: {},
+    failedFields: [],
+    coverLetterSupported: true,
+    transcriptSupported: false,
+  });
+  assert.equal(snapshot.cover_letter_supported, true);
+});
