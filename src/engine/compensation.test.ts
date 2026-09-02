@@ -128,3 +128,70 @@ test('formatting is readable and rounded', () => {
   assert.equal(formatCompensation(132000, 'USD', 'year'), 'USD 132,000 per year');
   assert.equal(formatCompensation(47.5, 'USD', 'hour'), 'USD 48 per hour');
 });
+
+/* THE 2026-09-02 REVIEW ATTACKS, pinned with the exact strings that were executed end-to-end
+ * against the first wiring of this standard (PR #866 round 1). Every one of these filled a wrong
+ * value; every one must now either parse the RIGHT range or refuse. */
+
+test('the English article is not the Australian dollar', () => {
+  assert.equal(
+    parseStatedCompensation('We offer a $130,000 - $150,000 salary per year')?.currency,
+    'USD',
+  );
+  // Real Australian notation still is.
+  assert.equal(parseStatedCompensation('Salary: A$130,000 - A$150,000 per year')?.currency, 'AUD');
+  assert.equal(parseStatedCompensation('Salary: CA$130,000 - CA$150,000 per year')?.currency, 'CAD');
+});
+
+test('a bare number range on a money line is not the salary', () => {
+  // The hours range must not be read as an hourly band; the currency-bearing single is under the
+  // lone-figure floor, so the whole line honestly refuses.
+  assert.equal(parseStatedCompensation('Schedule: pay for 40-50 hours per week at $25 per hour'), null);
+  assert.equal(parseStatedCompensation('2-4 years of experience preferred; pay is $30 per hour'), null);
+  assert.equal(parseStatedCompensation('401(k) match 3%-6% and $0 premium healthcare, yearly'), null);
+});
+
+test('benefit figures are not compensation, and never shadow the real range', () => {
+  assert.equal(parseStatedCompensation('Benefits include a $500 monthly wellness stipend'), null);
+  assert.equal(parseStatedCompensation('Annual bonus: $5,000 for all employees'), null);
+  const shadowed = parseStatedCompensation(
+    'We provide a $1,000 annual equipment stipend\nSalary: $130,000 - $150,000 per year',
+  );
+  assert.equal(shadowed?.median, 140000);
+  assert.equal(shadowed?.currency, 'USD');
+});
+
+test('European thousands-dots are thousands', () => {
+  const parsed = parseStatedCompensation('Gehalt/salary: €60.000 - €80.000 per year');
+  assert.equal(parsed?.median, 70000);
+  assert.equal(parsed?.currency, 'EUR');
+});
+
+test('a label that names its own unit binds the answer to it', () => {
+  // Year-labelled fields annualize a sub-annual posting.
+  assert.equal(
+    answerCompensation({
+      jdText: 'Compensation\n$10K per month salary\n',
+      numericOnly: true,
+      fieldLabel: 'Expected annualized total compensation',
+    })?.value,
+    '120000',
+  );
+  // Any other labelled unit that differs from the posting refuses: hourly from annual would
+  // smuggle in a working-week assumption the posting never made.
+  assert.equal(
+    answerCompensation({
+      jdText: 'Salary: $130,000 - $150,000 per year',
+      fieldLabel: 'Desired salary (hourly)',
+    }),
+    null,
+  );
+  // A label with no unit keeps the posting's own.
+  assert.equal(
+    answerCompensation({
+      jdText: 'Salary: $130,000 - $150,000 per year',
+      fieldLabel: 'What are your salary expectations for this position?',
+    })?.value,
+    'USD 140,000 per year',
+  );
+});

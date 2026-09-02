@@ -5192,3 +5192,55 @@ test('a pay-history question is never answered with the posting median', () => {
     { value: 'USD 140,000 per year' },
   );
 });
+
+test('pay-history phrasings leak in neither word order, and expectations override', () => {
+  const JD = 'Compensation: $130,000 - $150,000 per year. Great team, remote US.';
+  // Pay-word-first history phrasings (the round-1 review leaks): still her own to answer.
+  for (const label of [
+    'Base salary at your previous employer',
+    'Annual compensation at your last company',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, JD);
+    assert.ok(r && 'skipReason' in r, `pay history must refuse in this word order too: "${label}"`);
+  }
+  // An expectation word marks the question as desired compensation, whatever else it carries.
+  assert.deepEqual(
+    resolveKnownAnswer('What are your current salary expectations?', 'text', {}, JD),
+    { value: 'USD 140,000 per year' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Current expected salary', 'text', {}, JD),
+    { value: 'USD 140,000 per year' },
+  );
+});
+
+test('a currency question never receives an amount', () => {
+  const JD = 'Compensation: $130,000 - $150,000 per year';
+  for (const label of [
+    'Preferred currency for compensation',
+    'In what currency would you like your salary paid?',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, JD);
+    assert.ok(r && 'skipReason' in r, `a currency question takes no figure: "${label}"`);
+  }
+});
+
+test('a unit named by the salary label binds the answer', () => {
+  // An hourly-labelled field against an annual posting refuses rather than converting.
+  const r = resolveKnownAnswer('Desired salary (hourly)', 'number', {}, 'Salary: $130,000 - $150,000 per year');
+  assert.ok(r && 'skipReason' in r);
+});
+
+test('the refresh keeps a numeric salary control numeric, in lockstep with its lookup', () => {
+  // The run resolves a number control to a bare figure. The refresh used to resolve everything as
+  // 'text' and overwrote the run's own number with "USD 140,000 per year" - a string a number
+  // input cannot take, the 2026-08-11 prepare-versus-submit divergence for the numeric family.
+  const JD = 'Compensation: $130,000 - $150,000 per year';
+  const stored = [{ question: 'Expected base salary', answer: '140000', portal_input_type: 'number' }];
+  const refreshed = refreshKnownQuestionAnswers(stored as never, {}, JD);
+  assert.equal((refreshed[0] as { answer: string }).answer, '140000');
+  // And a text control still gets the formatted answer.
+  const storedText = [{ question: 'Expected base salary', answer: '', portal_input_type: 'text' }];
+  const refreshedText = refreshKnownQuestionAnswers(storedText as never, {}, JD);
+  assert.equal((refreshedText[0] as { answer: string }).answer, 'USD 140,000 per year');
+});
