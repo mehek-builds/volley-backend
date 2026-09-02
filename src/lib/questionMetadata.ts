@@ -7,7 +7,11 @@ import {
   SINGLE_CHOICE_EXACT_OPTION_TYPE,
   type DiscoveredQuestion,
 } from './questionDiscovery';
-import { managedOptionProbeControlId, type SupportedPortal } from './portalSubmission';
+import {
+  managedOptionProbeControlId,
+  managedOptionProbeExpectsClosedControl,
+  type SupportedPortal,
+} from './portalSubmission';
 import { usableOptions } from './profileFieldResolution';
 
 export type QuestionMetadataBlocker = {
@@ -140,9 +144,17 @@ export function questionMetadataBlockersForOptionProbeFailures(
      * own portal_input_type is `text` and whose required is false, on "if you answered yes to the
      * above, please provide details on competing offers".
      *
+     * THE QUESTION IS PUT TO THE PROBE, NOT TO THE OPTIONS. A first cut asked
+     * discoveredQuestionControlType, which decides closedness from field.options - the very evidence
+     * a failed probe did not produce. A Greenhouse react-select reports inputType 'text' with no DOM
+     * options until its menu opens, so that guard called school/degree/discipline/end-month open text
+     * and DELETED their blockers, and those blockers are a hard send gate. managedOptionProbeExpects-
+     * ClosedControl answers from the probe's own target decision instead, where
+     * MANAGED_FIXED_CLOSED_CONTROL_IDS keeps them closed whatever the DOM said.
+     *
      * Only the exact-options kind is filtered. `missing_question_text` stays for every control type,
      * because an unlabelled text field is a real defect and the applicant genuinely cannot answer it. */
-    if (!CLOSED_CONTROL_TYPE.test(discoveredQuestionControlType(field))) return [];
+    if (!managedOptionProbeExpectsClosedControl(field, portal)) return [];
     const question = normalizeReviewQuestionLabel(field.label);
     if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
       || discoveredFieldIsNotAQuestion({ label: question, options: field.options })) return [];
