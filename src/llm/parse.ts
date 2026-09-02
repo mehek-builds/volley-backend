@@ -15,7 +15,16 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * spend a fresh SDK timeout. Both SDKs otherwise default to ten minutes, and Anthropic retries
  * twice, which turned one upload into a 75 second spinner in production on 2026-08-30. */
 export const RESUME_PARSE_BUDGET_MS = 24_000;
-export const RESUME_PROVIDER_CALL_CAP_MS = 8_000;
+/* 12s, raised from 8s on 2026-09-03 against live evidence: a dense one-page resume (4.2k chars)
+ * needs 8-10s on BOTH providers, so at 8s every such upload spent the full cap twice and then
+ * degraded to the local parser anyway - the worst of both worlds, since the local parse is what
+ * builds the thin, artifact-titled banks (dash titles, missing entries) behind the base-resume
+ * dead-ends fixed in PRs #872/#875. Captured in production logs: openai and anthropic both
+ * outcome=error at elapsed_ms=8002-8004 timeout_ms=8000, three uploads in a row, while a 1.2k-char
+ * resume parsed in 5.6s. The overall budget is unchanged, so the worst-case upload is unchanged;
+ * this only re-slices how much of it one attempt may use, and turns a 9.7s degraded upload into a
+ * ~9-10s model-quality one. */
+export const RESUME_PROVIDER_CALL_CAP_MS = 12_000;
 export const RESUME_PROVIDER_HEDGE_DELAY_MS = 750;
 const MIN_RESUME_PROVIDER_CALL_MS = 750;
 
