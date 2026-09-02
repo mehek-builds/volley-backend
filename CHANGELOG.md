@@ -23,6 +23,12 @@
 
 ### Fixed
 
+- An auto-seeded recent-experience selection no longer makes a one-bullet entry unconditionally
+  mandatory on the base resume. An upload that finds a candidate seeds it with no confirmation, and a
+  sparse auto-pick was demanded by the required-entry check while the bullet floor (whose sparse
+  allowance activates only on the applicant's continue-with-found confirmation) was guaranteed to
+  drop it, refusing every build. Unconfirmed sparse picks now fall back to the survivable-priority
+  rule; confirmed ones stay mandatory with their allowance.
 - The base-resume build can no longer be deterministically unbuildable for an account whose
   current role carries a single bank bullet. The legacy priority fallback required that entry on
   the page while the bullet floor was guaranteed to drop it, so the fail-closed ATS check refused

@@ -411,7 +411,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
     } | null)?.recent_experience_review;
     const selectedEntryId = recentReview?.selected_entry_id;
-    const priorityEntries = priorityEntriesForBaseResume(bank, targetText, selectedEntryId);
+    const priorityEntries = priorityEntriesForBaseResume(bank, targetText, selectedEntryId, {
+      /* The same flag that turns on the floor's allowSparsePriority below, so what is mandatory
+         and what may stay on the page can never disagree about a sparse selection. */
+      sparseSelectionConfirmed: recentReview?.continue_with_found === true,
+    });
 
     /* Stage timings, kept in the spirit of parse.ts's resume_parse_stage lines and profile.ts's
      * *_elapsed_ms fields. The onboarding resume stage carries a sub-30-second promise, and a
