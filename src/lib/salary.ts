@@ -6,6 +6,11 @@
 //
 // Do not hand-edit the logic here without also updating the extension copy (and vice versa) -
 // two copies of the salary rule drifting apart is exactly how a currency-unsafe fill ships again.
+//
+// KNOWN DRIFT, 2026-09-02: REPEATED_CURRENCY_SRC below (a currency written again before the second
+// number of a range) exists only in this copy so far. The extension's salary.ts must take the same
+// change in the same release; until it does, a posting stating "$130,000 - $150,000" fills on the
+// managed path and matches nothing on the extension path.
 
 export interface StoredSalaryProfile {
   desired_salary?: string;
