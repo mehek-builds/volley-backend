@@ -214,7 +214,10 @@ const NEVER_FILL_PATTERNS = [
  * then "sponsor" after at most a preposition or article ("file for sponsorship") and six
  * characters of punctuation. Still anchored on requir/need, so
  * "have you previously been sponsored for a visa?" (no need expressed) and "can you sponsor a
- * colleague?" (nobody requires anything) stay outside it. */
+ * colleague?" (nobody requires anything) stay outside it. A need expressed in the PAST tense or
+ * for somebody else does reach it ("did your previous employer need to initiate sponsorship for
+ * you?"), and is held by PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME in workEligibilityAnswer, the one
+ * place every sponsorship arm passes through. */
 const SPONSORSHIP_COMMENCEMENT_SRC =
   String.raw`\b(?:requir\w*|need\w*)\b[^?]{0,40}?\b(?:commence|initiate|file|petition\w*|obtain|begin|start|provide|undertake)\b(?:\s+(?:for|of|the|a|an|any|your|its))*[^a-z?]{0,6}sponsor`;
 export const WORK_ELIGIBILITY_QUESTION = new RegExp(
@@ -407,6 +410,24 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  */
 const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start|to (?:begin|start) work(?:ing)?)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
+/* A SPONSORSHIP THAT ALREADY HAPPENED, OR ONE FOR SOMEBODY ELSE. needs_sponsorship is a statement
+ * about the applicant's present and future need. It says nothing about whether a former employer
+ * ever filed for her, and nothing about petitions she would file for her own reports as a manager,
+ * yet every sponsorship arm above reads a verb and a noun and cannot see the tense or the subject.
+ * Measured (2026-09-02 probe): "have you ever required an employer to file for sponsorship on your
+ * behalf?", "has a prior employer ever needed to file a petition for sponsorship for you?", "did
+ * your previous employer need to initiate sponsorship for you?" and "as a manager in this role you
+ * will need to initiate sponsorship for your direct reports. are you comfortable with that?" all
+ * answered "Yes" from a profile that has never been sponsored. An applicant who needs sponsorship
+ * now was being made to claim a history she does not have.
+ *
+ * So a sponsorship label framed in the past or about a third party holds for her, whatever the
+ * stored bit says. The frames are the ones employers write: "have you ever", "did you", "did your
+ * previous employer", "has a prior employer", "previously", "in the past", "been sponsored"; and for
+ * the other subject, sponsorship "for your direct reports", "for a colleague", "for new hires".
+ * A now-or-future wording never carries any of them, so the standard family is untouched. */
+const PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME =
+  /\b(?:have you ever|had you|did you|did your|has (?:a|any|your) (?:prior |previous |former |past |current |last )?employer|(?:prior|previous|former|past|last) employer|previously|in the past|ever (?:been|required|needed|had|received)|been sponsored)\b|\b(?:for|of|to|on behalf of) (?:your |a |an |any |the |other )?(?:direct reports?|reports|colleagues?|new hires?|employees?|team members?|staff|candidates?|someone else|another person|others)\b/i;
 /* "What is your visa status?" is a request for a value. "Will you require sponsorship for
  * employment visa status?" is a yes/no question that happens to contain the same two words, and it
  * is the commonest US sponsorship wording there is: 31 of the owner's stored questions carry it.
@@ -469,6 +490,10 @@ function workEligibilityAnswer(
     && (!asksCurrentSponsorship || namesFutureTime);
   if (!asksAuthorization && !asksSponsorship && !asksDetail) return null;
   if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+  // The stored bit is about her, now and later. A past sponsorship or someone else's is held.
+  if (asksSponsorship && PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
 

@@ -5121,6 +5121,65 @@ test('the commencement arm never claims a past sponsorship or sponsoring someone
     const resolved = resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US');
     assert.ok(!(resolved && 'value' in resolved), label);
   }
+  /* A need expressed in the past tense, or a need on somebody else's behalf, reaches the
+   * require/need arms (the first two below answered "Yes" on origin/main as well, the rest through
+   * the commencement arm) and is held by PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME: needs_sponsorship
+   * says nothing about a history, and "Yes" here claims one she does not have. */
+  for (const label of [
+    'have you ever required an employer to file for sponsorship on your behalf?',
+    'have you ever required visa sponsorship in the past?',
+    'has a prior employer ever needed to file a petition for sponsorship for you?',
+    'did your previous employer need to initiate sponsorship for you?',
+    'did you previously need a company to initiate sponsorship?',
+    'as a manager in this role you will need to initiate sponsorship for your direct reports. are you comfortable with that?',
+    'will you need to file for sponsorship for new hires on your team?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US');
+    assert.ok(resolved && 'skipReason' in resolved, label);
+    assert.match(resolved.skipReason, /^work-eligibility question left for you/, label);
+  }
+  // The now-or-future family carries none of those frames and still answers.
+  for (const label of [
+    'do you now or in the future require sponsorship for employment visa status?',
+    'will you now or in the future require sponsorship for employment visa status to work in the united states?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US'), { value: 'Yes' }, label);
+  }
+});
+
+/* DECIDED, NOT LEFT TO A SIDE EFFECT. Widening what the resolver answers changes what
+ * refreshKnownQuestionAnswers does to an answer she reviewed while the resolver was still silent:
+ * the record carries no answer_override_of (applicationReview.ts records one only when a resolver
+ * value existed at review time), so the override branch cannot prove the round and the profile
+ * wins, exactly as it does for every other current-round review with no derivation (see 'the
+ * incomparable keep is for bands only'). That is the standing rule kept on purpose: a reviewed "No"
+ * against needs_sponsorship = true contradicts her own stored fact, the answer moves the packet hash
+ * so an approved packet goes stale and must be re-approved with the new value in front of her, and
+ * a review saved from then on records the override and is kept. Applications 6703778e (TixTrack)
+ * and 0a5081aa (Apollo Research) are the two live packets this can touch. */
+test('a sponsorship "No" reviewed while the resolver was silent is recomputed once the profile answers, and an override of it is kept', () => {
+  const reviewedAt = '2026-09-02T00:00:00.000Z';
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  const silentThen = {
+    question: TIXTRACK_SPONSORSHIP_LABEL,
+    answer: 'No',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  };
+  const [recomputed] = refreshKnownQuestionAnswers([silentThen], needs, undefined, reviewedAt, 'us', 'US');
+  assert.equal(recomputed.answer, 'Yes');
+  assert.equal(recomputed.answer_source, undefined);
+  // Reviewed AGAINST the resolver's "Yes": the override is recorded and her answer stands.
+  const [overridden] = refreshKnownQuestionAnswers(
+    [{ ...silentThen, answer_override_of: 'Yes' }],
+    needs,
+    undefined,
+    reviewedAt,
+    'us',
+    'US',
+  );
+  assert.equal(overridden.answer, 'No');
+  assert.equal(overridden.answer_source, 'applicant_review');
 });
 
 test('a "us sponsorship" heading scopes the question to the United States', () => {
