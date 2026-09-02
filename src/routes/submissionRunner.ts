@@ -197,7 +197,7 @@ import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess'
 import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
-import { PACKET_EXPIRED_REASON, relearnedCapabilitiesAcknowledgement } from '../lib/packetResumeRestore';
+import { PACKET_EXPIRED_REASON, relearnedFormReadingAcknowledgement } from '../lib/packetResumeRestore';
 import {
   createAndPersistPacketAudit,
   currentAcknowledgedPacketAudit,
@@ -258,6 +258,7 @@ import {
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
   discoveredFieldIsNotAQuestion,
+  eeoSubjectPreferenceKeys,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
@@ -4332,10 +4333,41 @@ export function packetQuestionsDriftDiagnostic(
   };
 }
 
-export function packetDriftAttentionReason(issues: readonly string[]): string {
+/**
+ * WHETHER THE ONLY THING BETWEEN THIS PACKET AND THE FORM IS A QUESTION THE APPROVAL NEVER COVERED.
+ *
+ * The delivery payload hash is a SUPERSET of the question projection, and verifiedBuiltPacketIssues
+ * withholds its snap-only exemption while any question is unacknowledged, so an ask necessarily
+ * manufactures a delivery-payload issue beside itself. That pair is what told four applicants on
+ * 2026-09-02 that their application had "changed after you approved", naming "how Litos reaches
+ * this employer" - a sentence about a change nobody made, pointing at a screen with nothing on it
+ * to fix. The ask is the actionable half and the whole of it.
+ *
+ * `approvedStillBinds` is what keeps this from hiding a real one. The caller re-checks the packet
+ * as it stood at approval, under the envelope reconstructed from the row's current destination: a
+ * moved destination, channel, runtime, resume, cover letter or answer fails that check, the pair is
+ * not collapsed, and she gets the drift sentence naming what moved. An ask standing alone needs no
+ * such proof, because nothing else is claiming anything.
+ */
+export function packetDriftIsQuestionAskOnly(input: {
+  issues: readonly string[];
+  mode: EmployerPacketDeliveryMode;
+  approvedStillBinds: boolean;
+}): boolean {
+  if (!input.issues.includes(PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE)) return false;
+  const deliveryIssue = `${input.mode} employer-delivery payload changed after packet approval`;
+  if (!input.issues.every((issue) =>
+    issue === PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE || issue === deliveryIssue)) return false;
+  return input.issues.length === 1 || input.approvedStillBinds;
+}
+
+export function packetDriftAttentionReason(
+  issues: readonly string[],
+  askOnly = issues.length > 0 && issues.every((issue) => issue === PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE),
+): string {
   /* Not drift, so not the drift sentence. She changed nothing; the form asks more than the packet she
    * approved covered, and the only honest next step is the one that actually clears it. */
-  if (issues.length > 0 && issues.every((issue) => issue === PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE)) {
+  if (askOnly) {
     return 'This company form asks questions your approved packet did not cover, so nothing was sent.'
       + ' Open it, answer them, and approve it again.';
   }
@@ -4363,13 +4395,16 @@ export function deliveryDriftIsLitosLearnedOnly(input: {
   packet: SubmissionPacket;
   approvedPacket: SubmissionPacket;
   audit: PacketAudit;
-  verifiedQuestions: readonly ApplicationReviewQuestion[];
+  /** The rows the approval covered, PLUS the answerless rows this run's discovery learned. */
+  measuredQuestions: readonly ApplicationReviewQuestion[];
+  /** The rows the approval covered, exactly as it covered them. */
+  approvedQuestions: readonly ApplicationReviewQuestion[];
   mode: EmployerPacketDeliveryMode;
   approvedEnvelope: EmployerDeliveryEnvelope;
   measuredEnvelope: EmployerDeliveryEnvelope;
 }): boolean {
   const measured = verifiedBuiltPacketIssues(
-    input.packet, input.audit, input.verifiedQuestions, input.mode, input.measuredEnvelope,
+    input.packet, input.audit, input.measuredQuestions, input.mode, input.measuredEnvelope,
   );
   if (measured.length !== 1
     || measured[0] !== `${input.mode} employer-delivery payload changed after packet approval`) return false;
@@ -4380,8 +4415,87 @@ export function deliveryDriftIsLitosLearnedOnly(input: {
   if (!learned(approvedPolicy.coverLetterSupported, measuredPolicy.coverLetterSupported)
     || !learned(approvedPolicy.transcriptSupported, measuredPolicy.transcriptSupported)) return false;
   return verifiedBuiltPacketIssues(
-    input.approvedPacket, input.audit, input.verifiedQuestions, input.mode, input.approvedEnvelope,
+    input.approvedPacket, input.audit, input.approvedQuestions, input.mode, input.approvedEnvelope,
   ).length === 0;
+}
+
+/**
+ * THE ROWS THIS RUN LEARNED THE FORM ASKS, or null if what moved is not that.
+ *
+ * The predicate above is written for ONE issue, the delivery payload, and on the four packets
+ * measured in prod on 2026-09-02 it never got to run: discovery had added question rows, so the
+ * issue list was two long and `measured.length !== 1` refused at the first line. The second issue
+ * was not independent evidence of anything - verifiedBuiltPacketIssues withholds the snap-only
+ * delivery exemption while any question is unacknowledged, so a new question row manufactures the
+ * delivery issue as its own shadow - and the pair then made packetDriftAttentionReason skip its
+ * honest "answer them" branch and tell her the application had changed, about a change nobody made.
+ *
+ * The way out is not to loosen the predicate: it is to widen what counts as acknowledged, ONCE, to
+ * the rows the approval covered plus the rows the form has since taught Litos it asks - and then
+ * run the same unchanged predicate over that. Every refusal below is a case where widening would
+ * be a lie about what the applicant agreed to:
+ *
+ *   - a row she approved that is MISSING from the merged set, or one that arrived carrying a claim
+ *     of hers the approval never held (`forged`), is the strictly stronger statement
+ *     `application questions changed after packet approval`, and it must keep parking;
+ *   - a learned row with an ANSWER on it - a profile relay, a drafted paragraph, a sentence reused
+ *     from another employer's form - is content she has never seen. answer_source is absent on
+ *     every machine answer, so "carries no claim of hers" is not the same set as "safe to send
+ *     unreviewed", and the second one is empty. It parks, she is asked, the round after covers it;
+ *   - a merged set that cannot be split cleanly into "her rows, unchanged" and "the rest" - a
+ *     duplicate label, a row that vanished and a differently-labelled one that took its place -
+ *     is not a form Litos read better, and an ambiguous split is not a proof.
+ *
+ * Nothing here writes, blanks or invents an answer. The learned rows are returned exactly as
+ * discovery produced them, are written onto the review by the caller, and reach her on the answers
+ * screen; the send gate still refuses a blank required answer and a filed metadata blocker.
+ */
+/**
+ * THE PACKET AS IT STOOD WHEN SHE APPROVED, rebuilt from the one this run has assembled.
+ *
+ * Two things are rolled back and nothing else: the form inventory to what the review carried before
+ * this run (absent on a first approve), and the questions to the rows the approval covered. One
+ * construction, used by the carry that may re-issue the audit and by the hold that decides which
+ * sentence she reads, so those two can never disagree about what "as she approved it" means.
+ */
+export function approvedPacketBeforeDiscovery(input: {
+  packet: SubmissionPacket;
+  approvedQuestions: readonly ApplicationReviewQuestion[];
+  priorSnapshot: ReturnType<typeof readManagedFormSnapshot>;
+}): SubmissionPacket {
+  return {
+    ...input.packet,
+    questions: submissionPacketQuestions(input.approvedQuestions),
+    fieldOptions: input.priorSnapshot?.field_options,
+    failedFields: input.priorSnapshot?.failed_fields,
+  };
+}
+
+export function learnedFormQuestionRows(input: {
+  mergedQuestions: readonly ApplicationReviewQuestion[];
+  approvedQuestions: readonly ApplicationReviewQuestion[];
+  packetQuestions: SubmissionPacket['questions'];
+}): readonly ApplicationReviewQuestion[] | null {
+  const acknowledgement = packetQuestionAcknowledgement(
+    input.packetQuestions,
+    submissionPacketQuestions(input.approvedQuestions),
+  );
+  if (acknowledgement.missing.length > 0 || acknowledgement.forged.length > 0) return null;
+  if (acknowledgement.unacknowledged.length === 0) return [];
+  /* Matched as a multiset on the employer's own label, one merged row consumed per approved row,
+   * so a form that legitimately repeats a label still splits and a rename cannot pass as an add. */
+  const remaining = [...input.mergedQuestions];
+  for (const approved of input.approvedQuestions) {
+    const index = remaining.findIndex((question) => question.question === approved.question);
+    if (index === -1) return null;
+    remaining.splice(index, 1);
+  }
+  if (remaining.length !== acknowledgement.unacknowledged.length) return null;
+  const asked = new Set(acknowledgement.unacknowledged);
+  if (remaining.some((question) => !asked.has(question.question))) return null;
+  if (remaining.some((question) => question.answer_source !== undefined
+    || (typeof question.answer === 'string' && question.answer.trim().length > 0))) return null;
+  return remaining;
 }
 
 /**
@@ -4398,7 +4512,7 @@ export function deliveryDriftIsLitosLearnedOnly(input: {
  * Cartesia (ashby), acknowledged sha and measured sha differing by nothing but the capabilities.
  *
  * What it will not do: carry an approval over anything she looked at (the identity comparison in
- * relearnedCapabilitiesAcknowledgement), over a capability that was known and then changed, over a
+ * relearnedFormReadingAcknowledgement), over a capability that was known and then changed, over a
  * form inventory that moved since a previous probe, or over a re-scored audit that now says
  * something different about the packet. In every one of those cases it returns null having at most
  * persisted a fresh audit, which the hold that follows writes back over with the run's own review
@@ -4409,11 +4523,12 @@ export function deliveryDriftIsLitosLearnedOnly(input: {
  * pre-probe check refuses; those forms still take the second approve. Stated so the Greenhouse
  * cover-letter case is not filed as a regression of this change.
  */
-async function relearnCapabilitiesAfterDiscovery(input: {
+async function relearnFormReadingAfterDiscovery(input: {
   row: ResumeRow;
   packet: SubmissionPacket;
   audit: PacketAudit;
   verifiedQuestions: readonly ApplicationReviewQuestion[];
+  mergedQuestions: readonly ApplicationReviewQuestion[];
   mode: EmployerPacketDeliveryMode;
   approvedEnvelope: EmployerDeliveryEnvelope;
   measuredEnvelope: EmployerDeliveryEnvelope;
@@ -4421,22 +4536,44 @@ async function relearnCapabilitiesAfterDiscovery(input: {
   measured: Pick<ApplicationReviewState, 'cover_letter_supported' | 'transcript_supported' | 'managed_form_snapshot'>;
   runId: string;
   log: FastifyInstance['log'];
-}): Promise<{ row: ResumeRow; review: ApplicationReviewState; audit: PacketAudit } | null> {
+}): Promise<{
+  row: ResumeRow;
+  review: ApplicationReviewState;
+  audit: PacketAudit;
+  verifiedQuestions: readonly ApplicationReviewQuestion[];
+} | null> {
   const prior = input.priorSnapshot;
   /* A form inventory that moved since a previous probe is the employer changing the form, not
    * Litos learning it; only a first probe (no prior inventory) or an unchanged one may carry. */
   if (prior && (!isDeepStrictEqual(prior.field_options ?? {}, input.packet.fieldOptions ?? {})
     || !isDeepStrictEqual(prior.failed_fields ?? [], input.packet.failedFields ?? []))) return null;
-  const approvedPacket: SubmissionPacket = {
-    ...input.packet,
-    fieldOptions: prior?.field_options,
-    failedFields: prior?.failed_fields,
-  };
+  const learnedRows = learnedFormQuestionRows({
+    mergedQuestions: input.mergedQuestions,
+    approvedQuestions: input.verifiedQuestions,
+    packetQuestions: input.packet.questions,
+  });
+  if (!learnedRows) return null;
+  /* Her rows first, unchanged and in order, then what the form taught this run. The order is not
+   * cosmetic: relearnedFormReadingAcknowledgement proves the reissued set OPENS with the
+   * acknowledged rows, which is what makes the narrowed identity comparison a restriction of the
+   * audit's own question binding rather than a substitution for it. */
+  const measuredQuestions: readonly ApplicationReviewQuestion[] = [...input.verifiedQuestions, ...learnedRows];
+  /* THE PACKET AS IT STOOD WHEN SHE APPROVED: the inventory the review carried before this run
+   * (none, on a first approve) AND the questions the approval covered. The question substitution
+   * is what the capability-only version was missing - it rolled the inventory back and left the
+   * post-discovery rows in place, so this re-check could never come back empty once discovery had
+   * added one, and the carry was unreachable for exactly the population it was needed by. */
+  const approvedPacket = approvedPacketBeforeDiscovery({
+    packet: input.packet,
+    approvedQuestions: input.verifiedQuestions,
+    priorSnapshot: prior,
+  });
   if (!deliveryDriftIsLitosLearnedOnly({
     packet: input.packet,
     approvedPacket,
     audit: input.audit,
-    verifiedQuestions: input.verifiedQuestions,
+    measuredQuestions,
+    approvedQuestions: input.verifiedQuestions,
     mode: input.mode,
     approvedEnvelope: input.approvedEnvelope,
     measuredEnvelope: input.measuredEnvelope,
@@ -4449,7 +4586,7 @@ async function relearnCapabilitiesAfterDiscovery(input: {
   const measuredReview: ApplicationReviewState = {
     ...freshReview,
     ...input.measured,
-    questions: [...input.verifiedQuestions],
+    questions: [...measuredQuestions],
   };
   /* THE AUDIT-SIDE READING OF THE QUESTIONS, never the fill's. input.packet.questions is the live
    * reading (option snaps with their claims, per-page-load selectors, flapping input types); every
@@ -4458,7 +4595,7 @@ async function relearnCapabilitiesAfterDiscovery(input: {
    * packet can never reproduce, and the transport assert would throw after the claim on any packet
    * with a snapped question. Mirrors the audit route. */
   const reissuedBindings = createEmployerDeliveryBindings(
-    { ...input.packet, questions: submissionPacketQuestions(input.verifiedQuestions) },
+    { ...input.packet, questions: submissionPacketQuestions(measuredQuestions) },
     measuredReview,
     { mode: input.mode, envelope: input.measuredEnvelope },
   );
@@ -4475,11 +4612,12 @@ async function relearnCapabilitiesAfterDiscovery(input: {
     return null;
   }
   if (!reissued.persisted) return null;
-  const carried = relearnedCapabilitiesAcknowledgement({
+  const carried = relearnedFormReadingAcknowledgement({
     priorAudit: input.audit,
     priorAcknowledgement: freshReview.packet_audit_acknowledgement,
     reissuedAudit: reissued.audit,
     acknowledgedAt: new Date().toISOString(),
+    learnedQuestions: { acknowledged: input.verifiedQuestions, reissued: measuredQuestions },
   });
   if (!carried) return null;
   const [audited] = await db.select().from(generated_resumes).where(eq(generated_resumes.id, input.row.id)).limit(1);
@@ -4501,10 +4639,13 @@ async function relearnCapabilitiesAfterDiscovery(input: {
       runId: input.runId,
       coverLetterSupported: [input.approvedEnvelope.capabilityPolicy.coverLetterSupported ?? null, input.measuredEnvelope.capabilityPolicy.coverLetterSupported ?? null],
       transcriptSupported: [input.approvedEnvelope.capabilityPolicy.transcriptSupported ?? null, input.measuredEnvelope.capabilityPolicy.transcriptSupported ?? null],
+      /* Counts only. The labels are the employer's words and the answers would be hers; the count
+       * is what says whether this run learned questions or only capabilities. */
+      learnedQuestionCount: learnedRows.length,
     },
-    'Packet audit re-issued with the capabilities discovery measured; the approval she gave carried forward',
+    'Packet audit re-issued with what discovery measured about the form; the approval she gave carried forward',
   );
-  return { row: final, review: finalReview, audit: reissued.audit };
+  return { row: final, review: finalReview, audit: reissued.audit, verifiedQuestions: measuredQuestions };
 }
 
 async function holdPreparationForPacketDrift(input: {
@@ -4515,6 +4656,14 @@ async function holdPreparationForPacketDrift(input: {
   verifiedQuestions: readonly ApplicationReviewQuestion[];
   mode: EmployerPacketDeliveryMode;
   envelope: EmployerDeliveryEnvelope;
+  /* The packet and envelope as the approval bound them, when the caller can produce them. Read for
+   * one thing only: deciding whether a delivery-payload issue riding beside an unanswered question
+   * is that question's own shadow or a second, real fault. Absent, nothing is collapsed. */
+  approved?: {
+    packet: SubmissionPacket;
+    questions: readonly ApplicationReviewQuestion[];
+    envelope: EmployerDeliveryEnvelope;
+  };
   patch: Partial<ApplicationReviewState>;
   log: FastifyInstance['log'];
 }): Promise<boolean> {
@@ -4526,6 +4675,17 @@ async function holdPreparationForPacketDrift(input: {
     input.envelope,
   );
   if (issues.length === 0) return false;
+  const askOnly = packetDriftIsQuestionAskOnly({
+    issues,
+    mode: input.mode,
+    approvedStillBinds: Boolean(input.approved) && verifiedBuiltPacketIssues(
+      input.approved!.packet,
+      input.audit,
+      input.approved!.questions,
+      input.mode,
+      input.approved!.envelope,
+    ).length === 0,
+  });
   /* The issue strings are static English naming a binding, never applicant values, so they are
    * safe for hosted logs - and without this line the drift class is invisible: the run parks, the
    * applicant re-approves, and no record anywhere says which binding kept moving. */
@@ -4548,11 +4708,9 @@ async function holdPreparationForPacketDrift(input: {
   await writeReview(input.row, nextReview(input.current, {
     ...input.patch,
     status: 'needs_attention',
-    attention_reason: packetDriftAttentionReason(issues),
+    attention_reason: packetDriftAttentionReason(issues, askOnly),
     /* A question waiting to be asked is something she can finish, not a gap in her evidence. */
-    attention_categories: issues.every((issue) => issue === PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE)
-      ? ['required_field']
-      : ['evidence_gap'],
+    attention_categories: askOnly ? ['required_field'] : ['evidence_gap'],
     packet_audit_acknowledgement: undefined,
     submission_authorization: undefined,
     submission_claimed_at: undefined,
@@ -7136,9 +7294,14 @@ async function prepareManaged(
   fastify: FastifyInstance,
   authorization: StandingAuthorization,
   audit: PacketAudit,
-  verifiedQuestions: readonly ApplicationReviewQuestion[],
+  approvedQuestions: readonly ApplicationReviewQuestion[],
   verifiedResumeBytes: Buffer,
 ) {
+  /* Reassignable because the carry below may widen it, ONCE, from the rows the approval covered to
+   * those same rows plus the answerless rows this run's discovery learned. Everything downstream -
+   * the hold, the fill, the review write - has to read the widened set or it would compare the
+   * packet against an audit that no longer exists and park on a drift nobody caused. */
+  let verifiedQuestions: readonly ApplicationReviewQuestion[] = approvedQuestions;
   const priorManagedFormSnapshot = readManagedFormSnapshot(current);
   await writeReview(row, nextReview(current, {
     status: 'filling',
@@ -7330,7 +7493,30 @@ async function prepareManaged(
       if (!greenhouseSchema) return field;
       const labelKey = greenhousePublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
       const options = labelKey ? greenhouseSchema.optionsByLabel[labelKey] : undefined;
-      return options?.length ? { ...field, options } : field;
+      if (options?.length) return { ...field, options };
+      /* THE EEOC SET, JOINED BY SUBJECT BECAUSE NOTHING ELSE JOINS.
+       *
+       * Measured on Hudson River Trading packet 4a79eec1, 2026-09-02: four required react-select
+       * demographic controls, ids 245/248/249/250, no options in the DOM, and the board API
+       * publishes their lists under `compliance` keyed `gender`/`race`/`veteran_status`/
+       * `disability_status`. The label join above cannot reach them - the compliance label is the
+       * machine token "DisabilityStatus", not "Do you have a disability?" - and the control-id join
+       * through fieldOptions cannot either, because job-boards.greenhouse.io numbers these controls
+       * instead of naming them. The subject is the only key both sides share, and the vocabulary
+       * that reads it is the same one that already answers these controls from her stored eeo_prefs.
+       *
+       * `optionsComplete: true` is the employer's own published inventory for this control, which
+       * is the identical claim the Ashby join makes and the identical claim a live option probe
+       * makes when it succeeds. Without it questionMetadataBlockerForDiscovered keeps filing
+       * missing_exact_options whatever list is attached, and the row stays unanswerable. */
+      const subject = eeoSubjectPreferenceKeys(normalizeDiscoveredLabel(field.label))
+        .find((key) => greenhouseSchema.complianceOptionsByField[key]?.length);
+      const complianceOptions = subject
+        ? greenhouseSchema.complianceOptionsByField[subject]
+        : undefined;
+      return complianceOptions?.length
+        ? { ...field, options: complianceOptions, optionsComplete: true }
+        : field;
     });
   /* The Ashby join, by label, because the public form definition names its fields by UUID `path`
    * and the live DOM never carries that path - there is no control id to join on, only the wording.
@@ -7843,11 +8029,12 @@ async function prepareManaged(
       ? { transcript_supported: managedFormSnapshot.transcript_supported }
       : {}),
   };
-  const relearned = await relearnCapabilitiesAfterDiscovery({
+  const relearned = await relearnFormReadingAfterDiscovery({
     row,
     packet,
     audit,
     verifiedQuestions,
+    mergedQuestions,
     mode: 'browser',
     approvedEnvelope: prepareEnvelope,
     measuredEnvelope: measuredPrepareEnvelope,
@@ -7857,12 +8044,13 @@ async function prepareManaged(
     log: fastify.log,
   });
   if (relearned) {
-    /* The row, the review and the audit downstream are the re-issued ones: every later
-     * writeReview here is built from `current`, and a stale copy would write the old audit and the
-     * old acknowledgement straight back over the carried ones. */
+    /* The row, the review, the audit and the acknowledged question set downstream are the re-issued
+     * ones: every later writeReview here is built from `current`, and a stale copy would write the
+     * old audit and the old acknowledgement straight back over the carried ones. */
     row = relearned.row;
     current = relearned.review;
     audit = relearned.audit;
+    verifiedQuestions = relearned.verifiedQuestions;
   }
   if (await holdPreparationForPacketDrift({
     row,
@@ -7872,6 +8060,15 @@ async function prepareManaged(
     verifiedQuestions,
     mode: 'browser',
     envelope: measuredPrepareEnvelope,
+    approved: {
+      packet: approvedPacketBeforeDiscovery({
+        packet,
+        approvedQuestions,
+        priorSnapshot: priorManagedFormSnapshot,
+      }),
+      questions: approvedQuestions,
+      envelope: prepareEnvelope,
+    },
     log: fastify.log,
     patch: {
       submission_run_id: runId,
@@ -9049,20 +9246,25 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     });
     /* Written once, read by the carry and the hold patch. See the managed path's measuredCapabilities. */
     const directMeasuredCapabilities = { cover_letter_supported: coverLetterSupported, transcript_supported: transcriptSupported };
-    const relearned = await relearnCapabilitiesAfterDiscovery({
+    /* Captured before the carry, which may widen packetAudit.questions to include what discovery
+     * learned. The hold's shadow test has to ask about the rows the APPROVAL covered. */
+    const directApprovedQuestions = packetAudit.questions;
+    const directApprovedEnvelope = employerDeliveryEnvelope({
+      channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+      destinationUrl: portalApplicationUrl(portal, current.portal_url!),
+      portalFamily: portal,
+      runtime: browserDeliveryRuntimeIdentity(),
+      coverLetterSupported: current.cover_letter_supported,
+      transcriptSupported: current.transcript_supported,
+    });
+    const relearned = await relearnFormReadingAfterDiscovery({
       row,
       packet,
       audit: packetAudit.audit,
       verifiedQuestions: packetAudit.questions,
+      mergedQuestions,
       mode: 'browser',
-      approvedEnvelope: employerDeliveryEnvelope({
-        channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
-        destinationUrl: portalApplicationUrl(portal, current.portal_url!),
-        portalFamily: portal,
-        runtime: browserDeliveryRuntimeIdentity(),
-        coverLetterSupported: current.cover_letter_supported,
-        transcriptSupported: current.transcript_supported,
-      }),
+      approvedEnvelope: directApprovedEnvelope,
       measuredEnvelope: directPrepareEnvelope,
       priorSnapshot: undefined,
       measured: directMeasuredCapabilities,
@@ -9072,7 +9274,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     if (relearned) {
       row = relearned.row;
       current = relearned.review;
-      packetAudit = { ...packetAudit, audit: relearned.audit };
+      packetAudit = { ...packetAudit, audit: relearned.audit, questions: [...relearned.verifiedQuestions] };
     }
     if (await holdPreparationForPacketDrift({
       row,
@@ -9082,6 +9284,15 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       verifiedQuestions: packetAudit.questions,
       mode: 'browser',
       envelope: directPrepareEnvelope,
+      approved: {
+        packet: approvedPacketBeforeDiscovery({
+          packet,
+          approvedQuestions: directApprovedQuestions,
+          priorSnapshot: undefined,
+        }),
+        questions: directApprovedQuestions,
+        envelope: directApprovedEnvelope,
+      },
       log: fastify.log,
       patch: {
         submission_run_id: runId,

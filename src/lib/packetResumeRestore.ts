@@ -3,11 +3,17 @@ import { isDeepStrictEqual } from 'node:util';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes } from '../db/schema';
-import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
+import {
+  readApplicationReview,
+  type ApplicationReviewQuestion,
+  type ApplicationReviewState,
+} from './applicationReview';
 import {
   acknowledgementBindsAudit,
   packetAuditContentIdentity,
   packetAuditIsSubmissionReady,
+  packetAuditSha256,
+  packetVisibleQuestions,
   type PacketAudit,
   packetAuditContentIdentityWithoutDelivery,
 } from './packetAudit';
@@ -166,12 +172,33 @@ export function restoredPacketAcknowledgement(input: {
  * audit exactly, both audits carry the current delivery binding in the same mode (the channel and
  * runtime inside the hash are the caller's to pin, and deliveryDriftIsLitosLearnedOnly does), the
  * resume bytes are identical, and the re-issued audit says the same thing about the packet.
+ *
+ * THE SECOND THING A FORM TEACHES IS WHAT IT ASKS, and that is why this is no longer only about
+ * capabilities. Measured in prod 2026-09-02 on four of the campaign's ten boards - Hudson River
+ * Trading (greenhouse), Confluence (pinpoint), TixTrack (teamtailor), Apollo Research (lever) -
+ * each parked after an approve on "This application changed after you approved the exact packet
+ * Litos prepared. What changed: the questions this form asks, how Litos reaches this employer",
+ * with no acknowledgement and no preview. Nothing she approved had moved on any of them: the
+ * discovery pass had simply read the form more thoroughly than the inventory the approval was
+ * taken against, and the delivery hash moved because it hashes the question rows. Litos reading
+ * the same form better is not a change to what she approved, so the approval carries; what
+ * discovery learned still reaches her as questions, and `learnedQuestions` below is what keeps
+ * those two facts from being confused with each other.
  */
-export function relearnedCapabilitiesAcknowledgement(input: {
+export function relearnedFormReadingAcknowledgement(input: {
   priorAudit: PacketAudit | undefined;
   priorAcknowledgement: PacketAcknowledgement | undefined;
   reissuedAudit: PacketAudit;
   acknowledgedAt: string;
+  /* The two question sets, when this run learned the form asks more than the approval covered.
+   * Absent means the sets are identical and the identity below compares them whole, which is the
+   * capability-only carry exactly as it always was. */
+  learnedQuestions?: {
+    /** The rows the approval covered, byte-for-byte as it covered them. */
+    acknowledged: readonly ApplicationReviewQuestion[];
+    /** The full set the reissued audit bound: those same rows first, then what discovery learned. */
+    reissued: readonly ApplicationReviewQuestion[];
+  };
 }): PacketAcknowledgement | null {
   if (!input.priorAudit || !input.priorAcknowledgement) return null;
   if (!packetAuditIsSubmissionReady(input.priorAudit)
@@ -179,8 +206,40 @@ export function relearnedCapabilitiesAcknowledgement(input: {
   if (!acknowledgementBindsAudit(input.priorAcknowledgement, input.priorAudit)) return null;
   if (input.priorAudit.bindings.pdf.sha256 !== input.reissuedAudit.bindings.pdf.sha256) return null;
   if (input.priorAudit.bindings.employerDelivery?.mode !== input.reissuedAudit.bindings.employerDelivery?.mode) return null;
+  const learned = input.learnedQuestions;
+  let questionsSha256Override: string | undefined;
+  if (learned) {
+    /* THE FOUR PROOFS THAT KEEP A LEARNED ROW FROM BECOMING APPROVED CONTENT. Each one is refused
+     * here rather than at the caller, because this function is the only thing standing between a
+     * re-measurement and a re-approval, and a caller that got any of them wrong would otherwise
+     * mint a human approval out of a record that never matched.
+     *
+     * 1. The acknowledged rows hash to exactly what the prior audit bound. A caller that handed a
+     *    trimmed or edited "acknowledged" set to make the identity line up fails here first.
+     * 2. The reissued set hashes to exactly what the reissued audit bound, so the rows checked
+     *    below are the rows the audit actually carries, not a hopeful copy of them.
+     * 3. The reissued set OPENS with the acknowledged rows, unchanged and in order. This is what
+     *    makes the restriction in the identity comparison a real restriction: the override is the
+     *    hash of a genuine prefix of the audit's own set.
+     * 4. Every row past that prefix is answerless and carries no claim of hers. A learned row with
+     *    a machine answer on it is content she has never seen, and carrying an approval over it is
+     *    precisely the send this gate exists to refuse - so it holds, she is asked, and the round
+     *    after covers it. Nothing here writes or blanks an answer to make a carry possible. */
+    const acknowledgedSha256 = packetAuditSha256(packetVisibleQuestions([...learned.acknowledged]));
+    if (acknowledgedSha256 !== input.priorAudit.bindings.questionsSha256) return null;
+    if (packetAuditSha256(packetVisibleQuestions([...learned.reissued]))
+      !== input.reissuedAudit.bindings.questionsSha256) return null;
+    if (learned.reissued.length < learned.acknowledged.length) return null;
+    if (!isDeepStrictEqual(
+      learned.reissued.slice(0, learned.acknowledged.length),
+      [...learned.acknowledged],
+    )) return null;
+    const added = learned.reissued.slice(learned.acknowledged.length);
+    if (added.some((question) => !learnedQuestionIsUnanswered(question))) return null;
+    questionsSha256Override = acknowledgedSha256;
+  }
   if (packetAuditContentIdentityWithoutDelivery(input.priorAudit)
-    !== packetAuditContentIdentityWithoutDelivery(input.reissuedAudit)) return null;
+    !== packetAuditContentIdentityWithoutDelivery(input.reissuedAudit, questionsSha256Override)) return null;
   return {
     ownerSha256: input.reissuedAudit.bindings.ownerSha256,
     applicationId: input.reissuedAudit.bindings.applicationId,
@@ -189,8 +248,26 @@ export function relearnedCapabilitiesAcknowledgement(input: {
     pdfSha256: input.reissuedAudit.bindings.pdf.sha256,
     pdfSizeBytes: input.reissuedAudit.bindings.pdf.sizeBytes,
     acknowledged_at: input.acknowledgedAt,
-    source: 'capabilities_measured',
+    source: 'form_reading_measured',
   };
+}
+
+/**
+ * A ROW THE FORM JUST TAUGHT LITOS ABOUT, WITH NOTHING IN IT YET.
+ *
+ * Blank is the whole test, and it is deliberately blind to WHY the row is blank. A discovery pass
+ * that could not read a control's options files a metadata blocker and leaves the answer empty; a
+ * resolver that had no profile value to give leaves it empty too. Both are questions, both reach
+ * her on the answers screen, and neither is content. Anything with a value in it - a profile relay,
+ * a drafted paragraph, a sentence reused from another employer's form - is content she has not
+ * seen, whatever produced it, and is not carried. answer_source is checked as well because a row
+ * carrying her claim while holding no answer is a record nobody should be reasoning about.
+ */
+function learnedQuestionIsUnanswered(question: ApplicationReviewQuestion): boolean {
+  if (question.answer_source !== undefined) return false;
+  const answer: unknown = question.answer;
+  if (answer === undefined || answer === null) return true;
+  return typeof answer === 'string' && answer.trim().length === 0;
 }
 
 export type PacketResumeRestoreOutcome =
