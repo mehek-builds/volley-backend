@@ -7,6 +7,10 @@ import {
   artifact_versions,
   artifacts,
 } from '../db/schema';
+import {
+  preparedSendLifecycle,
+  unpreparedSendLifecycle,
+} from './canonicalApplicationLifecycle';
 import { immutableDocumentContentHash } from './immutableDocumentHash';
 
 type ArtifactVersionTransaction = Pick<typeof db, 'select' | 'insert' | 'update'>;
@@ -63,6 +67,15 @@ export async function linkGeneratedPacketToCanonicalApplication(
     // Tailoring an already submitted application replaces its document pointer, not its history.
     tracker_state: sql`case when ${terminalLifecycle} then 'applied' else 'applying' end`,
     review_state: sql`case when ${terminalLifecycle} then ${applications.review_state} else 'ready' end`,
+    /* A fresh tailor repoints this row at a new packet, so any prepared hold it was advertising
+       belonged to the old one and is now gone. Releasing it here keeps the stored pair and the
+       read heal saying the same thing, instead of leaving the row claiming a filled employer form
+       that no packet holds. It cannot move a receipt backwards: the terminal arm wins first. */
+    submission_state: sql`case
+      when ${terminalLifecycle} then ${applications.submission_state}
+      when ${applications.submission_state} = ${preparedSendLifecycle.submissionState} then ${unpreparedSendLifecycle.submissionState}
+      else ${applications.submission_state}
+    end`,
     updated_at: new Date(),
   }).where(and(
     eq(applications.id, input.applicationId),

@@ -17,7 +17,10 @@ import {
 import { getEntitlementSnapshot } from '../lib/entitlements';
 import { packetIsUntailoredMainResume } from '../lib/managedPrepare';
 import { previewScreenshotMissing } from '../lib/managedRunStopSummary';
-import { confirmedPacketPipelineProjection } from '../lib/canonicalApplicationLifecycle';
+import {
+  confirmedPacketPipelineProjection,
+  packetReviewIsPreparedSend,
+} from '../lib/canonicalApplicationLifecycle';
 import {
   normalizeManagedFormSnapshot,
   normalizeApplicationReviewQuestions,
@@ -168,6 +171,7 @@ import {
 import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
+  advanceCanonicalApplicationPreparedSend,
   CanonicalApplicationProjectionConflictError,
   syncCanonicalApplicationRow,
 } from '../lib/canonicalApplicationSync';
@@ -463,6 +467,25 @@ export async function writeReview(row: ResumeRow, review: ApplicationReviewState
       spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
     }).where(and(...conditions)).returning({ id: generated_resumes.id });
   });
+  /* THE PREPARED HOLD IS A LIFECYCLE FACT TOO, AND THIS IS WHERE THE TRACKER LEARNS IT.
+   *
+   * The comment below used to be the whole story, and it described a funnel that taught the
+   * canonical row exactly one fact out of the six a run can produce. A managed prepare that fills
+   * the employer form and parks the packet at ready_for_final_approval left the tracker row still
+   * saying not_started, so the dashboard flattened a filled application to "needs attention" and
+   * drew no Send control - measured in prod 2026-09-02 on The Maven Group, with 83 more behind it.
+   *
+   * Both directions run here, on every review write, because leaving the hold matters as much as
+   * entering it: a restart or a failed audit must return the row to its resting pair rather than
+   * leave it advertising a filled form that no longer exists. Neither arm can write 'submitted'.
+   */
+  if (updated.length > 0) {
+    await advanceCanonicalApplicationPreparedSend({
+      packetId: row.id,
+      userId: row.user_id,
+      prepared: packetReviewIsPreparedSend(review.status),
+    });
+  }
   /* Every submit path in this file - ATS API, managed, retained-session, controlled - stamps its
    * packet submitted through this one statement, so this is where the canonical applications row
    * learns the same fact. Best-effort by construction: the receipt the run just captured must not

@@ -7,7 +7,11 @@ import {
   generated_resumes,
 } from '../db/schema';
 import { readApplicationReview } from './applicationReview';
-import { confirmedSubmissionLifecycle } from './canonicalApplicationLifecycle';
+import {
+  confirmedSubmissionLifecycle,
+  preparedSendLifecycle,
+  unpreparedSendLifecycle,
+} from './canonicalApplicationLifecycle';
 import {
   canonicalApplicationForAttemptProjection,
   frozenPostingIdentitiesMatch,
@@ -232,6 +236,64 @@ export type CanonicalApplicationSyncDeps = {
 /* Legacy review-only paths may still ask for a best-effort tracker heal after their packet write.
  * Exact receipt sinks never use this wrapper: they call syncCanonicalApplicationRow inside their
  * fact plus packet transaction so a missing row or CAS loss rolls the whole acknowledgement back. */
+type PreparedSendExecutor = Pick<typeof db, 'update'>;
+
+/* PROJECT THE PACKET'S PREPARED HOLD ONTO THE CANONICAL ROW.
+ *
+ * Called from writeReview, the single statement every runner review write in the product passes
+ * through, so a managed prepare parking a packet at ready_for_final_approval and a restart or a
+ * failure leaving that hold both reach the tracker row through the same door and in the same
+ * order as the packet write itself.
+ *
+ * NOTHING HERE CAN CLAIM A SEND. The only value it writes is 'ready_for_final_approval', and the
+ * CASE expressions read the row at UPDATE time so a receipt landing between the runner's read and
+ * this write is never moved backwards - the same rule, written the same way, as
+ * updateCanonicalApplicationAfterFill and linkGeneratedPacketToCanonicalApplication.
+ *
+ * The clearing arm is conditional on the row actually being parked, so this is a no-op for every
+ * application that was never prepared, which is what makes it safe to call on every review write.
+ */
+export async function syncCanonicalApplicationPreparedSend(
+  input: { packetId: string; userId: string; prepared: boolean },
+  executor: PreparedSendExecutor = db,
+): Promise<void> {
+  const terminalLifecycle = sql`${applications.submission_state} = 'submitted' or ${applications.tracker_state} in ('applied', 'interview', 'offer', 'closed')`;
+  const owned = and(
+    eq(applications.legacy_generated_resume_id, input.packetId),
+    eq(applications.user_id, input.userId),
+  );
+  if (input.prepared) {
+    await executor.update(applications).set({
+      submission_state: sql`case when ${terminalLifecycle} then ${applications.submission_state} else ${preparedSendLifecycle.submissionState} end`,
+      review_state: sql`case when ${terminalLifecycle} then ${applications.review_state} else ${preparedSendLifecycle.reviewState} end`,
+      updated_at: new Date(),
+    }).where(owned);
+    return;
+  }
+  await executor.update(applications).set({
+    submission_state: unpreparedSendLifecycle.submissionState,
+    review_state: unpreparedSendLifecycle.reviewState,
+    updated_at: new Date(),
+  }).where(and(
+    owned,
+    eq(applications.submission_state, preparedSendLifecycle.submissionState),
+    sql`not (${terminalLifecycle})`,
+  ));
+}
+
+/* Best effort in exactly the sense the submitted heal below is: the packet write already
+ * succeeded, and a tracker projection having a bad day must not lose it. */
+export async function advanceCanonicalApplicationPreparedSend(
+  input: { packetId: string; userId: string; prepared: boolean },
+  deps: { sync?: (input: { packetId: string; userId: string; prepared: boolean }) => Promise<unknown> } = {},
+): Promise<void> {
+  try {
+    await (deps.sync ?? syncCanonicalApplicationPreparedSend)(input);
+  } catch (error) {
+    console.warn('[canonical-sync] failed to project the prepared hold', { packetId: input.packetId, error });
+  }
+}
+
 export async function advanceCanonicalApplicationFromPacketSubmission(
   input: CanonicalApplicationSyncInput,
   deps: CanonicalApplicationSyncDeps = {},

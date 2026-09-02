@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db, withDedicatedDatabase } from '../db';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
@@ -13,6 +13,7 @@ import {
   applications,
   artifact_versions,
   artifacts,
+  generated_resumes,
   monetization_events,
   outreach_draft_generations,
   pending_premium_actions,
@@ -27,7 +28,11 @@ import { requireAuth } from '../middleware/auth';
 import { apiBaseFor } from '../lib/apiBase';
 import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { mintDownloadToken } from '../lib/resumeAccess';
-import { manualSubmissionTransition } from '../lib/canonicalApplicationLifecycle';
+import {
+  manualSubmissionTransition,
+  preparedSendLifecycle,
+  preparedSendLifecycleProjection,
+} from '../lib/canonicalApplicationLifecycle';
 import {
   buildCanonicalFreeVersionedDocumentBinding,
   CANONICAL_FREE_NONE_BINDING,
@@ -253,6 +258,13 @@ export async function updateCanonicalApplicationAfterFill(
     // initial ownership read without a late fill write ever moving submitted/applied backwards.
     tracker_state: sql`case when ${terminalLifecycle} then 'applied' else 'applying' end`,
     review_state: sql`case when ${terminalLifecycle} then ${applications.review_state} else 'filling' end`,
+    /* Same rule as the tailor link: a Free extension fill takes the row out of any prepared hold a
+       managed run had parked it in, because that filled form is being replaced. */
+    submission_state: sql`case
+      when ${terminalLifecycle} then ${applications.submission_state}
+      when ${applications.submission_state} = ${preparedSendLifecycle.submissionState} then 'not_started'
+      else ${applications.submission_state}
+    end`,
     selected_resume_artifact_id: input.selectedResumeArtifactId,
     resume_attached: input.resumeAttached,
     resume_source: input.resumeSource,
@@ -311,6 +323,11 @@ const lifecycleRanks: Record<string, number> = {
   applying: 1,
   needs_attention: 2,
   ready: 3,
+  /* A filled employer form waiting on the applicant outranks "ready" - the work is further along -
+     and must never outrank a receipt, so it sits below submitted rather than beside it. Without an
+     entry here it would rank 0, tied with not_started, and a duplicate adoption could silently drop
+     the readiness of the prepared row it merged. */
+  ready_for_final_approval: 4,
   approved: 4,
   submitted: 5,
   applied: 5,
@@ -478,7 +495,15 @@ export async function upsertCanonicalApplicationForUser(input: {
   });
 }
 
-function applicationResponse(row: typeof applications.$inferSelect) {
+function applicationResponse(
+  row: typeof applications.$inferSelect,
+  /* The status of the packet this row points at, when the caller has read it. The stored lifecycle
+     columns are a projection of that packet, and for every application prepared before writeReview
+     learned to project the hold they are behind. Callers that just wrote the row themselves pass
+     nothing and get the stored pair, which is what they wrote. */
+  packetReviewStatus: string | null = null,
+) {
+  const lifecycle = preparedSendLifecycleProjection(row, packetReviewStatus);
   return {
     id: row.id,
     legacy_generated_resume_id: row.legacy_generated_resume_id,
@@ -498,8 +523,8 @@ function applicationResponse(row: typeof applications.$inferSelect) {
     portal_url: safeStoredPortalUrl(row.portal_url),
     source_surface: row.source_surface,
     tracker_state: row.tracker_state,
-    review_state: row.review_state,
-    submission_state: row.submission_state,
+    review_state: lifecycle.review_state,
+    submission_state: lifecycle.submission_state,
     selected_resume_artifact_id: row.selected_resume_artifact_id,
     resume_attached: row.resume_attached,
     resume_source: row.resume_source,
@@ -554,12 +579,25 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     /* Removed rows are excluded HERE rather than in the client, because this one route feeds the
        Tracker, the dashboard and the extension alike, and a client-side filter would hide a row on
        one surface and show it on the next. */
-    const rows = await db.select().from(applications).where(and(
-      eq(applications.user_id, request.jwtPayload!.userId),
-      isNull(applications.removed_at),
-    )).orderBy(desc(applications.updated_at)).limit(parsed.data.limit);
+    /* THE LINKED PACKET'S REVIEW STATUS IS READ WITH THE ROW, AND THE LIFECYCLE IS HEALED FROM IT.
+       This one LEFT JOIN is what lets an application prepared before the projection existed reach
+       its send without being prepared again. It is a derivation, not a write: a GET stays a GET,
+       every read of every already-parked row heals identically, and a row whose packet has since
+       moved on stops advertising a filled form on the same read. */
+    const rows = await db.select({
+      application: applications,
+      packetReviewStatus: sql<string | null>`${generated_resumes.spec}->'_review'->>'status'`,
+    }).from(applications)
+      .leftJoin(generated_resumes, and(
+        eq(generated_resumes.id, applications.legacy_generated_resume_id),
+        eq(generated_resumes.user_id, applications.user_id),
+      ))
+      .where(and(
+        eq(applications.user_id, request.jwtPayload!.userId),
+        isNull(applications.removed_at),
+      )).orderBy(desc(applications.updated_at)).limit(parsed.data.limit);
     return reply.header('Cache-Control', 'private, no-store').send({
-      applications: rows.map(applicationResponse),
+      applications: rows.map((row) => applicationResponse(row.application, row.packetReviewStatus)),
     });
   });
 
@@ -603,7 +641,12 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     }
 
     const blockers: string[] = [];
-    if (application.submission_state !== 'not_started') {
+    /* A packet parked at ready_for_final_approval is FILLED, NOT SENT. Refusing removal on it
+       would be this bug's mirror image: a screen asserting a send the evidence contradicts. The
+       ledger checks below are what actually enforce "never reached an employer", and they are
+       untouched - an attempt binding or event still refuses on its own. */
+    if (application.submission_state !== 'not_started'
+      && application.submission_state !== preparedSendLifecycle.submissionState) {
       blockers.push(`submission_state is "${application.submission_state}"`);
     }
     if (REMOVAL_BLOCKING_TRACKER_STAGES.has(application.tracker_state)) {
@@ -647,7 +690,7 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
       .where(and(
         eq(applications.id, application.id),
         eq(applications.user_id, request.jwtPayload!.userId),
-        eq(applications.submission_state, 'not_started'),
+        inArray(applications.submission_state, ['not_started', preparedSendLifecycle.submissionState]),
         isNull(applications.removed_at),
       )).returning();
     if (!removed) {
