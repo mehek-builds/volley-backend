@@ -8944,8 +8944,38 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
      inputRow, or the run assembles a packet from the key the sweep deleted. */
   let packetAudit = await verifiedPacketForRun(row, current, currentPacketAudit);
   if (!packetAudit.valid) {
+    /* THE ONE FIELD THAT SAYS WHICH BINDING MOVED WAS BEING DROPPED HERE.
+     *
+     * verifyCurrentPacketAudit returns bindingMismatchKeys precisely so a packet_stale can be
+     * diagnosed in production - the type calls them "privacy-safe fixed binding names for
+     * production diagnosis" and they carry no applicant content, only names like 'jd' or
+     * 'applicant_snapshot'. This line logged the code alone, so every stale packet looked
+     * identical in the log and the only way to tell a real edit from a false positive was to
+     * reproduce it live.
+     *
+     * That is not hypothetical: measured 2026-09-02 on Flow Traders `761e0add` (Greenhouse), the
+     * stored audit, the acknowledgement and a freshly recomputed audit ALL carried packet_version
+     * 0385e268 and audit_digest 873801, the fresh audit answered `passed`, and the run still parked
+     * on packet_stale. Three earlier false positives are recorded in this repo the same way
+     * (portalSubmission.ts:6280, questionDiscovery.ts:1922, packetAudit.ts:325). The reason is
+     * a developer token and stays out of the applicant's sentence exactly as before - only the log
+     * line gains it. */
     fastify.log.warn(
-      { applicationId: row.id, code: packetAudit.code },
+      {
+        applicationId: row.id,
+        code: packetAudit.code,
+        reason: packetAudit.reason,
+        /* `?? []` rather than a presence guard, and the empty array is the POINT.
+         * An empty list means all thirteen named bindings compared equal while packet_version
+         * still differed - structural drift in the stored bindings object rather than an edit to
+         * any one field - which is exactly the Flow Traders 761e0add signature this line exists to
+         * name. Omitting the key there would make "no binding moved" indistinguishable from "this
+         * deploy does not log the field", leaving the one case worth diagnosing looking identical
+         * to the pre-change line. The sibling submit site already logs it this way; the two must
+         * not disagree, or an operator comparing a prepare stop with a submit stop reads the
+         * absence of a key as a difference in the packet. */
+        bindingMismatchKeys: packetAudit.bindingMismatchKeys ?? [],
+      },
       'Application preparation withheld because the exact packet audit is missing or stale',
     );
     await writeReview(row, nextReview(current, {
@@ -11765,6 +11795,30 @@ function unverifiedSubmissionPatch(
   };
 }
 
+/* WHY PLAYWRIGHT'S TARGET-CLOSED SENTENCE IS DELIBERATELY NOT MATCHED HERE.
+ *
+ * A provider teardown mid-run really does produce
+ * "Target page, context or browser has been closed", and matching it would let the stop record say
+ * 'provider_session_failure' instead of 'unclassified'. That was tried and REVERTED, because this
+ * predicate does not only name the stop: submissionFailureOutcome ranks providerSessionFailure
+ * ABOVE uncertainAfterClaim, and the needsExit override that would restore the honest
+ * "Litos pressed Send" sentence is skipped whenever the row already carries an
+ * unverified_submission.
+ *
+ * The measured consequence, on a row whose earlier attempt was resolved 'not_sent': run two presses
+ * Submit successfully, the provider tears the browser down while the confirmation is being read,
+ * Stratus returns Playwright's sentence verbatim, and the applicant is told "Nothing was sent. Try
+ * this one again in a few minutes" and filed in the retry bucket - for an application the employer
+ * actually has. Before, the same message fell through to "The final submission was attempted, but
+ * Litos could not verify the employer confirmation. Check the portal or your email before trying
+ * again." Naming the stop is worth very little; turning "go look before you retry" into an
+ * affirmative "nothing was sent" is worth a duplicate application, which cannot be taken back.
+ *
+ * The two phrases below stay because Stratus emits them for a session that never opened, which is
+ * pre-click by construction. Anything whose throw site is not structurally known must keep the
+ * uncertain exit. If this is ever revisited, the classification must be gated on positive pre-click
+ * evidence from the run rather than on the text of an error, and it must not feed
+ * submissionFailureOutcome's ranking. */
 export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
