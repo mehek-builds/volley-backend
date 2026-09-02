@@ -2029,7 +2029,121 @@ test('a salary question fills the median of the range the label or the descripti
   }
   // A half-dollar median is rounded for the step=1 number input; an hourly figure keeps its cents.
   assert.deepEqual(resolveKnownAnswer('expected salary', 'number', {}, 'Salary $130,001 - $150,000'), { value: '140001' });
-  assert.deepEqual(resolveKnownAnswer('expected pay (hourly)', 'number', {}, 'Pay $20.50 - $25.50 per hour'), { value: '23' });
+  /* The hourly figure is read off the LABEL's own range, because a description window that merely
+     says "Pay $20.50 - $25.50 per hour" does not say the range is this role's salary. See the
+     jd-range provenance rule and its must-refuse pins below. */
+  assert.deepEqual(
+    resolveKnownAnswer('expected hourly salary ($20.50 - $25.50 per hour)', 'number', {}, undefined),
+    { value: '23' },
+  );
+  // The description states the range as this role's pay, in the unit the label asks in.
+  assert.deepEqual(
+    resolveKnownAnswer('expected hourly salary', 'number', {}, 'Base pay range $20.50 - $25.50 per hour.'),
+    { value: '23' },
+  );
+});
+
+/* THE MEDIAN IS THE EMPLOYER'S NUMBER READ BACK, AND ONLY WHILE IT STILL MEANS WHAT THEY MEANT.
+ *
+ * Every label below took TixTrack's annual $130,000 - $150,000 median before this rule (probe,
+ * 2026-09-02) and every one of them holds on origin/main. A currency the posting never named and a
+ * period the range was not stated in are the two ways a true number becomes a false claim: 140000
+ * EUR is a figure in a currency nobody quoted, and 140000 "per month" is an eleven-fold
+ * overstatement of what the employer published. */
+test('a label that names a different currency or a different pay period refuses the range median', () => {
+  const mustRefuse: Array<[string, string, string]> = [
+    // Currency: the label names one and the range is stated in another.
+    ['expected salary (in eur)', 'number', TIXTRACK_SALARY_JD],
+    ['expected salary in gbp', 'text', TIXTRACK_SALARY_JD],
+    // Teamtailor is Swedish and this label is common there.
+    ['expected salary (sek)', 'number', TIXTRACK_SALARY_JD],
+    ['expected salary (usd)', 'number', 'Base annual salary range of £45,000 - £55,000.'],
+    ['expected salary in usd', 'text', 'Base annual salary range of £45,000 - £55,000.'],
+    // Period: the label asks per month, per hour or for part-time hours; the range is annual.
+    ['expected monthly salary', 'number', TIXTRACK_SALARY_JD],
+    ['expected salary per month (sek)', 'text', TIXTRACK_SALARY_JD],
+    ['salary expectation (monthly, gross)', 'text', TIXTRACK_SALARY_JD],
+    ['what are your salary expectations? (net per month)', 'text', TIXTRACK_SALARY_JD],
+    ['expected compensation per hour', 'text', TIXTRACK_SALARY_JD],
+    ['expected pay rate per hour', 'text', TIXTRACK_SALARY_JD],
+    ['expected salary for this internship (per month)', 'text', TIXTRACK_SALARY_JD],
+    ['salary expectations for a part-time (20h/week) role', 'text', TIXTRACK_SALARY_JD],
+  ];
+  for (const [label, type, jd] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} [${type}]`);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
+  // The currency the posting DOES name, and the period it does state, both still fill.
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary (usd)', 'number', {}, TIXTRACK_SALARY_JD),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected monthly salary', 'number', {}, 'Base salary range of $4,000 - $5,000 per month.'),
+    { value: '4500' },
+  );
+});
+
+/* WHAT THE RANGE IN THE DESCRIPTION IS A RANGE OF. lib/salary.ts accepts any range within 160
+ * characters of a pay word, which is the right net for finding a figure and far too wide for
+ * answering with one. Each of these filled before the provenance rule and each is live on
+ * origin/main: a wellness stipend answered "expected salary" with 75, a monthly stipend answered
+ * "expected annual salary" with 1250, a daily intern rate answered with 550, an hourly rate
+ * answered with 20, and a base-plus-equity sentence answered "expected total compensation" with the
+ * base alone. */
+test('a description range fills only when the description says it is this role\'s pay', () => {
+  const mustRefuse: Array<[string, string, string]> = [
+    ['expected salary', 'number', 'We offer a $50 - $100 monthly wellness stipend. Salary competitive.'],
+    ['expected annual salary', 'number', 'Stipend $1,000 - $1,500 per month.'],
+    ['expected salary', 'number', 'Pay is 500 - 600 AED per day for the internship.'],
+    ['expected salary', 'number', 'Hourly rate $18 - $22; typical week 20 - 30 hours.'],
+    ['expected total compensation', 'text', 'Base salary $130,000 - $150,000 plus equity.'],
+    ['expected salary', 'number', 'Signing bonus of $5,000 - $10,000. Salary competitive.'],
+  ];
+  for (const [label, type, jd] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} :: ${jd}`);
+    assert.match(resolved.skipReason, /^salary question left for you/, jd);
+  }
+  // A window that names the role's own pay, with an annual marker or with no period at all, fills.
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary', 'number', {}, 'Base salary $130,000 - $150,000 per year.'),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary', 'number', {}, 'Salary $130,000 - $150,000.'),
+    { value: '140000' },
+  );
+  // The label asking in the window's own unit is the one way a stipend range is usable.
+  assert.deepEqual(
+    resolveKnownAnswer('expected monthly stipend salary', 'number', {}, 'Monthly stipend salary of $1,000 - $1,500 per month.'),
+    { value: '1250' },
+  );
+});
+
+/* A LABEL THAT MENTIONS PAY WITHOUT ASKING FOR A FIGURE OF IT. Every one of these took the median
+ * before the head-of-phrase rule (probe, 2026-09-02) and every one holds on origin/main: a currency
+ * field answered with 140000, a bonus field answered with the base salary, a structure field and a
+ * range field answered with a single number that is neither. */
+test('the range median never answers a currency, a structure, a bonus or a range', () => {
+  for (const label of [
+    'preferred currency for compensation',
+    'preferred salary currency',
+    'preferred compensation structure (base vs equity)',
+    'expected equity compensation',
+    'expected bonus compensation',
+    'expected stock compensation',
+    'preferred salary frequency',
+    'preferred compensation schedule',
+    'expected salary range',
+    'expected salary (please state a range)',
+    'salary expectations (please specify currency)',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', {}, TIXTRACK_SALARY_JD);
+    assert.ok(resolved && 'skipReason' in resolved, label);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
 });
 
 /* The runner resolves with the live control's type; refreshKnownQuestionAnswers and
@@ -2144,6 +2258,14 @@ test('isCoverLetterTextQuestion never fires on labels that merely contain the wo
   assert.equal(isCoverLetterTextQuestion('Why is a cover letter important to you?'), false);
   assert.equal(isCoverLetterTextQuestion('Please describe your motivation for applying'), false);
   assert.equal(isCoverLetterTextQuestion(''), false);
+  /* THE MARKER STRIP RUNS AFTER THE PUNCTUATION STRIP, so "cover letter required?" arrived here as
+     "cover letter required" and then as "cover letter" - a yes/no question read as the label of the
+     letter itself, with the whole letter typed into a control expecting "Yes". The strip is licensed
+     only where the label asks nothing; Teamtailor's welded marker never arrives on a question. */
+  assert.equal(isCoverLetterTextQuestion('cover letter required?'), false);
+  assert.equal(isCoverLetterTextQuestion('Cover Letter Required?'), false);
+  assert.equal(isCoverLetterTextQuestion('cover letter optional?'), false);
+  assert.equal(isCoverLetterTextQuestion('is a cover letter required?'), false);
 });
 
 test('a link question resolves via classifyField, so callers never reach the essay drafter', () => {
@@ -4503,14 +4625,20 @@ test('an agreeing resolver carries the applicant claim forward but not the answe
   assert.equal('consent_permission_granted_at' in refreshed, false);
 });
 
+/* THE PROFILE IS THE SOURCE OF TRUTH FOR A RESOLUTION SHE DISAGREED WITH, and staleness is decided
+ * by the derivation she recorded when she disagreed. A review saved against a resolver value carries
+ * answer_override_of; once the profile moves out from under it, that note stops matching and the
+ * answer is recomputed. A review saved with NO note is a different record entirely - the resolver had
+ * nothing to say at the time - and is kept; see 'an answer she gave while the resolver was silent'. */
 test('a resolved answer that differs still replaces the value and drops the record with it', () => {
   const reviewedAt = '2026-08-12T13:45:27.969Z';
   const stored = [{
     question: 'what is your gender/gender identity? 4005628101',
-    // A stale value: the profile now says something else, and the employer must receive the profile.
+    // A stale value: she overrode "Male", the profile now says Female, and the note no longer matches.
     answer: 'Prefer not to say',
     answer_source: 'applicant_review',
     answer_reviewed_at: reviewedAt,
+    answer_override_of: 'Male',
   }];
 
   const refreshed = refreshKnownQuestionAnswers(stored, { eeo_prefs: { gender: 'Female' } }, undefined, reviewedAt);
@@ -4519,6 +4647,7 @@ test('a resolved answer that differs still replaces the value and drops the reco
   assert.equal(refreshed[0].answer_source, undefined,
     'the record described the answer that was just replaced, so it goes with it');
   assert.equal(refreshed[0].answer_reviewed_at, undefined);
+  assert.equal(refreshed[0].answer_override_of, undefined);
 });
 
 test('equality for keeping the record is exact, because casing is what gets typed on the form', () => {
@@ -4528,6 +4657,8 @@ test('equality for keeping the record is exact, because casing is what gets type
     answer: 'Decline To Self Identify',
     answer_source: 'applicant_review',
     answer_reviewed_at: reviewedAt,
+    // She overrode a resolution that has since moved: casing is the whole of the difference here.
+    answer_override_of: 'Decline to self-identify (previous wording)',
   }];
 
   const refreshed = refreshKnownQuestionAnswers(
@@ -4683,16 +4814,17 @@ test('a reviewed band the resolver cannot judge is kept, and one it contradicts 
   assert.equal(refreshed[2].answer_source, undefined);
 });
 
-test('the incomparable keep is for bands only: a plain reviewed answer keeps the override rules', () => {
+test('the incomparable keep is for bands only: a reviewed answer whose derivation moved is recomputed', () => {
   const reviewedAt = '2026-08-20T18:30:00.000Z';
   const refreshed = refreshKnownQuestionAnswers([
-    /* No band shape, no answer_override_of: the override branch's own requirements still decide,
-       and they refuse an unproven claim, exactly as before this change. */
+    /* No band shape, and an answer_override_of the profile has moved away from: the override
+       branch's own requirements still decide, and they refuse a claim they cannot prove current. */
     {
       question: 'what degree did you complete at the above university? ✱',
       answer: 'Some Other Degree',
       answer_source: 'applicant_review',
       answer_reviewed_at: reviewedAt,
+      answer_override_of: 'Master of Science in Computer Science',
     },
   ], { degree: 'Bachelor of Science in Computer Science' }, undefined, reviewedAt);
   assert.equal(refreshed[0].answer, 'Bachelor of Science in Computer Science');
@@ -5133,6 +5265,14 @@ test('the commencement arm never claims a past sponsorship or sponsoring someone
     'did you previously need a company to initiate sponsorship?',
     'as a manager in this role you will need to initiate sponsorship for your direct reports. are you comfortable with that?',
     'will you need to file for sponsorship for new hires on your team?',
+    /* The third-party frame had no room for an ADJECTIVE before the noun, and these four reached the
+     * commencement arm through that gap and answered "Yes" from needs_sponsorship. The last asks
+     * whether she already HOLDS sponsorship, which is a different fact from needing one. */
+    'in this role you will need to file petitions for sponsorship of foreign national hires. describe your experience.',
+    'this position requires the successful candidate to provide sponsorship for junior staff. ok?',
+    'does your spouse or any dependent require us to initiate sponsorship?',
+    'this role requires you to obtain sponsorship independently; do you have it?',
+    'will you need to arrange sponsorship for your clients?',
   ]) {
     const resolved = resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US');
     assert.ok(resolved && 'skipReason' in resolved, label);
@@ -5147,17 +5287,18 @@ test('the commencement arm never claims a past sponsorship or sponsoring someone
   }
 });
 
-/* DECIDED, NOT LEFT TO A SIDE EFFECT. Widening what the resolver answers changes what
- * refreshKnownQuestionAnswers does to an answer she reviewed while the resolver was still silent:
- * the record carries no answer_override_of (applicationReview.ts records one only when a resolver
- * value existed at review time), so the override branch cannot prove the round and the profile
- * wins, exactly as it does for every other current-round review with no derivation (see 'the
- * incomparable keep is for bands only'). That is the standing rule kept on purpose: a reviewed "No"
- * against needs_sponsorship = true contradicts her own stored fact, the answer moves the packet hash
- * so an approved packet goes stale and must be re-approved with the new value in front of her, and
- * a review saved from then on records the override and is kept. Applications 6703778e (TixTrack)
- * and 0a5081aa (Apollo Research) are the two live packets this can touch. */
-test('a sponsorship "No" reviewed while the resolver was silent is recomputed once the profile answers, and an override of it is kept', () => {
+/* DECIDED, NOT LEFT TO A SIDE EFFECT, AND DECIDED THE OTHER WAY IN ROUND 3.
+ *
+ * Widening what the resolver answers changes what refreshKnownQuestionAnswers does to an answer she
+ * reviewed while the resolver was still silent. applicationReview.ts records answer_override_of only
+ * when a resolver value existed at review time, so its absence on a current-round review says the
+ * question reached her unanswered and the string on the record is hers alone. The first cut let the
+ * newly widened resolver overwrite it and strip the provenance, which measured (probe against
+ * origin/main c6e2c25, same input on both trees) as: a reviewed sponsorship "No" becoming "Yes", a
+ * reviewed salary "$120,000" becoming the posting median, a corrected "Tonee Inc." becoming "Tonee",
+ * and an "Other website" holding a GitHub link becoming the portfolio URL - on every packet read,
+ * submitted packets included. The human review wins instead. */
+test('an answer she gave while the resolver was silent is kept once the resolver learns the question', () => {
   const reviewedAt = '2026-09-02T00:00:00.000Z';
   const needs = { work_authorized: true, needs_sponsorship: true };
   const silentThen = {
@@ -5166,10 +5307,11 @@ test('a sponsorship "No" reviewed while the resolver was silent is recomputed on
     answer_source: 'applicant_review',
     answer_reviewed_at: reviewedAt,
   };
-  const [recomputed] = refreshKnownQuestionAnswers([silentThen], needs, undefined, reviewedAt, 'us', 'US');
-  assert.equal(recomputed.answer, 'Yes');
-  assert.equal(recomputed.answer_source, undefined);
-  // Reviewed AGAINST the resolver's "Yes": the override is recorded and her answer stands.
+  const [kept] = refreshKnownQuestionAnswers([silentThen], needs, undefined, reviewedAt, 'us', 'US');
+  assert.equal(kept.answer, 'No', 'the resolver learning the question does not unsay her answer');
+  assert.equal(kept.answer_source, 'applicant_review', 'and the record still says a person wrote it');
+  assert.equal(kept.answer_reviewed_at, reviewedAt);
+  // Reviewed AGAINST the resolver's "Yes": the override is recorded and her answer stands too.
   const [overridden] = refreshKnownQuestionAnswers(
     [{ ...silentThen, answer_override_of: 'Yes' }],
     needs,
@@ -5180,6 +5322,48 @@ test('a sponsorship "No" reviewed while the resolver was silent is recomputed on
   );
   assert.equal(overridden.answer, 'No');
   assert.equal(overridden.answer_source, 'applicant_review');
+  // A review from an EARLIER round is not the current round and is recomputed as it always was.
+  const [stale] = refreshKnownQuestionAnswers(
+    [{ ...silentThen, answer_reviewed_at: '2026-08-01T00:00:00.000Z' }],
+    needs,
+    undefined,
+    reviewedAt,
+    'us',
+    'US',
+  );
+  assert.equal(stale.answer, 'Yes');
+});
+
+/* THE SAME RULE ON THE FAMILY THIS ROUND WIDENED MOST. Before the desired_salary arm answered
+ * anything, a salary question on a posting with a stated range ALWAYS read "salary question left for
+ * you", so a figure in that field is always a figure she typed. Recomputing it to the posting median
+ * would replace her number with the employer's on a packet she has already approved. */
+test('a reviewed salary figure survives the arm that now answers salary questions', () => {
+  const reviewedAt = '2026-09-02T00:00:00.000Z';
+  const reviewed = (answer: string) => ({
+    question: 'what are your salary expectations for this position?* required',
+    answer,
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  });
+  for (const answer of ['$120,000', '135000']) {
+    const [kept] = refreshKnownQuestionAnswers(
+      [reviewed(answer)],
+      {},
+      TIXTRACK_SALARY_JD,
+      reviewedAt,
+    );
+    assert.equal(kept.answer, answer, answer);
+    assert.equal(kept.answer_source, 'applicant_review', answer);
+  }
+  // The figure the RUNNER stored carries no review claim and still refreshes to the median.
+  const [machine] = refreshKnownQuestionAnswers(
+    [{ question: 'what are your salary expectations for this position?* required', answer: '140000' }],
+    {},
+    TIXTRACK_SALARY_JD,
+    reviewedAt,
+  );
+  assert.equal(machine.answer, '140000');
 });
 
 test('a "us sponsorship" heading scopes the question to the United States', () => {
