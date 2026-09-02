@@ -165,9 +165,13 @@ function bankEntryText(entry: ExperienceBankEntry): string {
 /**
  * Evidence the base resume may not displace with older work.
  *
- * After onboarding, the entry the applicant confirmed is the one mandatory entry and must lead the
- * page. Before that review exists, the legacy fallback protects up to three current or role-defining
- * entries so older accounts retain the selection behavior they had before this flow shipped.
+ * Three states, not two. A selection that can survive the bullet floor (or a sparse one the
+ * applicant confirmed continuing with) is the one mandatory entry and must lead the page. An
+ * UNCONFIRMED sparse selection - every upload auto-seeds one when it finds a candidate - is not
+ * mandatory: it falls through to the legacy fallback below, which protects up to three current or
+ * role-defining entries the floor can actually keep, so older accounts retain the selection
+ * behavior they had before this flow shipped and no account is ever required to print an entry
+ * the pipeline must drop.
  */
 export function priorityEntriesForBaseResume(
   bank: ExperienceBankEntry[],
