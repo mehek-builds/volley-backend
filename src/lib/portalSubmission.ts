@@ -1320,6 +1320,25 @@ function reviewQuestionPortalInputType(item: SubmissionPacket['questions'][numbe
   return item.portalInputType ?? item.portal_input_type;
 }
 
+/**
+ * THE CONTROL'S MEASURED SHAPE, WHICH IS WHAT DECIDES THE ACTION - NOT THE BOARD IT CAME FROM.
+ *
+ * Discovery reports what it read off the live node (questionMetadata.ts): `select` for a native
+ * <select>, and `combobox` or `listbox` for a control carrying that role, an aria-haspopup listbox,
+ * or a text input whose probe read a usable option list. All three are CLOSED lists: the only values
+ * they can take are rows the employer offers, so typing an answer into one is never the right
+ * action, on any family.
+ *
+ * Returns null for every genuinely open control, which keeps the plain text fill as the fallback.
+ */
+function measuredClosedListShape(
+  portalInputType: string | undefined,
+): 'native_select' | 'bound_list' | null {
+  if (/^select$/i.test(portalInputType ?? '')) return 'native_select';
+  if (/^(?:combobox|listbox)$/i.test(portalInputType ?? '')) return 'bound_list';
+  return null;
+}
+
 function managedComboboxFill(
   actions: ManagedBrowserAction[],
   selector: string,
@@ -8239,6 +8258,57 @@ export function buildManagedPortalActions(
            * verifies the tick, so the selector leads there and this label path stays the rule for
            * every other family. */
           pushScopedQuestionChoiceActions(actions, questionText, answer, 'question', { includeSelectFallbacks: false });
+        }
+        continue;
+      }
+      /* A CLOSED LIST GETS A CHOICE, ON EVERY FAMILY. THE FILL BELOW IS FOR OPEN CONTROLS ONLY.
+       *
+       * Measured in production 2026-09-02, DSI Innovations on Recruitee (packet a34e5ce2, host
+       * dsiinnovations.recruitee.com): discovery finished in 1.4 s and read the calling-code picker
+       * correctly - durable selector `#country-select-input-candidate\.phone-undefined`, a
+       * role=combobox button bound to a downshift listbox, stored as portal_input_type `combobox`.
+       * The plan still aimed a bare `fill` of "United States" at it, because the only combobox arm
+       * in this loop is keyed on `portalFamily(portal) === 'greenhouse'`. The runner routes a fill
+       * whose target reports role=combobox into its custom chooser, nothing bounds that chooser, and
+       * it walked a 246-row virtualised country list until the 270 s provider deadline closed the
+       * page under its own wait: the run returned 502 after 270,086 ms at action index 5, the review
+       * was persisted failed, and a per-user lock was held for four and a half minutes - over one
+       * picker whose value the form had already defaulted correctly.
+       *
+       * The evidence needed to do better was computed a few lines above and thrown away.
+       * `currentOptions` is the inventory the option probe READ for this exact control, and it was
+       * consumed only inside the Greenhouse arm: dead evidence on every other board.
+       *
+       * So the dispatch is keyed on the control's measured shape instead. Greenhouse is excluded
+       * here only because its own shape arm ran above and its remaining fall-through is pinned by
+       * test; nothing about this rule is board-specific.
+       *
+       * NEVER GUESS A ROW. exactChoiceOptionValues accepts one exact decomposition of the answer
+       * into offered labels and returns null otherwise, and a null emits NOTHING - the same refusal
+       * the Workable and Greenhouse checkbox arms already make, which leaves the question on the
+       * form for the applicant instead of typing a value the employer does not offer.
+       */
+      const closedListShape = portalFamily(portal) === 'greenhouse'
+        ? null
+        : measuredClosedListShape(portalInputType);
+      if (closedListShape && currentOptions) {
+        const values = exactChoiceOptionValues(answer, currentOptions);
+        if (!values) continue;
+        if (closedListShape === 'native_select') {
+          // One <select>, one committed value. selectOption matches the employer's own option text,
+          // so the canonical row exactChoiceOptionValues returned is what goes on the wire.
+          if (values.length !== 1) continue;
+          managedSelect(actions, portalSelector, values[0], `question:${questionText.slice(0, 80)}`);
+          continue;
+        }
+        /* The same open/select/verify shape the Greenhouse combobox arm uses. It is label-scoped
+         * rather than selector-scoped because the runner strips `selector` from a fillByLabelText
+         * (managed-browser.js validateAction), and because the runner's scoped chooser reads the
+         * question's own container, presses the matching row and verifies the committed value -
+         * which is the only thing that drives a React or downshift listbox. A row it cannot match
+         * comes back as the existing `no option matched` skip rather than as typed text. */
+        for (const value of values) {
+          pushScopedQuestionChoiceActions(actions, questionText, value, 'question', { includeSelectFallbacks: false });
         }
         continue;
       }
