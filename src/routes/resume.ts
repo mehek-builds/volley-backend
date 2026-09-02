@@ -93,8 +93,13 @@ import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
-import { canonicalApplicationFingerprint, canonicalIdentityMatches, canonicalPortalUrl } from './canonicalApplications';
-import { isAppliedOrLaterTrackerState } from '../lib/canonicalApplicationLifecycle';
+import {
+  canonicalAliasMatches,
+  canonicalApplicationFingerprint,
+  canonicalIdentityMatches,
+  canonicalPortalUrl,
+} from './canonicalApplications';
+import { isAppliedOrLaterTrackerState, preparedSendLifecycle } from '../lib/canonicalApplicationLifecycle';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
@@ -1597,13 +1602,40 @@ export async function resumeRoutes(fastify: FastifyInstance) {
              brings a submitted row into its reach, so the guard belongs here, and it excludes rather
              than adopts - a posting already with the employer gets its own row and the send path
              refuses the duplicate on its own terms. */
+          /* A PREPARED PACKET IS OFF LIMITS TOO, and that is a decision rather than an omission.
+             `ready_for_final_approval` is a filled employer form with a preview screenshot waiting on
+             her Send press. linkGeneratedPacketToCanonicalApplication deliberately releases that hold
+             on a re-tailor - correct when she NAMED this application - but implicit adoption would do
+             it silently, repointing selected_resume_artifact_id and deselecting the application_artifacts
+             row that was actually filled into the form, leaving her prepared form referencing a resume
+             it was not filled with. The employer has not received it, so this is recoverable; it is
+             excluded anyway, because "explicit re-tailor may disturb it, implicit adoption may not" is
+             the line that keeps the surprise out. */
           const alreadyWithEmployer = (row: typeof applications.$inferSelect) =>
-            row.submission_state === 'submitted' || isAppliedOrLaterTrackerState(row.tracker_state);
+            row.submission_state === 'submitted'
+            || row.submission_state === preparedSendLifecycle.submissionState
+            || isAppliedOrLaterTrackerState(row.tracker_state);
+          /* ALL THREE OF THE UPSERT'S ARMS, not two. A first cut copied the exact-fingerprint and
+             `legacy:` arms and dropped canonicalAliasMatches, which has NO fingerprint restriction and
+             is the only arm that reaches a row carrying a canonical fingerprint other than the one
+             being computed now. Two ordinary paths fork without it: a row created by POST /applications
+             with a job_id (fingerprint `job:J`) is invisible to a later generation that carries the
+             portal URL but no job_id; and the upsert itself manufactures the mirror image, because it
+             rewrites application_fingerprint while PRESERVING a job_id it merged in, leaving a row with
+             job_id J under an `application:` fingerprint that a later generation carrying J cannot see.
+             Both are exactly the duplicate fork this branch exists to close. */
           const canonicalRow = ownedLive.find((row) => row.application_fingerprint === fingerprint);
           const adoptable = ownedLive.filter((row) => row.application_fingerprint.startsWith('legacy:')
             && canonicalIdentityMatches(row, identity));
-          const matches = [canonicalRow, ...adoptable]
+          const aliases = ownedLive.filter((row) => canonicalAliasMatches(row, {
+            jobId: effectiveJobId,
+            portalUrl: normalizedPortalUrl,
+            companyName: body.company,
+            role: body.role,
+          }));
+          const matches = [canonicalRow, ...adoptable, ...aliases]
             .filter((row): row is typeof applications.$inferSelect => Boolean(row))
+            .filter((row, index, all) => all.findIndex((other) => other.id === row.id) === index)
             .filter((row) => !alreadyWithEmployer(row));
           /* Deterministic, and ranked the way upsertCanonicalApplicationForUser ranks: a row that
              already carries a packet outranks an empty one, and the ordered select breaks the

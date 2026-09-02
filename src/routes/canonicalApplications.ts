@@ -361,7 +361,11 @@ export function canonicalIdentityMatches(
   return roleMatches && (row.company_scope_key === input.companyScopeKey || companyMatches);
 }
 
-function canonicalAliasMatches(
+/* Exported for the same reason canonicalIdentityMatches is: POST /resume/generate adopts through
+   this file's definitions rather than a second reading of them. This is the upsert's THIRD arm and
+   the one with no fingerprint restriction - it reaches a row carrying a canonical `application:` or
+   `job:` fingerprint that is not the one being computed now, which the other two arms cannot. */
+export function canonicalAliasMatches(
   row: typeof applications.$inferSelect,
   input: { jobId?: string; portalUrl: string | null; companyName: string; role: string },
 ): boolean {

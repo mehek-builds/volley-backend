@@ -18,7 +18,7 @@ const artifactVersions = readFileSync('src/lib/resumeArtifactVersions.ts', 'utf8
  * index on (user_id, application_fingerprint) could never collide and the insert always succeeded. */
 
 test('the match is the shared canonical predicate, not a second copy of it', () => {
-  assert.match(resumeRoute, /import \{ canonicalApplicationFingerprint, canonicalIdentityMatches, canonicalPortalUrl \} from '\.\/canonicalApplications'/);
+  assert.match(resumeRoute, /canonicalAliasMatches,\n\s*canonicalApplicationFingerprint,\n\s*canonicalIdentityMatches,\n\s*canonicalPortalUrl,/);
   assert.match(resumeRoute, /&& canonicalIdentityMatches\(row, identity\)\)/);
   assert.match(canonical, /export function canonicalIdentityMatches/);
 });
@@ -61,7 +61,9 @@ test('canonicalIdentityMatches returns on jobId, then on portalUrl, before compa
  * The ranked pick makes this sharper, not softer: it PREFERS a row that already carries a packet,
  * and a submitted row always has one. */
 test('a row already with the employer is excluded from adoption', () => {
-  assert.match(resumeRoute, /const alreadyWithEmployer = \(row: typeof applications\.\$inferSelect\) =>\s*\n\s*row\.submission_state === 'submitted' \|\| isAppliedOrLaterTrackerState\(row\.tracker_state\)/);
+  assert.match(resumeRoute, /const alreadyWithEmployer = \(row: typeof applications\.\$inferSelect\) =>/);
+  assert.match(resumeRoute, /row\.submission_state === 'submitted'/);
+  assert.match(resumeRoute, /\|\| isAppliedOrLaterTrackerState\(row\.tracker_state\)/);
   assert.match(resumeRoute, /\.filter\(\(row\) => !alreadyWithEmployer\(row\)\)/);
   // The exclusion must be applied to the candidate set, before the ranked pick.
   const exclIdx = resumeRoute.indexOf('.filter((row) => !alreadyWithEmployer(row))');
@@ -80,11 +82,30 @@ test('a row already with the employer is excluded from adoption', () => {
 /* Canonical intake matches a canonically fingerprinted row by EXACT fingerprint and reserves
  * identity matching for rows still stamped `legacy:`. Applying the predicate to every live row
  * would adopt rows the extension and website created, which intake would only match exactly. */
-test('the candidate row set mirrors canonical intake, not just its predicate', () => {
+test('the candidate row set is ALL THREE of canonical intake arms', () => {
   assert.match(resumeRoute, /const canonicalRow = ownedLive\.find\(\(row\) => row\.application_fingerprint === fingerprint\)/);
   assert.match(resumeRoute, /row\.application_fingerprint\.startsWith\('legacy:'\)/);
-  assert.match(resumeRoute, /canonicalApplicationFingerprint\(\{/);
+  /* The alias arm has NO fingerprint restriction and is the only one that reaches a row carrying a
+   * canonical fingerprint other than the one being computed now. Dropping it forks on two ordinary
+   * paths: a POST /applications row stamped `job:J` is invisible to a later generation that carries
+   * the portal URL but no job_id, and the upsert manufactures the mirror image by rewriting the
+   * fingerprint while preserving a merged-in job_id. */
+  assert.match(resumeRoute, /const aliases = ownedLive\.filter\(\(row\) => canonicalAliasMatches\(row, \{/);
+  assert.match(resumeRoute, /const matches = \[canonicalRow, \.\.\.adoptable, \.\.\.aliases\]/);
+  // Deduplicated by id, because the three arms overlap.
+  assert.match(resumeRoute, /all\.findIndex\(\(other\) => other\.id === row\.id\) === index/);
+  assert.match(canonical, /export function canonicalAliasMatches/);
   assert.match(canonical, /const adoptable = owned\.filter\(\(row\) =>\s*\n?\s*row\.application_fingerprint\.startsWith\('legacy:'\)/);
+});
+
+/* A FILLED, PARKED FORM IS NOT ADOPTABLE EITHER.
+ * `ready_for_final_approval` is a filled employer form with a preview screenshot waiting on her Send
+ * press. The link helper deliberately releases that hold on a re-tailor - right when she NAMED the
+ * application, surprising when adoption is implicit, because the prepared form would end up
+ * referencing a resume it was not filled with. */
+test('a prepared, filled packet is excluded from implicit adoption', () => {
+  assert.match(resumeRoute, /row\.submission_state === preparedSendLifecycle\.submissionState/);
+  assert.match(resumeRoute, /import \{ isAppliedOrLaterTrackerState, preparedSendLifecycle \}/);
 });
 
 test('adoption writes nothing to the row and leaves the link helper to repoint it', () => {
