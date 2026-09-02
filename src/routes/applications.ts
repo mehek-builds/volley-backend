@@ -71,9 +71,12 @@ import {
   submitRequestDisposition,
 } from '../lib/submissionSafety';
 import {
+  attemptNeverReachedEmployerIsReleasable,
   expiredAttendedHandoffClaimIsReleasable,
+  releaseAttemptThatNeverReachedEmployer,
   releaseExpiredAttendedHandoffClaim,
 } from '../lib/expiredHandoffClaimRelease';
+import { attemptNeverPressedReason } from '../lib/managedSubmitOutcome';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
@@ -141,6 +144,7 @@ import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
 import { canonicalApplicationForNewPacketAttempt } from '../lib/canonicalPacketBinding';
 import {
   appendSubmissionAttemptEvent,
+  attemptNeverReachedEmployer,
   authorizeFinalSubmissionBoundary,
   freezePostingIdentity,
   lockSubmissionAttemptUser,
@@ -625,12 +629,50 @@ async function repairExpiredAttendedHandoffClaim(
       return { row: locked, review: reconciled, disposition: 'unverified' as const };
     }
 
-    /* Legacy handoffs can predate the immutable attempt ledger. Only that empty-ledger case may
-     * use the old pre-click release rule, and its canonical observation check runs under the same
-     * user lock as the row write. */
     const claimEvents = current.submission_claim_id
       ? events.filter((event) => event.attempt_id === current.submission_claim_id)
       : [];
+    /* THE ATTEMPT THAT NEVER REACHED THE EMPLOYER, released and closed in one transaction.
+     *
+     * Ordered after expiredAlternateSubmissionReview, which reconciles an expired capability whose
+     * boundary WAS authorized, and before the legacy empty-ledger arm below. This arm is the exact
+     * middle case those two leave out: a durable attempt exists and it never crossed the boundary.
+     *
+     * BOTH WRITES OR NEITHER. The row release and the ledger's not_sent_proven are one atomic write
+     * under the user advisory lock already held above. A row released without the fact would still
+     * be refused by duplicateApplicationVerdict, which reads the ledger and not the row; a fact
+     * written without the release would leave the packet locked. See
+     * attemptNeverReachedEmployerIsReleasable for what this refuses. */
+    if (claimEvents.length > 0
+      && attemptNeverReachedEmployer(claimEvents)
+      && attemptNeverReachedEmployerIsReleasable(current)) {
+      const opening = claimEvents.find((event) => event.event_kind === 'attempt_opened')!;
+      const released = releaseAttemptThatNeverReachedEmployer(
+        current,
+        attemptNeverPressedReason(),
+        databaseNow.toISOString(),
+      );
+      const [updated] = await tx.update(generated_resumes)
+        .set({ spec: reviewSpec(released) })
+        .where(and(
+          eq(generated_resumes.id, locked.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (!updated) return null;
+      await appendSubmissionAttemptEvent({
+        ...submissionAttemptBindingFromEvent(opening),
+        eventId: submissionAttemptEventId(opening.attempt_id, 'not_sent_proven', 'never-reached-employer'),
+        eventKind: 'not_sent_proven',
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'attempt_never_reached_employer',
+      }, { executor: tx });
+      return { row: locked, review: released, disposition: 'never_reached' as const };
+    }
+    /* Legacy handoffs can predate the immutable attempt ledger. Only that empty-ledger case may
+     * use the old pre-click release rule, and its canonical observation check runs under the same
+     * user lock as the row write. */
     if (claimEvents.length > 0
       || !expiredAttendedHandoffClaimIsReleasable(current, databaseNow.getTime())) return null;
     const [canonicalEvent] = await tx.select({ id: application_submission_events.id })
@@ -664,7 +706,9 @@ async function repairExpiredAttendedHandoffClaim(
     },
     result.disposition === 'unverified'
       ? 'Reconciled an expired employer capability to an applicant outcome question'
-      : 'Released a legacy attended handoff whose pre-click claim expired',
+      : result.disposition === 'never_reached'
+        ? 'Released a submission attempt the ledger proves never reached the employer boundary'
+        : 'Released a legacy attended handoff whose pre-click claim expired',
   );
   return {
     ...result.row,
@@ -2787,6 +2831,24 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * So restarting is possible and has to be ASKED FOR by name. The response says so, and names
        * the build the stale review came from, so the caller can decide rather than guess. */
       const restartable = preparedRunCanRestart(current.status, Boolean(current.submission_claimed_at));
+      /* THE REFUSAL BELOW IS ALLOWED TO SAY "pressed Send" ONLY IF THE LEDGER SAYS SO.
+       *
+       * This is the second surface that asserted a press with nothing behind it but the presence of
+       * an unverified_submission record - the first being unverifiedSubmissionReason, which wrote
+       * the record's own sentence. Both are answered from the same fact, reduced the way
+       * duplicateApplication.ts already reduces it, so the refusal and the row cannot disagree.
+       *
+       * Read only when the record exists and is unresolved, which is the one branch that says it,
+       * so an ordinary refusal still costs no query. */
+      const unresolvedUnverified = Boolean(
+        current.unverified_submission && !current.unverified_submission.resolution,
+      );
+      const unverifiedNeverPressed = unresolvedUnverified && current.submission_claim_id
+        ? attemptNeverReachedEmployer(
+          (await submissionAttemptEventsForPacket(request.jwtPayload!.userId, row.id))
+            .filter((event) => event.attempt_id === current.submission_claim_id),
+        )
+        : false;
       if (disposition === 'reject' && !(restartable && parsed.data.restart === true)) {
         return reply.status(409).send(restartable
           ? {
@@ -2804,12 +2866,17 @@ export async function applicationRoutes(fastify: FastifyInstance) {
            * cause and no exit. The refusal is correct - the employer may already hold this
            * application - but a correct refusal that names neither the reason nor the way out is
            * indistinguishable from a bug. */
-          : current.unverified_submission && !current.unverified_submission.resolution
+          : unresolvedUnverified
             ? {
-              error: 'Litos pressed Send on this one and could not confirm what came back, so it will '
-                + 'not send it a second time until you have looked. Open the employer’s page, then tell '
-                + 'Litos whether the application is there: POST /applications/:id/submission/unverified '
-                + 'with found true or false. If it is not there, Litos will send this one for you.',
+              error: unverifiedNeverPressed
+                ? 'Litos opened an attempt on this one and stopped before pressing Send, so it will '
+                  + 'not start another until that attempt is closed. There is nothing to check on the '
+                  + 'employer’s page. Answer POST /applications/:id/submission/unverified with found '
+                  + 'false and Litos will record that nothing was sent and send this one for you.'
+                : 'Litos pressed Send on this one and could not confirm what came back, so it will '
+                  + 'not send it a second time until you have looked. Open the employer’s page, then tell '
+                  + 'Litos whether the application is there: POST /applications/:id/submission/unverified '
+                  + 'with found true or false. If it is not there, Litos will send this one for you.',
               code: 'SUBMISSION_OUTCOME_UNVERIFIED',
               restartable: false,
               unverified_submission: current.unverified_submission,
@@ -4285,9 +4352,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         };
 
         if (!parsed.data.found) {
+          /* THE DOOR THAT WAS BOLTED FROM THE INSIDE.
+           *
+           * This arm demanded a boundary authorization, and returned 409
+           * UNVERIFIED_ATTEMPT_AUTHORITY_MISSING - "This question is not bound to an exact
+           * submission attempt" - without one. An attempt that never reached the boundary has none
+           * by construction, so for exactly the rows where "it is not there" is PROVABLY the right
+           * answer, it was the one answer the product refused. The only control that still worked
+           * was "I found it there", which writes a submission_confirmed and a receipt. Measured
+           * 2026-09-02 on attempt 22b9663a: a packet whose ledger held attempt_opened alone could be
+           * moved only by recording a confirmation for an application that was never sent.
+           *
+           * The requirement is right where an authorization exists: that lease is durable employer
+           * risk, and the applicant's look is only admissible after it expires, which is what the
+           * active-lease refusal below enforces. It is meaningless where none was ever taken, and
+           * attemptNeverReachedEmployer is what tells the two apart. Everything else on this arm is
+           * unchanged, including the post-write assertion that the ledger really did fold to
+           * safe_not_sent before the row is allowed to move. */
           const boundary = await submissionBoundaryAuthorization(userId, claimId, { executor: tx });
-          if (!boundary) return { kind: 'authority_missing' as const };
-          if (boundary.active) return { kind: 'lease_active' as const, expiresAt: boundary.expiresAt };
+          if (!boundary && !attemptNeverReachedEmployer(events)) {
+            return { kind: 'authority_missing' as const };
+          }
+          if (boundary?.active) return { kind: 'lease_active' as const, expiresAt: boundary.expiresAt };
           await appendSubmissionAttemptEvent({
             ...binding,
             eventId: submissionAttemptEventId(claimId, 'not_sent_proven', 'applicant-checked-not-sent'),

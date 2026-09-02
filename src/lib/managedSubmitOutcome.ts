@@ -987,11 +987,61 @@ export function pressReachedOnlyChallengePlatform(
   return challenged;
 }
 
+/* THE TWO SENTENCES FOR AN ATTEMPT THAT NEVER PRESSED ANYTHING.
+ *
+ * Every arm of unverifiedSubmissionReason asserts a press, and its cause vocabulary has no "never
+ * pressed" member, so there was no way to reach that function and say the honest thing. Measured
+ * 2026-09-02, attempt 22b9663a: an attempt whose ledger held `attempt_opened` alone - no boundary
+ * authorization, no press, 456 ms from open to give-up - was described to the applicant as "Litos
+ * pressed Send and the page never showed a confirmation it could read", and she was sent to inspect
+ * an employer portal for a submission that was never attempted. The ledger said "never pressed" in
+ * one word (submissionAttemptRetrySafety's reason) and the sentence-writer never asked.
+ *
+ * TWO SENTENCES RATHER THAN ONE, because the STATE differs and the prose has to match the state.
+ *
+ * attemptNeverPressedReason is for a row whose attempt has been CLOSED: the claim is released, the
+ * ledger carries a not_sent_proven, and there is no unverified_submission record. Nothing is with
+ * an employer and nothing is pending, so the sentence points at the one action that finishes this,
+ * which is inside Litos. It deliberately carries "could not finish this application" so
+ * attentionCategoriesForReasons files it as run_failed - a run that broke and should be retried -
+ * and deliberately omits "does not know whether this application went through", which would file it
+ * as unverified_submission and contradict the row.
+ *
+ * unpressedUnverifiedSubmissionReason is for a row whose unverified_submission record still STANDS
+ * (a legacy row, or any path that could not close the attempt). Here the classification clause must
+ * be kept or submissionTerminalCause silently reclassifies the row, so it is kept - but it is
+ * placed on Litos not knowing what an unfinished attempt left behind, never on a press. The
+ * applicant is still not sent to the employer's page: there is nothing there to find.
+ * duplicateApplication.ts:143 makes the same trade for the same reason. */
+export function attemptNeverPressedReason(): string {
+  /* CAUSE-NEUTRAL, for the same reason noSubmitControl's sentence is. This arm is reached as the
+   * ledger-proven fallback, after every typed pre-click stop that has a sentence of its own, so
+   * naming a cause here would be a guess. What is always true, and all that matters, is that the
+   * run stopped before pressing and nothing reached the employer. */
+  return 'Litos stopped this send before pressing anything, so nothing was submitted and there is '
+    + 'no confirmation to look for. Litos could not finish this application on that run and has '
+    + 'released it, so open it in your dashboard and send it again when you are ready.';
+}
+
+export function unpressedUnverifiedSubmissionReason(): string {
+  return 'Litos opened an attempt on this application and stopped before pressing Send, so it does '
+    + 'not know whether this application went through only in the sense that it never got far '
+    + 'enough to try. Nothing on record shows a send, and there is nothing for you to check on the '
+    + 'employer’s page. Litos will not send a second one until this attempt is closed: choose '
+    + '“It is not there” below to record that nothing was sent and release this saved application.';
+}
+
 export function unverifiedSubmissionReason(input: {
   atsName?: string;
   portalUrl?: string;
   cause: UnverifiedCause;
   network?: SubmitNetworkEntry[] | null;
+  /* What the immutable attempt ledger records about this attempt, reduced the way
+   * duplicateApplication.ts already reduces it: 'opened' means the attempt was opened and never
+   * crossed the employer boundary, 'pressed' means a press is on record or an authorization to make
+   * one is. Null or absent means the ledger was not consulted, which must keep the pre-existing
+   * sentence: an unread ledger is not evidence of anything. */
+  sendEvidence?: 'pressed' | 'opened' | null;
   /* The runner SAW a rendered challenge standing after the press (its CAPTCHA blocker). Stronger
    * evidence than the network heuristic below: measured on the live Mytos Lever form, 2026-08-20,
    * run 6757f19a - the press fetched an hCaptcha drag puzzle and the receipt screenshot shows it
@@ -1000,6 +1050,10 @@ export function unverifiedSubmissionReason(input: {
    * rightly withdrew and the applicant was promised a re-send that would hit the same wall. */
   challengeOnScreen?: boolean;
 }): string {
+  /* ASKED FIRST, ahead of every cause arm, because no cause can outrank it. The causes below are
+   * all descriptions of how a press ended; if the ledger says no press was made, none of them
+   * applies no matter what the run reported. */
+  if (input.sendEvidence === 'opened') return unpressedUnverifiedSubmissionReason();
   const looksLike = CONFIRMATION_LOOKS_LIKE[(input.atsName ?? '').toLowerCase().trim()]
     ?? 'A sent application usually replaces the form with a short confirmation, and many employers '
       + 'email one too.';

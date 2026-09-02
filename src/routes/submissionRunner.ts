@@ -165,6 +165,7 @@ import {
   readExactManagedPageReceipt,
   readManagedSubmitOutcome,
   submissionProvablyNotSent,
+  attemptNeverPressedReason,
   unverifiedSubmissionReason,
   type ManagedReceiptResult,
 } from '../lib/managedSubmitOutcome';
@@ -4202,6 +4203,29 @@ export class EmployerBoundPacketDriftError extends Error {
     super(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
     this.name = 'EmployerBoundPacketDriftError';
     this.issues = [...issues];
+  }
+}
+
+/* THE DESTINATION PROBE COULD NOT ANSWER, AND THAT IS A TYPED PRE-CLICK STOP.
+ *
+ * This was a bare `throw new Error(...)`, and the bare throw is the whole of the 2026-09-02 defect.
+ * An untyped error classifies 'unclassified', which is deliberately not pre-click, so
+ * submissionProvablyNotSent refused to release, submissionFailureReview took the needsExit arm, and
+ * a run that had made ONE read-only remote call and never assembled an action list wrote "Litos
+ * pressed Send and the page never showed a confirmation it could read" onto the row and kept the
+ * claim. 456 ms, open to give-up, with `attempt_opened` alone in the ledger.
+ *
+ * The throw site is structurally ahead of the click: the probe is its own stateless run, made
+ * before buildManagedPortalActions exists and before assertFinalRunnerBoundaryClear, and it asks
+ * for no screenshot and presses nothing. Typing it is what lets the stop reason, the applicant's
+ * sentence and the ledger fact all agree that nothing was sent.
+ *
+ * The message is composed rather than fixed so the operator log and submission_error say WHICH of
+ * the two refusals fired, without either of them reaching the applicant's sentence. */
+export class ManagedDestinationUnverifiedError extends Error {
+  constructor(detail: string) {
+    super(`The employer destination could not be verified before submission: ${detail}`);
+    this.name = 'ManagedDestinationUnverifiedError';
   }
 }
 
@@ -10179,13 +10203,33 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // fails open to the pre-probe behaviour, same as managedResultRequiresCaptchaAttention does.
       // Only the message is logged, bounded: the runner's error string is remote-controlled and
       // Playwright-shaped failures embed page markup.
+      /* THE COMMENT ABOVE AND THE CODE BELOW USED TO DISAGREE, and the code won.
+       *
+       * "A probe that cannot run must not take down a submission that would otherwise succeed" and
+       * "continuing unprobed" describe a fail-open. The very next line then threw. The catch is
+       * kept - the runner's error string is remote-controlled and Playwright-shaped failures embed
+       * page markup, so it must be bounded before it is logged - but the refusal is now named for
+       * what it is, and the bounded detail is carried into the typed error rather than only into a
+       * log line nobody reading the row can see. */
       .catch((error: unknown) => {
         const detail = String(error instanceof Error ? error.message : error).slice(0, 200);
-        fastify.log.warn({ applicationId: row.id, detail }, 'CAPTCHA probe failed, continuing unprobed');
-        return null;
+        fastify.log.warn({ applicationId: row.id, detail }, 'Destination probe failed before submission');
+        return { failure: detail } as const;
       });
-    if (!captchaProbe) throw new Error('The employer destination could not be verified before submission');
-    assertEmployerPageUrl(applicationUrl, captchaProbe.url);
+    if ('failure' in captchaProbe) {
+      throw new ManagedDestinationUnverifiedError(captchaProbe.failure || 'the probe run did not return');
+    }
+    /* Same refusal, same proof, so the same typed stop. assertEmployerPageUrl throws a generic
+     * Error, and it is shared with call sites that run AFTER a press, so it cannot be retyped where
+     * it is defined. Here the probe is the only thing that has run, which is what makes the
+     * conversion sound at this one site. */
+    try {
+      assertEmployerPageUrl(applicationUrl, captchaProbe.url);
+    } catch (error) {
+      throw new ManagedDestinationUnverifiedError(
+        error instanceof Error ? error.message : 'the probe did not land on the employer page',
+      );
+    }
     // ONE check, named once. This used to read
     //   managedResultRequiresCaptchaAttention(probe) && managedCaptchaVerdictIsCorroborated(portal, probe)
     // and presented itself as probe-plus-corroboration. It was not. Both terms call
@@ -11442,14 +11486,27 @@ export function submissionFailureOutcome(input: {
      the sentence from them and names the binding that moved, and re-deriving that here would be a
      second place to keep the wording right. */
   packetDriftIssues?: readonly string[];
+  /* The destination probe could not answer, or did not land on the employer page. Ranked with the
+     other build-time refusals: it is a read-only run made before the action list exists. */
+  destinationUnverifiedBeforeSend?: boolean;
   uncertainAfterClaim: boolean;
+  /* The immutable ledger says this attempt never reached the employer boundary. The LAST arm of
+     the pre-click family and the widest: it is derived from the attempt's own facts rather than
+     from the error type, so it catches every stop that has no typed arm of its own - which is
+     exactly the population that used to inherit uncertainAfterClaim's "check the portal". */
+  preClickProvenByLedger?: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
   const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || uncertainAfterClaim || providerSessionFailure
+  /* preClickProvenByLedger joins the needs_attention list rather than falling to 'failed', and that
+     is load-bearing rather than cosmetic. submitRequestDisposition treats an unclaimed
+     needs_attention row as re-runnable and a 'failed' one as not, so a packet released by the
+     ledger proof has to land here or the release buys nothing: the claim would come off and the
+     packet would still refuse to send. */
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || destinationUnverifiedBeforeSend || uncertainAfterClaim || preClickProvenByLedger || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -11521,6 +11578,18 @@ export function submissionFailureOutcome(input: {
         ? 'Litos filled this application in and found the button that sends it, but could not confirm one of the required answers had been accepted, so it did not press it. Nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
       : fieldProofFailedBeforeSubmit
         ? 'Litos filled this application in, but could not prove one of the answers it typed was still on the form, so it stopped before pressing the button that sends it. Nothing has been sent and there is no confirmation to look for. Retrying will very likely stop at the same place, so open it when you have a minute and finish it off.'
+      : destinationUnverifiedBeforeSend
+        /* RANKED WITH THE PRE-CLICK FAMILY, mirroring classifySubmissionStop exactly. The probe is
+           a separate read-only run made before the fill-and-submit list is assembled, so nothing
+           was filled and nothing was pressed. Before this arm existed the stop was untyped, fell
+           through to uncertainAfterClaim, and told the applicant Litos had pressed Send.
+
+           The provider's own error string is deliberately NOT quoted. It arrives verbatim from
+           Stratus, it is remote-controlled, and it is already stored in submission_error for
+           operators. What she needs is what happened to her application and what to do next. */
+        ? 'Litos could not reach the employer’s application page to check it before sending, so it '
+          + 'stopped without filling or sending anything. Nothing was submitted and there is no '
+          + 'confirmation to look for. Try this one again in a few minutes.'
       : noSubmitControl
         /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
            renders nothing in a headless browser, a control relabelled mid-run, and a click that
@@ -11531,6 +11600,12 @@ export function submissionFailureOutcome(input: {
           ? 'Litos hit a temporary secure-browser error before it could finish this application. Nothing was sent. Try this one again in a few minutes.'
           : uncertainAfterClaim
             ? 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.'
+          : preClickProvenByLedger
+            /* BELOW uncertainAfterClaim, and that order is deliberate. Where both are true the
+               caller has already suppressed uncertainAfterClaim, so reaching this arm means the
+               ledger proof is the only thing left saying anything about this run. Where a typed
+               arm above matched, its sentence is better than this one and wins. */
+            ? attemptNeverPressedReason()
           : input.currentAttentionReason?.trim() || undefined;
   if (status === 'submit_requested') {
     return { status, attentionReason, attentionCategories: attentionCategoriesForReasons(attentionReason ? [attentionReason] : []) };
@@ -11854,7 +11929,22 @@ export async function recordSubmissionRunnerFailure(
     if (exactEvents.some((event) => event.event_kind === 'submission_confirmed'
         || event.event_kind === 'not_sent_proven')) return false;
 
-    let failed = submissionFailureReview(latestReview, cause);
+    /* READ BEFORE THE REVIEW IS COMPUTED, not after. These exact events were already loaded here
+     * and were only ever scanned for a terminal fact; the one question that decides whether this
+     * run may be called pre-click was in hand and was thrown away. Passing it in is the whole of
+     * the systemic half of this fix.
+     *
+     * `null` when no opening fact exists, which is the honest answer for a legacy or partially
+     * written attempt and keeps the pre-existing behaviour. It also keeps the not-sent writer below
+     * safe: that branch requires an `attempt_opened` to build a binding from, and would throw
+     * without one. */
+    const openingEvent = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+    const employerBoundaryReached = openingEvent
+      ? exactEvents.some((event) => event.event_kind === 'boundary_authorized'
+        || event.event_kind === 'press_observed')
+      : null;
+
+    let failed = submissionFailureReview(latestReview, cause, undefined, { employerBoundaryReached });
     if (securityCodeAttemptFingerprint && failed.security_code) {
       failed = nextReview(failed, {
         security_code: withSecurityCodeAttempt(failed.security_code, {
@@ -11955,10 +12045,27 @@ async function fail(row: ResumeRow, error: unknown, securityCodeAttemptFingerpri
  * /applications/:id/submission/unverified can reach it. A locked row with a route out is a safety
  * property. A locked row with no route is the defect.
  */
+/* WHAT THE LEDGER IS ALLOWED TO SETTLE ON ITS OWN.
+ *
+ * `employerBoundaryReached` is the caller's reading of the exact attempt's immutable facts:
+ *
+ *   false    - the attempt exists and carries no boundary_authorized and no press_observed, so the
+ *              run provably never crossed the employer boundary;
+ *   true     - it carries one or both, so a press is on record or an authorization to make one is;
+ *   null/absent - the ledger was not consulted, or the attempt has no durable opening fact. An
+ *              unread ledger is not evidence of anything, so this must behave exactly as before.
+ *
+ * The tri-state is the point. A boolean with a default would make "not asked" indistinguishable
+ * from "did not reach", and the direction that error runs in costs an application. */
+export type SubmissionFailureLedgerEvidence = {
+  employerBoundaryReached?: boolean | null;
+};
+
 export function submissionFailureReview(
   current: ApplicationReviewState,
   error: unknown,
   now: () => string = () => new Date().toISOString(),
+  ledger: SubmissionFailureLedgerEvidence = {},
 ): ApplicationReviewState {
   if (error instanceof FinalSubmissionBoundaryChangedError) {
     return nextReview(current, {
@@ -12005,6 +12112,22 @@ export function submissionFailureReview(
   const fieldProofFailedBeforeSubmit = error instanceof ManagedBrowserAssertionFailureError;
   const providerSessionFailure = providerSessionFailureBeforeSubmit || isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
+  /* THE PROOF THIS FUNCTION NEVER HAD, and the reason 69 employers on one account were blocked by
+   * attempts that never loaded a page. Everything below reasons from the ERROR TYPE, so a stop with
+   * no typed arm - an untyped provider refusal, a buildPacket failure, anything added later - fell
+   * to 'unclassified', which is not pre-click, which meant needsExit, which meant an
+   * unverified_submission record asserting a press and a claim that was never released. The attempt
+   * then sat at blocked_unverified/'opened' with no writer able to close it.
+   *
+   * The ledger answers the same question from facts instead of from types, and it answers it for
+   * every stop at once. Its own rule licenses this: a machine-authored not-sent proof is admissible
+   * exactly while no boundary_authorized exists, and inadmissible after. See
+   * attemptNeverReachedEmployer.
+   *
+   * It ADDS a release, it never removes one: releasesClaim is a disjunction, so a row that
+   * submissionProvablyNotSent already frees is unaffected, and a row the ledger cannot speak for
+   * behaves exactly as it did. */
+  const preClickProvenByLedger = ledger.employerBoundaryReached === false;
   const stoppedAt = now();
 
   // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
@@ -12051,6 +12174,11 @@ export function submissionFailureReview(
      told Litos had pressed Send and sent to hunt the employer's page for a receipt that could not
      exist. See EmployerBoundPacketDriftError. */
   const packetDrift = error instanceof EmployerBoundPacketDriftError ? error : null;
+  /* The next-earliest member of the pre-click family after the drift refusal. The destination probe
+     is its own read-only run, made before buildManagedPortalActions and before the employer
+     boundary is authorized, so a refusal here means no form was filled and no control was pressed.
+     Left untyped it fell to 'unclassified' and produced the measured 2026-09-02 row. */
+  const destinationUnverified = error instanceof ManagedDestinationUnverifiedError;
   const runTimedOut = isManagedRunTimeout(message);
 
   /* THE TYPED HALF, written on every arm including the ones that release outright.
@@ -12064,6 +12192,7 @@ export function submissionFailureReview(
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
       packetDriftBeforeSend: packetDrift !== null,
+      destinationUnverifiedBeforeSend: destinationUnverified,
       confirmationUnproven,
       fieldProofFailedBeforeSubmit,
       providerSessionFailureBeforeSubmit,
@@ -12086,14 +12215,34 @@ export function submissionFailureReview(
      wall, an unresolved unverified record, a recorded attempt and a pressed:true outcome, so a
      pre-click stop on a row that already carries any of those does NOT release anything. */
   const provablyNotSent = submissionProvablyNotSent({ ...current, submission_stop: stop });
-  const releasesClaim = uncertainAfterClaim && provablyNotSent;
+  /* THE DISJUNCTION IS THE FIX, and it is worth being precise about what each half proves.
+   *
+   * submissionProvablyNotSent asks the ROW: does its own stored evidence rule out a send? That is a
+   * strong test and it stays first, because it is also the one that refuses a release on a row
+   * carrying a receipt, a standing code wall, an unresolved unverified record or a recorded attempt
+   * from an EARLIER attempt. Those refusals are not weakened here.
+   *
+   * preClickProvenByLedger asks the ATTEMPT: did this one ever cross the employer boundary? A false
+   * answer is proof about THIS run only, which is exactly the scope of the claim being released -
+   * the claim was taken by this run. Anything an earlier attempt left on the row is untouched by
+   * the release and keeps blocking through employerMayHoldApplication, so widening the release here
+   * cannot let a second application out behind an unresolved first one. */
+  const releasesClaim = uncertainAfterClaim && (provablyNotSent || preClickProvenByLedger);
   /* A claim held with no proof behind it. Every such row must leave here with a door, and the only
      door that fits a state nobody can classify is the applicant's own look at the employer page. */
   const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
     packetDriftIssues: packetDrift?.issues,
+    destinationUnverifiedBeforeSend: destinationUnverified,
+    /* SUPPRESSED BY THE PROOF, and this is where defect 2 is actually fixed. uncertainAfterClaim's
+       sentence is "The final submission was attempted, but Litos could not verify the employer
+       confirmation. Check the portal or your email before trying again." Every word of it is false
+       of a run that never reached the boundary, and it is the sentence that sent the applicant to
+       inspect an employer portal for an attempt that did not happen. */
+    uncertainAfterClaim: uncertainAfterClaim && !preClickProvenByLedger,
+    preClickProvenByLedger,
     currentAttentionReason: current.attention_reason,
   });
 
