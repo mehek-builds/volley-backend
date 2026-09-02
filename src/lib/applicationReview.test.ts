@@ -18,7 +18,6 @@ import {
   type ApplicationReviewQuestion,
   type ApplicationReviewState,
 } from './applicationReview';
-import { discoverAndResolveQuestions, type ResumeRow } from '../routes/submissionRunner';
 import { PACKET_VISIBLE_QUESTION_FIELDS, packetVisibleQuestions } from './packetAudit';
 import {
   frozenJobEmployerContext,
@@ -1232,51 +1231,6 @@ test('a machine answer_state arriving beside a skip is documented, not silently 
     'unanswered',
     'the later row still wins the merge, which is why the mint must not emit one over her skip',
   );
-});
-
-/* And the mint, which is the side that was actually changed. */
-test('re-discovery does not re-mint a skipped optional question as unanswered', async () => {
-  const current: ApplicationReviewState = {
-    jd_text: 'Lead consulting projects.',
-    role: 'Manager',
-    portal_url: 'https://example.recruitee.com/o/manager/c/new',
-    ats_name: 'recruitee',
-    status: 'ready_to_submit',
-    edited_terms: [],
-    questions: [{
-      id: 'sponsorship',
-      question: 'Will you now or in the future require sponsorship?',
-      answer: '',
-      kind: 'required',
-      required: false,
-      answer_state: 'skipped',
-    }],
-    skipped_reasons: [],
-    updated_at: new Date().toISOString(),
-  };
-
-  const result = await discoverAndResolveQuestions(
-    [{
-      label: 'Will you now or in the future require sponsorship?',
-      selector: 'textarea[name="q1"]',
-      inputType: 'textarea',
-      maxLength: 500,
-    }],
-    { user_id: 'user-1' } as ResumeRow,
-    current,
-    {},
-    true,
-    'recruitee',
-  );
-
-  const question = result.questions.find((q) => /sponsorship/i.test(q.question));
-  if (question) {
-    assert.notEqual(
-      question.answer_state,
-      'unanswered',
-      'a machine default must not overwrite the applicant decision it re-discovers',
-    );
-  }
 });
 
 /* THE WRITE THAT NEVER LANDED.

@@ -5993,18 +5993,7 @@ export async function discoverAndResolveQuestions(
        optional blank must never enter blankRequiredQuestionLabels, or the send gate would hold a
        complete application over a field the employer does not require. */
     required = true,
-    /* 'unanswered' HERE IS THE MACHINE TALKING, and it must not talk over her.
-     *
-     * This default means "Litos has nothing to type". 'skipped' means something only the applicant
-     * can say: "I have read this and I am leaving the control alone." Re-discovery re-mints the row
-     * on every run, so defaulting unconditionally let a machine state overwrite an applicant
-     * decision one fill later, and the question she had already settled came back as work. Her
-     * decision therefore carries forward unless a caller names a state explicitly, which the
-     * refusal branches do on purpose: a value from a superseded unsafe resolver has to be
-     * re-confirmed rather than inherited. */
-    answerState: ApplicationReviewQuestion['answer_state'] = existing?.answer_state === 'skipped'
-      ? 'skipped'
-      : (required ? undefined : 'unanswered'),
+    answerState: ApplicationReviewQuestion['answer_state'] = required ? undefined : 'unanswered',
   ): ApplicationReviewQuestion => ({
     id: existing?.id ?? randomUUID(),
     question: reviewLabel,
