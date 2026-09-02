@@ -191,7 +191,13 @@ test('submit-request repairs the expired handoff claim before submitRequestDispo
 
 test('the repair is ledger-aware, owner-locked, and persists with an exact-spec CAS', () => {
   const helper = routeSlice('async function repairExpiredAttendedHandoffClaim', 'function editableResumeSpec');
-  assert.match(helper, /await lockSubmissionAttemptUser\(tx, userId\)/);
+  /* TRY-locked, not locked. This helper runs on every 2.5s dashboard poll of GET
+   * /applications/:id/submission, and a managed provider call can hold this user's ledger key for
+   * up to 280s. Waiting for it pinned a pool client for that whole window. The helper is already
+   * documented best-effort - "null on any miss, and the caller proceeds with the stored row" - and
+   * a lost race for the lock is exactly such a miss. */
+  assert.match(helper, /if \(!await tryLockSubmissionAttemptUser\(tx, userId\)\) return null;/);
+  assert.ok(!/await lockSubmissionAttemptUser\(/u.test(helper));
   assert.match(helper, /\.limit\(1\)\.for\('update'\)/);
   assert.match(helper, /submissionAttemptEventsForPacket\(userId, locked\.id, \{ executor: tx \}\)/);
   assert.match(helper, /expiredAlternateSubmissionReview\(current, events, databaseNow\)/);

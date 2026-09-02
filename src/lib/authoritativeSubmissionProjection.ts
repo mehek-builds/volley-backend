@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import {
   application_artifacts,
@@ -1840,7 +1840,19 @@ export async function authoritativeSubmissionProjection(input: {
     if (input.lockedRevision !== undefined) {
       throw new Error('A locked submission authority revision requires its transaction executor');
     }
-    return db.transaction((tx) => authoritativeSubmissionProjection({ ...input, executor: tx }));
+    return db.transaction(async (tx) => {
+      /* THE PASSIVE READER PATH ONLY, and only here: a caller that hands us its own executor is
+       * inside a critical section whose lock waits are its own to bound.
+       *
+       * This branch is a read for a page render - /resume/history, and the envelope read every
+       * first send pays. Measured 2026-09-02 it could queue behind a whole managed provider call,
+       * holding a pool client the entire time, which is how a 280s fill turned into a 25s
+       * /resume/history and 7.7s on every unrelated route. A 55P03 out of this transaction is
+       * caught by the caller, which degrades to no envelopes - the direction resume.ts already
+       * declares safe, since a packet without an envelope stays fail-closed at the send gate. */
+      await tx.execute(sql`set local lock_timeout = '5000ms'`);
+      return authoritativeSubmissionProjection({ ...input, executor: tx });
+    });
   }
   await lockSubmissionAttemptUser(input.executor, input.userId);
   const revision = input.lockedRevision
