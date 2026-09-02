@@ -70,7 +70,6 @@ import {
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { leadAlignmentIssues, selectJdAlignedLead, type LeadFallbackDecision } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
-import { isAppliedOrLaterTrackerState } from '../lib/canonicalApplicationLifecycle';
 import {
   repairHistoryReviewPortalFromMonitoredJob,
   repairReviewPortalFromMonitoredJob,
@@ -94,6 +93,7 @@ import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
+import { canonicalIdentityMatches } from './canonicalApplications';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
@@ -1525,53 +1525,52 @@ export async function resumeRoutes(fastify: FastifyInstance) {
              This path used to insert unconditionally with a `legacy:${resumeId}` fingerprint. Because
              resumeId is fresh per generation, that fingerprint was unique per generation, so the
              unique index on (user_id, application_fingerprint) never collided and every re-tailor of
-             a posting the student already had produced ANOTHER application row. The canonical intake
-             (upsertCanonicalApplicationForUser) has always deduplicated by posting identity; this
-             writer simply never consulted it, which is why a Tracker could hold eight rows for one
-             job while the send path - which dedupes correctly - refused all but one of them.
-             The identity used here is deliberately the same one canonicalApplicationFingerprint
-             ranks: the job row first, then the portal URL, then company scope + role. */
+             a posting the student already had produced ANOTHER application row.
+
+             THE MATCH IS canonicalIdentityMatches ITSELF, not a second reading of it. A first cut
+             wrote its own three-rung ladder with `??`, which is a FALL-THROUGH: a portal URL naming
+             no row dropped to company-scope + role and adopted a DIFFERENT posting at the same
+             employer, rewriting its portal_url and destroying its prepared packet. The shared
+             predicate is an exclusive cascade - jobId, else portalUrl, else company + role - so a
+             posting this account does not have is an insert, which is the whole point. It also
+             normalizes both sides (safeStoredPortalUrl, NFKC + case folding) where the hand-written
+             version compared raw strings and silently missed rows canonical intake had written.
+
+             THE LOCK IS THE SAME LOCK canonical intake takes, on this transaction, because the read
+             and the write below must not interleave with a concurrent generation for this user -
+             which is exactly how duplicates were produced in the first place. */
           const companyScopeKey = canonicalCompanyScope({ companyName: body.company });
-          const normalizedRole = body.role.trim().toLowerCase();
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${userId}`}, 0::bigint))`);
           const ownedLive = await tx.select().from(applications).where(and(
             eq(applications.user_id, userId),
             isNull(applications.removed_at),
-          ));
-          const existing = ownedLive.find((row) => effectiveJobId && row.job_id === effectiveJobId)
-            ?? ownedLive.find((row) => Boolean(canonicalApplicationPortalUrl)
-              && row.portal_url === canonicalApplicationPortalUrl)
-            ?? ownedLive.find((row) => row.company_scope_key === companyScopeKey
-              && row.role.trim().toLowerCase() === normalizedRole);
+          )).orderBy(applications.created_at, applications.id);
+          const identity = {
+            jobId: effectiveJobId,
+            portalUrl: canonicalApplicationPortalUrl ?? null,
+            companyScopeKey,
+            companyName: body.company,
+            role: body.role,
+          };
+          /* Deterministic, and ranked the way upsertCanonicalApplicationForUser ranks: a row that
+             already carries a packet outranks an empty one, and the ordered select breaks the
+             remaining tie. Left to `.find` over an unordered select, which row a re-tailor adopted
+             was decided by the query plan - in precisely the duplicated state this exists to end. */
+          const matches = ownedLive.filter((row) => canonicalIdentityMatches(row, identity));
+          const existing = matches.find((row) => Boolean(row.legacy_generated_resume_id)) ?? matches[0];
           if (existing) {
+            /* NOTHING IS WRITTEN TO THE ROW HERE, DELIBERATELY.
+               linkGeneratedPacketToCanonicalApplication runs below on this same id and already does
+               the repoint correctly, including the part a hand-rolled update got wrong: its
+               terminalLifecycle arm keeps `applied`/`submitted` rows on their existing state instead
+               of resetting them, and it moves application_artifacts.selected with the pointer. An
+               update here could only duplicate it or contradict it, and the first cut did both -
+               it cleared submission_state and the resume pointers on a row whose prepared hold the
+               link helper then had to reconcile. job_id and portal_url are likewise NOT rewritten:
+               they are two of the three inputs application_fingerprint is derived from, and moving
+               them without re-deriving the fingerprint leaves a row whose stored identity names a
+               posting it no longer points at. A matched row already agrees on that identity. */
             canonicalApplicationId = existing.id;
-            /* A row that already reached the employer keeps the packet it sent. Repointing
-               legacy_generated_resume_id there would overwrite the record of what was actually
-               submitted, so the new resume is stored and returned against the same application
-               without disturbing the receipt. */
-            const alreadyWithEmployer = existing.submission_state === 'submitted'
-              || isAppliedOrLaterTrackerState(existing.tracker_state);
-            if (!alreadyWithEmployer) {
-              /* The adopted row is carrying a NEW packet, so every projection derived from the old
-                 one is cleared with it. Leaving selected_resume_artifact_id and resume_attached in
-                 place would point the send at the PREVIOUS tailored resume while the review showed
-                 the new one - the employer would receive the wrong document. Leaving submission_state
-                 in place would carry a stale needs_attention and its attention_reason onto a packet
-                 that has not been attempted, which is what makes a freshly prepared application still
-                 read as parked. The insert path below sets exactly these same values. */
-              await tx.update(applications).set({
-                legacy_generated_resume_id: resumeId,
-                ...(effectiveJobId ? { job_id: effectiveJobId } : {}),
-                ...(canonicalApplicationPortalUrl ? { portal_url: canonicalApplicationPortalUrl } : {}),
-                tracker_state: 'applying',
-                review_state: 'ready',
-                submission_state: 'not_started',
-                selected_resume_artifact_id: null,
-                resume_attached: false,
-                resume_source: 'none',
-                resume_attached_at: null,
-                updated_at: new Date(),
-              }).where(eq(applications.id, existing.id));
-            }
           } else {
             canonicalApplicationId = randomUUID();
             await tx.insert(applications).values({

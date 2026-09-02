@@ -341,7 +341,11 @@ function mostAdvancedLifecycle(values: string[]): string {
     (lifecycleRanks[value] ?? 0) > (lifecycleRanks[best] ?? 0) ? value : best, values[0] ?? 'not_started');
 }
 
-function canonicalIdentityMatches(
+/* Exported so POST /resume/generate matches on exactly this definition rather than a second copy.
+   The cascade is EXCLUSIVE on purpose - a jobId or a portalUrl that names no row means "a posting I
+   do not have", which is an insert, never a fall-through to company+role that would adopt a
+   different posting at the same employer. One definition, so the two call sites cannot drift. */
+export function canonicalIdentityMatches(
   row: typeof applications.$inferSelect,
   input: { jobId?: string; portalUrl: string | null; companyScopeKey: string; companyName: string; role: string },
 ): boolean {
