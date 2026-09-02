@@ -42,7 +42,10 @@ jobs:
       - name: Ask the board how fresh it is
         env:
           INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
-          API_BASE: ${{ secrets.LITOS_API_BASE }}
+          # LITOS_API_BASE is a repository VARIABLE, not a secret - the base URL is public, and
+          # every other workflow here reads it from vars. Reading it from secrets yields an empty
+          # string, which the fail-closed check below turns into a red run on every schedule.
+          API_BASE: ${{ vars.LITOS_API_BASE }}
           THRESHOLD: ${{ inputs.threshold_minutes }}
         run: |
           set -euo pipefail
