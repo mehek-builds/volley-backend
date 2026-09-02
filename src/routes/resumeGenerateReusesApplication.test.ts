@@ -18,7 +18,7 @@ const artifactVersions = readFileSync('src/lib/resumeArtifactVersions.ts', 'utf8
  * index on (user_id, application_fingerprint) could never collide and the insert always succeeded. */
 
 test('the match is the shared canonical predicate, not a second copy of it', () => {
-  assert.match(resumeRoute, /import \{ canonicalApplicationFingerprint, canonicalIdentityMatches \} from '\.\/canonicalApplications'/);
+  assert.match(resumeRoute, /import \{ canonicalApplicationFingerprint, canonicalIdentityMatches, canonicalPortalUrl \} from '\.\/canonicalApplications'/);
   assert.match(resumeRoute, /&& canonicalIdentityMatches\(row, identity\)\)/);
   assert.match(canonical, /export function canonicalIdentityMatches/);
 });
@@ -132,6 +132,25 @@ test('the adoption read is taken under the canonical advisory lock, on this tran
 test('the adopted row is chosen deterministically', () => {
   assert.match(resumeRoute, /\.orderBy\(applications\.created_at, applications\.id\)/);
   assert.match(resumeRoute, /matches\.find\(\(row\) => Boolean\(row\.legacy_generated_resume_id\)\) \?\? matches\[0\]/);
+});
+
+/* BOTH SIDES NORMALIZED, OR THE POSTING DOES NOT MATCH ITSELF.
+ *
+ * canonicalIdentityMatches normalizes only the STORED side (safeStoredPortalUrl) and compares the
+ * input verbatim, and canonicalApplicationFingerprint hashes whatever it is handed. Passing the
+ * request URL raw makes a posting fail to match itself whenever the stored row differs only by a
+ * trailing slash, a #hash, or a utm_/ref/source parameter - exactly the differences canonicalPortalUrl
+ * exists to erase - so the dedupe silently does not fire. Intake normalizes before doing either. */
+test('the request portal URL is normalized before matching and before the fingerprint', () => {
+  assert.match(resumeRoute, /normalizedPortalUrl = canonicalPortalUrl\(canonicalApplicationPortalUrl \?\? undefined\)/);
+  const adoptStart = resumeRoute.indexOf('const canonicalRow = ownedLive.find');
+  const branch = resumeRoute.slice(resumeRoute.indexOf('let normalizedPortalUrl'), adoptStart);
+  // Neither the identity nor the fingerprint may see the raw value.
+  assert.doesNotMatch(branch.replace(/\/\*[\s\S]*?\*\//g, ''), /portalUrl: canonicalApplicationPortalUrl/);
+  assert.match(branch, /portalUrl: normalizedPortalUrl,[\s\S]*portalUrl: normalizedPortalUrl,/);
+  // Guarded: the schema admits http:// and canonicalPortalUrl requires https outside tests.
+  assert.match(resumeRoute, /\} catch \{\s*\n\s*normalizedPortalUrl = null;/);
+  assert.match(canonical, /const portalUrl = canonicalPortalUrl\(input\.portalUrl \?\? undefined\);/);
 });
 
 test('a resume-only generation still never adopts a prepared application', () => {

@@ -93,7 +93,7 @@ import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
-import { canonicalApplicationFingerprint, canonicalIdentityMatches } from './canonicalApplications';
+import { canonicalApplicationFingerprint, canonicalIdentityMatches, canonicalPortalUrl } from './canonicalApplications';
 import { isAppliedOrLaterTrackerState } from '../lib/canonicalApplicationLifecycle';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
@@ -1546,9 +1546,29 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             eq(applications.user_id, userId),
             isNull(applications.removed_at),
           )).orderBy(applications.created_at, applications.id);
+          /* NORMALIZED ONCE, AND ON BOTH SIDES.
+             canonicalIdentityMatches normalizes only the STORED side - it compares
+             safeStoredPortalUrl(row.portal_url) against input.portalUrl verbatim - and
+             canonicalApplicationFingerprint hashes whatever it is handed. Passing the request's URL
+             raw therefore compares a normalized value against an unnormalized one, so a posting
+             fails to match ITSELF whenever the stored row differs only by a trailing slash, a #hash
+             or a utm_/ref/source parameter: the dedupe this exists to perform silently does not
+             fire. upsertCanonicalApplicationForUser avoids that by normalizing before it does either,
+             and this now does the same, from the same function.
+             Guarded because the request schema admits http:// while canonicalPortalUrl requires
+             https outside tests. Intake calls it unguarded and lets it throw, but that is a 400 on a
+             small write; here it would abort a generation that succeeds today. An unusable URL
+             therefore carries no portal identity rather than failing the request - the cascade falls
+             to the job row if there is one, and otherwise to company and role. */
+          let normalizedPortalUrl: string | null = null;
+          try {
+            normalizedPortalUrl = canonicalPortalUrl(canonicalApplicationPortalUrl ?? undefined);
+          } catch {
+            normalizedPortalUrl = null;
+          }
           const identity = {
             jobId: effectiveJobId,
-            portalUrl: canonicalApplicationPortalUrl ?? null,
+            portalUrl: normalizedPortalUrl,
             companyScopeKey,
             companyName: body.company,
             role: body.role,
@@ -1561,7 +1581,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
              agree on the predicate and disagree on what it is allowed to touch. */
           const fingerprint = canonicalApplicationFingerprint({
             jobId: effectiveJobId,
-            portalUrl: canonicalApplicationPortalUrl ?? null,
+            portalUrl: normalizedPortalUrl,
             companyScopeKey,
             role: body.role,
           });
