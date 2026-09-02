@@ -216,9 +216,15 @@ describe('base resume priority selection', () => {
     );
   });
 
-  test('current one-bullet roles cannot be displaced by older multi-bullet history', () => {
-    const professor = bankEntry({ id: 'professor', org: 'State University', title: 'Adjunct Professor', date_range: '2024 - Present' });
-    const litigator = bankEntry({ id: 'litigator', org: 'Legal Aid', title: 'Litigation Associate', date_range: '2023 - Present' });
+  test('current roles cannot be displaced by older multi-bullet history', () => {
+    const professor = bankEntry({
+      id: 'professor', org: 'State University', title: 'Adjunct Professor', date_range: '2024 - Present',
+      bullet_variants: ['Taught two grounded seminars', 'Advised a grounded thesis cohort'],
+    });
+    const litigator = bankEntry({
+      id: 'litigator', org: 'Legal Aid', title: 'Litigation Associate', date_range: '2023 - Present',
+      bullet_variants: ['Argued a grounded motion', 'Drafted grounded discovery requests'],
+    });
     const oldRole = bankEntry({
       id: 'old',
       org: 'Old Firm',
@@ -294,13 +300,73 @@ describe('base resume priority selection', () => {
   });
 
   test('role-defining work is protected alongside the most recent general role', () => {
-    const admin = bankEntry({ id: 'admin', org: 'Engineering Office', title: 'Administrator', date_range: '2019 - 2022' });
-    const nursing = bankEntry({ id: 'nursing', type: 'project', org: 'Clinical Nursing Study', title: 'Nursing Researcher', date_range: '2018' });
-    const convent = bankEntry({ id: 'convent', org: 'Convent', title: 'Resident Assistant', date_range: '2016 - 2017' });
+    const twoLines = (a: string, b: string) => [a, b];
+    const admin = bankEntry({ id: 'admin', org: 'Engineering Office', title: 'Administrator', date_range: '2019 - 2022', bullet_variants: twoLines('Ran a grounded office process', 'Kept grounded records straight') });
+    const nursing = bankEntry({ id: 'nursing', type: 'project', org: 'Clinical Nursing Study', title: 'Nursing Researcher', date_range: '2018', bullet_variants: twoLines('Collected grounded patient data', 'Presented grounded findings') });
+    const convent = bankEntry({ id: 'convent', org: 'Convent', title: 'Resident Assistant', date_range: '2016 - 2017', bullet_variants: twoLines('Supported grounded residents', 'Organised grounded events') });
 
     const priorities = priorityEntriesForBaseResume([admin, nursing, convent], 'Registered Nurse. Nursing Research');
     assert.equal(priorities[0]?.id, 'admin');
     assert.ok(priorities.some((entry) => entry.id === 'nursing'));
+  });
+
+  test('a required entry the dedupe emptied is excused, because its sentences are on the page', () => {
+    /* The one level deeper the sparse-priority fix could not reach: a duplicate bank row with a
+     * DIFFERENT identity (a re-upload that renamed the org) has two grounded variants, so it
+     * survives the mandatory filter - and then the floor's cross-entry dedupe empties it because
+     * its every sentence already prints under the other copy's heading. Demanding it anyway is the
+     * same nothing-saved dead-end. The excuse is keyed on (org, title): a different role at the
+     * same organization is NOT excused. */
+    const required = bankEntry({ id: 'dupe', org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst', date_range: '2024 - Present' });
+    const specWithoutIt = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [{ ...SPEC.experience[0], type: 'job' as const, org: 'Tri Coast Capital', title: 'Analyst', date_range: '2024 - Present' }],
+    };
+    assert.equal(
+      baseResumeSelectionIssues(specWithoutIt, [required], { requireFirst: false }).length,
+      1,
+    );
+    assert.deepEqual(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
+      }),
+      [],
+    );
+    assert.equal(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
+      }).length,
+      1,
+    );
+  });
+
+  test('an entry the bullet floor is guaranteed to drop is never mandatory', () => {
+    /* Reproduced live 2026-09-02/03 against production: a current leadership role with ONE bank
+     * variant was required by this fallback, forbidden by the prompt, dropped by the floor (which
+     * has no sparse allowance on this path), and the fail-closed ATS gate then refused EVERY
+     * build - "required current or role-defining entry missing" on each retry, with nothing
+     * saved, deterministically. Being selectable is fine; being mandatory requires being able to
+     * survive the floor. */
+    const sparse = bankEntry({
+      id: 'sparse', type: 'leadership', org: 'Pre-Health Society', title: 'Events Coordinator',
+      date_range: '2025 - Present', bullet_variants: ['Organized speaker panels for 80 attendees'],
+    });
+    const internship = bankEntry({
+      id: 'internship', org: 'Genomics Lab', title: 'Research Assistant', date_range: '2025 - Present',
+      bullet_variants: ['Performed grounded PCR runs', 'Analyzed grounded sequencing data'],
+    });
+    const priorities = priorityEntriesForBaseResume([sparse, internship], 'Research Assistant');
+    assert.ok(!priorities.some((entry) => entry.id === 'sparse'));
+    assert.ok(priorities.some((entry) => entry.id === 'internship'));
+    /* The explicit-selection escape is untouched: a confirmed sparse entry stays mandatory,
+     * because continue_with_found gives the floor and the validator their allowance for it. */
+    assert.deepEqual(
+      priorityEntriesForBaseResume([sparse, internship], 'Research Assistant', 'sparse').map((entry) => entry.id),
+      ['sparse'],
+    );
   });
 });
 

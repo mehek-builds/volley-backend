@@ -23,6 +23,16 @@
 
 ### Fixed
 
+- The base-resume build can no longer be deterministically unbuildable for an account whose
+  current role carries a single bank bullet. The legacy priority fallback required that entry on
+  the page while the bullet floor was guaranteed to drop it, so the fail-closed ATS check refused
+  every build with "required current or role-defining entry missing" and a retry reproduced it
+  forever. A one-variant entry is still selectable and is dropped with its honest warning; it is
+  just no longer mandatory. An explicitly confirmed sparse entry keeps its continue-with-found
+  allowance and stays mandatory. The same dead-end one level deeper is also closed: a required
+  duplicate row the cross-entry dedupe empties (every sentence already printed under the other
+  copy's heading) is excused by the required-entry check instead of failing the build, keyed on
+  org and title so a different role at the same organization is never excused.
 - The dashboard board loads again. GET /applications/board now returns the passive submission
   authority collection the dashboard requires (top-level schema version and per-user authority
   revision, plus a submission authority envelope on every card, built from the same authoritative
