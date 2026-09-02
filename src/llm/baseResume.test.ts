@@ -49,9 +49,12 @@ test('base generation and repair calls obey their interactive caps', () => {
 test('a grounded local base spec can never enter either repair branch', () => {
   const local = { ...SPEC, generation_method: 'local_fallback' as const };
   assert.equal(baseResumeRepairAllowed(local.generation_method, 0), false);
-  assert.equal(baseResumeRepairAllowed(local.generation_method, 34_999), false);
+  assert.equal(baseResumeRepairAllowed(local.generation_method, 17_999), false);
   assert.equal(baseResumeRepairAllowed(undefined, 0), true);
-  assert.equal(baseResumeRepairAllowed(undefined, 35_001), false);
+  /* 18s, not 35s: the window covers generation plus repairs, repairs run 1.3-1.7s each live, and
+   * the stage carries a sub-30-second promise the old ceiling could not keep. */
+  assert.equal(baseResumeRepairAllowed(undefined, 17_999), true);
+  assert.equal(baseResumeRepairAllowed(undefined, 18_001), false);
 });
 
 function bankEntry(over: Partial<ExperienceBankEntry>): ExperienceBankEntry {

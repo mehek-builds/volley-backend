@@ -533,14 +533,24 @@ export async function generateBaseResumeSpec(
   try {
     const stream = client.messages.stream(
     {
-      model: 'claude-sonnet-5',
-      /* Thinking is OFF, and the whole 15-second onboarding promise rides on it. Sonnet 5 runs
+      /* Haiku, not Sonnet, and the choice is measured rather than assumed. This call selects
+       * entries and mostly reuses bank wording verbatim; every quality rule is enforced AFTER
+       * generation by weakVerbBullets, overlongBullets, misWordedBullets, the grounding prune and
+       * the fail-closed ATS gate, so the model is not the quality bar here - the gates are.
+       * Measured 2026-09-03 across seven banks (five varied trial resumes through the e2e harness
+       * plus the 14-entry admin bank twice): Haiku cleared the same gates with equal-or-fewer
+       * violations than Sonnet (it needed ZERO repair passes on the 14-entry bank where Sonnet
+       * needed one or two) and generated 30-40% faster - 6.3-10.3s full-pipeline runs against
+       * Sonnet's 8.4-11.8s on identical inputs. A slow generation is what the onboarding build
+       * screen spends most of its time on, so this is the single biggest lever on the sub-30s
+       * resume-creation promise. */
+      model: 'claude-haiku-4-5-20251001',
+      /* Thinking is OFF, and the whole onboarding latency promise rides on it. These models run
        * adaptive thinking when the parameter is omitted, and on this exact call that meant ~12
        * silent seconds before the first entry streamed (measured 2026-08-29 against production:
        * 12.7s to first piece, 3s for everything after it). The student is watching a build screen
-       * the entire time. Selection quality does not lean on the reasoning pass: the hard rules are
-       * enforced AFTER generation by weakVerbBullets, overlongBullets, baseResumeSelectionIssues
-       * and the grounding prune, all of which fail closed and drive repairs. */
+       * the entire time. Selection quality does not lean on the reasoning pass, per the gate
+       * argument above. */
       thinking: { type: 'disabled' },
       /* Sized for the WORST bank, not a typical one. Measured 2026-07-27 on a real two-page resume
        * with 7 bank entries: an 8192 cap truncated mid-object and failed the build outright, and a

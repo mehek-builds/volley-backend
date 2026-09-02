@@ -70,9 +70,15 @@ import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 // Overall route allowance. Individual generation and repair calls have much lower interactive caps
 // in llm/baseResume.ts, so an upstream stall degrades to grounded local output instead of using it.
 const REQUEST_DEADLINE_MS = 120_000;
-/* An interactive ceiling, independent of Vercel's much larger kill limit. With one 15s generation
- * and 8s targeted repairs, this prevents quality polishing from recreating a minute-long spinner. */
-const REPAIR_PASS_BUDGET_MS = 35_000;
+/* An interactive ceiling on the whole generation-plus-repairs window, measured from the start of
+ * generation. 18s, sized from live numbers rather than caution: repairs measured 1.3-1.7s each
+ * against production on 2026-09-02, so even a worst-case 15s generation still gets one repair pass
+ * before this closes, and a typical 5-8s generation comfortably fits all three. The old 35s value
+ * predates targeted repairs (each pass was a full regeneration then) and let a pathological build
+ * run to ~45s of model time before render and checks - past the 30-second promise the whole
+ * onboarding resume stage now carries. Worst case under this ceiling: 18s window + one 8s repair
+ * call already in flight + render and checks, which lands the stage under 30s. */
+const REPAIR_PASS_BUDGET_MS = 18_000;
 
 export function baseResumeRepairAllowed(
   generationMethod: ResumeSpec['generation_method'],
@@ -412,7 +418,20 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       };
 
       const buildStartedAt = Date.now();
-      let rawSpec = await generate();
+      /* Stage timings, mirroring parse.ts's resume_parse_stage lines. The onboarding resume stage
+       * carries a sub-30-second promise, and a promise nobody can measure in production is a hope:
+       * a slow build looked identical to a failed one in the logs until these existed (a one-off
+       * ~5s profiles UPDATE was observed on 2026-09-02 and could not be attributed at the time). */
+      const stageTimings: Record<string, number> = {};
+      const timed = async <T>(stage: string, run: () => Promise<T>): Promise<T> => {
+        const startedAt = Date.now();
+        try {
+          return await run();
+        } finally {
+          stageTimings[stage] = (stageTimings[stage] ?? 0) + (Date.now() - startedAt);
+        }
+      };
+      let rawSpec = await timed('generation', generate);
 
       /* THE HARD RULES, enforced until they hold.
        *
@@ -552,7 +571,8 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
         // Bullet-level defects only: rewrite them in place.
         const targets = repairTargetsFor(weak, overlong, misWorded);
-        const repaired = await repairBaseResumeBullets(rawSpec, [...targets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        const repaired = await timed('repairs', () =>
+          repairBaseResumeBullets(rawSpec, [...targets.values()], { timeoutMs: REQUEST_DEADLINE_MS }));
         /* Same-reference return means nothing merged - a malformed reply, a transient model error,
          * or rewrites that failed the deterministic checks. Repainting identical content would
          * clear and redraw the student's finished resume for zero change, so skip it and let the
@@ -613,7 +633,8 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         && baseResumeRepairAllowed(finalSpec.generation_method, Date.now() - buildStartedAt)
       ) {
         const lateTargets = repairTargetsFor(lateWeak, lateOverlong, lateMisWorded);
-        const lateRepaired = await repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        const lateRepaired = await timed('repairs', () =>
+          repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS }));
         if (lateRepaired !== finalSpec) {
           /* Every rewrite the LOOP produced flowed through pruneUngroundedContent above; this one
            * runs after it, so without a re-prune an invented number in a backstop rewrite would be
@@ -681,9 +702,9 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       try {
         /* Same as the tailored path: the base resume gets the same page-filling rule, from the
            same bank, because it is the same document made for a different audience. */
-        const rendered = await renderResumePdf(finalSpec, contact, targetText, bank);
+        const rendered = await timed('render_check', () => renderResumePdf(finalSpec, contact, targetText, bank));
         printed = rendered.spec;
-        const parsedPdf = await extractPdfText(rendered.buffer);
+        const parsedPdf = await timed('render_check', () => extractPdfText(rendered.buffer));
         const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);
         const finalValidation = validateResumeSpec(
           printed,
@@ -753,7 +774,16 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
 
       send({ event: 'ats', ...ats });
 
+      const logBuildTimings = (outcome: 'done' | 'ats_failed') =>
+        request.log.info(
+          { userId, outcome, total_ms: Date.now() - buildStartedAt, ...Object.fromEntries(
+            Object.entries(stageTimings).map(([stage, elapsed]) => [`${stage}_ms`, elapsed]),
+          ) },
+          'base_resume_build timings',
+        );
+
       if (!ats.passed) {
+        logBuildTimings('ats_failed');
         send({ event: 'stage', stage: 'failed' });
         send({
           event: 'error',
@@ -763,10 +793,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       }
 
       const builtAt = new Date();
-      await db
+      await timed('save', () => db
         .update(profiles)
         .set({ base_resume_json: printed, base_resume_built_at: builtAt, updated_at: builtAt })
-        .where(eq(profiles.user_id, userId));
+        .where(eq(profiles.user_id, userId)));
+      logBuildTimings('done');
 
       send({ event: 'stage', stage: 'done' });
       send({
