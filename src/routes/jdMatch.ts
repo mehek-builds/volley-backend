@@ -17,6 +17,9 @@ import { extractJdTerms } from '../engine/jdMatch';
 import { applications, generated_resumes, autofill_events, monitored_jobs, career_page_sources } from '../db/schema';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { resolveRevision } from '../lib/buildInfo';
+import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
+import { SUBMISSION_AUTHORITY_SCHEMA_VERSION } from '../lib/submissionAuthorityRevision';
+import { submissionAuthorityEnvelopeForPacket } from '../lib/submissionAuthorityEnvelope';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -739,6 +742,29 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
    *
    * One row per application, with the stage the student put it in. Projected, not select *: spec is
    * a jsonb blob carrying the whole job description.
+   *
+   * SUBMISSION AUTHORITY. The dashboard treats this payload as one passive authority snapshot: it
+   * requires a top-level `schema_version` of `submission-authority-v1`, the user's
+   * `submission_authority_revision`, and a `submission_authority` envelope on EVERY card whose
+   * `revision` equals that collection revision, and it throws "Application board authority was
+   * incomplete." otherwise, which Board.tsx renders as "Could not load your board". Measured in
+   * prod 2026-09-02: the payload carried none of those fields, so the board had been unloadable for
+   * every user since the dashboard shipped that check (role-quick-website #466, 2026-08-31).
+   *
+   * The envelopes come from the same authoritative projection the submission path itself uses, in
+   * ONE batched read over the page's packets (one transaction, one per-user advisory lock, the same
+   * cost /resume/history already pays for its page), serialised by the one shared envelope builder.
+   * The card's own `stage` and `submission_status` are untouched: the client derives what it shows
+   * from the envelope, demoting an unconfirmed "applied" card to saved and routing a held or
+   * repair-required one to review.
+   *
+   * FAIL-CLOSED, the same way as the list and history routes. A projection read failure attaches no
+   * collection fields and no envelopes; a card whose envelope cannot be published (a held attempt
+   * awaiting a manual handoff, a confirmation outside the client's vocabulary, see the builder)
+   * gets none. The client then refuses the whole board rather than showing a card whose authority
+   * it could not verify. That is deliberate: the board is a submission-evidence surface, and an
+   * envelope this route would have to invent is worse than a board that says it could not load.
+   * Each omission is logged with the packet id so the gap is diagnosable from the server side.
    */
   fastify.get('/applications/board', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
@@ -765,6 +791,18 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       // thousands of cards the student will never scroll to and renders a select for each.
       .limit(BOARD_LIMIT);
 
+    const submissionAuthority = await (async () => {
+      try {
+        return await authoritativeSubmissionProjection({ userId, packetIds: rows.map((row) => row.id) });
+      } catch (error) {
+        request.log.warn(
+          { err: error },
+          'submission authority projection unavailable for the board; cards carry no envelope and the dashboard fails closed',
+        );
+        return null;
+      }
+    })();
+
     return reply.status(200).send({
       stages: STAGES,
       limit: BOARD_LIMIT,
@@ -772,8 +810,34 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
        * request instead of a board call plus a /health call plus the assumption that nothing
        * deployed in between. Null when the deployment supplied no SHA; see lib/buildInfo. */
       revision: resolveRevision().revision,
+      /* The passive-collection authority fields. Both are absent when the projection could not be
+       * read, so the client sees an incomplete collection, never a fabricated revision. */
+      ...(submissionAuthority
+        ? {
+          schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
+          submission_authority_revision: submissionAuthority.revision,
+        }
+        : {}),
       cards: rows.map((row) => {
         const context = (row.job_context ?? {}) as { company?: string; role?: string; job_id?: string };
+        const envelope = submissionAuthority
+          ? submissionAuthorityEnvelopeForPacket({
+            packetId: row.id,
+            projection: submissionAuthority.byPacketId.get(row.id),
+            retrySafety: submissionAuthority.retrySafetyByPacketId.get(row.id),
+            revision: submissionAuthority.revision,
+          })
+          : undefined;
+        if (submissionAuthority && !envelope) {
+          request.log.warn(
+            {
+              packetId: row.id,
+              projectionState: submissionAuthority.byPacketId.get(row.id)?.state,
+              retrySafetyKind: submissionAuthority.retrySafetyByPacketId.get(row.id)?.kind,
+            },
+            'board card has no publishable submission authority envelope; the dashboard fails closed',
+          );
+        }
         return {
           id: row.id,
           // The monitored_jobs posting this application was started from, or null. The jobs list
@@ -792,6 +856,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
           run_revision: row.run_revision,
           review_updated_at: row.review_updated_at,
           stage: deriveStage(row.pipeline_stage, row.status),
+          ...(envelope ? { submission_authority: envelope } : {}),
         };
       }),
     });

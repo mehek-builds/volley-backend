@@ -18,6 +18,11 @@
 
 ### Fixed
 
+- The dashboard board loads again. GET /applications/board now returns the passive submission
+  authority collection the dashboard requires (top-level schema version and per-user authority
+  revision, plus a submission authority envelope on every card, built from the same authoritative
+  projection the submission path uses); without it the dashboard rejected the whole board as
+  incomplete and rendered "Could not load your board" for every user.
 - Resume uploads no longer fail onboarding only because model-inferred target roles are unavailable.
 - PDF text reconstruction and local parsing now enforce item, character, entry, bullet, and skill
   ceilings so malformed or unusually large documents cannot create unbounded work.

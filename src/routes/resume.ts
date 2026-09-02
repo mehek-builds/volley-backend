@@ -6,6 +6,7 @@ import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectSt
 import { db } from '../db/index';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
+import { submissionAuthorityEnvelopeForUnattemptedPacket } from '../lib/submissionAuthorityEnvelope';
 import {
   applications,
   application_artifacts,
@@ -193,59 +194,10 @@ export function includeRequestedResumeInHistory<T extends { id: string; user_id:
   return [requestedRow, ...latestRows];
 }
 
-/**
- * The public submission-authority envelope a `/resume/history` packet must carry for the dashboard
- * to authorise a first employer send, and only for a packet whose immutable submission history is
- * genuinely empty.
- *
- * The dashboard derives a packet's send authority from `packet.submission_authority` alone and
- * fail-closes when it is absent or does not parse. The exact envelope it accepts is the release's
- * client contract. This returns that envelope ONLY when the authoritative projection is `none` and
- * retry safety is `no_evidence`, which hold together exactly when the packet has no attempt-opened
- * event: the one state that may become sendable, whose wire projection is the irreducible
- * `{ state: 'none' }`. A `/resume/history` packet carries no embedded canonical row, so the gate's
- * identity for it is the packet id itself, which is what `application_id` and `packet_id` name.
- *
- * Any packet with attempt history classifies non-none (a sent one is `repair_required`) and gets
- * `undefined` here, so it stays without an envelope and as fail-closed at the gate as before: this
- * can free a genuinely un-attempted packet but can never turn a sent one sendable.
- */
-export function submissionAuthorityEnvelopeForUnattemptedPacket(input: {
-  packetId: string;
-  projectionState: string | undefined;
-  retrySafetyKind: string | undefined;
-  revision: string | undefined;
-}):
-  | {
-    schema_version: 'submission-authority-v1';
-    revision: string;
-    state: 'none';
-    application_id: string;
-    packet_id: string;
-    projection: { state: 'none' };
-    retry_safety: { kind: 'no_evidence' };
-  }
-  | undefined {
-  // The client validator only accepts a canonical numeric revision (digits, <= int64). Requiring
-  // the same here means a divergent revision shape returns undefined at the source instead of
-  // being emitted and silently rejected downstream, which would strand the packet with no signal.
-  const revisionIsCanonical = typeof input.revision === 'string'
-    && input.revision.length <= 19
-    && /^(?:0|[1-9][0-9]*)$/.test(input.revision)
-    && (input.revision.length < 19 || input.revision <= '9223372036854775807');
-  if (input.projectionState !== 'none'
-    || input.retrySafetyKind !== 'no_evidence'
-    || !revisionIsCanonical) return undefined;
-  return {
-    schema_version: 'submission-authority-v1',
-    revision: input.revision as string,
-    state: 'none',
-    application_id: input.packetId,
-    packet_id: input.packetId,
-    projection: { state: 'none' },
-    retry_safety: { kind: 'no_evidence' },
-  };
-}
+/* The envelope builder lives beside the projection it serialises (lib/submissionAuthorityEnvelope),
+ * where the board's full-collection builder shares it. Re-exported here because the application
+ * routes and the history tests import it from this module. */
+export { submissionAuthorityEnvelopeForUnattemptedPacket };
 
 function monitoredApplicationUrlForGenerate(posting: ActionPostingRow | null): string | undefined {
   if (!posting) return undefined;
