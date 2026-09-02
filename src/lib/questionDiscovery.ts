@@ -2560,7 +2560,17 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         } = withProvenance;
         return withApplicantClaim as T;
       }
-      return { ...withoutProvenance(), answer: known.value };
+      /* A skip belongs to the answer it was taken against, so a recomputed value drops it the
+       * same way withoutProvenance drops answer_source. An unchanged value keeps it. The key is
+       * omitted, never set to undefined: these rows are compared as records. */
+      if (known.value.trim() === withProvenance.answer.trim()) {
+        return { ...withoutProvenance(), answer: known.value };
+      }
+      const {
+        answer_state: _skipOnAReplacedAnswer,
+        ...rewrittenWithoutStaleSkip
+      } = withoutProvenance() as T & { answer_state?: unknown };
+      return { ...rewrittenWithoutStaleSkip, answer: known.value } as T;
     }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
       || Boolean(label && isRefusedQuestion(label));
@@ -2668,10 +2678,47 @@ const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
 export const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
   /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+/* THE CURRENT EMPLOYER, in every spelling an employer form uses for it.
+ *
+ * "employer" was the only noun this matched, and Lever's default "Current company" field does not
+ * say it. MEASURED IN PROD 2026-09-02 15:25 UTC on Apollo Research "Product Security Engineer"
+ * (Lever, packet 0a5081aa-ee6f-4733-be63-e83437dfd2e6): the optional text question discovered as
+ * "current company org" was stored with an EMPTY answer while the profile carried Tonee
+ * (AI Engineer, September 2025 to Present) in exactly the current_employer slot the resolver
+ * already reads. The miss was classification alone, so the fix is the noun list: company, org and
+ * organization sit beside employer, and "who do you work for" beside "where do you work". The
+ * bare field-name spelling ("Employer") goes through labelNamesProfileField below, with the same
+ * word budget and polar-question refusal every other bare keyword in this file is held to. */
 const CURRENT_EMPLOYER_QUESTION =
-  /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b/i;
+  /\bcurrent\s+(?:employer|company|org(?:ani[sz]ation)?)\b|\bwho\s+(?:do|are)\s+you\s+(?:currently\s+)?work(?:ing)?\s+for\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b/i;
 const MOST_RECENT_EMPLOYER_QUESTION =
-  /\bwhere\s+have\s+you\s+most\s+recently\s+worked\b|\bmost\s+recent\s+employer\b/i;
+  /\bwhere\s+have\s+you\s+most\s+recently\s+worked\b|\bmost\s+recent\s+(?:employer|company|org(?:ani[sz]ation)?)\b|\b(?:last|latest)\s+(?:employer|company)\b/i;
+/* A "current" ask that ALSO admits the most recent employer: "current or most recent employer",
+ * "current / last company". Read by the current_employer arm of resolveKnownAnswer and nowhere
+ * else: it is what lets that arm fall back to most_recent_employer when current_employer is
+ * unset, and its absence is what stops a plain "current company" from ever being answered with a
+ * job she has left. */
+const EMPLOYER_LABEL_ALLOWS_MOST_RECENT = /\bmost\s+recent\b|\blatest\b|\blast\b|\b(?:or|\/)\s*(?:previous|prior|former)\b/i;
+/* A PAST employer is never the current one. "previous company", "former employer", "prior
+ * organization": none of these may reach the current_employer arm, whatever noun sits beside
+ * them. */
+const PAST_EMPLOYER_QUALIFIER = /\b(?:previous|prior|former|past|earlier|preceding|last|latest|ex)\b|\bmost\s+recent\b|\bemployment\s+history\b|\bwork\s+history\b/i;
+/* Something ABOUT the employer rather than the employer. KEYWORD_SUBJECT_QUALIFIER already refuses
+ * the attributes it knows (website, email, address, references, level); these are the ones only an
+ * employer noun collides with. "current employer sponsorship" and "current company size" are not
+ * answered with the employer's name. */
+const EMPLOYER_ATTRIBUTE_QUALIFIER =
+  /\bsponsor\w*\b|\bvisa\b|\bsize\b|\bindustry\b|\bsector\b|\btitles?\b|\broles?\b|\bpositions?\b|\bsalary\b|\bstart\b|\bend\b|\bduration\b|\bpolic(?:y|ies)\b|\brestrict\w*\b|\bagreements?\b|\bcontact\w*\b|\bnotif\w*\b|\bletters?\b|\bverif\w*\b|\bpermission\b|\btypes?\b|\bconflicts?\b|\bcompet\w*\b|\bsupervisors?\b|\bmanagers?\b|\bhistor(?:y|ies)\b/i;
+const EMPLOYER_NOUN = /\bemployer\b/i;
+/* THE "OTHER" LINK SLOT. Lever's standard links block is urls[LinkedIn], urls[GitHub],
+ * urls[Portfolio], urls[Other], and the last of those is discovered as "other url urls[other]".
+ * MEASURED on the same Apollo Research packet as CURRENT_EMPLOYER_QUESTION above: it was stored
+ * EMPTY while the GitHub went into its own urls[GitHub] control, because "other url" names no
+ * network and the portfolio rule wants "website" or "portfolio". Every spelling here is the slot
+ * for a link the form has not already asked for by name, so a label that DOES name a network
+ * (linkedin, github, portfolio) is not this and is routed to its own rule first. */
+const OTHER_LINK_QUESTION =
+  /\b(?:any\s+)?other\s+(?:relevant\s+|personal\s+|professional\s+|online\s+)?(?:urls?|websites?|web\s*sites?|links?|sites?)\b|\burls?\s*\[\s*other\s*\]|\badditional\s+(?:relevant\s+)?(?:urls?|websites?|links?)\b/i;
 const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
   /\bhave\s+you\s+(?:ever\s+|previously\s+)?(?:worked|been\s+employed)\s+(?:for|by|at)\b|\bhave\s+you\s+been\s+enrolled\s+in\b[^?]{0,120}\bin\s+the\s+past\s+\d+\s+months\b/i;
 const STEM_MAJOR_QUESTION =
@@ -5111,7 +5158,7 @@ const NATIONALITY_TO_COUNTRY: Record<string, string> = {
 
 export type ProfileKey =
   | 'phone' | 'phone_country' | 'address_city' | 'address_state' | 'address_country'
-  | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'citizenship' | 'date_of_birth'
+  | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'other_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'current_employer' | 'most_recent_employer' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
   | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
   | 'education_start_date' | 'education_end_date'
@@ -5392,9 +5439,31 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (/linkedin/i.test(l)) return 'linkedin_url';
   if (/github/i.test(l)) return 'github_url';
+  /* BEFORE the portfolio rule, which would otherwise claim "other website" through its bare
+   * \bwebsite\b and answer it from a portfolio slot that is usually empty. AFTER linkedin and
+   * github, so a label that names a network keeps its own rule, and refused outright when the
+   * label says "portfolio": "portfolio or other website" is the portfolio field. A polar question
+   * ("do you have any other links?") asks whether, not which, and gets nothing here. */
+  if (OTHER_LINK_QUESTION.test(l) && !/portfolio/i.test(l) && !isPolarQuestion(l)) return 'other_url';
   if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
-  if (CURRENT_EMPLOYER_QUESTION.test(l)) return 'current_employer';
-  if (MOST_RECENT_EMPLOYER_QUESTION.test(l)) return 'most_recent_employer';
+  /* The employer rules, in this order: a "most recent" ask is decided before the "current" one so
+   * that "current or most recent employer" still lands on current_employer (the resolver's arm
+   * falls back from there, see EMPLOYER_LABEL_ALLOWS_MOST_RECENT) while a plain "most recent
+   * employer" is never read as current; a past qualifier refuses the current arm outright; and an
+   * attribute of the employer is not the employer. The polar refusal is shared: "may we contact
+   * your current employer?" wants a yes or a no. */
+  const employerAttributeAsked = KEYWORD_SUBJECT_QUALIFIER.test(l.replace(/\b(?:employer|company|org(?:ani[sz]ation)?)\b/gi, ' '))
+    || EMPLOYER_ATTRIBUTE_QUALIFIER.test(l);
+  if (!isPolarQuestion(l) && !employerAttributeAsked) {
+    if (CURRENT_EMPLOYER_QUESTION.test(l) && !PAST_EMPLOYER_QUALIFIER.test(l.replace(CURRENT_EMPLOYER_QUESTION, ' '))) return 'current_employer';
+    if (MOST_RECENT_EMPLOYER_QUESTION.test(l)) return 'most_recent_employer';
+    // "current employer (or most recent)": the current arm, which falls back on its own terms.
+    if (CURRENT_EMPLOYER_QUESTION.test(l) && EMPLOYER_LABEL_ALLOWS_MOST_RECENT.test(l)) return 'current_employer';
+    // The bare field name: "Employer", "Employer name", "Name of employer". Same budget, same
+    // qualifier list and same polar refusal as every other bare keyword at the bottom of this
+    // function, plus the past qualifier: a bare "previous employer" is a past job, not this one.
+    if (labelNamesProfileField(l, EMPLOYER_NOUN) && !PAST_EMPLOYER_QUALIFIER.test(l)) return 'current_employer';
+  }
   if (TERM_QUESTION.test(l)) return 'availability_term';
   if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
     return 'onsite_commitment';
@@ -7375,6 +7444,47 @@ export async function discoverPageQuestions(page: Page): Promise<DiscoveredQuest
 // Returns null for anything that isn't a confidently-known field (including every refused
 // question), so the caller can fall through to the essay drafter or leave it for the human.
 
+/**
+ * THE ANSWER TO AN "OTHER URL" SLOT, from the profile's true links and nothing else.
+ *
+ * THE RULE. The slot exists for a link the form has not already asked for by name, so when the
+ * caller can see the sibling controls the answer is the first true profile link no sibling has
+ * claimed, in the order portfolio, GitHub, LinkedIn: the portfolio is the link most forms lack a
+ * slot for, and LinkedIn comes last because nearly every links block already has one. When every
+ * link on file is already claimed, or when the caller cannot see siblings at all, the answer is
+ * the GitHub URL as the ACCEPTED DUPLICATE of a true link: it is hers, it is public, and a
+ * recruiter reading it twice loses nothing, where an empty slot on a form she is otherwise
+ * answering in full reads as having nothing to show. Without siblings the fallback after GitHub is
+ * the portfolio, never LinkedIn: a LinkedIn control almost certainly exists on the same block and
+ * the rule is that LinkedIn is never duplicated into "other" beside it.
+ *
+ * NEVER A FABRICATED URL. Every value returned here is one of the three stored profile columns
+ * verbatim; a profile with no links gets null and the slot stays empty. That is the standing
+ * answering rule: absence on the profile is the answer.
+ */
+export function otherLinkAnswer(
+  ap: Pick<ApplicationProfileLike, 'linkedin_url' | 'github_url' | 'portfolio_url'>,
+  siblingLabels?: readonly string[],
+): { value: string } | null {
+  const portfolio = ap.portfolio_url?.trim() || undefined;
+  const github = ap.github_url?.trim() || undefined;
+  const linkedin = ap.linkedin_url?.trim() || undefined;
+  if (siblingLabels) {
+    const claimed = new Set<ProfileKey>();
+    for (const sibling of siblingLabels) {
+      const key = classifyField(sibling);
+      if (key === 'linkedin_url' || key === 'github_url' || key === 'portfolio_url') claimed.add(key);
+    }
+    if (portfolio && !claimed.has('portfolio_url')) return { value: portfolio };
+    if (github && !claimed.has('github_url')) return { value: github };
+    if (linkedin && !claimed.has('linkedin_url')) return { value: linkedin };
+    return github ? { value: github } : null;
+  }
+  if (github) return { value: github };
+  if (portfolio) return { value: portfolio };
+  return null;
+}
+
 export function resolveKnownAnswer(
   label: string,
   inputType: string,
@@ -7405,6 +7515,18 @@ export function resolveKnownAnswer(
   options?: readonly string[],
   /** One frozen instant for every time-dependent rule in a packet identity construction. */
   asOf: Date = new Date(),
+  /* THE LABELS OF THE OTHER CONTROLS ON THE SAME FORM, for callers that can see them.
+   *
+   * Read by exactly one rule, otherLinkAnswer, and only to find a true profile link that no
+   * sibling control has already claimed. Undefined is fail-closed to the GitHub URL, the accepted
+   * duplicate of a true link (see otherLinkAnswer for that rule). NO CALLER PASSES THIS YET, on
+   * purpose: the refresh path (refreshKnownQuestionAnswers, knownAnswerLookup) reads the STORED
+   * question list, from which Lever's fixed urls[LinkedIn] / urls[GitHub] / urls[Portfolio]
+   * controls have already been dropped as fixed profile fields, so it would see no siblings where
+   * the run saw three, and a run answering the portfolio while the refresh answers GitHub is the
+   * packet_stale deadlock documented at PHONE_NUMBER_FIELD_QUESTION. Thread it only when both
+   * sides of that flip can see the same controls. */
+  siblingLabels?: readonly string[],
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -7778,6 +7900,8 @@ export function resolveKnownAnswer(
       return ap.github_url ? { value: ap.github_url } : null;
     case 'portfolio_url':
       return ap.portfolio_url ? { value: ap.portfolio_url } : null;
+    case 'other_url':
+      return otherLinkAnswer(ap, siblingLabels);
     case 'referral_source_default': {
       /* CHANGED. The fallback was `{ value: 'Company website' }` for an account that had stored
        * nothing, described in profileFieldResolution.test.ts as "a deliberate product behaviour
@@ -7818,9 +7942,20 @@ export function resolveKnownAnswer(
       return { skipReason: `availability date left for you: "${label.slice(0, 60)}"` };
     }
     case 'current_employer':
-      return ap.current_employer ? { value: ap.current_employer } : null;
+      /* The job she is IN, and only that, unless the label itself admits the most recent one.
+       * "Current or most recent employer" is answered from most_recent_employer when
+       * current_employer is unset; a plain "current company" with no current job is left empty,
+       * because the most recent job is a PAST one and a past employer is never the answer to a
+       * "current" ask. The classifier has already refused every label carrying a past qualifier. */
+      if (ap.current_employer) return { value: ap.current_employer };
+      if (EMPLOYER_LABEL_ALLOWS_MOST_RECENT.test(label) && ap.most_recent_employer) return { value: ap.most_recent_employer };
+      return null;
     case 'most_recent_employer':
-      return ap.most_recent_employer ? { value: ap.most_recent_employer } : null;
+      // The job she is in is also her most recent one, so a "most recent" ask with no separate
+      // most_recent_employer on file is still a true answer from current_employer.
+      return ap.most_recent_employer
+        ? { value: ap.most_recent_employer }
+        : ap.current_employer ? { value: ap.current_employer } : null;
     case 'onsite_commitment':
       return onsiteCommitmentAnswer(label, ap, jdText);
     case 'current_enrollment':

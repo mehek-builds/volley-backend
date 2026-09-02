@@ -131,7 +131,9 @@ test('a blank required answer stops the send and never the fill run', async () =
   );
   assert.match(approve, /A required application answer is still blank\./);
   assert.match(runner, /&& unansweredRequiredQuestions\.length === 0/);
-  assert.match(runner, /unansweredRequiredCount: blankRequiredQuestionLabels\(mergedQuestions\)\.length/);
+  /* pendingRequiredQuestionLabels, not blankRequiredQuestionLabels: an unapproved Litos draft is
+     not an answered question, and this count is the standing-consent send decision. */
+  assert.match(runner, /unansweredRequiredCount: pendingRequiredQuestionLabels\(mergedQuestions\)\.length/);
   const portal = await readFile('src/lib/portalSubmission.ts', 'utf8');
   assert.match(portal, /if \(readiness\.blocking\.length > 0\) throw new FormIncompleteError\(readiness\.blocking\)/);
 });
@@ -244,7 +246,8 @@ test('final approval validates and submits refreshed known question answers', as
   assert.match(approve, /const approvalReview: ApplicationReviewState = \{/);
   assert.match(approve, /questions: resolvePacketAuditQuestionFixpoint\([\s\S]{0,220}sensitiveProfile/);
   assert.match(approve, /const approvalQuestionGate = submissionQuestionGate\(approvalReview\)/);
-  assert.match(approve, /approvalQuestionGate\.requiredQuestionLabels\.length > 0/);
+  assert.match(approve, /approvalQuestionGate\.draftQuestionLabels\.length > 0/);
+  assert.match(approve, /approvalQuestionGate\.requiredQuestionLabels\.length > approvalQuestionGate\.draftQuestionLabels\.length/);
   assert.match(approve, /sensitiveQuestionFor\(\s*approvalReview\.questions, sensitiveProfile, approvalReview\.jd_text,/);
   assert.match(approve, /\.\.\.approvalReview,[\s\S]{0,120}status:\s*'submitting'/);
   assert.doesNotMatch(approve, /current\.questions\.some/);

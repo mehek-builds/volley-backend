@@ -86,10 +86,122 @@ Voice and format:
 export interface AnswerResult {
   answer: string;
   warnings: string[];
+  /* TRUE WHEN THIS PARAGRAPH IS THE HONEST SUBSTITUTE, not a direct answer.
+   *
+   * The premise rule refused the question as asked, and the second pass wrote what the applicant
+   * HAS done instead. The caller uses it to say so on the review screen: a draft that deliberately
+   * answers a narrower question than the employer asked is exactly the draft she most needs to read
+   * before it goes out. Absent/false on an ordinary draft. */
+  honestSubstitute?: boolean;
 }
 
 export interface DraftedAnswerValidation extends AnswerResult {
   blockingIssues: string[];
+}
+
+/* THE SECOND PASS, and the reason a premise refusal stopped being a blank box.
+ *
+ * MEASURED, prod, 2026-09-02. EQL Tech "Founding AI Engineer (Computer Vision)" on Workable, packet
+ * 9bbf3ba1: question 3 of 5, REQUIRED, type text, "Describe a multimodal/cv system you personally
+ * shipped to production, and your role in it." The applicant has no computer-vision system in
+ * production, so the premise rule (R-029) correctly output CANNOT_DRAFT, and the whole of what the
+ * product then did was leave the box empty. The employer screen offers Previous and a disabled Save
+ * and next, no Skip: the refusal was right and its terminal state was a dead end.
+ *
+ * A refusal is a statement about the QUESTION AS ASKED, never about whether the applicant has
+ * anything to say. So the refusal now opens a second, narrower ask instead of closing the field:
+ * describe the nearest thing she has actually built, in the past tense, tied to its real project or
+ * employer, without adopting the question's frame and without naming the thing she has not done.
+ *
+ * WHAT KEEPS IT HONEST is not this prose. It is unheldExperienceTerms below, which is computed from
+ * the applicant's OWN material with the job description deliberately excluded, and enforced with
+ * claimedUnheldItems exactly as the ranking rule enforces its own list. The prompt asks; the
+ * deterministic check decides.
+ *
+ * WHAT MAKES IT SAFE TO ATTEMPT AT ALL is provenance. The caller stores this paragraph with
+ * answer_source 'litos_draft', and the send gate counts an unapproved draft as an unanswered
+ * required question, so an imperfect substitute costs the applicant a read and an edit. It cannot
+ * cost her a false claim to an employer. */
+export const HONEST_SUBSTITUTE_INSTRUCTION = `You already judged that this question presumes work the applicant's material does not support, and you were right: do NOT answer it as asked.
+
+Write instead the honest substitute. Rules, all of them hard:
+- Describe the CLOSEST real work in the experience bank: what she actually built, at its real project or employer, in the past tense.
+- Do NOT claim, imply, or even name the thing the question presumes she has done. Leave those words out of the answer entirely rather than disclaiming them; a sentence about what she has not done is not what this box is for.
+- Do NOT name a technology, tool, framework, method or field that is not in the experience bank or the declared skills list, whatever the question or the job description says. The posting asking for something is never evidence she has done it.
+- Do not apologise, do not hedge, and do not describe the answer as a substitute. State the real work plainly and let it stand on its own.
+- Same voice and format rules as before: first person, plain, 60-130 words, no em dash, no AI-tell words, output ONLY the answer text.
+
+If the experience bank holds nothing at all that is adjacent to the question, output exactly CANNOT_DRAFT and nothing else.`;
+
+/* Common capitalised English that a naive acronym rule would otherwise treat as a technology. Kept
+ * short on purpose: this list only ever narrows enforcement, and a term wrongly kept costs one
+ * regeneration while a term wrongly dropped costs a claim she does not hold. */
+const NON_TECHNICAL_QUESTION_TERMS = new Set([
+  'and', 'or', 'the', 'not', 'yes', 'no', 'you', 'your', 'our', 'we', 'us', 'it', 'in', 'of', 'to',
+  'a', 'an', 'is', 'are', 'was', 'were', 'be', 'do', 'did', 'how', 'why', 'what', 'when', 'who',
+  'ok', 'na', 'n/a', 'tbd', 'etc', 'eg', 'ie', 'ceo', 'cto', 'hr', 'usa', 'uk', 'eu', 'us',
+]);
+
+/**
+ * The technology-shaped terms a free-text question names, extracted conservatively.
+ *
+ * NOT a general noun-phrase extractor and deliberately not trying to be one. Four sources, each one
+ * a shape that is a technology far more often than it is prose:
+ *   - an explicit candidate list the question itself writes out (the ranking extractor's own rule)
+ *   - slash groups, which is how a posting compresses a field pair: "multimodal/cv" -> multimodal, cv
+ *   - short all-caps acronyms: CV, NLP, GPU, ETL
+ *   - internally capitalised or digit-bearing tokens: PyTorch, TensorFlow, K8s, S3, C++, C#
+ *
+ * Missing a term only NARROWS enforcement - the prompt rule and the existing gates still apply - so
+ * the extraction stays conservative and can never manufacture a false refusal on its own.
+ */
+export function questionExperienceTerms(question: string): string[] {
+  const terms = new Set<string>();
+  for (const item of extractRankedItems(question)) terms.add(item);
+  for (const match of question.matchAll(/[A-Za-z][A-Za-z0-9+#.]*(?:\/[A-Za-z][A-Za-z0-9+#.]*)+/g)) {
+    for (const part of match[0].split('/')) terms.add(part);
+  }
+  for (const match of question.matchAll(/[A-Za-z][A-Za-z0-9]*(?:\+\+|#)|[A-Za-z][A-Za-z0-9.]*/g)) {
+    const token = match[0].replace(/\.+$/, '');
+    if (token.length < 2) continue;
+    const alphabetic = token.replace(/[^A-Za-z]/g, '');
+    if (/^[A-Z]{2,6}$/.test(alphabetic) && alphabetic === token) terms.add(token);
+    else if (/[a-z]/.test(token) && /[A-Z]/.test(token.slice(1))) terms.add(token);
+    else if (/[0-9]/.test(token) && /[A-Za-z]/.test(token)) terms.add(token);
+    else if (/(?:\+\+|#)$/.test(token)) terms.add(token);
+  }
+  return [...terms]
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2 && !NON_TECHNICAL_QUESTION_TERMS.has(term.toLowerCase()));
+}
+
+/**
+ * The terms this question names that the applicant's OWN material does not evidence.
+ *
+ * THE JOB DESCRIPTION IS NOT IN THIS CORPUS, and that exclusion is the whole guarantee. The ordinary
+ * answer corpus (answerGroundingCorpus) includes the JD, which is right for "does this number exist"
+ * but exactly wrong for "has she done this": a posting that asks for computer vision would otherwise
+ * ground a sentence claiming she has shipped computer vision. The cover-letter prompt has stated the
+ * rule in words since it was written - the job description defines what matters and is never
+ * evidence that the candidate has done something - and this is that rule made deterministic.
+ *
+ * Held is decided with the same whole-item mention test the ranking rule uses, so "C" is not held by
+ * a bank that says "C++" and "Java" is not held by one that says "JavaScript".
+ */
+export function unheldExperienceTerms(
+  question: string,
+  bank: ExperienceBankEntry[],
+  education: ApplicantGroundingFacts,
+  declaredSkills?: string[] | null,
+): string[] {
+  const terms = questionExperienceTerms(question);
+  if (terms.length === 0) return [];
+  const declared = (declaredSkills ?? []).filter(
+    (skill) => typeof skill === 'string' && skill.trim().length > 0,
+  );
+  const ownMaterial = `${experienceBankCorpus(bank)} ${groundingFactsText(education)} ${declared.join(' ')}`;
+  const held = new Set(claimedUnheldItems(ownMaterial, terms));
+  return terms.filter((term) => !held.has(term));
 }
 
 // The drafter's refusal sentinel (R-029). When the prompt's premise rule concludes no honest
@@ -259,19 +371,23 @@ export function groundingFactsText(education: ApplicantGroundingFacts): string {
   ].filter((value) => typeof value === 'string' && value.trim().length > 0).join(' ');
 }
 
-function answerGroundingCorpus(
-  bank: ExperienceBankEntry[],
-  jdText: string,
-  education: ApplicantGroundingFacts,
-): string {
-  const bankCorpus = bank
+/** The applicant's experience bank as flat text. Her own material and nothing else. */
+export function experienceBankCorpus(bank: ExperienceBankEntry[]): string {
+  return bank
     .map((entry) => {
       const variants = Array.isArray(entry.bullet_variants) ? (entry.bullet_variants as string[]) : [];
       const tags = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
       return [entry.org, entry.title ?? '', entry.date_range ?? '', ...variants, ...tags].join(' ');
     })
     .join(' ');
-  return `${bankCorpus} ${jdText} ${groundingFactsText(education)}`;
+}
+
+function answerGroundingCorpus(
+  bank: ExperienceBankEntry[],
+  jdText: string,
+  education: ApplicantGroundingFacts,
+): string {
+  return `${experienceBankCorpus(bank)} ${jdText} ${groundingFactsText(education)}`;
 }
 
 /**
@@ -333,6 +449,18 @@ export async function draftApplicationAnswer(
   // "never declared", which disables the deterministic ranking check (R-042) but must never be
   // read as "holds no skills" - the same NULL-vs-[] semantics the list carries everywhere else.
   declaredSkills?: string[] | null,
+  /* THE MODEL, INJECTABLE, so the drafting PIPELINE can be tested without a network call.
+   *
+   * Everything this module actually decides - the premise refusal, the second ask, the unheld-term
+   * check and its one regeneration, the fail-closed - lives between the model calls, and none of it
+   * was reachable from a test before this seam existed: the two providers are module-level clients,
+   * so the only assertions possible were on prompt TEXT and on the two branches that short-circuit
+   * before any call. That is precisely the wrong half to have covered, and the EQL Tech dead end
+   * (prod, 2026-09-02) sat in the uncovered half.
+   *
+   * Optional and unused in production: every real caller omits it and gets the OpenAI-then-Anthropic
+   * path unchanged. It is not a provider abstraction and must not grow into one. */
+  generate?: (input: { system: string; context: string; user: string }) => Promise<string>,
 ): Promise<AnswerResult> {
   const declared = (declaredSkills ?? []).filter(
     (s) => typeof s === 'string' && s.trim().length > 0,
@@ -363,6 +491,7 @@ export async function draftApplicationAnswer(
 
   async function callModel(feedback?: string): Promise<string> {
     const userContent = `Question: ${question}\n\nWrite the answer.${rankingRule ? `\n\n${rankingRule}` : ''}${feedback ? `\n\n${feedback}` : ''}`;
+    if (generate) return generate({ system: SYSTEM_PROMPT, context: contextBlock, user: userContent });
     if (openAIConfigured() && !feedback) {
       try {
         const generated = await generateOpenAIText({
@@ -405,9 +534,34 @@ export async function draftApplicationAnswer(
   const corpusWords = wordSet(corpusText);
 
   let answer = normalizeDraftedAnswer(await callModel());
-  // A premise refusal (R-029) is final: '' flows out through the empty-answer path below and the
-  // route's existing 502, so the field is flagged for the applicant rather than drafted.
-  if (answer === '') return { answer: '', warnings: [] };
+  /* A PREMISE REFUSAL OPENS THE SECOND ASK RATHER THAN CLOSING THE FIELD.
+   *
+   * It used to be final: '' flowed out through the empty-answer path and the applicant got a blank
+   * required box she had to write from nothing (the EQL Tech computer-vision question, prod
+   * 2026-09-02). The refusal itself was correct and is unchanged - what changed is that "I cannot
+   * answer THIS question" is now followed by "so answer the honest one", and the result reaches her
+   * as an unapproved draft she can take, edit, or replace.
+   *
+   * Everything below still applies to the substitute: the number check, the em dash strip, the
+   * proper-noun warning. The unheld-experience check is ADDITIONAL and specific to this path. */
+  let honestSubstitute = false;
+  const unheldTerms = answer === ''
+    ? unheldExperienceTerms(question, bank, education, declared)
+    : [];
+  if (answer === '') {
+    answer = normalizeDraftedAnswer(await callModel(HONEST_SUBSTITUTE_INSTRUCTION));
+    honestSubstitute = answer !== '';
+    if (answer !== '' && claimedUnheldItems(answer, unheldTerms).length > 0) {
+      answer = normalizeDraftedAnswer(await callModel(
+        `${HONEST_SUBSTITUTE_INSTRUCTION}\n\nYour previous draft named ${claimedUnheldItems(answer, unheldTerms).join(', ')}, which the applicant's own experience does not evidence. Rewrite it without those words anywhere in the answer, describing only work the experience bank actually holds.`,
+      ));
+      /* STILL CLAIMING AFTER EXPLICIT FEEDBACK: never ship it. Same fail-closed direction as the
+       * ranking rule - a blank box she can write herself is a cost, a claim she never made is a
+       * harm, and only one of the two is recoverable. */
+      if (claimedUnheldItems(answer, unheldTerms).length > 0) return { answer: '', warnings: [] };
+    }
+    if (answer === '') return { answer: '', warnings: [], honestSubstitute: false };
+  }
 
   // If the draft used numbers not present in the applicant's material, regenerate once with that as
   // explicit feedback (same self-correcting pattern as the resume path).
@@ -465,6 +619,11 @@ export async function draftApplicationAnswer(
   if (thinRanking) warnings.push(thinRanking);
   const wordCount = answer.split(/\s+/).filter(Boolean).length;
   if (wordCount > 160) warnings.push(`Answer is ${wordCount} words - consider trimming.`);
+  /* The one warning the applicant most needs beside a substitute: it says, in her own review screen,
+   * that the draft answers a narrower question than the employer asked. */
+  if (honestSubstitute) {
+    warnings.push('This question asks about work your resume does not show, so the draft describes the closest real work instead. Read it before it goes out.');
+  }
 
-  return { answer, warnings };
+  return { answer, warnings, honestSubstitute };
 }

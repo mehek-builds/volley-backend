@@ -51,8 +51,19 @@ export type ApplicationReviewQuestion = {
    * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
    * an employer's privacy statement, applicant terms or code of conduct under the permission she
    * granted once at onboarding, and it exists so that the packet audit shows an acceptance made on
-   * her behalf rather than a tick that reads as if she had made it herself. */
-  answer_source?: 'applicant_review' | 'consent_permission';
+   * her behalf rather than a tick that reads as if she had made it herself.
+   *
+   * 'litos_draft' is A PARAGRAPH LITOS WROTE THAT SHE HAS NOT APPROVED. It is the only value here
+   * that makes an answer LESS sendable than no value at all: an absent answer_source means "some
+   * machine put this here and we cannot say which", which the packet acknowledgement already sorts
+   * into ask-her-next-round, while this one says "Litos composed these words in her name", and
+   * submissionSafety counts it as an unanswered required question until she replaces it or confirms
+   * it. It exists because the essay drafter used to push its paragraph with no flag at all, so a
+   * drafted answer and a profile relay were the same record to every reader.
+   *
+   * It is REPLACED, never annotated: an edit or an explicit confirmation mints 'applicant_review'
+   * over it, and from that moment the answer is byte-identical in status to anything she typed. */
+  answer_source?: 'applicant_review' | 'consent_permission' | 'litos_draft';
   answer_reviewed_at?: string;
   /**
    * The PROFILE VALUE this answer was snapped from, when discovery could read the control's options
@@ -292,9 +303,22 @@ export function normalizeApplicationReviewQuestions(
      * later read is the fresher read of the employer's own control, so it wins when present. */
     const optionsMeasured = Object.prototype.hasOwnProperty.call(question, 'options');
     const options = optionsMeasured ? (question.options ?? null) : existing.options;
-    const answerState = question.answer.trim()
-      ? undefined
-      : question.answer_state ?? existing.answer_state;
+    /* AN ANSWERED QUESTION MAY STILL BE ONE SHE CHOSE TO LEAVE ALONE.
+     *
+     * This used to clear the state outright whenever an answer was present, on the reading that an
+     * answer resolves the question. That holds for the two MACHINE states: 'unanswered' and
+     * 'litos_refused' both describe Litos having nothing to type, and an answer really does settle
+     * them. It does not hold for 'skipped', which is the applicant's own instruction about the
+     * CONTROL rather than about the answer: "I know what the value is, the portal will not take it,
+     * leave it." Dropping that turned her decision into a fact the record could not hold, so
+     * discovery re-raised the same question on every fill and the row never became sendable.
+     *
+     * Nothing types differently as a result: packetQuestionsForFill does not carry answer_state, so
+     * the answer beside it still reaches the form exactly as before. */
+    const mergedAnswerState = question.answer_state ?? existing.answer_state;
+    const answerState = !question.answer.trim() || mergedAnswerState === 'skipped'
+      ? mergedAnswerState
+      : undefined;
     const { answer_state: _existingAnswerState, ...existingWithoutAnswerState } = existing;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
@@ -393,7 +417,14 @@ export function mergeSubmittedApplicationReviewQuestions(
         answer_reviewed_at: _answerReviewedAt,
         ...questionWithoutProvenance
       } = question;
-      return questionWithoutProvenance;
+      /* EXCEPT THE DRAFT MARKER, WHICH IS NOT A CLAIM ABOUT HER AND SO CANNOT GO STALE THE WAY ONE
+       * DOES. Stripping it here would be the whole feature undone by omission: a save that never
+       * mentions the drafted question would silently turn "Litos wrote this and she has not read it"
+       * into "some machine put this here", and the send gate would open on a paragraph nobody
+       * approved. Nothing about this record moved, so what it says about itself still holds. */
+      return question.answer_source === 'litos_draft' && question.answer.trim()
+        ? { ...questionWithoutProvenance, answer_source: 'litos_draft' as const }
+        : questionWithoutProvenance;
     }
     const { question: submittedQuestion, index: submittedIndex } = submittedMatch;
     consumedSubmittedIndexes.add(submittedIndex);
@@ -599,9 +630,29 @@ export function mergeSubmittedApplicationReviewQuestions(
       ? question
       : { ...questionWithoutProvenance, ...carriedAnswerClaims };
     const { answer_state: _carriedAnswerState, ...carriedForwardWithoutAnswerState } = carriedForward;
-    const nextAnswerState = submittedQuestion.answer.trim()
-      ? undefined
-      : submittedQuestion.answer_state ?? question.answer_state;
+    /* THE WRITER BEHIND PUT /review/answers, and the reason a skip never reached the record.
+     *
+     * Same rule as normalizeApplicationReviewQuestions, and it has to be the same or the skip dies
+     * here instead of there: 'unanswered' and 'litos_refused' are the machine saying it had nothing
+     * to type, and an answer settles them. 'skipped' is the applicant speaking about the CONTROL
+     * ("the value is right, the portal's menu will not take it, leave the field alone"), which an
+     * answer beside it does not settle. Dropping it on save meant she could mark a question skipped,
+     * be told "Saved", and have the record come back without it, so discovery raised the same
+     * question on the next fill and the row never became sendable. */
+    const storedSkipStillBound = question.answer_state === 'skipped'
+      && submittedQuestion.answer.trim() === question.answer.trim();
+    const submittedAnswerStateForSave = submittedQuestion.answer_state
+      ?? (!submittedQuestion.answer.trim() || storedSkipStillBound ? question.answer_state : undefined);
+    /* And the binding cuts the other way on an EDIT. The dashboard un-skips by omitting the key
+     * (its `answer_state: undefined` never survives JSON), so a bare `??` fallback would resurrect
+     * the stored skip over an answer she just typed to replace it, and the question could never be
+     * un-skipped from the product at all. A skip from the stored side therefore stands only while
+     * the answer is still the one it was taken against; posting 'skipped' explicitly is the skip
+     * action itself and stands on its own. */
+    const nextAnswerState = !submittedQuestion.answer.trim()
+      || submittedAnswerStateForSave === 'skipped'
+      ? submittedAnswerStateForSave
+      : undefined;
     return {
       ...carriedForwardWithoutAnswerState,
       answer: submittedQuestion.answer,
@@ -620,7 +671,17 @@ export function mergeSubmittedApplicationReviewQuestions(
       // because they are the same assertion made through two different controls.
       ...(applicantSuppliedAnswer || applicantConfirmedAnswer
         ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
-        : {}),
+        /* AND OTHERWISE THE DRAFT MARKER SURVIVES THE SAVE, byte for byte, exactly as long as the
+         * paragraph does. This is the laundering door for the drafting feature and it is the same
+         * door the 802-answer incident came through: the review screen posts back the whole list it
+         * was shown, so an untouched Save reaches here with the drafted answer unchanged and no
+         * confirmation flag. Without this clause the strip above would leave answer_source absent -
+         * indistinguishable from a profile relay - and a paragraph she never read would clear the
+         * gate. Keyed on `answerUnchanged` because a REPLACED answer is her own bytes, and that case
+         * is already the applicantSuppliedAnswer branch above. */
+        : question.answer_source === 'litos_draft' && answerUnchanged && submittedAnswer
+          ? { answer_source: 'litos_draft' as const }
+          : {}),
       /* Beside the claim and never without it, because it is only meaningful as the other half of
        * that claim. See overriddenResolverValue. */
       ...(overriddenResolverValue ? { answer_override_of: overriddenResolverValue } : {}),
@@ -654,7 +715,9 @@ export function mergeSubmittedApplicationReviewQuestions(
     } = question;
     merged.push({
       ...submittedWithoutProvenance,
-      ...(!submittedWithoutProvenance.answer.trim() && submittedAnswerState
+      // Same rule for a question arriving for the first time: her skip stands beside an answer.
+      ...((!submittedWithoutProvenance.answer.trim() || submittedAnswerState === 'skipped')
+        && submittedAnswerState
         ? { answer_state: submittedAnswerState }
         : {}),
     });
@@ -1571,7 +1634,16 @@ export function applyApplicantReviewedAnswers(
 ): ApplicationReviewState {
   return {
     ...current,
-    questions: questions.map((question) => question.answer.trim()
+    /* THE BLANKET STAMP, MINUS THE ONE RECORD IT MUST NOT TOUCH.
+     *
+     * This function claims every non-blank answer in the body as hers, which is what PUT /review
+     * means by a review round. A LITOS DRAFT is the exception, and skipping it is what keeps this
+     * route from being a second door into the laundering the narrow answers route was fixed for: a
+     * paragraph Litos composed does not become her answer because a whole-list Save went past it.
+     * Approval is per-question and explicit - PUT /applications/:id/review/answers with
+     * `confirmed: true`, or an edit that changes the bytes - and both of those run through
+     * mergeSubmittedApplicationReviewQuestions, which mints 'applicant_review' over the marker. */
+    questions: questions.map((question) => question.answer.trim() && question.answer_source !== 'litos_draft'
       ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
       : question),
     questions_reviewed_at: reviewedAt,
