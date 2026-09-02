@@ -310,6 +310,39 @@ describe('base resume priority selection', () => {
     assert.ok(priorities.some((entry) => entry.id === 'nursing'));
   });
 
+  test('a required entry the dedupe emptied is excused, because its sentences are on the page', () => {
+    /* The one level deeper the sparse-priority fix could not reach: a duplicate bank row with a
+     * DIFFERENT identity (a re-upload that renamed the org) has two grounded variants, so it
+     * survives the mandatory filter - and then the floor's cross-entry dedupe empties it because
+     * its every sentence already prints under the other copy's heading. Demanding it anyway is the
+     * same nothing-saved dead-end. The excuse is keyed on (org, title): a different role at the
+     * same organization is NOT excused. */
+    const required = bankEntry({ id: 'dupe', org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst', date_range: '2024 - Present' });
+    const specWithoutIt = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [{ ...SPEC.experience[0], type: 'job' as const, org: 'Tri Coast Capital', title: 'Analyst', date_range: '2024 - Present' }],
+    };
+    assert.equal(
+      baseResumeSelectionIssues(specWithoutIt, [required], { requireFirst: false }).length,
+      1,
+    );
+    assert.deepEqual(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
+      }),
+      [],
+    );
+    assert.equal(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
+      }).length,
+      1,
+    );
+  });
+
   test('an entry the bullet floor is guaranteed to drop is never mandatory', () => {
     /* Reproduced live 2026-09-02/03 against production: a current leadership role with ONE bank
      * variant was required by this fallback, forbidden by the prompt, dropped by the floor (which

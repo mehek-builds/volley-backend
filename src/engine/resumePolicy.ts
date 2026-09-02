@@ -473,6 +473,10 @@ export function enforceExperienceBulletFloor(
      * so the caller is handed the cause rather than left to infer it. */
     onDropped?: (entry: {
       org: string;
+      /* Travels with org so a caller can name the exact role identity that fell off. The
+         required-entry gate keys on (org, title), and an org alone cannot excuse a dropped
+         duplicate without also excusing a different role at the same organization. */
+      title: string;
       bullets: number;
       reason: 'below_floor' | 'already_printed';
     }) => void;
@@ -545,11 +549,11 @@ export function enforceExperienceBulletFloor(
      * whose every bullet was already printed under an earlier heading empties completely, and
      * `allowSparseAll` would otherwise have waved the empty shell through. */
     if (bullets.length === 0) {
-      options.onDropped?.({ org: entry.org, bullets: 0, reason: 'already_printed' });
+      options.onDropped?.({ org: entry.org, title: entry.title ?? '', bullets: 0, reason: 'already_printed' });
       return [];
     }
     if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority && !options.allowSparseAll) {
-      options.onDropped?.({ org: entry.org, bullets: bullets.length, reason: 'below_floor' });
+      options.onDropped?.({ org: entry.org, title: entry.title ?? '', bullets: bullets.length, reason: 'below_floor' });
       return [];
     }
     const kept = bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);

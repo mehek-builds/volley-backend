@@ -651,6 +651,10 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          the one omission the student can act on, and the sentence says how - one more bullet. The
          two generators must not differ in whether they tell them. */
       const droppedForLength: string[] = [];
+      /* Fed to the required-entry gate below: an entry emptied because its every sentence already
+         prints under another heading is VISIBLE on the page, so the gate may not demand it - see
+         baseResumeSelectionIssues for the dead-end this closes. */
+      const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
       const spec = enforceExperienceBulletFloor(pruned.spec, bank, {
         priorityEntryId: selectedEntryId,
         allowSparsePriority: recentReview?.continue_with_found === true,
@@ -659,12 +663,14 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
            end for a duplicated one: an entry emptied by the dedupe has every bullet already on the
            page under another heading, so a fourth bullet changes nothing and the student would be
            sent round a loop. Say what actually happened instead. */
-        onDropped: ({ org, bullets, reason }) =>
+        onDropped: ({ org, title, bullets, reason }) => {
+          if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
           droppedForLength.push(
             reason === 'already_printed'
               ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
               : `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
-          ),
+          );
+        },
       });
       const removed = [...droppedForLength, ...pruned.removed];
 
@@ -799,7 +805,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          * succeeded. */
         const issues = [
           ...finalValidation.issues.filter((issue) => !providerStyleIssues.includes(issue)),
-          ...baseResumeSelectionIssues(printed, priorityEntries),
+          ...baseResumeSelectionIssues(printed, priorityEntries, { droppedAsAlreadyPrinted }),
           ...layout.issues,
           ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
           ...findPdfTextFidelityIssues(parsedPdf.text, printed, contact),

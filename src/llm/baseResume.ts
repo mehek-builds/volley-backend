@@ -246,11 +246,26 @@ export function priorityEntriesForBaseResume(
 export function baseResumeSelectionIssues(
   spec: ResumeSpec,
   priorities: ExperienceBankEntry[],
-  options: { requireFirst?: boolean } = {},
+  options: {
+    requireFirst?: boolean;
+    /* Entries the bullet floor dropped because their every bullet already prints under another
+     * heading. This gate exists to keep the applicant's defining work VISIBLE on the page, and a
+     * duplicate emptied by the cross-entry dedupe is visible - the same sentences sit under the
+     * other copy's heading. Demanding it anyway recreated the nothing-saved dead-end one level
+     * deeper: a duplicate bank row with a slightly different identity (a re-upload that renamed
+     * "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA") was required by identity,
+     * emptied by the dedupe, and refused by this gate on every rebuild. Keyed on (org, title),
+     * not org alone, so excusing a dropped duplicate cannot excuse a different role at the same
+     * organization. */
+    droppedAsAlreadyPrinted?: Array<{ org: string; title?: string | null }>;
+  } = {},
 ): string[] {
   const selected = new Set(spec.experience.map((entry) => entryIdentity(entry)));
+  const excused = new Set(
+    (options.droppedAsAlreadyPrinted ?? []).map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
+  );
   const issues = priorities
-    .filter((entry) => !selected.has(entryIdentity(entry)))
+    .filter((entry) => !selected.has(entryIdentity(entry)) && !excused.has(entryIdentity(entry)))
     .map((entry) => `required current or role-defining entry missing: ${entry.title ? `${entry.title} at ` : ''}${entry.org}`);
   const first = spec.experience[0];
   const priority = priorities[0];

@@ -456,7 +456,7 @@ test('provider-outage continuity still drops an entry the dedupe emptied', () =>
      a loop. The two routes branch on this to say what actually happened. */
   assert.deepEqual(
     dropped,
-    [{ org: 'Tonee', bullets: 0, reason: 'already_printed' }],
+    [{ org: 'Tonee', title: 'AI Engineer', bullets: 0, reason: 'already_printed' }],
     'the emptied entry is reported with the cause, not silently gone',
   );
 });
@@ -474,7 +474,7 @@ test('a genuinely thin entry still reports the bullet-count cause', () => {
 
   const dropped: { org: string; bullets: number; reason: string }[] = [];
   enforceExperienceBulletFloor(input, [source], { onDropped: (entry) => dropped.push(entry) });
-  assert.deepEqual(dropped, [{ org: 'Acme', bullets: 1, reason: 'below_floor' }]);
+  assert.deepEqual(dropped, [{ org: 'Acme', title: 'Intern', bullets: 1, reason: 'below_floor' }]);
 });
 
 /* Two genuinely different entries keep every one of their bullets. The dedupe keys on the sentence,
