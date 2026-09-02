@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   resumeGenerateSuccessResponseSchema,
+  resumeProfileIncompleteResponseSchema,
   resumeQualityHoldResponseSchema,
 } from './resumeResponseSchema';
 
@@ -81,6 +82,42 @@ describe('resume response contract', () => {
         issues: [],
         warnings: [],
       },
+    });
+    assert.equal(result.success, false);
+  });
+
+  test('a profile-incomplete hold carries its own code and names the field to fix', () => {
+    const result = resumeProfileIncompleteResponseSchema.safeParse({
+      error: 'Your profile is missing education details, so Litos did not make this resume.',
+      code: 'resume_profile_incomplete',
+      field: 'education',
+      quality: {
+        ready_to_attach: false,
+        issues: ['education degree is missing from the profile source'],
+        warnings: [],
+      },
+    });
+    assert.equal(result.success, true);
+  });
+
+  test('a profile-incomplete hold is NOT a quality hold, so a client keying on the quality-hold code does not treat it as a posting verdict', () => {
+    // The whole point of the distinct code: resume_quality_hold means "try another posting", and a
+    // missing school/degree must never take that branch. These two schemas must stay mutually
+    // exclusive on `code`.
+    const body = {
+      error: 'Your profile is missing education details, so Litos did not make this resume.',
+      code: 'resume_profile_incomplete',
+      field: 'education',
+    };
+    assert.equal(resumeQualityHoldResponseSchema.safeParse(body).success, false);
+    assert.equal(resumeProfileIncompleteResponseSchema.safeParse(body).success, true);
+  });
+
+  test('rejects an unknown fixable field', () => {
+    const result = resumeProfileIncompleteResponseSchema.safeParse({
+      error: 'x',
+      code: 'resume_profile_incomplete',
+      field: 'salary',
     });
     assert.equal(result.success, false);
   });
