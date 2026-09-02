@@ -31,6 +31,51 @@ export function blankRequiredQuestionLabels(
     .map((question) => question.question);
 }
 
+/**
+ * The answers LITOS WROTE AND SHE HAS NOT APPROVED, on a packet about to reach an employer.
+ *
+ * THE OWNER'S RULE, verbatim: for required essays Litos auto-generates from the resume and the job
+ * description, "and then asks the user if they approve of the generated answer". This is the half of
+ * that sentence a prompt cannot enforce. Before it existed, the essay drafter pushed a paragraph
+ * with no provenance at all, and the send gate - which only ever asked whether a required answer was
+ * blank - saw text and let it through. A machine paragraph in her name was therefore held to a
+ * LOWER bar than a machine blank: the blank stopped the send, the paragraph did not.
+ *
+ * REQUIRED AND OPTIONAL ALIKE. An optional drafted essay is words composed in her name just as much
+ * as a required one, and the Pinpoint "personal summary" is precisely that shape. undecidedOptional
+ * cannot cover it - a draft has a non-blank answer and no answer_state, so that check reports it
+ * decided - which is why this is its own list rather than a clause on either of the two above.
+ *
+ * WHAT CLEARS IT is not this function. It is mergeSubmittedApplicationReviewQuestions: an edit or an
+ * explicit per-question confirmation REPLACES 'litos_draft' with 'applicant_review', and the answer
+ * stops being here at all. There is no "approved draft" state to keep in sync.
+ */
+export function unapprovedLitosDraftQuestionLabels(
+  questions: readonly Pick<ApplicationReviewQuestion, 'question' | 'answer' | 'answer_source'>[] | undefined,
+): string[] {
+  return (questions ?? [])
+    .filter((question) => question.answer_source === 'litos_draft' && question.answer.trim().length > 0)
+    .map((question) => question.question);
+}
+
+/**
+ * Every required answer this packet still owes the applicant: the blanks AND the unapproved drafts.
+ *
+ * One function rather than a clause at each of the six send-facing call sites, and deliberately NOT
+ * folded into blankRequiredQuestionLabels, whose own readers (questionMetadata, the reopened-choice
+ * tests) mean "the box is empty" literally. The gate below and the two prepare decisions read this
+ * one, so a draft nobody approved fails closed on the ATS API channel and the controlled-browser
+ * path as well, which are the two that bypass the prepare decisions entirely.
+ */
+export function pendingRequiredQuestionLabels(
+  questions: readonly ApplicationReviewQuestion[] | undefined,
+): string[] {
+  return [...new Set([
+    ...blankRequiredQuestionLabels(questions),
+    ...unapprovedLitosDraftQuestionLabels(questions),
+  ])];
+}
+
 /** Optional questions need an explicit applicant decision before any employer capability opens. */
 export function undecidedOptionalQuestionLabels(
   questions: readonly Pick<ApplicationReviewQuestion,
@@ -46,7 +91,10 @@ export function undecidedOptionalQuestionLabels(
 
 export type SubmissionQuestionGate = {
   metadataBlockerCount: number;
+  /** Blank required answers AND unapproved Litos drafts, required or optional. */
   requiredQuestionLabels: string[];
+  /** The subset of the above that is a paragraph Litos wrote and she has not approved. */
+  draftQuestionLabels: string[];
   optionalQuestionLabels: string[];
   clear: boolean;
 };
@@ -56,11 +104,13 @@ export function submissionQuestionGate(
   review: Pick<ApplicationReviewState, 'questions' | 'question_metadata_blockers'>,
 ): SubmissionQuestionGate {
   const metadataBlockerCount = review.question_metadata_blockers?.length ?? 0;
-  const requiredQuestionLabels = blankRequiredQuestionLabels(review.questions);
+  const requiredQuestionLabels = pendingRequiredQuestionLabels(review.questions);
+  const draftQuestionLabels = unapprovedLitosDraftQuestionLabels(review.questions);
   const optionalQuestionLabels = undecidedOptionalQuestionLabels(review.questions);
   return {
     metadataBlockerCount,
     requiredQuestionLabels,
+    draftQuestionLabels,
     optionalQuestionLabels,
     clear: metadataBlockerCount === 0
       && requiredQuestionLabels.length === 0

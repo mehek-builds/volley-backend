@@ -248,7 +248,11 @@ test('final approval revalidates the full packet before it clicks submit', () =>
   assert.doesNotMatch(handler, /cover_letter_supported/);
   assert.match(handler, /approvalReview\.questions = normalizeApplicationReviewQuestions\(approvalReview\.questions\)/);
   assert.match(handler, /const approvalQuestionGate = submissionQuestionGate\(approvalReview\)/);
-  assert.match(handler, /approvalQuestionGate\.requiredQuestionLabels\.length > 0/);
+  /* The blank-answer sentence is now the REMAINDER of the same list: unapproved Litos drafts ride
+     in requiredQuestionLabels so every send path fails closed on them, and get their own sentence
+     above rather than being described as blank. Both halves are pinned. */
+  assert.match(handler, /approvalQuestionGate\.draftQuestionLabels\.length > 0/);
+  assert.match(handler, /approvalQuestionGate\.requiredQuestionLabels\.length > approvalQuestionGate\.draftQuestionLabels\.length/);
   assert.match(handler, /sensitiveQuestionFor\(\s*approvalReview\.questions/);
   assert.match(handler, /Sensitive question requires your attention/);
   assert.match(handler, /preSendResumeVerificationIssues\([\s\S]{0,120}request\.jwtPayload!\.userId,[\s\S]{0,80}stored,[\s\S]{0,80}applicationCompany\(row\)/);

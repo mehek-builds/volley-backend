@@ -309,6 +309,7 @@ import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import {
   blankRequiredQuestionLabels,
+  pendingRequiredQuestionLabels,
   directPreparationIsSafe,
   submissionQuestionGate,
   undecidedOptionalQuestionLabels,
@@ -4100,10 +4101,17 @@ export function packetQuestionAcknowledgement(
     }
     unmatched.splice(index, 1);
   }
+  /* 'litos_draft' SORTS WITH THE MACHINE ANSWERS, and getting that wrong would print the tampering
+   * sentence at the applicant for a feature working exactly as designed. `forged` means "this
+   * question carries a claim the audit never saw", which is a statement about a claim made in HER
+   * name; a draft marker is Litos naming itself as the author and asserting nothing about her. It is
+   * an extra question the audit never showed her, which is the definition of `unacknowledged`: not
+   * drift, not sendable, ask her next round. */
+  const machineAuthored = (source: unknown): boolean => source === undefined || source === 'litos_draft';
   return {
     missing: unmatched.map((verifiedQ) => verifiedQ.question),
-    unacknowledged: extras.filter((q) => q.answerSource === undefined).map((q) => q.question),
-    forged: extras.filter((q) => q.answerSource !== undefined).map((q) => q.question),
+    unacknowledged: extras.filter((q) => machineAuthored(q.answerSource)).map((q) => q.question),
+    forged: extras.filter((q) => !machineAuthored(q.answerSource)).map((q) => q.question),
   };
 }
 
@@ -6438,6 +6446,10 @@ export async function discoverAndResolveQuestions(
             required: fieldIsRequired,
             portal_selector: portalSelectorForField(field),
             portal_input_type: controlType,
+            /* LITOS COMPOSED THIS LETTER, so it goes out only after she has read it. Same rule and
+               same value as the essay drafter below: a generated body is a generated body whether
+               the control is called "cover letter" or "tell us about yourself". */
+            answer_source: 'litos_draft',
           });
           continue;
         }
@@ -6470,7 +6482,26 @@ export async function discoverAndResolveQuestions(
       && Boolean(existing.answer.trim())
       && existing.answer_source !== 'applicant_review'
       && wouldNotDraftNow;
-    if (existing) {
+    /* A REQUIRED OPEN-ENDED BOX AN EARLIER RUN LEFT BLANK IS STILL DRAFTABLE, and until now it was
+     * not: the existing-record block below sits above the drafter and ends in `continue`, so the
+     * first run that parked a question as required-and-blank parked it forever. The EQL Tech
+     * computer-vision question (prod, 2026-09-02) is exactly that record, and no number of re-runs
+     * could have produced a draft for it.
+     *
+     * Narrow on purpose. Only a REQUIRED record, only one with no answer at all, only one carrying
+     * no answer_state - which excludes every deliberate outcome: 'litos_refused' is a refusal that
+     * must stay hers, 'skipped' is her decision, 'unanswered' is the optional mint. And only when
+     * this build would draft the question at all, so a stale essay at a closed control still routes
+     * to the invalidation arm below. The record's id is carried into the draft, so nothing is
+     * orphaned and no answer she is mid-typing loses its prompt identity. */
+    const blankRequiredExistingIsDraftable = Boolean(existing)
+      && !existing!.answer.trim()
+      && existing!.answer_state === undefined
+      && existing!.required
+      && !(known && 'value' in known)
+      && !wouldNotDraftNow
+      && !staleDraftedAnswer;
+    if (existing && !blankRequiredExistingIsDraftable) {
       if (known && 'value' in known) {
         /* The spread must not carry HER provenance onto a machine value. `existing` can be an
          * applicant_review record whose reviewed answer no longer fits (reviewedAnswerStillFits
@@ -6601,7 +6632,7 @@ export async function discoverAndResolveQuestions(
       // A compact answer enters the form only when the normal gate accepts it. If it misses, this
       // one item falls back to the existing dedicated generator and keeps all of its feedback
       // retries. Other accepted items from the same packet are still reused.
-      const { answer, warnings } = compactValidation && compactValidation.blockingIssues.length === 0
+      const { answer, warnings, honestSubstitute } = compactValidation && compactValidation.blockingIssues.length === 0
         ? compactValidation
         : await draftApplicationAnswer(
           label,
@@ -6618,13 +6649,31 @@ export async function discoverAndResolveQuestions(
         surfaceUnansweredQuestion(field, reviewLabel, existing, false, fieldIsRequired);
         continue;
       }
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: fieldIsRequired, portal_selector: field.selector, portal_input_type: controlType });
+      questions.push({
+        id: existing?.id ?? randomUUID(),
+        question: reviewLabel,
+        answer: fitted,
+        kind: 'essay',
+        required: fieldIsRequired,
+        portal_selector: field.selector,
+        portal_input_type: controlType,
+        /* THE WHOLE OF WHAT MAKES DRAFTING SAFE. These are Litos's words in her name, so the record
+           says so and the send gate counts it as an unanswered required question until she edits it
+           or confirms it. Before this the paragraph was pushed with no flag, which every reader had
+           to interpret as "some machine put this here" - the same shape as a profile relay. */
+        answer_source: 'litos_draft',
+      });
       if (warnings.length > 0) {
         (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
-      if (!automaticSubmissionEnabled) {
-        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`AI-drafted answer needs your review before this goes out: "${label.slice(0, 60)}"`);
+      if (honestSubstitute) {
+        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`drafted from the closest real work on your resume, because this question asks about something it does not show: "${label.slice(0, 60)}"`);
       }
+      /* UNGATED ON STANDING CONSENT, and that asymmetry was the bug. With automatic submission ON,
+         this line did not run and no attention reason existed for a drafted answer at all - the one
+         configuration in which nobody was going to read it before it went. The send gate is what
+         actually holds it now; this is the sentence that tells her why. */
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`AI-drafted answer needs your review before this goes out: "${label.slice(0, 60)}"`);
     } catch (error) {
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
       surfaceUnansweredQuestion(field, reviewLabel, existing, false, fieldIsRequired);
@@ -8482,7 +8531,9 @@ async function prepareManaged(
   // nothing. It reads the failure ARRAY rather than the rendered prose, for the reason the direct
   // path's comment below gives: a sentence that renders to nothing must never be able to restore
   // `safe`.
-  const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
+  /* Blanks AND unapproved drafts. A paragraph Litos wrote in her name is not an answered question,
+     and `safe` is the standing-consent decision: without this it would send one. */
+  const unansweredRequiredQuestions = pendingRequiredQuestionLabels(mergedQuestions);
   const undecidedOptionalQuestions = undecidedOptionalQuestionLabels(mergedQuestions);
   const discoveryAttentionDiagnostics = discoveryAttention.map((reason) => {
     const questionStem = /(?:left for you|answer):\s*["']([^"']{1,160})/i.exec(reason)?.[1]
@@ -9456,7 +9507,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // transcriptAttention is the third, and the only one no server refusal backs up: nothing
       // rejects a packet for a missing transcript, so standing consent would simply send it.
       attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length + transcriptAttention.length,
-      unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
+      unansweredRequiredCount: pendingRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
     const review = nextReview(current, {
@@ -9980,9 +10031,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * The security-code sentence LEADS, for the same reason it leads in prepareManaged: it is the
      * only line that says an application has already gone to the employer. */
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(claimedReview.security_code);
-    const requiredSentence = `${unansweredRequired.length} required `
-      + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered, so this was not sent: `
-      + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`;
+    /* A DRAFT IS NOT A BLANK, and telling her a box is empty when it holds a paragraph Litos wrote
+       sends her looking for the wrong thing. Same stop, same evidence code, honest sentence. */
+    const unapprovedDrafts = questionGate.draftQuestionLabels;
+    const requiredSentence = unapprovedDrafts.length === unansweredRequired.length
+      ? `${unapprovedDrafts.length} answer${unapprovedDrafts.length === 1 ? '' : 's'} Litos drafted for you `
+        + `${unapprovedDrafts.length === 1 ? 'is' : 'are'} still waiting on your approval, so this was not sent: `
+        + `${unapprovedDrafts.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`
+      : `${unansweredRequired.length} required `
+        + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered, so this was not sent: `
+        + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`;
     await writeReviewWithRunnerNotSentFact(row, nextReview(claimedReview, {
       status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
       attention_reason: finishingSecurityCode
