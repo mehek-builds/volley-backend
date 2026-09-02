@@ -8616,7 +8616,8 @@ export function buildManagedPortalActions(
       // ever to reach the press: 400 INVALID_CONFIRM_AND_SUBMIT_SELECTOR, nothing pressed, and the
       // row left in `submitting` behind an authorized boundary. Crelate's control is an
       // input[type="button"], squarely inside the canonical set, and its "SUBMIT APPLICATION"
-      // value is what the v4 chooser's final pattern selects on.
+      // value is what the v3 chooser's final pattern selects on (crelate is not a v4 family;
+      // v4's pristine-candidate read admits only type="submit" and would drop this control).
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,

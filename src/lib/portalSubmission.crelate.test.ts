@@ -99,7 +99,9 @@ test('Crelate is statically autonomous and its managed plan uses only captured c
   assert.equal(submits.length, 1);
   /* THE MANAGED PRESS CARRIES THE CANONICAL CANDIDATE SET, NOT CRELATE'S EXACT CONTROL. stratus
    * refuses any other selector on confirmAndSubmit (400 INVALID_CONFIRM_AND_SUBMIT_SELECTOR, before
-   * a browser opens); its chooser narrows to the "SUBMIT APPLICATION" input[type="button"] itself.
+   * a browser opens); its v3 chooser narrows to the "SUBMIT APPLICATION" input[type="button"]
+   * itself (text = innerText || value, final pattern "submit ... application", score 3, the only
+   * candidate on the live Maven form).
    * The exact CRELATE_FINAL_SUBMIT_SELECTOR belongs to the direct path, pinned further down. This
    * assertion used to expect the exact selector here, which is why every crelate managed send was
    * rejected from 2026-08-09 until The Maven Group reached the press on 2026-09-02. */
