@@ -5506,16 +5506,37 @@ export function eeoAnswer(pref: string | undefined): string {
   return pref && pref.trim() ? pref.trim() : 'Decline to self-identify';
 }
 
+/**
+ * WHICH SELF-IDENTIFICATION SUBJECT AN EMPLOYER'S LABEL IS ASKING ABOUT, in the order the stored
+ * preference keys should be consulted.
+ *
+ * Extracted from eeoPreferenceForLabel unchanged, ladder and order intact, because a SECOND caller
+ * needs the same reading: Greenhouse publishes the EEOC option lists in a `compliance` block keyed
+ * by these same names (gender, race, veteran_status, disability_status), while the live DOM asks
+ * the question in the employer's own words. The join between the two is the subject, and the
+ * repo already has exactly one measured vocabulary for it. Copying that ladder into the greenhouse
+ * reader would have made two, which drift, and the drift would be a wrong option list attached to
+ * a real applicant's demographic answer.
+ */
+export function eeoSubjectPreferenceKeys(label: string): readonly string[] {
+  const l = label.toLowerCase();
+  if (/transgender/.test(l)) return ['transgender_status', 'transgender'];
+  if (/gender|sex\b/.test(l)) return ['gender', 'sex'];
+  if (/hispanic|latino/.test(l)) return ['hispanic_ethnicity', 'hispanic', 'ethnicity'];
+  if (/race|racial|ethnicit|ethnic\b/.test(l)) return ['race', 'ethnicity'];
+  if (/veteran|military/.test(l)) return ['veteran_status', 'veteran'];
+  if (/disab/.test(l)) return ['disability_status', 'disability'];
+  if (/sexual orientation/.test(l)) return ['sexual_orientation'];
+  return [];
+}
+
 function eeoPreferenceForLabel(label: string, prefs: Record<string, string> | null | undefined): string | undefined {
   if (!prefs) return undefined;
-  const l = label.toLowerCase();
-  if (/transgender/.test(l)) return prefs.transgender_status ?? prefs.transgender;
-  if (/gender|sex\b/.test(l)) return prefs.gender ?? prefs.sex;
-  if (/hispanic|latino/.test(l)) return prefs.hispanic_ethnicity ?? prefs.hispanic ?? prefs.ethnicity;
-  if (/race|racial|ethnicit|ethnic\b/.test(l)) return prefs.race ?? prefs.ethnicity;
-  if (/veteran|military/.test(l)) return prefs.veteran_status ?? prefs.veteran;
-  if (/disab/.test(l)) return prefs.disability_status ?? prefs.disability;
-  if (/sexual orientation/.test(l)) return prefs.sexual_orientation;
+  for (const key of eeoSubjectPreferenceKeys(label)) {
+    // `??` semantics, exactly as the ladder this replaced: a null stored value falls through.
+    const stored: unknown = prefs[key];
+    if (stored !== undefined && stored !== null) return prefs[key];
+  }
   return undefined;
 }
 

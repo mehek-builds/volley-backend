@@ -704,17 +704,36 @@ export function packetAuditContentIdentity(audit: PacketAudit): string {
 
 /**
  * The same identity minus HOW THE PACKET IS DELIVERED, for exactly one caller: the runner deciding
- * whether the capabilities a discovery pass just measured (does the form take a cover letter, a
- * transcript) may re-issue the audit under the approval she already gave. Everything she looked at
- * and agreed to is still compared: the spec, the job description, the job context, the questions,
- * the applicant snapshot, both email identities, every clause, term and verdict. Only the employer
- * delivery hash is set aside, and only because the caller has separately proven that the ONE thing
- * moving that hash is a fact Litos learned by looking at the form after she approved.
+ * whether what a discovery pass just measured (does the form take a cover letter, a transcript,
+ * what does it actually ask) may re-issue the audit under the approval she already gave. Everything
+ * she looked at and agreed to is still compared: the spec, the job description, the job context,
+ * the questions, the applicant snapshot, both email identities, every clause, term and verdict.
+ * Only the employer delivery hash is set aside, and only because the caller has separately proven
+ * that the ONE thing moving that hash is a fact Litos learned by looking at the form after she
+ * approved.
+ *
+ * `questionsSha256Override` IS THE ONE PLACE THE QUESTION BINDING MAY BE NARROWED, and it narrows
+ * to a subset rather than dropping the binding. A run that learns the form asks more than the
+ * approval covered re-issues the audit over the merged set, so the audit's own questionsSha256 is
+ * bound to move; dropping questions from this identity to accommodate that would silently license
+ * a changed ANSWER on a row she did approve, which is the exact content the acknowledgement exists
+ * to hold. Instead the caller hands the hash of the reissued audit's question set RESTRICTED to the
+ * rows the approval covered, and this comparison then proves those rows are byte-identical to what
+ * the prior audit bound. The rows outside that restriction are proven answerless separately, at the
+ * one caller (relearnedFormReadingAcknowledgement), before it is allowed to pass anything here.
  */
-export function packetAuditContentIdentityWithoutDelivery(audit: PacketAudit): string {
+export function packetAuditContentIdentityWithoutDelivery(
+  audit: PacketAudit,
+  questionsSha256Override?: string,
+): string {
   const { audit_digest: _digest, packet_version: _version, bindings, ...rest } = audit;
   const { pdf: _pdf, employerDelivery: _delivery, ...contentBindings } = bindings;
-  return packetAuditSha256({ ...rest, bindings: contentBindings });
+  return packetAuditSha256({
+    ...rest,
+    bindings: questionsSha256Override === undefined
+      ? contentBindings
+      : { ...contentBindings, questionsSha256: questionsSha256Override },
+  });
 }
 
 export function packetAuditIsSubmissionReady(audit: unknown): audit is PacketAudit {

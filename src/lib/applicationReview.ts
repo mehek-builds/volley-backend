@@ -1055,11 +1055,17 @@ export type ApplicationReviewState = {
      * The content is identical by construction, since every render input is frozen on the row, but
      * "a human confirmed these bytes" and "a machine rebuilt these bytes" are different facts and a
      * corpus that cannot tell them apart can never answer which packets were actually reviewed. */
-    /* 'capabilities_measured' is written by the runner's prepare when the discovery pass learned
-     * the form's cover-letter and transcript capabilities after she approved, the delivery envelope
-     * moved by exactly those facts, and nothing she looked at changed. See
-     * relearnedCapabilitiesAcknowledgement in lib/packetResumeRestore.ts. */
-    source?: 'applicant' | 'auto_restored' | 'capabilities_measured';
+    /* 'form_reading_measured' is written by the runner's prepare when the discovery pass read the
+     * employer's form after she approved and learned something the approval was taken without: the
+     * cover-letter and transcript capabilities, and the rows the form actually asks. The delivery
+     * envelope moves by exactly those facts, nothing she looked at changed, and every learned row
+     * is answerless and still has to reach her on the answers screen before any send. See
+     * relearnedFormReadingAcknowledgement in lib/packetResumeRestore.ts.
+     *
+     * 'capabilities_measured' is the same fact under its older, narrower name, written between
+     * 2026-09-01 and 2026-09-02 when the carry covered capabilities alone. It stays in the union
+     * because rows carry it; nothing writes it any more. */
+    source?: 'applicant' | 'auto_restored' | 'capabilities_measured' | 'form_reading_measured';
   };
   filled_fields?: string[];
   /* THE DOCUMENTS THIS FORM DEMANDS AND THIS RUN LEFT HER NO WAY TO GIVE IT.

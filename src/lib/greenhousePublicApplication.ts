@@ -58,6 +58,23 @@ export function greenhousePublicQuestionLabelKey(value: unknown): string | undef
 
 export type GreenhousePublicApplicationSchema = {
   fieldOptions: Record<string, string[]>;
+  /**
+   * THE EEOC SELF-IDENTIFICATION LISTS, KEYED BY THE EMPLOYER'S OWN FIELD NAME.
+   *
+   * Greenhouse publishes these in a `compliance` array that sits BESIDE `questions` at the top
+   * level, and this parser walked straight past it. Measured 2026-09-02 against a live board:
+   * `compliance[].questions[].fields[]` carries `disability_status`, `veteran_status`, `race` and
+   * `gender` as multi_value_single_select, each with its full `values[]` of `{label, value}` - the
+   * identical shape the `questions` loop already reads.
+   *
+   * That omission is what parked Hudson River Trading packet 4a79eec1: on job-boards.greenhouse.io
+   * these render as react-select comboboxes whose ids are bare numbers (245/248/249/250) with no
+   * options in the DOM, so the live probe cannot name them and the published list was the only
+   * source there was. Kept as its own map rather than folded into optionsByLabel because the
+   * compliance label is a machine token ("DisabilityStatus"), not the employer's question wording,
+   * so it can only be joined by SUBJECT - see the greenhouse join in submissionRunner.
+   */
+  complianceOptionsByField: Record<string, string[]>;
   optionsByLabel: Record<string, string[]>;
   fieldNamesByLabel: Record<string, string>;
   coverLetterSupported: boolean;
@@ -110,6 +127,7 @@ export function parseGreenhousePublicApplicationSchema(
   if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
 
   const fieldOptions: Record<string, string[]> = {};
+  const complianceOptionsByField: Record<string, string[]> = {};
   const optionsByLabel: Record<string, string[]> = {};
   const fieldNamesByLabel: Record<string, string> = {};
   const allFields: Array<{ name?: string; type?: string }> = [];
@@ -148,6 +166,25 @@ export function parseGreenhousePublicApplicationSchema(
     if (label && questionOptions.length > 0) optionsByLabel[label] = questionOptions;
   }
 
+  /* Read after the questions loop and never allowed to overwrite it: a board that publishes the
+   * same field name in both places is describing one control, and the `questions` reading is the
+   * one every other join in this repo is built on. */
+  const rawCompliance = (value as Record<string, unknown>).compliance;
+  for (const block of Array.isArray(rawCompliance) ? rawCompliance : []) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) continue;
+    const blockQuestions = (block as Record<string, unknown>).questions;
+    for (const question of Array.isArray(blockQuestions) ? blockQuestions : []) {
+      if (!question || typeof question !== 'object' || Array.isArray(question)) continue;
+      for (const field of greenhousePublicQuestionFields(question)) {
+        const fieldName = greenhousePublicFieldName(field);
+        const options = greenhousePublicFieldOptions(field);
+        if (!fieldName || options.length === 0) continue;
+        if (!complianceOptionsByField[fieldName]) complianceOptionsByField[fieldName] = options;
+        if (!fieldOptions[fieldName]) fieldOptions[fieldName] = options;
+      }
+    }
+  }
+
   const fieldNames = new Set(allFields.map((field) => field.name).filter(Boolean));
   const hasResumeFile = allFields.some((field) => field.name === 'resume' && field.type === 'input_file');
   if (!fieldNames.has('first_name')
@@ -157,6 +194,7 @@ export function parseGreenhousePublicApplicationSchema(
 
   return {
     fieldOptions,
+    complianceOptionsByField,
     optionsByLabel,
     fieldNamesByLabel,
     coverLetterSupported,

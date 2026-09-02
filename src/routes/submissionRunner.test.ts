@@ -5819,8 +5819,13 @@ test('packet drift parks with the moved binding named, and both holds log the is
   );
   assert.match(hold, /input\.log\.warn\(/, 'the hold must put the drift on a log line');
   assert.match(hold, /packetDriftIssues: issues/, 'the log line must carry the exact issue strings');
-  assert.match(hold, /attention_reason: packetDriftAttentionReason\(issues\)/,
+  /* `askOnly` is derived from the same issue list two lines above (packetDriftIsQuestionAskOnly),
+   * so the sentence still has exactly one source; what it adds is the proof that lets an ask stop
+   * wearing its own delivery shadow as a second fault. */
+  assert.match(hold, /attention_reason: packetDriftAttentionReason\(issues(?:, askOnly)?\)/,
     'the applicant sentence must come from the issue list, not a fixed string');
+  assert.match(hold, /const askOnly = packetDriftIsQuestionAskOnly\(\{\n\s*issues,/,
+    'and askOnly must itself be read off that same list');
   const callSites = source.match(/holdPreparationForPacketDrift\(\{[\s\S]{0,700}?log: fastify\.log,/g) ?? [];
   assert.equal(callSites.length, 2, 'both prepare-path holds must pass the logger');
 });
@@ -6540,7 +6545,8 @@ test('delivery drift counts as Litos-learned only when the probe alone moved it'
     packet: over.packet ?? approved,
     approvedPacket: over.approvedPacket ?? approved,
     audit,
-    verifiedQuestions: [],
+    measuredQuestions: [],
+    approvedQuestions: [],
     mode: 'browser',
     approvedEnvelope: over.approvedEnvelope ?? beforeProbe,
     measuredEnvelope: over.measuredEnvelope ?? afterProbe,
