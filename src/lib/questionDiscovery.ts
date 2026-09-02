@@ -199,12 +199,34 @@ const NEVER_FILL_PATTERNS = [
 // See WORK_ELIGIBILITY_QUESTION in the extension's generic.ts: work authorization and sponsorship
 // used to be globally refused after a false legal declaration shipped once (R-004). They are now
 // answered only from explicit stored booleans, with ambiguous mixed wording still left to the user.
-export const WORK_ELIGIBILITY_QUESTION =
-  /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+/* THE EMPLOYER AS THE SUBJECT OF THE SPONSORING, with the act named as a verb.
+ *
+ * Measured live on TixTrack (Teamtailor, 2026-09-02, application 6703778e): "will you now or in the
+ * future require tixtrack to commence (“sponsorship”) for employment visa status (e.g., h-1b visa
+ * status)?" was a required radio left unanswered with needs_sponsorship stored true. The two
+ * sponsorship arms below read "require <up to three words> sponsor" and "sponsor <up to three
+ * words> require", and this label fits neither: the employer's name, "to" and "commence" are three
+ * words, but the fourth thing before "sponsorship" is a parenthesis and a curly quote, and the
+ * welded "sponsorship* required" prefix puts an asterisk between the noun and the verb.
+ *
+ * So the applicant's need is recognised through the verb the employer will perform: require or
+ * need, then within forty characters one of the verbs an employer uses for starting a petition,
+ * then "sponsor" after at most a preposition or article ("file for sponsorship") and six
+ * characters of punctuation. Still anchored on requir/need, so
+ * "have you previously been sponsored for a visa?" (no need expressed) and "can you sponsor a
+ * colleague?" (nobody requires anything) stay outside it. */
+const SPONSORSHIP_COMMENCEMENT_SRC =
+  String.raw`\b(?:requir\w*|need\w*)\b[^?]{0,40}?\b(?:commence|initiate|file|petition\w*|obtain|begin|start|provide|undertake)\b(?:\s+(?:for|of|the|a|an|any|your|its))*[^a-z?]{0,6}sponsor`;
+export const WORK_ELIGIBILITY_QUESTION = new RegExp(
+  String.raw`(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)|${SPONSORSHIP_COMMENCEMENT_SRC}`,
+  'i',
+);
 const WORK_AUTHORIZATION_QUESTION =
   /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
-const SPONSORSHIP_QUESTION =
-  /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const SPONSORSHIP_QUESTION = new RegExp(
+  String.raw`(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)|${SPONSORSHIP_COMMENCEMENT_SRC}`,
+  'i',
+);
 /* One question that mentions both halves, asked in the order that fixes its polarity: the applicant
  * is asked whether she REQUIRES something, so "Yes" is a disclosure and never a claim of
  * eligibility. That ordering is why this family escapes the blanket refusal that other mixed labels
@@ -256,7 +278,7 @@ const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[
 const US_ABBREVIATION_SCOPE =
   /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
 const US_ABBREVIATION_SCOPE_CASE_FOLDED =
-  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
+  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation|sponsor\w*)\b/i;
 /* The employer defers the country to the posting instead of naming it.
  *
  * Broadened on 2026-08-09, measured: the three fixed phrasings it held missed Deepgram's "the
@@ -2668,8 +2690,21 @@ const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
 export const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
   /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+/* "current company org" is Lever's welded label for its Current company field (visible label plus
+ * the control's name, org), measured live on Apollo Research (application 0a5081aa, 2026-09-02) as
+ * an optional text left unanswered with current_employer on file. The bare-field arm takes the
+ * whole label: the noun the employer chose for the organisation, an optional "name" or the welded
+ * "org", nothing else. A sentence that merely mentions her current company ("does your current
+ * company know you are applying?") is a different question and stays off this rule. */
 const CURRENT_EMPLOYER_QUESTION =
-  /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b/i;
+  /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b|^\s*current\s+(?:company|organi[sz]ation|org)(?:\s+(?:name|org))?\s*[*:]?\s*$|\bname\s+of\s+(?:your\s+)?current\s+(?:company|organi[sz]ation)\b/i;
+/* Lever's "Other website" field, discovered as "other url urls[other]" on the same Apollo Research
+ * form: the visible label with the control's name welded on. The handle is read here rather than
+ * stripped by normalizeDiscoveredLabel, because "urls[LinkedIn]" on its own is a name a person can
+ * read and the discovery walk is asserted to keep it as a label. What the field asks for is one
+ * more link, and the one link the profile holds that is not LinkedIn or GitHub is the portfolio.
+ * Anchored end to end so "other" in a sentence never reaches it. */
+const OTHER_WEBSITE_QUESTION = /^\s*other\s+(?:url|website|web\s*site|link|site)s?\s*(?:urls\s*\[\s*other\s*\])?\s*[*:]?\s*$/i;
 const MOST_RECENT_EMPLOYER_QUESTION =
   /\bwhere\s+have\s+you\s+most\s+recently\s+worked\b|\bmost\s+recent\s+employer\b/i;
 const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
@@ -4726,6 +4761,14 @@ export const CONSENT_STRUCTURAL_FILLER: ReadonlySet<string> = new Set([
   // Politeness and discourse scaffolding.
   'please', 'hereby', 'herein', 'hereto', 'below', 'above', 'following', 'further', 'also', 'then',
   'thereby', 'accordance', 'accordingly', 'here', 'yes',
+  /* THE FORM'S OWN REQUIRED MARKER, welded into the label as a word. Teamtailor discovers its
+   * platform consent as "required. by submitting this application, i agree that i have read the
+   * privacy policy and confirm that tixtrack store my personal details to be able to process my
+   * job application." (TixTrack, 2026-09-02, permission granted): every other token was accounted
+   * for and the one leftover was "required", so the label held. A marker word names no document
+   * and no fact about her; it says the control must be filled, which is why the label is being
+   * read at all. */
+  'required', 'optional',
   /* The vocabulary of APPLYING and of the data itself. Not document names: every one of these
    * describes the act the applicant is performing or the material she is handing over, which is
    * what a consent sentence is made of once its document name has been removed. */
@@ -5392,7 +5435,7 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (/linkedin/i.test(l)) return 'linkedin_url';
   if (/github/i.test(l)) return 'github_url';
-  if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
+  if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l) || OTHER_WEBSITE_QUESTION.test(l)) return 'portfolio_url';
   if (CURRENT_EMPLOYER_QUESTION.test(l)) return 'current_employer';
   if (MOST_RECENT_EMPLOYER_QUESTION.test(l)) return 'most_recent_employer';
   if (TERM_QUESTION.test(l)) return 'availability_term';
@@ -5570,8 +5613,41 @@ export function isCoverLetterTextQuestion(label: string): boolean {
     .replace(/\((?:optional|required)\)/gi, ' ')
     .replace(/[*:;,.!?"'`]+/g, ' ')
     .replace(/\s+/g, ' ')
+    .trim()
+    /* THE MARKER WORD TEAMTAILOR WELDS ONTO THE LABEL. Its required textarea is discovered as
+     * "cover letter* required candidate[job_applications_attributes][0][cover_letter]" (TixTrack,
+     * 2026-09-02): the provider handle is stripped by normalizeDiscoveredLabel, the asterisk by the
+     * line above, and the bare word "required" was what was left keeping this exact match from
+     * firing, so a required cover-letter textarea sat empty while the review said the company took
+     * no cover letter. A leading or trailing marker word is decoration in the same sense the
+     * parenthesised one is; a label that reads "required" anywhere else is still not the letter. */
+    .replace(/^(?:required|optional)\s+|\s+(?:required|optional)$/i, '')
     .trim();
   return COVER_LETTER_TEXT_LABEL.test(stripped);
+}
+
+/**
+ * THE FORM TAKES THE COVER LETTER AS TEXT: a discovered control whose label is the cover letter
+ * itself and whose shape is a free-text box.
+ *
+ * The capability read that feeds `cover_letter_supported` counts file inputs (hasCoverLetterUpload,
+ * managedResultHasCoverLetterUpload), so a family that takes the letter in a textarea measured as
+ * "does not take a cover letter" even while discoverAndResolveQuestions was answering that very
+ * textarea from the stored letter. Same product, same letter, two answers to one question. This is
+ * the text half of the measurement, read off the discovery inventory with the same predicate the
+ * resolution loop applies, so the two cannot disagree about which control counts.
+ */
+export function discoveredFieldsTakeCoverLetterAsText(
+  fields: readonly Pick<DiscoveredQuestion, 'label' | 'inputType' | 'role' | 'options'>[],
+): boolean {
+  return fields.some((field) => {
+    const label = normalizeDiscoveredLabel(field.label);
+    if (!label || !isCoverLetterTextQuestion(label)) return false;
+    const role = field.role?.trim().toLowerCase();
+    if (role === 'combobox' || role === 'listbox') return false;
+    if ((field.options ?? []).some((option) => option.trim().length > 0)) return false;
+    return /^(?:text|textarea)$/i.test(field.inputType.trim() || 'text');
+  });
 }
 
 // The largest whole-sentence prefix of `text` that fits `maxLen`, or null when no real sentence
@@ -6449,6 +6525,13 @@ const EMPTY_BRACKET_HANDLE_RE = /\[\s*\]/g;
  * empty labels, which is right: "cards [field0]" names a field, tells the applicant nothing, and
  * cannot be answered by anyone. */
 const LEVER_CARD_HANDLE_RE = /\bcards\s*\[\s*field\d+\s*\]/gi;
+/* Teamtailor's Rails-style names: candidate[answers_attributes][0][answer],
+ * candidate[job_applications_attributes][0][cover_letter]. Welded onto the label exactly as
+ * above, measured on TixTrack (2026-09-02) as "cover letter* required
+ * candidate[job_applications_attributes][0][cover_letter]" and "what are your salary expectations
+ * for this position?* required candidate[answers_attributes][0][answer]". The word "candidate"
+ * followed immediately by a bracket is the handle; "candidate privacy policy" is untouched. */
+const TEAMTAILOR_CANDIDATE_HANDLE_RE = /\bcandidate\[[^\]]*\](?:\[[^\]]*\])*/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
 /* EVERY POSITIVELY IDENTIFIED PROVIDER HANDLE, in one list and in strip order.
@@ -6468,6 +6551,7 @@ const PROVIDER_HANDLE_STRIPPERS: readonly RegExp[] = [
   GREENHOUSE_SECTION_HANDLE_RE,
   EMPTY_BRACKET_HANDLE_RE,
   LEVER_CARD_HANDLE_RE,
+  TEAMTAILOR_CANDIDATE_HANDLE_RE,
   GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE,
 ];
 
@@ -7772,10 +7856,29 @@ export function resolveKnownAnswer(
         : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
     }
     case 'desired_salary': {
-      resolveSalary(
+      /* THE POSTING'S OWN RANGE ANSWERS THE POSTING'S OWN QUESTION.
+       *
+       * This arm used to call resolveSalary and throw the result away, refusing every salary
+       * question whatever it computed. Measured live on TixTrack (Teamtailor, 2026-09-02,
+       * application 6703778e): "what are your salary expectations for this position?" was a
+       * required number input refused while the description stated "Base annual salary range of
+       * $130,000 - $150,000". The median of a range the employer published is not a claim about
+       * her and not a figure Litos invented; it is the employer's number read back, which is the
+       * standing rule for salary fields. A number input gets the bare figure (140000), a text
+       * input the same figure in the posting's own spelling ($140,000).
+       *
+       * Only a STATED range fills: the label's or the description's, exactly as lib/salary.ts
+       * finds them, and only when the description states one range rather than several. A stored
+       * figure still refuses here (its currency check lives in the extension path), and a posting
+       * with no range refuses with the same sentence it always has; the researched regional median
+       * that rule calls for is not computed in this resolver. */
+      const salary = resolveSalary(
         { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
         storedSalaryOf(ap),
       );
+      if (salary.action === 'fill' && (salary.source === 'label-range' || salary.source === 'jd-range')) {
+        return { value: salary.value };
+      }
       return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }
     case 'date_of_birth':

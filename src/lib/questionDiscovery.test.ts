@@ -5,6 +5,7 @@ import {
   DISCOVER_QUESTIONS_SCRIPT,
   discoveredFieldIsFixedPortalProfileControl,
   discoveredFieldIsRequired,
+  discoveredFieldsTakeCoverLetterAsText,
   eeoAnswer,
   isCoreIdentityField,
   isCoverLetterTextQuestion,
@@ -2003,9 +2004,37 @@ test('salary questions are left for human attention', () => {
   assert.ok(eur && 'skipReason' in eur);
 });
 
-test('salary questions stay blank even when the label states a range', () => {
-  const resolved = resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined);
-  assert.ok(resolved && 'skipReason' in resolved);
+/* The posting's own range answers the posting's own question. The arm used to compute this and
+ * discard it; measured on TixTrack (Teamtailor, 2026-09-02) as a required number input refused
+ * while the description stated "$130,000 - $150,000". */
+test('a salary question fills the median of the range the label or the description states', () => {
+  assert.deepEqual(
+    resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined),
+    { value: 'USD 100,000' },
+  );
+  const tixtrack = 'what are your salary expectations for this position?* required';
+  const jd = [
+    frozenJobEmployerContext('TixTrack'),
+    'Base annual salary range of $130,000 - $150,000. Remote within the United States.',
+  ].join('\n');
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'number', {}, jd), { value: '140000' });
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'text', {}, jd), { value: '$140,000' });
+});
+
+test('a salary question with no stated range still refuses, whatever is stored', () => {
+  for (const jd of [undefined, 'Competitive compensation. Remote within the United States.']) {
+    const resolved = resolveKnownAnswer('what are your salary expectations for this position?', 'number', {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved);
+    assert.match(resolved.skipReason, /^salary question left for you/);
+  }
+  // Two distinct ranges in one description is not one stated range.
+  const twoRanges = resolveKnownAnswer(
+    'what are your salary expectations?',
+    'text',
+    {},
+    'Salary $100,000 - $120,000 in Austin; salary $130,000 - $150,000 in New York.',
+  );
+  assert.ok(twoRanges && 'skipReason' in twoRanges);
 });
 
 test('eeoAnswer is exact-match-only, never a near-miss (R-018)', () => {
@@ -2033,6 +2062,13 @@ test('isCoverLetterTextQuestion matches only labels that are the cover letter it
   assert.equal(isCoverLetterTextQuestion('Motivation letter'), true);
   assert.equal(isCoverLetterTextQuestion('Letter of Motivation'), true);
   assert.equal(isCoverLetterTextQuestion('Anschreiben'), true);
+  // Teamtailor welds its marker word and its Rails name onto the label (TixTrack, 2026-09-02).
+  assert.equal(isCoverLetterTextQuestion('cover letter* required'), true);
+  assert.equal(
+    isCoverLetterTextQuestion(normalizeDiscoveredLabel('cover letter* required candidate[job_applications_attributes][0][cover_letter]')),
+    true,
+  );
+  assert.equal(isCoverLetterTextQuestion('Required cover letter'), true);
 });
 
 test('isCoverLetterTextQuestion never fires on labels that merely contain the words', () => {
@@ -3969,10 +4005,31 @@ test('the page script and this module use ONE definition of a provider handle', 
     'urls[LinkedIn]',
     'Degree* degree--0',
     'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'candidate[answers_attributes][0][answer]',
+    'cover letter* required candidate[job_applications_attributes][0][cover_letter]',
     '姓名',
   ]) {
     assert.equal(compiled(value), isProviderHandleOnly(value), value);
   }
+});
+
+/* Teamtailor's Rails-style names, welded onto the label exactly as Lever's card handles are.
+ * Measured on TixTrack (2026-09-02): the salary question and the cover-letter textarea both
+ * carried one, and the cover-letter exact match could not fire through it. */
+test('a Teamtailor candidate[...] name is a provider handle, and the question survives without it', () => {
+  assert.equal(
+    normalizeDiscoveredLabel('what are your salary expectations for this position?* required candidate[answers_attributes][0][answer]'),
+    'what are your salary expectations for this position?* required',
+  );
+  assert.equal(
+    normalizeDiscoveredLabel('cover letter* required candidate[job_applications_attributes][0][cover_letter]'),
+    'cover letter* required',
+  );
+  assert.equal(isProviderHandleOnly('candidate[answers_attributes][0][answer]'), true);
+  assert.equal(normalizeDiscoveredLabel('candidate[answers_attributes][0][answer]'), '');
+  // The word on its own, or as part of a document name, is never a handle.
+  assert.equal(normalizeDiscoveredLabel('Candidate Privacy Notice'), 'Candidate Privacy Notice');
+  assert.equal(isProviderHandleOnly('candidate'), false);
 });
 
 test('the discovery walk falls through to a heading only for a handle, and only when it is unambiguous', () => {
@@ -4950,4 +5007,138 @@ test('the offer rule does not claim a location choice that mentions return offer
     resolveKnownAnswer('do you have any upcoming offer deadlines?', 'select', { has_outstanding_offers: false }, undefined),
     { value: 'No' },
   );
+});
+
+/* ---- the resolver round measured live on 2026-09-02 ----
+ *
+ * Five questions the managed prepare surfaced that the profile answers, each measured through this
+ * resolver before the fix (null, refused or held) and after (the expected answer). TixTrack is a
+ * Teamtailor tenant (application 6703778e); Apollo Research is Lever (application 0a5081aa). */
+
+const TIXTRACK_SPONSORSHIP_LABEL =
+  'us sponsorship* required will you now or in the future require tixtrack to commence (“sponsorship”) for employment visa status (e.g., h-1b visa status)?';
+
+test('a sponsorship question naming the employer as the one to commence it is answered from needs_sponsorship', () => {
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  const doesNot = { work_authorized: true, needs_sponsorship: false };
+  // Measured before: resolveKnownAnswer returned null and classifyField null; the radio sat empty.
+  assert.deepEqual(resolveKnownAnswer(TIXTRACK_SPONSORSHIP_LABEL, 'radio', needs, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer(TIXTRACK_SPONSORSHIP_LABEL, 'radio', doesNot, undefined), { value: 'No' });
+  assert.equal(WORK_ELIGIBILITY_QUESTION.test(TIXTRACK_SPONSORSHIP_LABEL), true);
+  // The same shape with other commencement verbs, scoped by the posting instead of by the label.
+  for (const label of [
+    'will you now or in the future require acme to initiate sponsorship for an employment visa?',
+    'do you now, or will you in the future, need the company to file for sponsorship of a work visa?',
+    'will you now or in the future require acme to commence sponsorship?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US'), { value: 'Yes' }, label);
+    // Unscoped and without a US marker, the country is unknown and the question still holds.
+    const unscoped = resolveKnownAnswer(label, 'radio', needs, undefined);
+    assert.ok(unscoped && 'skipReason' in unscoped, label);
+  }
+  // A future-only wording keeps the legacy-scalar rule it always had: one stored bit cannot say
+  // whether the need is present or future, so the question holds. The arm widens what is
+  // recognised as a sponsorship question, not what a stored declaration may say.
+  const futureOnly = resolveKnownAnswer('will you require acme to initiate sponsorship for an employment visa?', 'radio', needs, undefined, 'us', 'US');
+  assert.ok(futureOnly && 'skipReason' in futureOnly);
+  assert.match(futureOnly.skipReason, /^work-eligibility question left for you/);
+  // Nothing stored: held, never invented.
+  const unasked = resolveKnownAnswer(TIXTRACK_SPONSORSHIP_LABEL, 'radio', {}, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+});
+
+test('the commencement arm never claims a past sponsorship or sponsoring someone else', () => {
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  for (const label of [
+    'have you previously been sponsored for a visa?',
+    'have you ever been sponsored by an employer in the united states?',
+    'are you able to sponsor a colleague for a work visa?',
+    'would you be willing to sponsor a new hire?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US');
+    assert.ok(!(resolved && 'value' in resolved), label);
+  }
+});
+
+test('a "us sponsorship" heading scopes the question to the United States', () => {
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  assert.deepEqual(
+    resolveKnownAnswer('us sponsorship: will you now or in the future require sponsorship for employment visa status?', 'radio', needs, undefined),
+    { value: 'Yes' },
+  );
+  // A visa class named as an example is not a country: Redwood's label lists H-1B beside TN and
+  // E-3, and that family stays held until the posting supplies the country.
+  const unscoped = resolveKnownAnswer('will you now or in the future require sponsorship for employment visa status (e.g. h-1b)?', 'radio', needs, undefined);
+  assert.ok(unscoped && 'skipReason' in unscoped);
+});
+
+const TIXTRACK_CONSENT_LABEL =
+  'required. by submitting this application, i agree that i have read the privacy policy and confirm that tixtrack store my personal details to be able to process my job application.';
+
+test('a platform consent sentence that opens with the required marker word is accepted under the standing permission', () => {
+  const granted = {
+    consent_acknowledgement_permission: { granted_at: '2026-08-12T00:00:00.000Z', version: '2026-08-12' },
+  };
+  const context = frozenJobEmployerContext('TixTrack');
+  // Measured before: "required" was the one token nothing accounted for, and the label held.
+  assert.deepEqual(resolveKnownAnswer(TIXTRACK_CONSENT_LABEL, 'checkbox', granted, context), { value: 'Yes' });
+  // The applicant's stored profile booleans do not license it; only the standing permission does.
+  for (const profile of [{}, { accept_privacy_notices: true }]) {
+    const held = resolveKnownAnswer(TIXTRACK_CONSENT_LABEL, 'checkbox', profile, context);
+    assert.ok(held && 'skipReason' in held);
+    assert.match(held.skipReason, /privacy notice/);
+  }
+  // Without the packet's employer line the company name is unaccounted for and the label holds.
+  const noEmployer = resolveKnownAnswer(TIXTRACK_CONSENT_LABEL, 'checkbox', granted, undefined);
+  assert.ok(noEmployer && 'skipReason' in noEmployer);
+});
+
+test('the marker word does not open a truth attestation, an authorization or a covenant', () => {
+  const granted = {
+    consent_acknowledgement_permission: { granted_at: '2026-08-12T00:00:00.000Z', version: '2026-08-12' },
+    conduct_acknowledgement_permission: { granted_at: '2026-08-12T00:00:00.000Z', version: '2026-08-12' },
+  };
+  const context = frozenJobEmployerContext('TixTrack');
+  for (const label of [
+    'required. i certify that the information provided in this application is true and complete.',
+    'required. i authorize tixtrack to conduct a background check.',
+    'required. i agree to the non-compete agreement.',
+    'required. i agree to binding arbitration of any dispute.',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'checkbox', granted, context);
+    assert.ok(!(resolved && 'value' in resolved), label);
+  }
+});
+
+test("Lever's welded current-company and other-website labels answer from the profile", () => {
+  const ap = { current_employer: 'Tonee', portfolio_url: 'https://mehek.example' };
+  // Measured before: both returned null.
+  assert.equal(classifyField('current company org'), 'current_employer');
+  assert.deepEqual(resolveKnownAnswer('current company org', 'text', ap, undefined), { value: 'Tonee' });
+  assert.deepEqual(resolveKnownAnswer('Current company', 'text', ap, undefined), { value: 'Tonee' });
+  assert.deepEqual(resolveKnownAnswer('Name of current company', 'text', ap, undefined), { value: 'Tonee' });
+  assert.equal(classifyField('other url urls[other]'), 'portfolio_url');
+  assert.deepEqual(resolveKnownAnswer('other url urls[other]', 'text', ap, undefined), { value: 'https://mehek.example' });
+  assert.deepEqual(resolveKnownAnswer('Other website', 'text', ap, undefined), { value: 'https://mehek.example' });
+  // No portfolio stored: skipped, not invented.
+  assert.equal(resolveKnownAnswer('other url urls[other]', 'text', { current_employer: 'Tonee' }, undefined), null);
+  // A sentence that mentions the current company, and a link field for something else, stay off.
+  assert.equal(classifyField('does your current company know you are applying?'), null);
+  assert.equal(classifyField('what other urls should we look at when reviewing your work?'), null);
+  assert.notEqual(classifyField('urls[LinkedIn]'), 'portfolio_url');
+});
+
+test('discoveredFieldsTakeCoverLetterAsText counts only a free-text control that IS the cover letter', () => {
+  const textarea = {
+    label: 'cover letter* required candidate[job_applications_attributes][0][cover_letter]',
+    inputType: 'textarea',
+    options: null,
+  };
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([textarea]), true);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'text', options: [] }]), true);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'file', options: null }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'select', options: ['Yes', 'No'] }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'text', role: 'combobox', options: null }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Why is a cover letter important to you?', inputType: 'textarea', options: null }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([]), false);
 });
