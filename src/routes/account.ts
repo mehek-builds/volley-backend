@@ -54,7 +54,7 @@ import {
   cancelBillingBeforeAccountDeletion,
 } from '../lib/accountDeletionBilling';
 import { drainManagedTerminalCleanupBeforeAccountDeletion } from './submissionRunner';
-import { lockSubmissionAttemptUser } from '../lib/submissionAttemptLedger';
+import { lockSubmissionAttemptUser, lockSubmissionProviderCallUser } from '../lib/submissionAttemptLedger';
 import { drainBrowserProviderResourcesBeforeAccountDeletion } from '../lib/browserProviderResourceCleanup';
 
 type AccountTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -317,7 +317,14 @@ export async function accountRoutes(fastify: FastifyInstance) {
     }
     try {
       await db.transaction(async (tx) => {
+        /* BOTH KEYS, LEDGER FIRST. The ledger key serialises this against every ledger writer and
+         * is the key the submission-authority revision trigger try-locks for the drain insert
+         * below. The provider-call key is what an in-flight managed provider call now holds, so
+         * taking it here is what still makes a drain wait for that call and fence every later one.
+         * This order is fixed everywhere both are taken; the provider fence takes only the second
+         * key, so there is no cycle. */
         await lockSubmissionAttemptUser(tx, userId);
+        await lockSubmissionProviderCallUser(tx, userId);
         const [ownedAccount] = await tx.select({ id: users.id }).from(users)
           .where(eq(users.id, userId)).limit(1);
         if (!ownedAccount) throw new Error('Account disappeared before deletion could be fenced');

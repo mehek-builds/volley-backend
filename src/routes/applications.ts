@@ -150,6 +150,7 @@ import {
   submissionAttemptEventsForPacket,
   submissionAttemptsOpenedToday,
   submissionAttemptRetrySafety,
+  tryLockSubmissionAttemptUser,
   type SubmissionAttemptBinding,
   type SubmissionAttemptEventRecord,
 } from '../lib/submissionAttemptLedger';
@@ -563,13 +564,42 @@ async function ownedResume(request: FastifyRequest, reply: FastifyReply) {
  * release simply does not happen - null on any miss, and the caller proceeds with the stored row,
  * whose gates then refuse exactly as they did before. That is the safe failure direction: a missed
  * release costs one more request, a wrong release could cost a duplicate application. */
+/* The cheapest possible "could either repair branch move this row" question, asked of the row a
+ * route has ALREADY read, before the helper opens a transaction or touches a lock at all.
+ *
+ * Both branches need a claim: expiredAlternateSubmissionReview returns null without
+ * submission_claim_id, and expiredAttendedHandoffClaimIsReleasable returns null without
+ * submission_claimed_at. Both refuse a submitted row and a row carrying a receipt - the alternate
+ * branch explicitly, the release branch through employerMayHoldApplication. So a row failing this
+ * predicate cannot be repaired by either branch, and skipping it changes no outcome.
+ *
+ * GET /applications/:id/submission runs the helper on every 2.5s dashboard poll, so for the vast
+ * majority of rows this turns a transaction plus an advisory lock into a field read. */
+export function expiredHandoffClaimRepairIsPossible(
+  review: Pick<
+    ApplicationReviewState,
+    'status' | 'submission_claim_id' | 'submission_claimed_at' | 'submitted_at' | 'receipt'
+  > | null,
+): boolean {
+  if (!review) return false;
+  if (!review.submission_claim_id && !review.submission_claimed_at) return false;
+  if (review.status === 'submitted' || review.submitted_at || review.receipt) return false;
+  return true;
+}
+
 async function repairExpiredAttendedHandoffClaim(
   row: NonNullable<Awaited<ReturnType<typeof ownedResume>>>,
   userId: string,
   log: FastifyRequest['log'],
 ): Promise<NonNullable<Awaited<ReturnType<typeof ownedResume>>> | null> {
+  if (!expiredHandoffClaimRepairIsPossible(readApplicationReview(row.spec))) return null;
   const result = await db.transaction(async (tx) => {
-    await lockSubmissionAttemptUser(tx, userId);
+    /* TRY, NEVER WAIT. This helper is documented best-effort: "null on any miss, and the caller
+     * proceeds with the stored row, whose gates then refuse exactly as they did before". A lost
+     * race for the lock is exactly such a miss, and it costs one more request. Waiting for it is
+     * what let a 280s managed provider call hold this route open on every dashboard poll, pinning
+     * a pool client until the whole API queued under its 10s checkout ceiling. */
+    if (!await tryLockSubmissionAttemptUser(tx, userId)) return null;
     const [locked] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, userId),

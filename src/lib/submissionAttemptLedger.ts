@@ -520,6 +520,46 @@ export async function lockSubmissionAttemptUser(
   await executor.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`submission-attempt:${userId}`}, 0::bigint))`);
 }
 
+/* THE FENCE KEY, WHICH IS NOT THE LEDGER KEY.
+ *
+ * Measured in production 2026-09-02 01:30 UTC. One managed prepare for one account held
+ * `submission-attempt:<userId>` across a whole stratus call: a backend sat "idle in transaction"
+ * for 47s, two more waited behind it, GET /resume/history did not return in 25s, and /applications,
+ * /profile, /me, /billing/state and /resume/base each took 7.7s because the blocked readers pinned
+ * pool clients and everything else queued under the 10s checkout ceiling. The provider fence needs
+ * exactly one guarantee - an account deletion drain and an in-flight provider call for that user
+ * can never overlap - and that guarantee has nothing to say about ledger readers.
+ *
+ * So the provider call takes its OWN per-user key. Account deletion takes the ledger key and then
+ * this one, in that fixed order, so a committed drain is still observed by every later provider
+ * call and a drain still cannot commit while a call is in flight. Ledger writers keep taking only
+ * `submission-attempt:<userId>`, which is also the key the lock_submission_authority_revision_user
+ * trigger try-locks, so a fill no longer makes every write to that user's generated_resumes,
+ * applications or artifacts raise 40001 and 503.
+ *
+ * Keep this key PER USER, never per posting: "one provider call at a time for one account" is what
+ * stops two managed runs racing the same employer session.
+ */
+export async function lockSubmissionProviderCallUser(
+  executor: Pick<typeof db, 'execute'>,
+  userId: string,
+): Promise<void> {
+  await executor.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`submission-provider-call:${userId}`}, 0::bigint))`);
+}
+
+/* The same serialization asked without waiting, for a best-effort reader that must never queue
+ * behind a writer. False means "somebody else holds it"; the caller's documented answer to that is
+ * to do nothing, which is the same answer it already gives to a lost CAS. */
+export async function tryLockSubmissionAttemptUser(
+  executor: Pick<typeof db, 'execute'>,
+  userId: string,
+): Promise<boolean> {
+  const result = await executor.execute(
+    sql`select pg_try_advisory_xact_lock(hashtextextended(${`submission-attempt:${userId}`}, 0::bigint)) as acquired`,
+  );
+  return (result.rows[0] as { acquired?: unknown } | undefined)?.acquired === true;
+}
+
 /** Read the one immutable employer-boundary authorization for an exact attempt. */
 export async function submissionBoundaryAuthorization(
   userId: string,

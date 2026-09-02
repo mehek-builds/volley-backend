@@ -68,7 +68,7 @@ import {
   runManagedBrowser,
   startManagedBrowserRequestBudget,
 } from '../lib/browserbase';
-import { createFencedBrowserSession, databaseNow } from '../lib/browserProviderResourceCleanup';
+import { createFencedBrowserSession } from '../lib/browserProviderResourceCleanup';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from '../lib/workableApplicationUrl';
 import {
   managedContinuationAttemptFingerprint,
@@ -325,6 +325,7 @@ import {
   MAX_USER_DOCUMENT_BYTES,
 } from '../lib/documentStore';
 import { duplicateApplicationVerdict, type DuplicateApplicationVerdict } from '../lib/duplicateApplication';
+import { withProviderCallFence } from '../lib/submissionAccountFence';
 import {
   authorizeFinalSubmissionBoundary,
   appendSubmissionAttemptEvent,
@@ -865,11 +866,7 @@ async function runManagedBrowserWithAccountFence(
   userId: string,
   ...args: Parameters<typeof runManagedBrowser>
 ): Promise<ManagedBrowserResult> {
-  return db.transaction(async (tx) => {
-    await lockSubmissionAttemptUser(tx, userId);
-    await assertSubmissionAccountNotDraining(tx, userId);
-    return runManagedBrowser(...args);
-  });
+  return withProviderCallFence(userId, () => runManagedBrowser(...args));
 }
 
 /** Keep every retained-session provider POST behind the account drain until the call finishes. */
@@ -892,10 +889,8 @@ async function continueManagedBrowserWithAccountFence(
     throw new Error('Fenced managed continuation with a pre-existing budget requires its provider deadline');
   }
   const { timeoutMs, ...boundedOptions } = options;
-  return db.transaction(async (tx) => {
-    await lockSubmissionAttemptUser(tx, userId);
-    await assertSubmissionAccountNotDraining(tx, userId);
-    const fenceNow = await databaseNow(tx);
+  return withProviderCallFence(userId, async ({ fenceDatabaseNow }) => {
+    const fenceNow = await fenceDatabaseNow();
     /* A budget we own starts only after the advisory lock is held. pg_advisory_xact_lock blocks
      * with no timeout, and this fence holds it across a whole provider call, so starting the clock
      * before the wait would charge another caller's provider call to this one and then trip the

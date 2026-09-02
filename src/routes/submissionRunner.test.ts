@@ -3286,14 +3286,38 @@ test('every managed provider start, continuation POST, and direct session creati
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const runnerSource = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+
+  /* The fence body itself now lives in lib/submissionAccountFence.ts. Its ONE lock is the
+   * provider-call key: taking the ledger key here is what stalled every dashboard reader and made
+   * the revision trigger 503 every write for the length of a fill. */
+  const fenceSource = readFileSync(join(__dirname, '../lib/submissionAccountFence.ts'), 'utf8');
+  const bodyStart = fenceSource.indexOf('export async function withProviderCallFence');
+  assert.ok(bodyStart > 0, 'the provider call fence must be one named, testable function');
+  const fenceBody = fenceSource.slice(bodyStart);
+  assert.ok(fenceBody.includes('lockSubmissionProviderCallUser(tx, userId)'));
+  assert.ok(!fenceBody.includes('lockSubmissionAttemptUser('),
+    'the provider fence must not hold the ledger key across a provider call');
+  assert.ok(fenceBody.indexOf('lockSubmissionProviderCallUser(tx, userId)')
+    < fenceBody.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
+  assert.ok(fenceBody.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
+    < fenceBody.indexOf('return call({'));
+
+  /* Account deletion is the other half of drain-fences-provider-call, and it takes BOTH keys,
+   * ledger first, so a drain waits for an in-flight call and fences every later one. */
+  const accountSource = readFileSync(join(__dirname, 'account.ts'), 'utf8');
+  const drainAt = accountSource.indexOf('managed_submission_account_deletion_drains).values({');
+  assert.ok(drainAt > 0);
+  const drainFence = accountSource.slice(0, drainAt);
+  assert.ok(drainFence.lastIndexOf('await lockSubmissionAttemptUser(tx, userId);')
+    < drainFence.lastIndexOf('await lockSubmissionProviderCallUser(tx, userId);'),
+    'the deletion drain must take the ledger key first and the provider-call key second');
+
   const fenceStart = runnerSource.indexOf('async function runManagedBrowserWithAccountFence(');
   const fenceEnd = runnerSource.indexOf('\n}', fenceStart) + 2;
   const fence = runnerSource.slice(fenceStart, fenceEnd);
   assert.ok(fenceStart > 0);
-  assert.ok(fence.indexOf('lockSubmissionAttemptUser(tx, userId)')
-    < fence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
-  assert.ok(fence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
-    < fence.indexOf('return runManagedBrowser(...args)'));
+  assert.ok(fence.indexOf('withProviderCallFence(userId,')
+    < fence.indexOf('runManagedBrowser(...args)'));
   assert.equal(
     [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
     1,
@@ -3304,15 +3328,13 @@ test('every managed provider start, continuation POST, and direct session creati
   const continuationFenceEnd = runnerSource.indexOf('\n}', continuationFenceStart) + 2;
   const continuationFence = runnerSource.slice(continuationFenceStart, continuationFenceEnd);
   assert.ok(continuationFenceStart > 0);
-  assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
-    < continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
-  assert.ok(continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
-    < continuationFence.indexOf('databaseNow(tx)'));
+  assert.ok(continuationFence.indexOf('withProviderCallFence(userId,')
+    < continuationFence.indexOf('fenceDatabaseNow()'));
   // A budget this fence owns must start after the blocking advisory lock, never before it, or the
   // lock wait is charged to the provider window and trips the minimum-dispatch assertion.
-  assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+  assert.ok(continuationFence.indexOf('withProviderCallFence(userId,')
     < continuationFence.indexOf('startManagedBrowserRequestBudget('));
-  assert.ok(continuationFence.indexOf('databaseNow(tx)')
+  assert.ok(continuationFence.indexOf('fenceDatabaseNow()')
     < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
   assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
     < continuationFence.indexOf('return continueManagedBrowser('));
@@ -3339,6 +3361,31 @@ test('every managed provider start, continuation POST, and direct session creati
     < create.indexOf('await createReservedBrowserSession('));
   assert.ok(create.indexOf('await createReservedBrowserSession(')
     < create.indexOf('provider_resource_id: session.id'));
+});
+
+test('the dashboard poll repair reader tries the ledger key and never queues behind a provider call', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const applicationsSource = readFileSync(join(__dirname, 'applications.ts'), 'utf8');
+  const repairStart = applicationsSource.indexOf('async function repairExpiredAttendedHandoffClaim(');
+  assert.ok(repairStart > 0);
+  const repair = applicationsSource.slice(repairStart, applicationsSource.indexOf('\nfunction editableResumeSpec(', repairStart));
+  assert.ok(repair.includes('tryLockSubmissionAttemptUser(tx, userId)'),
+    'GET /applications/:id/submission runs this on every 2.5s poll; it must never wait for the lock',
+  );
+  assert.ok(!repair.includes('await lockSubmissionAttemptUser('));
+  assert.ok(repair.indexOf('expiredHandoffClaimRepairIsPossible(')
+    < repair.indexOf('db.transaction('),
+    'a row no branch could repair must not open a transaction at all',
+  );
+
+  const ledgerSource = readFileSync(join(__dirname, '../lib/submissionAttemptLedger.ts'), 'utf8');
+  const tryLockStart = ledgerSource.indexOf('export async function tryLockSubmissionAttemptUser(');
+  assert.ok(tryLockStart > 0);
+  assert.match(
+    ledgerSource.slice(tryLockStart, tryLockStart + 500),
+    /pg_try_advisory_xact_lock\(hashtextextended\(\$\{`submission-attempt:\$\{userId\}`\}/u,
+  );
 });
 
 test('unattended preparation parks unavailable monitored jobs before browser work', async () => {
