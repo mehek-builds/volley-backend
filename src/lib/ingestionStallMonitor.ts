@@ -33,11 +33,13 @@
 import { ingestionHealth, type IngestionHealth } from './ingestionHealth';
 
 export const DEFAULT_MONITOR_INTERVAL_MS = 10 * 60_000;
-/* Long enough that an observation survives until the next GitHub delivery even at the worst
-   measured gap (400 minutes), so a recorded stall cannot expire unread; short enough that the
-   alarm clears itself within a day once the board recovers, instead of staying red until a human
-   acknowledges it and thereby training everyone to ignore it. */
-export const DEFAULT_OBSERVATION_RETENTION_MS = 12 * 60 * 60_000;
+/* An observation must outlast the gap between the reads that collect it, or it expires unseen and
+   the stall is reported never - the exact hole this record was added to close. The worst gaps
+   measured across this repository's last 100 scheduled runs are 808 and 746 minutes, so anything
+   at or under 12 hours is too short. 24 hours clears that with margin while still letting the
+   alarm reset itself within a day, rather than staying red until a human acknowledges it and
+   thereby training everyone to ignore it. */
+export const DEFAULT_OBSERVATION_RETENTION_MS = 24 * 60 * 60_000;
 export const DEFAULT_THRESHOLD_MS = 180 * 60_000;
 
 export type BoardFreshness = { newest_seen_at: Date | null; active_jobs: number };
@@ -52,7 +54,13 @@ export type IngestionObservations = {
   started_at: string | null;
   checks: number;
   read_failures: number;
-  last_checked_at: string | null;
+  /* The last read that COMPLETED and therefore established something. Deliberately separate from
+     last_attempt_at: a read that threw advanced the clock but settled nothing, and letting a
+     failed attempt masquerade as an observation is how a dead monitor passes for a live one. */
+  last_observation_at: string | null;
+  minutes_since_last_observation: number | null;
+  last_attempt_at: string | null;
+  minutes_since_started: number | null;
   /* The last sample that positively proved the board fresh. Stays put across read failures on
      purpose: an unreadable database is not evidence of a healthy board. */
   last_healthy_at: string | null;
@@ -92,7 +100,8 @@ export class IngestionStallMonitor {
   private startedAt: number | null = null;
   private checks = 0;
   private readFailures = 0;
-  private lastCheckedAt: number | null = null;
+  private lastObservationAt: number | null = null;
+  private lastAttemptAt: number | null = null;
   private lastHealthyAt: number | null = null;
   private currentlyStalled: boolean | null = null;
   private stalls: StallSample[] = [];
@@ -147,7 +156,8 @@ export class IngestionStallMonitor {
       const freshness = await this.read();
       const at = this.now();
       this.checks += 1;
-      this.lastCheckedAt = at.getTime();
+      this.lastObservationAt = at.getTime();
+      this.lastAttemptAt = at.getTime();
       const health = ingestionHealth(freshness.newest_seen_at, this.thresholdMs, at);
       if (health.stalled) {
         this.currentlyStalled = true;
@@ -179,12 +189,15 @@ export class IngestionStallMonitor {
          ignored. A monitor that cannot read at all shows up as a last_healthy_at that stops
          advancing, which is the signal a reader should judge. */
       this.readFailures += 1;
-      this.lastCheckedAt = this.now().getTime();
+      /* Only the ATTEMPT clock moves. last_observation_at must not advance for a read that
+         established nothing, or a monitor that has never once succeeded reads as freshly alive. */
+      this.lastAttemptAt = this.now().getTime();
       this.logger.error(JSON.stringify({
         event: 'ingestion_stall_check_failed',
         alert: true,
         error: error instanceof Error ? error.message : String(error),
-        checked_at: new Date(this.lastCheckedAt).toISOString(),
+        attempted_at: new Date(this.lastAttemptAt).toISOString(),
+        observations_so_far: this.checks,
       }));
       return null;
     } finally {
@@ -205,7 +218,8 @@ export class IngestionStallMonitor {
   }
 
   snapshot(): IngestionObservations {
-    this.prune(this.now().getTime());
+    const nowMs = this.now().getTime();
+    this.prune(nowMs);
     return {
       monitor_running: this.running,
       monitor_interval_minutes: Math.floor(this.intervalMs / 60_000),
@@ -214,7 +228,10 @@ export class IngestionStallMonitor {
       started_at: iso(this.startedAt),
       checks: this.checks,
       read_failures: this.readFailures,
-      last_checked_at: iso(this.lastCheckedAt),
+      last_observation_at: iso(this.lastObservationAt),
+      minutes_since_last_observation: elapsedMinutes(this.lastObservationAt, nowMs),
+      last_attempt_at: iso(this.lastAttemptAt),
+      minutes_since_started: elapsedMinutes(this.startedAt, nowMs),
       last_healthy_at: iso(this.lastHealthyAt),
       currently_stalled: this.currentlyStalled,
       stall_observations: this.stalls.length,
@@ -228,6 +245,12 @@ export class IngestionStallMonitor {
 
 function positive(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/** Whole minutes from `since` to `nowMs`, or null when the thing never happened. */
+function elapsedMinutes(since: number | null, nowMs: number): number | null {
+  if (typeof since !== 'number' || !Number.isFinite(since)) return null;
+  return Math.max(0, Math.floor((nowMs - since) / 60_000));
 }
 
 function iso(ms: number | null | undefined): string | null {

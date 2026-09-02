@@ -338,8 +338,10 @@ the **API** service, not the worker. This is deliberate: on 2026-09-01 the worke
 logo-verification retry loop reporting SUCCESS and polling nothing for seven and a half hours, so a
 check hosted inside the worker would have been wedged by the loop it was meant to report. The API
 samples the board every `INGESTION_STALL_CHECK_INTERVAL_MS`, logs `ingestion_stall_alert` with
-`alert: true` on every stalled sample, and keeps what it observed for twelve hours so that a stall
-which begins and ends between two reads is still reported. `ingestion-stall-alert.yml` reads that
+`alert: true` on every stalled sample, and keeps what it observed for twenty-four hours so that a
+stall which begins and ends between two reads is still reported - longer than the worst GitHub
+delivery gap measured on this repository (808 minutes), so a recorded stall cannot expire before
+the run that would have reported it. `ingestion-stall-alert.yml` reads that
 record rather than sampling the board itself, because GitHub delivered every scheduled workflow in
 this repository only five to eight times a day from 2026-08-27 onward regardless of the cron
 declared. Detection latency is the interval above; GitHub notification latency is 3.5-5 hours and

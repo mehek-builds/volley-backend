@@ -26,7 +26,9 @@
 # SO DETECTION MOVED INTO THE API PROCESS, which Railway keeps alive and probes at /health, and
 # which is deliberately NOT the job-monitor worker - the worker is the component that wedged, and
 # an alarm hosted inside it would have been wedged by the same loop. It samples the board every
-# INGESTION_STALL_CHECK_INTERVAL_MS (10 minutes by default) and keeps what it saw for 12 hours.
+# INGESTION_STALL_CHECK_INTERVAL_MS (10 minutes by default) and keeps what it saw for 24 hours -
+# longer than the worst GitHub delivery gap measured here (808 minutes), so a recorded stall
+# cannot expire before the run that would have reported it.
 # This job reads that record.
 #
 # WHAT THAT BUYS. Reading a REMEMBERED record instead of taking an instantaneous sample is the
@@ -143,6 +145,10 @@ jobs:
           worst_at=$(jq -r '.observed.worst_observed_at // "unknown"' "${response_file}")
           window=$(jq -r '.observed.retention_hours // "unknown"' "${response_file}")
           last_healthy=$(jq -r '.observed.last_healthy_at // "never"' "${response_file}")
+          interval=$(jq -r '.observed.monitor_interval_minutes // 10' "${response_file}")
+          since_observation=$(jq -r '.observed.minutes_since_last_observation // -1' "${response_file}")
+          since_started=$(jq -r '.observed.minutes_since_started // -1' "${response_file}")
+          failures=$(jq -r '.observed.read_failures // 0' "${response_file}")
 
           # FAIL CLOSED WHEN NOBODY IS SAMPLING. An API process that never started the monitor is
           # not evidence of a healthy board - it is the absence of any evidence at all, which is
@@ -151,6 +157,26 @@ jobs:
             echo "::error::The in-process ingestion stall monitor is NOT RUNNING on the API, so nothing is watching the board between these runs. Detection is currently only as good as this workflow's 3.5-5 hour delivery. Check the API boot logs for 'ingestion_stall_alert' wiring."
             exit 1
           fi
+
+          # FAIL CLOSED WHEN NOTHING HAS ACTUALLY BEEN OBSERVED. `stall_observations: 0` means
+          # "no stall was seen", which is only good news if somebody was looking. A monitor whose
+          # every read times out reports exactly the same zero as a healthy board, and reading that
+          # as health is the same bug that let the 2026-09-01 stall run for seven and a half hours.
+          # Three intervals of grace, so a process that has only just restarted is not called dead.
+          grace=$(( interval * 3 ))
+          if [ "${since_observation}" -lt 0 ]; then
+            if [ "${since_started}" -gt "${grace}" ]; then
+              echo "::error::The ingestion stall monitor is running but has NEVER completed a check in the ${since_started} minutes since it started (${failures} read failures). Nothing is observing the board, so the zero below is an absence of evidence, not evidence of health."
+              exit 1
+            fi
+            echo "::notice::The monitor started ${since_started} minutes ago and has not completed its first check yet. Reporting the live reading only."
+            since_observation_text="never (first check pending)"
+          elif [ "${since_observation}" -gt "${grace}" ]; then
+            echo "::error::The ingestion stall monitor last completed a check ${since_observation} minutes ago, more than ${grace} minutes (three intervals), with ${failures} read failures. Its record is stale, so any stall since then went unobserved."
+            exit 1
+          fi
+
+          : "${since_observation_text:=${since_observation} minutes ago}"
 
           if [ "${stalled}" != "false" ]; then
             echo "::error::JOB INGESTION HAS STALLED. Newest posting seen ${minutes} minutes ago (${newest}), threshold ${threshold} minutes. The board is not being fed. Check the litos-job-worker logs: the 2026-09-01 cause was a logo queue that could not drain holding the poll cycle open."
@@ -165,4 +191,4 @@ jobs:
           fi
 
           echo "Ingestion healthy: newest posting seen ${minutes} minutes ago (${newest}), threshold ${threshold} minutes."
-          echo "Monitor: sampling every $(jq -r '.observed.monitor_interval_minutes' "${response_file}") minutes, $(jq -r '.observed.checks' "${response_file}") checks and $(jq -r '.observed.read_failures' "${response_file}") read failures since $(jq -r '.observed.started_at' "${response_file}"), no stall observed in the last ${window}h, last proven healthy ${last_healthy}."
+          echo "Monitor: sampling every ${interval} minutes, $(jq -r '.observed.checks' "${response_file}") completed checks and ${failures} read failures in the ${since_started} minutes since it started, last observation ${since_observation_text}, no stall observed in the last ${window}h, last proven healthy ${last_healthy}."

@@ -32,7 +32,7 @@ function harness(options: {
     },
     thresholdMs: options.thresholdMs ?? 180 * MINUTES,
     intervalMs: options.intervalMs ?? 10 * MINUTES,
-    retentionMs: options.retentionMs ?? 12 * 60 * MINUTES,
+    retentionMs: options.retentionMs ?? 24 * 60 * MINUTES,
     logger: SILENT,
     now: () => new Date(nowMs),
     setTimer: () => 'timer',
@@ -128,6 +128,50 @@ test('a read that throws is unknown, never healthy', async () => {
   assert.equal(failed.stall_observations, 0, 'a database blip is not a stalled board');
   assert.equal(failed.last_healthy_at, healthy.last_healthy_at, 'and it proves nothing fresh');
   assert.equal(failed.checks, 1, 'a failed read is not a completed check');
+  assert.equal(failed.last_observation_at, healthy.last_observation_at, 'nor a new observation');
+  assert.equal(failed.minutes_since_last_observation, 10, 'the record is now visibly 10 minutes old');
+  assert.notEqual(failed.last_attempt_at, failed.last_observation_at, 'but the attempt is recorded');
+});
+
+test('a monitor that has never completed a check is visibly empty, not visibly fine', async () => {
+  /* THE FAIL-OPEN THIS CLOSES. stall_observations is 0 both when nothing went wrong and when
+     nobody ever looked. Those must not be indistinguishable, or a monitor whose every read fails
+     reports the same zero as a healthy board - which is the 2026-09-01 bug wearing a new hat.
+     A reader decides with minutes_since_last_observation; it is null only when nothing was ever
+     established, and minutes_since_started says whether that is alarming or merely early. */
+  const h = harness({ reads: [new Error('timeout')] });
+  h.monitor.start();
+  await h.monitor.check();
+
+  const empty = h.monitor.snapshot();
+  assert.equal(empty.stall_observations, 0, 'the same zero a healthy board reports');
+  assert.equal(empty.checks, 0);
+  assert.equal(empty.read_failures, 1);
+  assert.equal(empty.minutes_since_last_observation, null, 'but nothing was ever observed');
+  assert.equal(empty.minutes_since_started, 0, 'and this is still within the boot grace');
+
+  h.advance(60 * MINUTES);
+  await h.monitor.check();
+  const stillEmpty = h.monitor.snapshot();
+  assert.equal(stillEmpty.minutes_since_last_observation, null);
+  assert.equal(stillEmpty.minutes_since_started, 60, 'well past any grace: this reads as broken');
+});
+
+test('the retention window outlasts the worst measured GitHub delivery gap', async () => {
+  /* An observation that expires before the run that would have reported it is an observation that
+     was never taken. Measured worst gaps across this repository's last 100 scheduled runs are 808
+     and 746 minutes, so a 12-hour window was too short. */
+  const h = harness({ reads: [board(FROZEN_AT)], start: '2026-09-01T18:00:00.000Z' });
+  h.monitor.start();
+  await h.monitor.check();
+  assert.equal(h.monitor.snapshot().stall_observations, 1);
+
+  h.advance(808 * MINUTES);
+  assert.equal(
+    h.monitor.snapshot().stall_observations,
+    1,
+    'still reportable after the worst delivery gap ever measured here',
+  );
 });
 
 test('a board that has never been polled is stalled', async () => {
