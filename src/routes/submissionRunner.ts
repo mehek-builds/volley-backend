@@ -11658,8 +11658,27 @@ function unverifiedSubmissionPatch(
   };
 }
 
+/* THE PROVIDER TEARING THE BROWSER DOWN IS A PROVIDER SESSION FAILURE, AND IT DID NOT SAY SO.
+ *
+ * Measured live 2026-09-02 on DSI Innovations (Recruitee, run 35a497e0): the managed run reached
+ * "Filling your answers" at 13:02:47 and stopped at 13:07:17 - 270_000ms later, exactly Stratus'
+ * MANAGED_RUN_TIMEOUT_MS. The provider closed the browser out from under the in-flight wait, so
+ * Playwright threw its own sentence rather than either of the two Stratus phrases below, nothing
+ * matched, and the row recorded `reason: 'unclassified'`.
+ *
+ * That is the one classification the stop vocabulary calls "deliberately not guessed at", and it
+ * costs a real fact: the run DID stop because the session went away, and the record said only that
+ * nobody knew. The Playwright shape is distinctive - it names page, context and browser together -
+ * and is emitted only when the target is gone, which is the definition of this reason.
+ *
+ * NOTHING IS RELAXED. 'provider_session_failure' is deliberately absent from PRECEDES_CLICK, so a
+ * row classified here keeps its claim and takes the same conservative exit 'unclassified' took.
+ * This names the stop; it does not make one re-runnable. Only the before-submit variant, which is
+ * proved by where the throw happens rather than by any message, releases a claim. */
 export function isProviderSessionFailureMessage(message: string): boolean {
-  return /sandbox stream was closed|not accepting commands/i.test(message);
+  return /sandbox stream was closed|not accepting commands/i.test(message)
+    || /target (?:page|closed)[^.]*?(?:context|browser) has been closed/i.test(message)
+    || /target page, context or browser has been closed/i.test(message);
 }
 
 /**
