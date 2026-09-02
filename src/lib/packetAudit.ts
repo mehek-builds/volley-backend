@@ -177,6 +177,52 @@ export function packetAuditSha256(value: unknown): string {
   return createHash('sha256').update(canonicalPacketJson(value)).digest('hex');
 }
 
+/* THE ONE FIELD OF THE APPLICANT SNAPSHOT THAT IS NOT ABOUT THIS APPLICATION.
+ *
+ * `application_profile.submitted_application_companies` is Litos' own send log - every company this
+ * account has an application at, read live out of the database on every build
+ * (lib/applicationProfileLike.ts, `submittedApplicationCompanies`). It is GLOBAL and it MOVES: any
+ * row anywhere in the account reaching submitted or unverified adds a name to it.
+ *
+ * Hashing it into a PER-APPLICATION binding made every approved packet in the account invalid the
+ * moment any one of them landed. Measured on this account 2026-09-02: the stored snapshot carried a
+ * 69-name list, a single failed send added its employer, and from then on every send refused with
+ * "The employer-bound packet changed after approval: applicant snapshot changed after packet
+ * approval; browser employer-delivery payload changed after packet approval" - on packets nobody had
+ * touched. It is self-poisoning rather than merely noisy, because claimSubmission opens this
+ * employer's attempt BEFORE buildPacket runs, so a send could arrange its own refusal.
+ *
+ * WHY DROPPING IT DOES NOT WEAKEN THE GUARANTEE, which is the only question that matters here.
+ * The list has exactly one consumer, `applicationAlreadyAtPacketEmployer`
+ * (lib/questionDiscovery.ts:1247), and it reads ONE bit out of it:
+ * `history.some((company) => isSameCompany(company, packetEmployer))`. The other sixty-eight names
+ * cannot change a byte this employer ever sees. And when that one bit DOES flip, it flips an ANSWER
+ * - the send log's only job is to withdraw an answer and hand the question back - and answers are
+ * bound separately and exactly, as `questionsSha256` here and as `packet.questions` in
+ * verifiedBuiltPacketIssues. So an employer-relevant change still parks the send, through the check
+ * that was always the right one to catch it.
+ *
+ * Same shape of argument as LIVE_FORM_READING_FIELDS in submissionRunner.ts: exempt what the
+ * applicant did not author and cannot see, keep every byte she approved.
+ *
+ * ONE-TIME COST, stated because it is real: audits minted before this hashed the full snapshot, so
+ * an already-acknowledged packet mismatches once and re-approving re-binds it. Those packets refuse
+ * to send today anyway, so this strictly improves them. */
+export function applicantSnapshotBindingValue(snapshot: unknown): unknown {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
+  const record = snapshot as Record<string, unknown>;
+  const profile = record.application_profile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return snapshot;
+  if (!('submitted_application_companies' in (profile as Record<string, unknown>))) return snapshot;
+  const { submitted_application_companies: _sendLog, ...boundProfile } = profile as Record<string, unknown>;
+  return { ...record, application_profile: boundProfile };
+}
+
+/** The applicant-snapshot binding. Always minted and checked through the projection above. */
+export function applicantSnapshotSha256(snapshot: unknown): string {
+  return packetAuditSha256(applicantSnapshotBindingValue(snapshot));
+}
+
 export function packetAuditTextSha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
@@ -385,7 +431,7 @@ function packetBindings(input: PacketBindingInput): PacketAuditBindings {
     specSha256: packetAuditSha256(normalizedSpec),
     jobContextSha256: packetAuditSha256(input.jobContext),
     questionsSha256: packetAuditSha256(packetVisibleQuestions(input.questions)),
-    applicantSnapshotSha256: packetAuditSha256(input.applicantSnapshot),
+    applicantSnapshotSha256: applicantSnapshotSha256(input.applicantSnapshot),
     resumeContactEmailSha256: packetAuditSha256(input.resumeEmail.trim().toLowerCase()),
     applicantEmailSha256: packetAuditSha256(input.applicantEmail.trim().toLowerCase()),
     ...(input.employerDelivery ? { employerDelivery: input.employerDelivery } : {}),

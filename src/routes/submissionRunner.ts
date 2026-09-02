@@ -204,7 +204,7 @@ import {
   currentPacketAudit,
   packetAuditClientError,
 } from '../lib/packetAuditService';
-import { packetAuditSha256, packetAuditTextSha256, type PacketAudit } from '../lib/packetAudit';
+import { applicantSnapshotSha256, packetAuditSha256, packetAuditTextSha256, type PacketAudit } from '../lib/packetAudit';
 import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
 import {
   browserEmployerDeliveryChannel,
@@ -4127,7 +4127,7 @@ export function verifiedBuiltPacketIssues(
   envelope: EmployerDeliveryEnvelope,
 ): string[] {
   const issues: string[] = [];
-  if (packetAuditSha256(packet.applicantSnapshot) !== audit.bindings.applicantSnapshotSha256) {
+  if (applicantSnapshotSha256(packet.applicantSnapshot) !== audit.bindings.applicantSnapshotSha256) {
     issues.push('applicant snapshot changed after packet approval');
   }
   if (packetAuditTextSha256(packet.jdText ?? '') !== audit.bindings.jdSha256) {
