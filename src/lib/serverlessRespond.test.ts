@@ -32,8 +32,15 @@ import { respondWhenFinished } from './serverlessRespond';
  * Deliberately NOT `Promise.race` against an already-resolved marker: both arms are queued as
  * microtasks and which one the race adopts depends on subscription order, so that version reported
  * a settled promise as pending. Setting a flag and then yielding a full macrotask tick is decided
- * by the event loop rather than by microtask ordering. `setImmediate` also does not let the 20ms
- * timer below fire, so a genuinely pending promise still reads as pending.
+ * by the event loop rather than by microtask ordering.
+ *
+ * ONE TICK AND NO MORE, and callers must not race it against a wall-clock timer that settles the
+ * very promise being measured. The test below used to emit `finish` from a 20ms `setTimeout`; under
+ * CPU load - a full test sweep, or roughly one isolated run in three - the timer fired before this
+ * `setImmediate` callback ran, so a pending promise read as settled and a correct implementation
+ * failed. Sleeping longer here does not fix that, it inverts the test: it lets the answer arrive
+ * and then reports settled for a promise that was pending at the only moment that mattered. The
+ * answer must instead be released by the test, after this has already read the promise.
  */
 async function isSettled(p: Promise<unknown>): Promise<boolean> {
   let settled = false;
@@ -55,11 +62,21 @@ describe('the serverless handler waits for the response', () => {
     const server = new EventEmitter();
     const res = fakeResponse();
     // A handler that accepts the request and answers later, which is every route that touches the
-    // database. `emit` returns synchronously here, exactly as it does in production.
-    server.on('request', () => setTimeout(() => res.emit('finish'), 20));
+    // database. `emit` returns synchronously here, exactly as it does in production, and the
+    // response stays open until this test releases it a few lines down. The release is an explicit
+    // signal rather than a timer on purpose: a `setTimeout` would race the tick `isSettled` yields,
+    // and the test would be asserting on whichever of the two the event loop happened to run first.
+    let accepted = false;
+    server.on('request', () => {
+      accepted = true;
+    });
 
     const done = respondWhenFinished(server, {} as IncomingMessage, res);
     assert.equal(await isSettled(done), false, 'settling here is the bug: the response is still open');
+    assert.ok(accepted, 'the fake server never received the request, so nothing was under test');
+
+    // The response answers now. Everything before this line ran with it still open.
+    res.emit('finish');
     await done;
     assert.equal(await isSettled(done), true);
   });

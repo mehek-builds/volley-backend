@@ -6024,7 +6024,18 @@ export async function discoverAndResolveQuestions(
        optional blank must never enter blankRequiredQuestionLabels, or the send gate would hold a
        complete application over a field the employer does not require. */
     required = true,
-    answerState: ApplicationReviewQuestion['answer_state'] = required ? undefined : 'unanswered',
+    /* 'unanswered' HERE IS THE MACHINE TALKING, and it must not talk over her.
+     *
+     * This default means "Litos has nothing to type". 'skipped' means something only the applicant
+     * can say: "I have read this and I am leaving the control alone." Re-discovery re-mints the row
+     * on every run, so defaulting unconditionally let a machine state overwrite an applicant
+     * decision one fill later, and the question she had already settled came back as work. Her
+     * decision therefore carries forward unless a caller names a state explicitly, which the
+     * refusal branches do on purpose: a value from a superseded unsafe resolver has to be
+     * re-confirmed rather than inherited. */
+    answerState: ApplicationReviewQuestion['answer_state'] = existing?.answer_state === 'skipped'
+      ? 'skipped'
+      : (required ? undefined : 'unanswered'),
   ): ApplicationReviewQuestion => ({
     id: existing?.id ?? randomUUID(),
     question: reviewLabel,
@@ -6327,7 +6338,18 @@ export async function discoverAndResolveQuestions(
     //
     // Only when the control really had a list. matchedOption is false for every free-text field
     // too, and those are filled with the value beside it.
-    if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
+    //
+    // Said once, not on every fill. The point above is to TELL her about a control Litos knows it
+    // will leave empty. Once she has read that and marked the question skipped, saying it again
+    // informs her of nothing and costs her the send: this list is a term of `safe`, so the row
+    // returns to needs_attention on every run and the Send control never appears. That is a loop
+    // with no exit, because the option list Litos could not match is the same one next time.
+    //
+    // Optional only. A required field left empty at the portal is still her work whatever she
+    // marked, so the required branch keeps raising it.
+    const applicantSkippedThisQuestion = existing?.answer_state === 'skipped';
+    if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0
+      && (fieldIsRequired || !applicantSkippedThisQuestion)) {
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
     }
     if (rememberedWithoutOptionConstraint !== undefined
@@ -6484,8 +6506,19 @@ export async function discoverAndResolveQuestions(
           current.questions_reviewed_at,
         )
           && knownValue.trim() === existing.answer.trim();
+        /* AND HER SKIP FOLLOWS THE ANSWER TOO, for the reason the paragraph above exists.
+         *
+         * 'skipped' is a decision she took against ONE value: "that is the right answer and this
+         * control will not take it." Carried onto a value the machine has since recomputed, it
+         * silences the send gate for something she never saw, because the exemption that reads it
+         * is keyed on the question's LABEL rather than on what the label now answers. The state is
+         * dropped rather than set to undefined: a key that exists holding nothing is a different
+         * record from a key that was never written, and this one is compared as a record. */
+        const skipOutlivedItsAnswer = existing.answer_state === 'skipped'
+          && knownValue.trim() !== existing.answer.trim();
+        const { answer_state: _skipOnAReplacedAnswer, ...existingWithoutStaleSkip } = existing;
         questions.push({
-          ...existing,
+          ...(skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing),
           ...(existing.answer_source === 'applicant_review' && !provenanceStillHers
             ? { answer_source: undefined, answer_reviewed_at: undefined }
             : {}),
