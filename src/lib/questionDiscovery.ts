@@ -2685,6 +2685,29 @@ const PROGRAMMING_LANGUAGE_PROFICIENCY_QUESTION =
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
+/* THE SALARY SHE IS ASKING FOR, as opposed to the one she has, had, or is being asked to accept.
+ *
+ * SALARY_QUESTION routes every label that mentions pay to the desired_salary arm, and that is the
+ * right routing for REFUSING: none of those questions may be answered from a stored figure without
+ * the currency check. It is the wrong routing for FILLING. The posting's own range answers exactly
+ * one question, "what do you want to be paid for this role", and the arm was measured (2026-09-02,
+ * probe against the TixTrack description) typing the employer's $140,000 median into "current
+ * salary", "salary history", "what was your most recent salary?", "have you ever received workers
+ * compensation?" and "is the salary range listed acceptable to you?". A current-salary field filled
+ * with the posting's median is a false statement of her compensation history, not the employer's
+ * number read back.
+ *
+ * So a fill needs all three: the label asks for what she EXPECTS, DESIRES or REQUIRES; nothing in
+ * it points at a salary she has or had; and the control is an open one that takes a figure. A
+ * polar question ("are you comfortable with the range?") and a closed control (radio, checkbox,
+ * select) are a different question with a yes/no answer that no median can be. "required" is left
+ * off the expectation words on purpose: it is the marker Teamtailor welds onto every label
+ * ("compensation* required"), and it says nothing about what is being asked. */
+const EXPECTED_SALARY_QUESTION =
+  /\b(?:expect\w*|desired?|target\w*|seeking|sought|looking\s+for|requirements?|minimum|ask(?:ing)?|ideal|preferred|wish\w*|want\w*|hop(?:e|es|ed|ing))\b/i;
+const SALARY_HISTORY_QUESTION =
+  /\b(?:current|previous|prior|last|most\s+recent|former|past|existing|present|today'?s)\s+(?:(?:base|annual|total|gross|net|monthly|hourly|yearly)\s+)*(?:salary|salaries|compensation|pay|wage|wages|remuneration|earnings|package|ctc|rate)\b|\b(?:salary|compensation|pay|wage|earnings?)\s+history\b|\bworkers'?\s+comp|\b(?:at|in|from|during)\s+your\s+(?:current|previous|prior|last|most\s+recent|former|past)\b|\bwhat\s+(?:was|were)\b|\bhave\s+you\s+(?:ever\s+)?(?:received|earned|been\s+paid)\b|\bcurrently\s+(?:earn|make|paid)\b/i;
+const OPEN_SALARY_CONTROL = /^(?:text|textarea|number)?$/i;
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
@@ -7864,20 +7887,43 @@ export function resolveKnownAnswer(
        * required number input refused while the description stated "Base annual salary range of
        * $130,000 - $150,000". The median of a range the employer published is not a claim about
        * her and not a figure Litos invented; it is the employer's number read back, which is the
-       * standing rule for salary fields. A number input gets the bare figure (140000), a text
-       * input the same figure in the posting's own spelling ($140,000).
+       * standing rule for salary fields.
+       *
+       * ONE VALUE WHATEVER THE CONTROL'S TYPE, and that is load-bearing rather than tidy. The first
+       * cut of this arm gave a number input "140000" and a text input "$140,000". The runner
+       * resolves with the live control's type and the refresh (refreshKnownQuestionAnswers, and
+       * knownAnswerLookup beside it) resolves with a hardcoded 'text', so the value the runner
+       * stored was rewritten on the next packet read, the audit and the fill disagreed about the
+       * question, and the send gate answered "application questions changed after packet
+       * approval" on every press: the packet_stale deadlock documented at the phone rule, and the
+       * reason lib/phoneCountry.ts returns a country name for every control type. So the figure is
+       * the bare median on both shapes, as lib/salary.ts computes it for a numeric field; a text
+       * input accepts "140000" as readily as a number input does, and a browser sanitises
+       * "$140,000" on <input type=number> to nothing at all.
+       *
+       * ONLY THE QUESTION THE RANGE ANSWERS. See EXPECTED_SALARY_QUESTION: the label has to ask
+       * for her expected, desired or required pay, must not point at a salary she has or had, and
+       * the control must be an open one; everything else SALARY_QUESTION routes here keeps the
+       * refusal it always had.
        *
        * Only a STATED range fills: the label's or the description's, exactly as lib/salary.ts
        * finds them, and only when the description states one range rather than several. A stored
        * figure still refuses here (its currency check lives in the extension path), and a posting
        * with no range refuses with the same sentence it always has; the researched regional median
        * that rule calls for is not computed in this resolver. */
-      const salary = resolveSalary(
-        { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
-        storedSalaryOf(ap),
-      );
-      if (salary.action === 'fill' && (salary.source === 'label-range' || salary.source === 'jd-range')) {
-        return { value: salary.value };
+      const asksForHerExpectedPay = EXPECTED_SALARY_QUESTION.test(label)
+        && !SALARY_HISTORY_QUESTION.test(label)
+        && !isPolarQuestion(label)
+        && OPEN_SALARY_CONTROL.test(inputType.trim());
+      if (asksForHerExpectedPay) {
+        const salary = resolveSalary({ label, field: 'numeric', jdText }, storedSalaryOf(ap));
+        if (salary.action === 'fill' && (salary.source === 'label-range' || salary.source === 'jd-range')) {
+          /* "$130,001 - $150,000" has a median of 140000.5, which a step=1 number input rejects.
+           * An annual figure is rounded to the unit; an hourly one (under 1000) keeps its cents. */
+          const figure = Number(salary.value);
+          const wholeAnnualFigure = Number.isFinite(figure) && figure >= 1000 && !Number.isInteger(figure);
+          return { value: wholeAnnualFigure ? String(Math.round(figure)) : salary.value };
+        }
       }
       return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }

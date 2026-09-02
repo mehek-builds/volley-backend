@@ -20,6 +20,7 @@ import {
   isPolarQuestion,
   isProviderHandleOnly,
   isRefusedQuestion,
+  knownAnswerLookup,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
@@ -2007,18 +2008,80 @@ test('salary questions are left for human attention', () => {
 /* The posting's own range answers the posting's own question. The arm used to compute this and
  * discard it; measured on TixTrack (Teamtailor, 2026-09-02) as a required number input refused
  * while the description stated "$130,000 - $150,000". */
+const TIXTRACK_SALARY_JD = [
+  frozenJobEmployerContext('TixTrack'),
+  'Base annual salary range of $130,000 - $150,000. Remote within the United States.',
+].join('\n');
+
 test('a salary question fills the median of the range the label or the description states', () => {
+  // The bare figure on every control type: a text input takes "100000" and a number input takes
+  // nothing else. See the refresh-path test below for why the spelling must not depend on type.
   assert.deepEqual(
     resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined),
-    { value: 'USD 100,000' },
+    { value: '100000' },
   );
   const tixtrack = 'what are your salary expectations for this position?* required';
-  const jd = [
-    frozenJobEmployerContext('TixTrack'),
-    'Base annual salary range of $130,000 - $150,000. Remote within the United States.',
-  ].join('\n');
-  assert.deepEqual(resolveKnownAnswer(tixtrack, 'number', {}, jd), { value: '140000' });
-  assert.deepEqual(resolveKnownAnswer(tixtrack, 'text', {}, jd), { value: '$140,000' });
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'number', {}, TIXTRACK_SALARY_JD), { value: '140000' });
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'text', {}, TIXTRACK_SALARY_JD), { value: '140000' });
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'textarea', {}, TIXTRACK_SALARY_JD), { value: '140000' });
+  for (const label of ['expected salary', 'salary requirements', 'what is your minimum salary?', 'target compensation']) {
+    assert.deepEqual(resolveKnownAnswer(label, 'number', {}, TIXTRACK_SALARY_JD), { value: '140000' }, label);
+  }
+  // A half-dollar median is rounded for the step=1 number input; an hourly figure keeps its cents.
+  assert.deepEqual(resolveKnownAnswer('expected salary', 'number', {}, 'Salary $130,001 - $150,000'), { value: '140001' });
+  assert.deepEqual(resolveKnownAnswer('expected pay (hourly)', 'number', {}, 'Pay $20.50 - $25.50 per hour'), { value: '23' });
+});
+
+/* The runner resolves with the live control's type; refreshKnownQuestionAnswers and
+ * knownAnswerLookup resolve with a hardcoded 'text'. A value that differed by type ("140000" against
+ * "$140,000") was rewritten on the next packet read, and the send gate then answered "application
+ * questions changed after packet approval" on every press of the TixTrack packet. */
+test('the salary figure the runner stores survives the refresh path unchanged', () => {
+  const raw = 'what are your salary expectations for this position?* required candidate[answers_attributes][0][answer]';
+  const runner = resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'number', {}, TIXTRACK_SALARY_JD);
+  assert.ok(runner && 'value' in runner);
+  assert.equal(knownAnswerLookup({}, TIXTRACK_SALARY_JD)({ question: raw }), runner.value);
+  const [refreshed] = refreshKnownQuestionAnswers(
+    [{ question: raw, answer: '140000', required: true, portal_input_type: 'number', kind: 'required' }],
+    {},
+    TIXTRACK_SALARY_JD,
+    undefined,
+    'us',
+    'US',
+  );
+  assert.equal(refreshed.answer, '140000');
+});
+
+/* SALARY_QUESTION routes every label that mentions pay here, and the first cut of the fill typed the
+ * posting's median into all of them (probe, 2026-09-02). A current-salary field filled with the
+ * employer's number is a false statement of her history; a polar question and a closed control want
+ * a yes or a no that no median can be. Every one of these refused on origin/main and must go on
+ * refusing, with the range on the posting AND on the label. */
+test('the range median fills only a question about her expected pay on an open control', () => {
+  const mustRefuse: Array<[string, string]> = [
+    ['current salary', 'number'],
+    ['what is your current base salary?', 'number'],
+    ['salary history', 'text'],
+    ['please list your compensation at your last three roles', 'textarea'],
+    ['what was your most recent salary?', 'number'],
+    ['previous salary', 'number'],
+    ['current salary (e.g. $90,000 - $110,000)', 'text'],
+    ['current compensation package (base + bonus)', 'text'],
+    ['have you ever received workers compensation?', 'radio'],
+    ['are you comfortable with the compensation range stated in the posting?', 'radio'],
+    ['is the salary range listed acceptable to you?', 'radio'],
+    ['do you have any questions about compensation?', 'textarea'],
+    ['are you willing to accept a salary within our stated range?', 'checkbox'],
+    ['compensation* required', 'text'],
+    ['salary', 'text'],
+    ['what are your salary expectations?', 'select'],
+    ['what are your salary expectations?', 'radio'],
+  ];
+  for (const [label, type] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, TIXTRACK_SALARY_JD);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} [${type}]`);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
 });
 
 test('a salary question with no stated range still refuses, whatever is stored', () => {
