@@ -63,12 +63,20 @@ test('naming this stop grants nothing - it is still not a pre-click stop', () =>
  * moved - bindingMismatchKeys is built for exactly this - and the log line dropped it. */
 test('a withheld packet audit logs the reason and which bindings moved', () => {
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const call = runner.slice(
-    runner.indexOf('Application preparation withheld because the exact packet audit') - 900,
-    runner.indexOf('Application preparation withheld because the exact packet audit'),
-  );
+  const anchor = runner.indexOf('Application preparation withheld because the exact packet audit');
+  // Window is measured from the log call that precedes the message, not a fixed character count,
+  // so adding or trimming the comment above it cannot silently move the assertions off the target.
+  const callStart = runner.lastIndexOf('fastify.log.warn(', anchor);
+  const call = runner.slice(callStart, anchor);
   assert.match(call, /reason: packetAudit\.reason/);
-  assert.match(call, /bindingMismatchKeys: packetAudit\.bindingMismatchKeys/);
+  /* `?? []` specifically: an EMPTY list is the diagnostic signal (all thirteen bindings equal while
+   * packet_version still differed = structural drift, the Flow Traders 761e0add signature). A
+   * presence guard would omit the key exactly there, making the one case worth diagnosing look
+   * identical to an un-deployed fix. */
+  assert.match(call, /bindingMismatchKeys: packetAudit\.bindingMismatchKeys \?\? \[\]/);
+  // Both withheld-audit sites must log the key set identically, or an operator reads a missing
+  // key as a difference in the packet rather than a difference in the call site.
+  assert.equal(runner.split('bindingMismatchKeys: packetAudit.bindingMismatchKeys ?? []').length - 1, 2);
   // The token must still never reach the applicant's sentence.
   assert.match(runner, /attention_reason: packetAuditClientError\(packetAudit\)\.error/);
 });

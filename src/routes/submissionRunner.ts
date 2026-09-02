@@ -8934,9 +8934,16 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         applicationId: row.id,
         code: packetAudit.code,
         reason: packetAudit.reason,
-        ...(packetAudit.bindingMismatchKeys?.length
-          ? { bindingMismatchKeys: packetAudit.bindingMismatchKeys }
-          : {}),
+        /* `?? []` rather than a presence guard, and the empty array is the POINT.
+         * An empty list means all thirteen named bindings compared equal while packet_version
+         * still differed - structural drift in the stored bindings object rather than an edit to
+         * any one field - which is exactly the Flow Traders 761e0add signature this line exists to
+         * name. Omitting the key there would make "no binding moved" indistinguishable from "this
+         * deploy does not log the field", leaving the one case worth diagnosing looking identical
+         * to the pre-change line. The sibling submit site already logs it this way; the two must
+         * not disagree, or an operator comparing a prepare stop with a submit stop reads the
+         * absence of a key as a difference in the packet. */
+        bindingMismatchKeys: packetAudit.bindingMismatchKeys ?? [],
       },
       'Application preparation withheld because the exact packet audit is missing or stale',
     );
