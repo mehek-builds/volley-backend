@@ -30,6 +30,37 @@ test('a run that found no submit control says nothing was sent', () => {
     'the one sentence this branch exists to avoid');
 });
 
+/* THE MAVEN GROUP, 305dae5e, 2026-09-02. The drift gate refused this Crelate packet before a browser
+   was opened, and because the refusal was an untyped Error it inherited uncertainAfterClaim: the row
+   said "Litos pressed Send and the page never showed a confirmation it could read", quoted the
+   employer's apply URL, and asked the applicant to go and look. Nothing had been sent. */
+test('a packet that drifted before the send says nothing was sent and never points at the employer page', () => {
+  const out = submissionFailureOutcome({
+    ...base,
+    packetDriftIssues: ['applicant snapshot changed after packet approval'],
+  });
+  assert.equal(out.status, 'needs_attention');
+  assert.match(out.attentionReason!, /it was not sent/);
+  assert.doesNotMatch(out.attentionReason!, /check the portal or your email/i,
+    'the sentence every pre-click arm exists to avoid');
+  assert.doesNotMatch(out.attentionReason!, /pressed Send/i);
+});
+
+test('the drift sentence names which binding moved, so re-approving is not a blind loop', () => {
+  const out = submissionFailureOutcome({
+    ...base,
+    packetDriftIssues: ['resume file changed after packet approval'],
+  });
+  assert.match(out.attentionReason!, /the resume file/,
+    'an applicant told only "it changed" reopens the packet, sees nothing different, and lands here again');
+});
+
+test('an empty drift issue list is not a drift, so it cannot silently claim nothing was sent', () => {
+  const out = submissionFailureOutcome({ ...base, packetDriftIssues: [] });
+  assert.match(out.attentionReason!, /check the portal or your email/i,
+    'with no issues there is no proof the gate refused, so the uncertain arm must still own it');
+});
+
 test('the pre-click route transition is retryable and stores no attempted or submitted residue', () => {
   const current = {
     status: 'submission_claimed',

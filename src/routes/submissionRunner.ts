@@ -204,7 +204,7 @@ import {
   currentPacketAudit,
   packetAuditClientError,
 } from '../lib/packetAuditService';
-import { packetAuditSha256, packetAuditTextSha256, type PacketAudit } from '../lib/packetAudit';
+import { applicantSnapshotSha256, packetAuditSha256, packetAuditTextSha256, type PacketAudit } from '../lib/packetAudit';
 import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
 import {
   browserEmployerDeliveryChannel,
@@ -4127,7 +4127,7 @@ export function verifiedBuiltPacketIssues(
   envelope: EmployerDeliveryEnvelope,
 ): string[] {
   const issues: string[] = [];
-  if (packetAuditSha256(packet.applicantSnapshot) !== audit.bindings.applicantSnapshotSha256) {
+  if (applicantSnapshotSha256(packet.applicantSnapshot) !== audit.bindings.applicantSnapshotSha256) {
     issues.push('applicant snapshot changed after packet approval');
   }
   if (packetAuditTextSha256(packet.jdText ?? '') !== audit.bindings.jdSha256) {
@@ -4174,6 +4174,37 @@ export function verifiedBuiltPacketIssues(
   return issues;
 }
 
+/* THE DRIFT REFUSAL, AS A TYPE RATHER THAN AS A SENTENCE ABOUT ONE.
+ *
+ * THE DEFECT THIS EXISTS FOR, measured on The Maven Group 305dae5e (Crelate, 2026-09-02). Every
+ * assertVerifiedBuiltPacket call site sits AHEAD of the employer transport - transportVerifiedBuiltPacket
+ * asserts and only then calls transport(), and the managed send asserts before runManagedBrowser is
+ * reached at all - so a drift refusal is structurally a run in which no browser ever opened. It threw
+ * a bare Error, so fail() found no `instanceof` it recognised, classifySubmissionStop returned
+ * 'unclassified', and 'unclassified' is deliberately not in PRECEDES_CLICK. The row therefore took
+ * the unverified exit and told the applicant "Litos pressed Send and the page never showed a
+ * confirmation it could read", naming the employer's apply URL and asking her to go and look - for a
+ * run that provably never pressed anything. It then blocked every future send to that posting behind
+ * an unverified record that can only be cleared by answering a question about an application that
+ * does not exist.
+ *
+ * The issues ride on the error because packetDriftAttentionReason already writes the honest sentence
+ * from them ("...so it was not sent. What changed: your saved profile details."), and the send path
+ * was the one caller that could not reach it. Naming the moved binding is the whole reason that
+ * function exists; see APPLICANT_PACKET_DRIFT_PHRASES.
+ *
+ * The message is deliberately unchanged. It is stored in submission_error, matched by operators, and
+ * pinned by existing tests; only the TYPE and the classification derived from it are new. */
+export class EmployerBoundPacketDriftError extends Error {
+  readonly issues: readonly string[];
+
+  constructor(issues: readonly string[]) {
+    super(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
+    this.name = 'EmployerBoundPacketDriftError';
+    this.issues = [...issues];
+  }
+}
+
 function assertVerifiedBuiltPacket(
   packet: SubmissionPacket,
   audit: PacketAudit,
@@ -4183,7 +4214,7 @@ function assertVerifiedBuiltPacket(
 ): void {
   const issues = verifiedBuiltPacketIssues(packet, audit, verifiedQuestions, mode, envelope);
   if (issues.length > 0) {
-    throw new Error(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
+    throw new EmployerBoundPacketDriftError(issues);
   }
 }
 
@@ -8913,8 +8944,38 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
      inputRow, or the run assembles a packet from the key the sweep deleted. */
   let packetAudit = await verifiedPacketForRun(row, current, currentPacketAudit);
   if (!packetAudit.valid) {
+    /* THE ONE FIELD THAT SAYS WHICH BINDING MOVED WAS BEING DROPPED HERE.
+     *
+     * verifyCurrentPacketAudit returns bindingMismatchKeys precisely so a packet_stale can be
+     * diagnosed in production - the type calls them "privacy-safe fixed binding names for
+     * production diagnosis" and they carry no applicant content, only names like 'jd' or
+     * 'applicant_snapshot'. This line logged the code alone, so every stale packet looked
+     * identical in the log and the only way to tell a real edit from a false positive was to
+     * reproduce it live.
+     *
+     * That is not hypothetical: measured 2026-09-02 on Flow Traders `761e0add` (Greenhouse), the
+     * stored audit, the acknowledgement and a freshly recomputed audit ALL carried packet_version
+     * 0385e268 and audit_digest 873801, the fresh audit answered `passed`, and the run still parked
+     * on packet_stale. Three earlier false positives are recorded in this repo the same way
+     * (portalSubmission.ts:6280, questionDiscovery.ts:1922, packetAudit.ts:325). The reason is
+     * a developer token and stays out of the applicant's sentence exactly as before - only the log
+     * line gains it. */
     fastify.log.warn(
-      { applicationId: row.id, code: packetAudit.code },
+      {
+        applicationId: row.id,
+        code: packetAudit.code,
+        reason: packetAudit.reason,
+        /* `?? []` rather than a presence guard, and the empty array is the POINT.
+         * An empty list means all thirteen named bindings compared equal while packet_version
+         * still differed - structural drift in the stored bindings object rather than an edit to
+         * any one field - which is exactly the Flow Traders 761e0add signature this line exists to
+         * name. Omitting the key there would make "no binding moved" indistinguishable from "this
+         * deploy does not log the field", leaving the one case worth diagnosing looking identical
+         * to the pre-change line. The sibling submit site already logs it this way; the two must
+         * not disagree, or an operator comparing a prepare stop with a submit stop reads the
+         * absence of a key as a difference in the packet. */
+        bindingMismatchKeys: packetAudit.bindingMismatchKeys ?? [],
+      },
       'Application preparation withheld because the exact packet audit is missing or stale',
     );
     await writeReview(row, nextReview(current, {
@@ -10043,7 +10104,57 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       coverLetterSupported: claimedReview.cover_letter_supported,
       transcriptSupported: claimedReview.transcript_supported,
     });
-    assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);
+    /* A DRIFT REFUSAL CLOSES ITS OWN ATTEMPT, because Litos already holds the proof.
+     *
+     * This assert is the earliest employer-bound refusal in the run: no browser has been opened, no
+     * field filled, no control pressed. Left as a bare throw it reached fail(), which writes the
+     * REVIEW but never a ledger fact - the not-sent writers all sit below this line (the consent
+     * hold at ~10101 is the nearest one). The attempt claimSubmission opened therefore stayed open,
+     * and an attempt carrying only `attempt_opened` folds to blocked_unverified/'opened'
+     * (submissionAttemptLedger.ts), which blocks EVERY future application to that employer and puts
+     * "Litos has an earlier attempt ... open the employer's page and tell Litos whether it is there"
+     * in front of the applicant. Measured on this account 2026-09-02: 69 employers in that state,
+     * every one of them asked about a page Litos itself never loaded.
+     *
+     * `typed_pre_click_stop` is the machine proof the ledger already defines for exactly this, and
+     * it is admissible here for the reason the ledger states: no `boundary_authorized` event exists
+     * yet, and its own rule is that only once that event exists may no machine-authored not-sent
+     * proof close the attempt. Before it, the run provably never reached the employer boundary.
+     *
+     * The applicant is never asked to check a portal for this stop, which is the whole point. */
+    try {
+      assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);
+    } catch (error) {
+      if (!(error instanceof EmployerBoundPacketDriftError)) throw error;
+      /* THE WRITE CAN REFUSE, AND A REFUSAL IS NOT A HANDLED STOP.
+       *
+       * writeReviewWithRunnerNotSentFact returns false rather than throwing when the row moved under
+       * this run (a changed submission_run_id or submission_claim_id) or when the attempt already
+       * carries boundary_authorized, press_observed or submission_confirmed - the last three being
+       * exactly the cases where a machine not-sent proof must never be written. Returning here on
+       * false would swallow the drift entirely: no review update, no ledger fact, no stop record, and
+       * the row keeps its claim with nothing said. That is strictly worse than the bare throw this
+       * block replaced, which at least reached fail(). So a refused write rethrows, and fail() now
+       * classifies it as the typed pre-click stop rather than as 'unclassified'. */
+      const closed = await writeReviewWithRunnerNotSentFact(row, nextReview(claimedReview, {
+        status: 'needs_attention',
+        attention_reason: packetDriftAttentionReason(error.issues),
+        submission_error: error.message,
+        submission_stop: submissionStopRecord(
+          'packet_drift_before_send',
+          new Date().toISOString(),
+          claimedReview.submission_run_id,
+        ),
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+        submission_authorization: undefined,
+      }), attemptBinding, 'employer-bound-packet-drift', {
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'employer_bound_packet_drift_before_send',
+      });
+      if (!closed) throw error;
+      return;
+    }
     // There is no Playwright Page on this path - the actions run inside the remote runner - so
     // neither fillPortal's blocker check nor clickFinalSubmit's guard executes here, and the code
     // below writes status:'submitted' on a receipt screenshot. Without this probe, portalCanAutoSubmit
@@ -11326,13 +11437,19 @@ export function submissionFailureOutcome(input: {
      NOT one in fact. See the arm below for what that inheritance was costing the applicant. */
   requiredFieldConfirmation?: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
+  /* The exact issue strings from a EmployerBoundPacketDriftError, or undefined. Strings rather than
+     a boolean for the same reason actionBudgetStop is a string: packetDriftAttentionReason composes
+     the sentence from them and names the binding that moved, and re-deriving that here would be a
+     second place to keep the wording right. */
+  packetDriftIssues?: readonly string[];
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -11365,6 +11482,26 @@ export function submissionFailureOutcome(input: {
            hunt for. The error's own sentence is used verbatim - it already names the portal and the
            question count, which is what makes this one actionable rather than mysterious. */
         ? `${actionBudgetStop} Nothing was sent. Remove or answer fewer optional questions on this application, then try again.`
+      : packetDrift
+        /* SLOTTED HERE TO MIRROR classifySubmissionStop EXACTLY, which ranks
+           'packet_drift_before_send' immediately after 'action_budget'. That file's own docstring
+           asks for the mirror - "two orderings over the same inputs would disagree eventually, and
+           the disagreement would be a row whose prose says one thing and whose typed record says
+           another". Nothing turns on it today, because EmployerBoundPacketDriftError cannot also be
+           a ManagedRequiredFieldConfirmationError or a ManagedBrowserAssertionFailureError, but the
+           position is the cheapest way to keep it true of a future error that can.
+
+           RANKED ABOVE uncertainAfterClaim for the same reason as every arm around it, and this one
+           had no arm at all until 2026-09-02: the drift gate refuses before a transport is chosen,
+           so nothing was sent. Inheriting uncertainAfterClaim told the applicant Litos had pressed
+           Send and pointed her at the employer's apply URL to look for a confirmation of an
+           application that was never made.
+
+           The sentence is packetDriftAttentionReason's, unchanged and shared with the prepare hold
+           that already said it correctly, so the two halves of the product cannot drift apart on the
+           wording of the same event. It names which binding moved and ends on the step that clears
+           it - reviewing the current packet inside Litos - never on opening the employer's page. */
+        ? packetDriftAttentionReason(packetDriftIssues!)
       : requiredFieldConfirmation
         /* RANKED ABOVE noSubmitControl, AND THAT ORDER IS THE WHOLE ARM.
            ManagedRequiredFieldConfirmationError extends NoSubmitControlError, deliberately and
@@ -11658,6 +11795,30 @@ function unverifiedSubmissionPatch(
   };
 }
 
+/* WHY PLAYWRIGHT'S TARGET-CLOSED SENTENCE IS DELIBERATELY NOT MATCHED HERE.
+ *
+ * A provider teardown mid-run really does produce
+ * "Target page, context or browser has been closed", and matching it would let the stop record say
+ * 'provider_session_failure' instead of 'unclassified'. That was tried and REVERTED, because this
+ * predicate does not only name the stop: submissionFailureOutcome ranks providerSessionFailure
+ * ABOVE uncertainAfterClaim, and the needsExit override that would restore the honest
+ * "Litos pressed Send" sentence is skipped whenever the row already carries an
+ * unverified_submission.
+ *
+ * The measured consequence, on a row whose earlier attempt was resolved 'not_sent': run two presses
+ * Submit successfully, the provider tears the browser down while the confirmation is being read,
+ * Stratus returns Playwright's sentence verbatim, and the applicant is told "Nothing was sent. Try
+ * this one again in a few minutes" and filed in the retry bucket - for an application the employer
+ * actually has. Before, the same message fell through to "The final submission was attempted, but
+ * Litos could not verify the employer confirmation. Check the portal or your email before trying
+ * again." Naming the stop is worth very little; turning "go look before you retry" into an
+ * affirmative "nothing was sent" is worth a duplicate application, which cannot be taken back.
+ *
+ * The two phrases below stay because Stratus emits them for a session that never opened, which is
+ * pre-click by construction. Anything whose throw site is not structurally known must keep the
+ * uncertain exit. If this is ever revisited, the classification must be gated on positive pre-click
+ * evidence from the run rather than on the text of an error, and it must not feed
+ * submissionFailureOutcome's ranking. */
 export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
@@ -11883,6 +12044,13 @@ export function submissionFailureReview(
      failed, and on 2026-08-11 the runner had actually pressed Submit. It classifies as its own
      typed stop, keeps the claim, and takes the unverified exit below. */
   const confirmationUnproven = error instanceof ManagedConfirmationUnprovenError;
+  /* The earliest stop of the pre-click family, and the one that used to be invisible to this
+     function. The exact packet is compared against the audit that authorised it BEFORE a transport
+     is chosen, so a refusal here means no browser was opened, no field was filled and no control was
+     pressed. Left untyped it fell to 'unclassified', which is not pre-click, and the applicant was
+     told Litos had pressed Send and sent to hunt the employer's page for a receipt that could not
+     exist. See EmployerBoundPacketDriftError. */
+  const packetDrift = error instanceof EmployerBoundPacketDriftError ? error : null;
   const runTimedOut = isManagedRunTimeout(message);
 
   /* THE TYPED HALF, written on every arm including the ones that release outright.
@@ -11895,6 +12063,7 @@ export function submissionFailureReview(
       regenerationRequired,
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
+      packetDriftBeforeSend: packetDrift !== null,
       confirmationUnproven,
       fieldProofFailedBeforeSubmit,
       providerSessionFailureBeforeSubmit,
@@ -11924,6 +12093,7 @@ export function submissionFailureReview(
 
   const outcome = submissionFailureOutcome({
     captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure,
+    packetDriftIssues: packetDrift?.issues,
     currentAttentionReason: current.attention_reason,
   });
 
