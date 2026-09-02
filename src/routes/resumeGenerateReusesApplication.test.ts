@@ -1,0 +1,56 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'fs';
+
+const resumeRoute = readFileSync('src/routes/resume.ts', 'utf8');
+const canonical = readFileSync('src/routes/canonicalApplications.ts', 'utf8');
+
+/* TAILORING A POSTING TWICE USED TO FORK THE TRACKER.
+ *
+ * Measured on 2026-09-02 against the live account: 201 application rows collapsed to 95 distinct
+ * postings, and 74 of those rows carried the exact signature of this writer - tracker_state
+ * 'applying', review_state 'ready', source_surface 'dashboard', a legacy_generated_resume_id -
+ * with 41 of them sitting inside a duplicate group. 36 of 40 duplicate portal-URL groups shared a
+ * SINGLE job_id, which the canonical fingerprint would have collapsed, proving the rows were not
+ * created through canonical intake at all.
+ *
+ * The mechanism was the fingerprint: `legacy:${resumeId}` is unique per generation, so the unique
+ * index on (user_id, application_fingerprint) could never collide and the insert always succeeded.
+ * These tests pin the lookup that now precedes the insert. */
+
+test('resume generation without an application_id adopts the posting\'s existing row', () => {
+  assert.match(resumeRoute, /if \(body\.application_id\) \{\n\s+canonicalApplicationId = body\.application_id;/);
+  // The identity ladder mirrors canonicalApplicationFingerprint: job row, then portal URL, then scope+role.
+  assert.match(resumeRoute, /ownedLive\.find\(\(row\) => effectiveJobId && row\.job_id === effectiveJobId\)/);
+  assert.match(resumeRoute, /row\.portal_url === canonicalApplicationPortalUrl/);
+  assert.match(resumeRoute, /row\.company_scope_key === companyScopeKey/);
+  assert.match(resumeRoute, /row\.role\.trim\(\)\.toLowerCase\(\) === normalizedRole/);
+  assert.match(resumeRoute, /canonicalApplicationId = existing\.id/);
+});
+
+test('the adoption lookup only ever considers the caller\'s own live rows', () => {
+  assert.match(resumeRoute, /tx\.select\(\)\.from\(applications\)\.where\(and\(\n\s+eq\(applications\.user_id, userId\),\n\s+isNull\(applications\.removed_at\),/);
+});
+
+test('a row already with the employer keeps the packet it sent', () => {
+  assert.match(resumeRoute, /existing\.submission_state === 'submitted'/);
+  assert.match(resumeRoute, /isAppliedOrLaterTrackerState\(existing\.tracker_state\)/);
+  assert.match(resumeRoute, /if \(!alreadyWithEmployer\) \{/);
+  // The repoint is inside the guard, so a submitted row never has its sent packet overwritten.
+  const guardIndex = resumeRoute.indexOf('if (!alreadyWithEmployer) {');
+  const repointIndex = resumeRoute.indexOf('legacy_generated_resume_id: resumeId,\n                ...(effectiveJobId');
+  assert.ok(guardIndex > 0 && repointIndex > guardIndex, 'repoint must sit inside the alreadyWithEmployer guard');
+});
+
+test('a genuinely new posting still inserts exactly one row', () => {
+  assert.match(resumeRoute, /canonicalApplicationId = randomUUID\(\);\n\s+await tx\.insert\(applications\)\.values\(\{/);
+  assert.match(resumeRoute, /application_fingerprint: `legacy:\$\{resumeId\}`/);
+  // Exactly one insert into applications survives in this route.
+  assert.equal(resumeRoute.split('tx.insert(applications)').length - 1, 1);
+});
+
+test('canonical intake still owns the fingerprint ladder this lookup mirrors', () => {
+  assert.match(canonical, /if \(input\.jobId\) return `job:\$\{input\.jobId\}`/);
+  assert.match(canonical, /\? `portal:\$\{input\.portalUrl\}`/);
+  assert.match(canonical, /: `scope:\$\{input\.companyScopeKey\}:role:\$\{input\.role\.trim\(\)\.toLowerCase\(\)\}`/);
+});

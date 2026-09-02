@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
+import { eq, desc, and, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
@@ -70,6 +70,7 @@ import {
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { leadAlignmentIssues, selectJdAlignedLead, type LeadFallbackDecision } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
+import { isAppliedOrLaterTrackerState } from '../lib/canonicalApplicationLifecycle';
 import {
   repairHistoryReviewPortalFromMonitoredJob,
   repairReviewPortalFromMonitoredJob,
@@ -1495,24 +1496,67 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           spec: storedSpec,
           resume_object_key: objectKey,
         });
-        canonicalApplicationId = body.application_id ?? randomUUID();
         canonicalArtifactId = randomUUID();
-        if (!body.application_id) {
-          await tx.insert(applications).values({
-            id: canonicalApplicationId,
-            user_id: userId,
-            legacy_generated_resume_id: resumeId,
-            job_id: effectiveJobId,
-            company_scope_key: canonicalCompanyScope({ companyName: body.company }),
-            company_name: body.company,
-            role: body.role,
-            portal_url: canonicalApplicationPortalUrl,
-            source_surface: 'dashboard',
-            tracker_state: 'applying',
-            review_state: 'ready',
-            selected_resume_artifact_id: null,
-            application_fingerprint: `legacy:${resumeId}`,
-          });
+        if (body.application_id) {
+          canonicalApplicationId = body.application_id;
+        } else {
+          /* TAILORING THE SAME POSTING TWICE MUST NOT FORK THE TRACKER.
+             This path used to insert unconditionally with a `legacy:${resumeId}` fingerprint. Because
+             resumeId is fresh per generation, that fingerprint was unique per generation, so the
+             unique index on (user_id, application_fingerprint) never collided and every re-tailor of
+             a posting the student already had produced ANOTHER application row. The canonical intake
+             (upsertCanonicalApplicationForUser) has always deduplicated by posting identity; this
+             writer simply never consulted it, which is why a Tracker could hold eight rows for one
+             job while the send path - which dedupes correctly - refused all but one of them.
+             The identity used here is deliberately the same one canonicalApplicationFingerprint
+             ranks: the job row first, then the portal URL, then company scope + role. */
+          const companyScopeKey = canonicalCompanyScope({ companyName: body.company });
+          const normalizedRole = body.role.trim().toLowerCase();
+          const ownedLive = await tx.select().from(applications).where(and(
+            eq(applications.user_id, userId),
+            isNull(applications.removed_at),
+          ));
+          const existing = ownedLive.find((row) => effectiveJobId && row.job_id === effectiveJobId)
+            ?? ownedLive.find((row) => Boolean(canonicalApplicationPortalUrl)
+              && row.portal_url === canonicalApplicationPortalUrl)
+            ?? ownedLive.find((row) => row.company_scope_key === companyScopeKey
+              && row.role.trim().toLowerCase() === normalizedRole);
+          if (existing) {
+            canonicalApplicationId = existing.id;
+            /* A row that already reached the employer keeps the packet it sent. Repointing
+               legacy_generated_resume_id there would overwrite the record of what was actually
+               submitted, so the new resume is stored and returned against the same application
+               without disturbing the receipt. */
+            const alreadyWithEmployer = existing.submission_state === 'submitted'
+              || isAppliedOrLaterTrackerState(existing.tracker_state);
+            if (!alreadyWithEmployer) {
+              await tx.update(applications).set({
+                legacy_generated_resume_id: resumeId,
+                ...(effectiveJobId ? { job_id: effectiveJobId } : {}),
+                ...(canonicalApplicationPortalUrl ? { portal_url: canonicalApplicationPortalUrl } : {}),
+                tracker_state: 'applying',
+                review_state: 'ready',
+                updated_at: new Date(),
+              }).where(eq(applications.id, existing.id));
+            }
+          } else {
+            canonicalApplicationId = randomUUID();
+            await tx.insert(applications).values({
+              id: canonicalApplicationId,
+              user_id: userId,
+              legacy_generated_resume_id: resumeId,
+              job_id: effectiveJobId,
+              company_scope_key: companyScopeKey,
+              company_name: body.company,
+              role: body.role,
+              portal_url: canonicalApplicationPortalUrl,
+              source_surface: 'dashboard',
+              tracker_state: 'applying',
+              review_state: 'ready',
+              selected_resume_artifact_id: null,
+              application_fingerprint: `legacy:${resumeId}`,
+            });
+          }
         }
         await tx.insert(artifacts).values({
           id: canonicalArtifactId,
