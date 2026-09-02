@@ -129,17 +129,26 @@ test('an override is dropped once the profile fact it was made against moves', (
     'and the record stops claiming an override of a value nothing resolves to');
 });
 
-/* BOTH HALVES ARE LOAD-BEARING, proved by removing one. A claim with no record of what it overrode
- * cannot be checked for currency, so it must not outrank the resolver - the same default
- * answer_option_source has for a band with no derivation. */
-test('an applicant claim with no record of what it overrode does not outrank the resolver', () => {
+/* THE MISSING RECORD SAYS SOMETHING, AND SINCE 2026-09-02 IT SAYS THE RIGHT THING.
+ *
+ * mergeReviewedQuestions writes answer_override_of only when a resolver value existed at review
+ * time, so a current-round claim WITHOUT one is not an unprovable override: it is an answer to a
+ * question the resolver had nothing to say about, and she is its only source. Recomputing it was how
+ * widening any rule silently rewrote answers she had typed - a reviewed salary figure replaced by
+ * the posting median, a reviewed sponsorship "No" replaced by "Yes" - on every packet read.
+ *
+ * The currency mechanism is unchanged for the case it was built for: an override WITH a derivation
+ * is still checked against the profile and still recomputes when the profile moves (see the test
+ * above), and a claim keyed to a stale round is still not honoured (see the test below). */
+test('an applicant claim with no record of what it overrode answers a question the resolver was silent on', () => {
   const [read] = refreshKnownQuestionAnswers(
     [{ ...machineResolved(HER_DEGREE), answer_source: 'applicant_review', answer_reviewed_at: ROUND }],
     profileWith(PROFILE_DEGREE),
     undefined,
     ROUND,
   );
-  assert.equal(read.answer, PROFILE_DEGREE, 'unprovable currency recomputes, which costs one recomputation');
+  assert.equal(read.answer, HER_DEGREE, 'the human review wins where no resolution was recorded');
+  assert.equal(read.answer_source, 'applicant_review');
 });
 
 /* THE OTHER HALF OF THE SAME SENTENCE. A stale round is exactly how the previous fix passed its own

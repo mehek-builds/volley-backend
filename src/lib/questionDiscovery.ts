@@ -16,8 +16,11 @@ import {
 } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
 import {
-  resolveSalary,
-  storedSalaryOf,
+  collectCurrencies,
+  detectCurrency,
+  findStatedRanges,
+  statedRangeInLabel,
+  type StatedRange,
   type StoredSalaryProfile,
 } from './salary';
 import {
@@ -199,12 +202,37 @@ const NEVER_FILL_PATTERNS = [
 // See WORK_ELIGIBILITY_QUESTION in the extension's generic.ts: work authorization and sponsorship
 // used to be globally refused after a false legal declaration shipped once (R-004). They are now
 // answered only from explicit stored booleans, with ambiguous mixed wording still left to the user.
-export const WORK_ELIGIBILITY_QUESTION =
-  /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+/* THE EMPLOYER AS THE SUBJECT OF THE SPONSORING, with the act named as a verb.
+ *
+ * Measured live on TixTrack (Teamtailor, 2026-09-02, application 6703778e): "will you now or in the
+ * future require tixtrack to commence (“sponsorship”) for employment visa status (e.g., h-1b visa
+ * status)?" was a required radio left unanswered with needs_sponsorship stored true. The two
+ * sponsorship arms below read "require <up to three words> sponsor" and "sponsor <up to three
+ * words> require", and this label fits neither: the employer's name, "to" and "commence" are three
+ * words, but the fourth thing before "sponsorship" is a parenthesis and a curly quote, and the
+ * welded "sponsorship* required" prefix puts an asterisk between the noun and the verb.
+ *
+ * So the applicant's need is recognised through the verb the employer will perform: require or
+ * need, then within forty characters one of the verbs an employer uses for starting a petition,
+ * then "sponsor" after at most a preposition or article ("file for sponsorship") and six
+ * characters of punctuation. Still anchored on requir/need, so
+ * "have you previously been sponsored for a visa?" (no need expressed) and "can you sponsor a
+ * colleague?" (nobody requires anything) stay outside it. A need expressed in the PAST tense or
+ * for somebody else does reach it ("did your previous employer need to initiate sponsorship for
+ * you?"), and is held by PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME in workEligibilityAnswer, the one
+ * place every sponsorship arm passes through. */
+const SPONSORSHIP_COMMENCEMENT_SRC =
+  String.raw`\b(?:requir\w*|need\w*)\b[^?]{0,40}?\b(?:commence|initiate|file|petition\w*|obtain|begin|start|provide|undertake)\b(?:\s+(?:for|of|the|a|an|any|your|its))*[^a-z?]{0,6}sponsor`;
+export const WORK_ELIGIBILITY_QUESTION = new RegExp(
+  String.raw`(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]|(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)|${SPONSORSHIP_COMMENCEMENT_SRC}`,
+  'i',
+);
 const WORK_AUTHORIZATION_QUESTION =
   /(?:eligible|eligibility)\s+(?:to\s+)?(?:legally\s+)?work|authori[sz](?:ed|ation)\s+to\s+work|legally\s+authori[sz]ed|right\s+to\s+work|work\s+authori[sz]/i;
-const SPONSORSHIP_QUESTION =
-  /(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)/i;
+const SPONSORSHIP_QUESTION = new RegExp(
+  String.raw`(?:requir\w*|need\w*|visa|immigration|without|employment)\s+(?:\w+\s+){0,3}sponsor|sponsor\w*\s+(?:\w+\s+){0,3}(?:requir\w*|need\w*)|${SPONSORSHIP_COMMENCEMENT_SRC}`,
+  'i',
+);
 /* One question that mentions both halves, asked in the order that fixes its polarity: the applicant
  * is asked whether she REQUIRES something, so "Yes" is a disclosure and never a claim of
  * eligibility. That ordering is why this family escapes the blanket refusal that other mixed labels
@@ -256,7 +284,7 @@ const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[
 const US_ABBREVIATION_SCOPE =
   /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
 const US_ABBREVIATION_SCOPE_CASE_FOLDED =
-  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
+  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation|sponsor\w*)\b/i;
 /* The employer defers the country to the posting instead of naming it.
  *
  * Broadened on 2026-08-09, measured: the three fixed phrasings it held missed Deepgram's "the
@@ -385,6 +413,68 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  */
 const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start|to (?:begin|start) work(?:ing)?)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
+/* A SPONSORSHIP THAT ALREADY HAPPENED, OR ONE FOR SOMEBODY ELSE. needs_sponsorship is a statement
+ * about the applicant's present and future need. It says nothing about whether a former employer
+ * ever filed for her, and nothing about petitions she would file for her own reports as a manager,
+ * yet every sponsorship arm above reads a verb and a noun and cannot see the tense or the subject.
+ * Measured (2026-09-02 probe): "have you ever required an employer to file for sponsorship on your
+ * behalf?", "has a prior employer ever needed to file a petition for sponsorship for you?", "did
+ * your previous employer need to initiate sponsorship for you?" and "as a manager in this role you
+ * will need to initiate sponsorship for your direct reports. are you comfortable with that?" all
+ * answered "Yes" from a profile that has never been sponsored. An applicant who needs sponsorship
+ * now was being made to claim a history she does not have.
+ *
+ * So a sponsorship label framed in the past or about a third party holds for her, whatever the
+ * stored bit says. The frames are the ones employers write: "have you ever", "did you", "did your
+ * previous employer", "has a prior employer", "previously", "in the past", "been sponsored"; and for
+ * the other subject, sponsorship "for your direct reports", "for a colleague", "for new hires".
+ * A now-or-future wording never carries any of them, so the standard family is untouched.
+ *
+ * WIDENED 2026-09-02, because the third-party half had no room for an ADJECTIVE and the four labels
+ * below reached the commencement arm through the gap (measured "Yes" before, held after): "in this
+ * role you will need to file petitions for sponsorship of foreign national hires", "this position
+ * requires the successful candidate to provide sponsorship for junior staff", "does your spouse or
+ * any dependent require us to initiate sponsorship?" and "this role requires you to obtain
+ * sponsorship independently; do you have it?". The noun list now takes up to two words before it
+ * ("of foreign national hires", "for junior staff") and covers the people an employer sponsors who
+ * are not this applicant - hires, staff, clients, a spouse, dependents, family. "petitions for
+ * sponsorship" is its own frame because a petition is filed BY an employer, never by a candidate.
+ * And sponsorship "independently" or "on your own" asks whether she already HOLDS one, which is a
+ * different fact from needing one; needs_sponsorship cannot answer it either. */
+/* WIDENED AGAIN 2026-09-02 (round 4), after a probe answered "Yes" to nine more of both shapes.
+ *
+ * PAST: the subject list read "did you" and "did your", so "in your last role in the united states,
+ * did AN employer need to sponsor you?" walked straight past it, as did "were you required to
+ * obtain sponsorship for your us internship last summer?" and "when you worked in the united states
+ * before, did anyone need to sponsor you?". Each of those is a question about a history
+ * needs_sponsorship does not record, and "Yes" to it is a claim she has never made. Six of the nine
+ * answered even with no posting country supplied, and two answered on the scoped authority path.
+ *
+ * THIRD PARTY: the noun list was a list of the people an employer sponsors, and every noun it did
+ * not happen to carry - interns, contractors, researchers, a workforce, nationals - reached the
+ * commencement arm. The adjective allowance of two words was beaten by three ("the company's
+ * international employees", "our overseas engineering team members"), and a possessive apostrophe
+ * broke the \w+ filler outright. The filler now takes four tokens and allows an apostrophe, and the
+ * nouns cover the ordinary words for other people at work. The list is still a convenience: what
+ * makes the rule safe is that these labels ask about somebody who is not this applicant, so a
+ * miss fails toward answering and every miss found is pinned as a test. */
+const THIRD_PARTY_SPONSORSHIP_SUBJECT_SRC =
+  String.raw`(?:for|of|to|on behalf of)\s+(?:[\w'’-]+\s+){0,4}(?:direct reports?|reports|colleagues?|(?:new )?hires?|employees?|team members?|teams?|staff|personnel|workforce|workers?|candidates?|clients?|customers?|interns?|contractors?|subcontractors?|consultants?|freelancers?|temps?|apprentices?|trainees?|graduates?|students?|volunteers?|researchers?|scientists?|engineers?|developers?|designers?|analysts?|associates?|professionals?|specialists?|technicians?|nationals?|spouse|dependents?|family members?|partner|someone else|another person|others)\b`;
+const PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME = new RegExp(
+  String.raw`\b(?:have you ever|had you|did you|did your|has (?:a|any|your) (?:prior |previous |former |past |current |last )?employer|(?:prior|previous|former|past|last) employer|previously|in the past|ever (?:been|required|needed|had|received)|been sponsored)\b`
+  + String.raw`|\bdid\s+(?:an|any|anyone|another|someone|somebody)\b`
+  + String.raw`|\b(?:in|at|during|from|for|on)\s+your\s+(?:last|previous|prior|former|past|earlier)\s+(?:role|job|position|internship|placement|employment|employer)\b`
+  + String.raw`|\b(?:last|previous|prior|former|past)\s+(?:summer|autumn|fall|winter|spring|year|semester|term|internship|placement|role|job|position)\b`
+  + String.raw`|\bwhen\s+you\s+(?:worked|studied|interned|were)\b`
+  + String.raw`|\bbefore\b[^?]{0,20}\bdid\b`
+  + String.raw`|\bwere\s+you\s+(?:ever\s+)?(?:required|sponsored|asked|obliged|obligated)\b`
+  + String.raw`|\b${THIRD_PARTY_SPONSORSHIP_SUBJECT_SRC}`
+  + String.raw`|\bpetitions?\s+for\s+sponsorship\b`
+  + String.raw`|\byour\s+(?:\w+\s+){0,2}(?:spouse|dependents?|family members?|partner)\b`
+  + String.raw`|\bsponsorship\b[^?]{0,30}\b(?:independently|on your own|yourself)\b`
+  + String.raw`|\b(?:independently|on your own|yourself)\b[^?]{0,30}\bsponsorship\b`,
+  'i',
+);
 /* "What is your visa status?" is a request for a value. "Will you require sponsorship for
  * employment visa status?" is a yes/no question that happens to contain the same two words, and it
  * is the commonest US sponsorship wording there is: 31 of the owner's stored questions carry it.
@@ -447,6 +537,10 @@ function workEligibilityAnswer(
     && (!asksCurrentSponsorship || namesFutureTime);
   if (!asksAuthorization && !asksSponsorship && !asksDetail) return null;
   if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+  // The stored bit is about her, now and later. A past sponsorship or someone else's is held.
+  if (asksSponsorship && PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
 
@@ -2252,6 +2346,22 @@ export const SINGLE_CHOICE_EXACT_OPTION_TYPE = /^(?:select(?:-one)?|radio|listbo
  * match, and reading options directly keeps this leaf-usable without importing profileFieldResolution
  * (which imports this module).
  */
+/* THE CONVERSE OF reviewedAnswerIsAnOfferedOption, and the two share a control gate for that reason.
+ * A strict single-choice control whose recorded list does not contain the reviewed answer cannot be
+ * filled with it at all, so that answer is not protected by any keep: it is the genuine re-open case
+ * reopenUnfitClosedChoiceQuestions exists for. A control with no recorded list, or a searchable
+ * combobox that can find options nobody enumerated, proves nothing and is never judged here. */
+export function reviewedAnswerIsOnNoOfferedOption(question: {
+  answer: string;
+  portal_input_type?: string;
+  options?: readonly string[] | null;
+}): boolean {
+  const controlType = question.portal_input_type?.trim().toLowerCase() ?? '';
+  if (!SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType)) return false;
+  if ((question.options ?? []).length === 0) return false;
+  return !reviewedAnswerIsAnOfferedOption(question);
+}
+
 export function reviewedAnswerIsAnOfferedOption(question: {
   answer: string;
   portal_input_type?: string;
@@ -2560,6 +2670,43 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         } = withProvenance;
         return withApplicantClaim as T;
       }
+      /* SHE ANSWERED IT BECAUSE NOBODY ELSE COULD, AND A RESOLVER THAT LEARNS THE QUESTION LATER
+       * DOES NOT GET TO CONTRADICT HER.
+       *
+       * applicationReview.ts records answer_override_of only when the resolver HAD a value at review
+       * time. Its absence on a current-round review is therefore evidence, not a gap: the question
+       * reached the review screen unanswered, and the string on the record is hers alone. The branch
+       * above cannot prove that round - there is no derivation to check - so before this, widening
+       * any rule silently rewrote every such answer. Measured on this branch's own widening
+       * (2026-09-02 probe, same input against origin/main c6e2c25): a reviewed sponsorship "No"
+       * became "Yes", a reviewed salary "$120,000" and "135000" became the posting median "140000",
+       * a corrected "Tonee Inc." became "Tonee", and an "Other website" holding a GitHub link became
+       * the portfolio URL. The refresh runs on every packet read, submitted packets included
+       * (resume.ts:294, submissionRunner.ts), so the served record of an answer already SENT was
+       * being rewritten too.
+       *
+       * AN ANSWER THE CONTROL CANNOT TAKE IS NOT KEPT EITHER. A strict single-choice record whose
+       * own option list does not contain the reviewed string is the genuine re-open case, and
+       * freezing it would strand the packet on a value no fill can place. See
+       * reviewedAnswerIsOnNoOfferedOption, the converse of the exact-option keep above.
+       *
+       * A BAND STILL LOSES WHEN IT CONTRADICTS HER OWN STORED FACT, which is the one case where the
+       * profile must win: "August 2029 - December 2029" beside a graduation of May 2028 is a window
+       * her own profile says is wrong, and reviewedOptionBandVerdict has ruled on exactly that above.
+       * Everything the verdict cannot compare - a figure, a yes/no, a company name, a link - is kept.
+       *
+       * The provenance is kept with it. A stripped answer_source would claim the machine wrote a
+       * string a person typed, and reopenUnfitClosedChoiceQuestions still re-opens a reviewed answer
+       * that fits no live option, so a stale review is not made permanent by this.
+       *
+       * LAST OF THE KEEP BRANCHES, deliberately. When the resolver recomputes her answer byte for
+       * byte there is nothing to protect her from, and the branch above still settles that record's
+       * own derivation claims - a legacy answer_option_source that no longer describes a snap is
+       * dropped there, and this branch must not reach back over it and freeze one in place. */
+      if (applicantReviewedCurrentAnswer
+        && overrodeResolverValue === undefined
+        && !reviewedAnswerIsOnNoOfferedOption(withProvenance)
+        && reviewedOptionBandVerdict(question.answer, known.value) !== 'contradicts') return question;
       return { ...withoutProvenance(), answer: known.value };
     }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
@@ -2663,13 +2810,383 @@ const PROGRAMMING_LANGUAGE_PROFICIENCY_QUESTION =
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
+/* THE SALARY SHE IS ASKING FOR, as opposed to the one she has, had, or is being asked to accept.
+ *
+ * SALARY_QUESTION routes every label that mentions pay to the desired_salary arm, and that is the
+ * right routing for REFUSING: none of those questions may be answered from a stored figure without
+ * the currency check. It is the wrong routing for FILLING. The posting's own range answers exactly
+ * one question, "what do you want to be paid for this role", and the arm was measured (2026-09-02,
+ * probe against the TixTrack description) typing the employer's $140,000 median into "current
+ * salary", "salary history", "what was your most recent salary?", "have you ever received workers
+ * compensation?" and "is the salary range listed acceptable to you?". A current-salary field filled
+ * with the posting's median is a false statement of her compensation history, not the employer's
+ * number read back.
+ *
+ * So a fill needs all three: the label asks for what she EXPECTS, DESIRES or REQUIRES; nothing in
+ * it points at a salary she has or had; and the control is an open one that takes a figure. A
+ * polar question ("are you comfortable with the range?") and a closed control (radio, checkbox,
+ * select) are a different question with a yes/no answer that no median can be. "required" is left
+ * off the expectation words on purpose: it is the marker Teamtailor welds onto every label
+ * ("compensation* required"), and it says nothing about what is being asked. */
+/* THE SALARY NOUN HAS TO BE WHAT THE LABEL ASKS FOR, not a word it happens to contain.
+ *
+ * The first cut of this rule looked for an expectation word anywhere in the label, and SALARY_QUESTION
+ * had already routed the label here for mentioning pay at all. Measured (2026-09-02 probe, against the
+ * TixTrack description): "preferred currency for compensation" and "preferred salary currency" both
+ * took the median as a CURRENCY, "preferred compensation structure (base vs equity)" took it as a
+ * structure, and "expected bonus compensation" and "expected equity compensation" presented the base
+ * salary as a bonus and as an equity figure. Every one of them is a text field on a live form.
+ *
+ * So the expectation word and the pay noun have to be the same phrase: the expectation within two
+ * words of the noun ("expected annual salary"), or the noun immediately before it ("salary
+ * expectations"), with no second noun taking the pay word as its modifier ("salary currency",
+ * "salary range"). And the seven words that name something OTHER than a figure of pay refuse the
+ * label outright wherever they sit in it, because none of them can be answered with a median. */
+const EXPECTATION_SRC =
+  String.raw`expect\w*|desired?|target\w*|seeking|sought|looking\s+for|requirements?|minimum|ask(?:ing)?|ideal|preferred|wish\w*|want\w*|hop(?:e|es|ed|ing)`;
+const PAY_NOUN_SRC = String.raw`salar(?:y|ies)|compensation|pay|remuneration|wages?`;
+/* The nouns a pay word can modify. "expected salary currency" asks which currency, "expected salary
+ * range" asks for two numbers; a single median answers neither. */
+const PAY_QUALIFYING_NOUN_SRC =
+  String.raw`currenc(?:y|ies)|structure|equity|stock|bonus(?:es)?|frequenc(?:y|ies)|schedule|range|bands?|brackets?`;
+/* "range" is here as well as in the qualifying nouns above, because a label can ask for one at a
+ * distance from the noun it qualifies: "expected salary (please state a range)" reads as an
+ * expectation of salary right up to the parenthesis, and a single median is not a range.
+ *
+ * "band" and "bracket" are a range under another name, and both are ordinary wording on a European
+ * form: "expected salary band" and "expected salary bracket" each took TixTrack's median as if it
+ * were one band (probe, 2026-09-02). "Gross or net?" is a third shape of the same defect: the field
+ * wants to be told WHICH basis is being quoted, and a gross annual median typed into it says
+ * nothing about which of the two it is. */
+const NON_FIGURE_SALARY_ASK =
+  /\b(?:currenc(?:y|ies)|structure|equity|stock|bonus(?:es)?|frequenc(?:y|ies)|schedule|ranges?|bands?|brackets?)\b|\b(?:gross|net)\b\s*(?:or|vs\.?|versus|\/)\s*\b(?:gross|net)\b/i;
+const EXPECTED_SALARY_QUESTION = new RegExp(
+  String.raw`\b(?:${EXPECTATION_SRC})\b(?:\s+\w+){0,2}\s+\b(?:${PAY_NOUN_SRC})\b(?!\s+(?:${PAY_QUALIFYING_NOUN_SRC})\b)`
+  + String.raw`|\b(?:${PAY_NOUN_SRC})\b\s+\b(?:${EXPECTATION_SRC})\b`,
+  'i',
+);
+const SALARY_HISTORY_QUESTION =
+  /\b(?:current|previous|prior|last|most\s+recent|former|past|existing|present|today'?s)\s+(?:(?:base|annual|total|gross|net|monthly|hourly|yearly)\s+)*(?:salary|salaries|compensation|pay|wage|wages|remuneration|earnings|package|ctc|rate)\b|\b(?:salary|compensation|pay|wage|earnings?)\s+history\b|\bworkers'?\s+comp|\b(?:at|in|from|during)\s+your\s+(?:current|previous|prior|last|most\s+recent|former|past)\b|\bwhat\s+(?:was|were)\b|\bhave\s+you\s+(?:ever\s+)?(?:received|earned|been\s+paid)\b|\bcurrently\s+(?:earn|make|paid)\b/i;
+const OPEN_SALARY_CONTROL = /^(?:text|textarea|number)?$/i;
+/* THE UNIT THE LABEL ASKS IN, AND THE UNIT THE RANGE IS STATED IN, HAVE TO BE THE SAME UNIT.
+ *
+ * The median is the employer's own number read back, and that defence holds only while the number
+ * still means what the employer meant. Measured (2026-09-02 probe, TixTrack's "$130,000 - $150,000"
+ * against labels that all hold on origin/main): "expected salary (in eur)", "expected salary in gbp"
+ * and "expected salary (sek)" each took 140000 as a figure in a currency the posting never named,
+ * and "expected monthly salary", "expected salary per month (sek)", "expected compensation per
+ * hour" and "salary expectations for a part-time (20h/week) role" each took an ANNUAL figure as a
+ * monthly, hourly or part-time one - an eleven-fold overstatement typed under her name. The reverse
+ * holds too: "expected salary (usd)" against a description stating "£45,000 - £55,000".
+ *
+ * So a currency named in the label must be the range's own currency (a bare "$" range is USD), and
+ * a pay period named in the label must be the period the range itself was stated in. Neither check
+ * can refuse the plain label the fill exists for: "what are your salary expectations for this
+ * position?" names no currency and no period, so both arms pass it through.
+ *
+ * THE UNIT HAS TO BE PROVED, NOT MERELY LEFT UNCONTRADICTED. Round 3 wrote both arms as "refuse on
+ * a unit I can see is different", and an adversarial probe of 128 cases (2026-09-02) took twenty of
+ * them apart from the other side: a unit the reader CANNOT SEE is not a unit that agrees.
+ *
+ *   - detectCurrency returns null for three different label shapes and round 3 skipped the currency
+ *     comparison for all three. "expected salary" names no currency (fill). "expected salary in
+ *     kronor" names one the four-word table does not carry, as do swedish krona, rupees, yen,
+ *     zloty, canadian dollars, australian dollars, bare pounds and bare francs. "expected salary
+ *     (gbp or eur)" and "expected salary, state in eur or sek" name TWO. Eleven such labels took
+ *     TixTrack's US median. Every one of them now refuses, and the vocabulary below is a
+ *     convenience rather than the guard: a currency-shaped token this file cannot resolve to
+ *     exactly one code refuses just as a mismatched one does, so a currency nobody has thought of
+ *     yet fails closed.
+ *   - PAY_PERIOD_PATTERNS carried four periods, so "expected biweekly salary" (the hyphenated
+ *     spelling was caught, the unhyphenated one was not), fortnightly, per fortnight, quarterly and
+ *     per pay period all read as "no period named" and took an ANNUAL figure.
+ *   - Worst of the three, the period arm accepted a period word found ANYWHERE in the 200-character
+ *     window rather than one qualifying the range. "Base annual salary range of $130,000 - $150,000,
+ *     paid out monthly." answered "expected monthly salary" with 140000, a twelve-fold
+ *     overstatement, and so did an annual range in a description that merely reviews performance
+ *     monthly or states a 40-hour week. The period is now read from the SENTENCE the range was
+ *     written in, and a sentence naming two periods is unreadable rather than agreeable. */
+const BARE_DOLLAR_RANGE = /(?:^|[^a-z])\$/i;
+
+/* THE PERIODS A LABEL OR A RANGE CAN BE STATED IN, most specific spelling first: "semi-monthly"
+ * contains "monthly" and "bi-weekly" contains "weekly", so each pattern consumes its matches before
+ * the next one reads what is left. */
+type PayPeriod = 'hour' | 'day' | 'week' | 'biweek' | 'semimonth' | 'month' | 'quarter' | 'year' | 'pay period';
+const PAY_PERIOD_VOCABULARY: ReadonlyArray<readonly [PayPeriod, RegExp]> = [
+  ['semimonth', /\bsemi-?monthly\b|\btwice\s+(?:a|per)\s+month\b|\bbi-?monthly\b/gi],
+  ['biweek', /\bbi-?weekly\b|\bfortnight(?:ly)?\b|\bevery\s+(?:two|2)\s+weeks\b/gi],
+  ['pay period', /\bper\s+pay\s+(?:period|cycle|check)\b|\bpay\s+(?:period|cycle)\b|\bper\s+paycheck\b/gi],
+  ['hour', /\bper\s+hour\b|\bhourly\b|\ban\s+hour\b|\/\s*(?:hr|hour)\b|\bp\/h\b/gi],
+  ['day', /\bper\s+day\b|\bdaily\b|\ba\s+day\b|\/\s*day\b|\bper\s+diem\b/gi],
+  ['week', /\bper\s+week\b|\bweekly\b|\ba\s+week\b|\/\s*(?:wk|week)\b|\bpart-?\s?time\s+hours\b|\bh\s*\/\s*week\b|\bhours?\s*\/\s*week\b|\bhours\s+per\s+week\b/gi],
+  ['month', /\bper\s+month\b|\bmonthly\b|\ba\s+month\b|\/\s*(?:mo|month)\b|\bper\s+calendar\s+month\b|\bpcm\b/gi],
+  ['quarter', /\bquarterly\b|\bper\s+quarter\b/gi],
+  ['year', /\bannual(?:ly|i[sz]ed)?\b|\bper\s+(?:year|annum)\b|\byearly\b|\ba\s+year\b|\/\s*(?:yr|year|annum)\b|\bp\.a\.\b/gi],
+];
+function payPeriodsIn(text: string): Set<PayPeriod> {
+  const found = new Set<PayPeriod>();
+  let rest = text;
+  for (const [period, pattern] of PAY_PERIOD_VOCABULARY) {
+    const stripped = rest.replace(pattern, ' ');
+    if (stripped === rest) continue;
+    found.add(period);
+    rest = stripped;
+  }
+  return found;
+}
+
+/* A range means what the sentence it was written in says it means, and nothing a later sentence
+ * says about performance reviews or working hours can change that. The split keeps a decimal
+ * intact ("$20.50 - $25.50" is one number twice, not two sentences) and treats a newline and a
+ * semicolon as ends, because a description states two cities' ranges on one line as often as on
+ * two. */
+const SENTENCE_END = /(?<=[.;!?\n])(?!\d)/;
+function splitIntoSentences(text: string): string[] {
+  return text.split(SENTENCE_END);
+}
+function sentenceAt(text: string, index: number): string {
+  let start = 0;
+  for (const sentence of splitIntoSentences(text)) {
+    const end = start + sentence.length;
+    if (index < end) return sentence;
+    start = end;
+  }
+  return text;
+}
+function rangeKey(range: StatedRange): string {
+  return `${range.min}:${range.max}:${range.currency ?? ''}`;
+}
+function rangeCurrencyOf(range: StatedRange, context: string): string | null {
+  if (range.currency) return range.currency;
+  return BARE_DOLLAR_RANGE.test(context) ? 'USD' : detectCurrency(context);
+}
+/* The period the RANGE was stated in: the one named by the sentence that states it. `null` is a
+ * range stated with no period at all; 'unreadable' is a sentence naming two of them, or a range
+ * this function could not find a sentence for, and both of those refuse. */
+function rangePeriodOf(context: string, range: StatedRange): PayPeriod | 'unreadable' | null {
+  const key = rangeKey(range);
+  const stating = splitIntoSentences(context)
+    .filter((sentence) => findStatedRanges(sentence).some((found) => rangeKey(found) === key));
+  if (stating.length === 0) return 'unreadable';
+  const periods = new Set<PayPeriod>();
+  for (const sentence of stating) for (const period of payPeriodsIn(sentence)) periods.add(period);
+  if (periods.size > 1) return 'unreadable';
+  return periods.size === 1 ? [...periods][0]! : null;
+}
+
+/* THE CURRENCIES A LABEL NAMES, counted rather than identified. A pair maps to a code where one
+ * code is right and to null where the name covers several ("kronor" is Swedish, Norwegian, Danish
+ * and Icelandic; a bare "dollars" or "pounds" or "francs" names a family, not a currency), and a
+ * null is treated exactly like a mismatch. Qualified names come first so the bare entries below
+ * only ever read what is left. */
+const LABEL_CURRENCY_WORDS: ReadonlyArray<readonly [RegExp, string | null]> = [
+  [/\b(?:us|u\.s\.|united\s+states|american)\s+dollars?\b/gi, 'USD'],
+  [/\bcanadian\s+dollars?\b/gi, 'CAD'],
+  [/\baustralian\s+dollars?\b/gi, 'AUD'],
+  [/\bnew\s+zealand\s+dollars?\b/gi, 'NZD'],
+  [/\bsingapore(?:an)?\s+dollars?\b/gi, 'SGD'],
+  [/\bhong\s+kong\s+dollars?\b/gi, 'HKD'],
+  [/\bswedish\s+kron(?:or|a|er)\b/gi, 'SEK'],
+  [/\bnorwegian\s+kron(?:er|e|or)\b/gi, 'NOK'],
+  [/\bdanish\s+kron(?:er|e|or)\b/gi, 'DKK'],
+  [/\b(?:pounds?\s+sterling|british\s+pounds?)\b/gi, 'GBP'],
+  [/\bswiss\s+francs?\b/gi, 'CHF'],
+  [/\bjapanese\s+yen\b|\byen\b/gi, 'JPY'],
+  [/\beuros?\b/gi, 'EUR'],
+  [/\bdirhams?\b/gi, 'AED'],
+  [/\brupees?\b/gi, 'INR'],
+  [/\bzlot(?:y|ych)\b/gi, 'PLN'],
+  [/\bkorean\s+won\b/gi, 'KRW'],
+  [/\bshekels?\b/gi, 'ILS'],
+  [/\bringgit\b/gi, 'MYR'],
+  [/\bbaht\b/gi, 'THB'],
+  [/\bforint\b/gi, 'HUF'],
+  [/\bkorun(?:a|y)?\b/gi, 'CZK'],
+  [/\bnaira\b/gi, 'NGN'],
+  [/\brands?\b/gi, 'ZAR'],
+  [/\bbrazilian\s+reais\b|\breais\b/gi, 'BRL'],
+  // Names that no single code answers. Each of these refuses exactly as a wrong code does.
+  [/\bkron(?:or|a|e|er)\b/gi, null],
+  [/\bdollars?\b/gi, null],
+  [/\bpounds?\b/gi, null],
+  [/\bfrancs?\b/gi, null],
+  [/\bpesos?\b/gi, null],
+  [/\bdinars?\b/gi, null],
+  [/\briyals?\b/gi, null],
+  [/\brupiah\b/gi, null],
+  [/\bcrowns?\b/gi, null],
+  [/\bshillings?\b/gi, null],
+  [/\blir[ae]\b/gi, null],
+];
+/* A currency symbol this file cannot resolve is still a currency the label named. */
+const UNREADABLE_CURRENCY_SYMBOL = /[¥₽₱₫฿₴₦₡₲₸₾₼﷼]|\bzł|\bkr\b|\bR\$/i;
+function currenciesNamedInLabel(label: string): { codes: Set<string>; unreadable: boolean } {
+  const codes = new Set<string>(collectCurrencies(label));
+  let unreadable = false;
+  let rest = label;
+  for (const [pattern, code] of LABEL_CURRENCY_WORDS) {
+    const stripped = rest.replace(pattern, ' ');
+    if (stripped === rest) continue;
+    rest = stripped;
+    if (code) codes.add(code);
+    else unreadable = true;
+  }
+  if (UNREADABLE_CURRENCY_SYMBOL.test(rest)) unreadable = true;
+  /* A bare "$" is read as USD on the label exactly as it is on the range, which is what lets a
+   * label stating its own range ("expected hourly salary ($20.50 - $25.50 per hour)") answer it. */
+  if (codes.size === 0 && !unreadable && BARE_DOLLAR_RANGE.test(label)) codes.add('USD');
+  return { codes, unreadable };
+}
+function labelCurrencyMatchesRange(label: string, context: string, range: StatedRange): boolean {
+  const named = currenciesNamedInLabel(label);
+  /* A currency token that cannot be resolved to one code, or two of them in one label, is an
+   * unknown unit. A figure typed into such a field claims to be in whichever the reader assumed. */
+  if (named.unreadable || named.codes.size > 1) return false;
+  if (named.codes.size === 0) return true;
+  const rangeCurrency = rangeCurrencyOf(range, context);
+  /* An unmarked range beside a label that names a currency cannot be shown to be in that
+   * currency, and a figure typed into a currency-named field claims it is. Held. */
+  return rangeCurrency !== null && rangeCurrency === [...named.codes][0];
+}
+/* The label's unit against the unit the range was stated in. `context` is the text the range was
+ * read out of: the label itself for a label-range, the description sentence for a jd-range. */
+function labelUnitMatchesRange(label: string, context: string, range: StatedRange): boolean {
+  if (!labelCurrencyMatchesRange(label, context, range)) return false;
+  const labelPeriods = payPeriodsIn(label);
+  // Two periods in one label ("expected monthly salary (annual equivalent)") name no one unit.
+  if (labelPeriods.size > 1) return false;
+  const rangePeriod = rangePeriodOf(context, range);
+  if (rangePeriod === 'unreadable') return false;
+  const labelPeriod = labelPeriods.size === 1 ? [...labelPeriods][0]! : null;
+  /* A field that names no period is asking for the figure a salary field means by default, which
+   * is the annual one. An annual range answers it and a range stated in any other period does not:
+   * "expected salary" against "€4,000 - €5,000 per month" is a twelve-fold understatement typed
+   * with the same confidence as the correct answer. */
+  if (labelPeriod === null) return rangePeriod === null || rangePeriod === 'year';
+  return labelPeriod === rangePeriod;
+}
+/* WHAT THE RANGE IN THE DESCRIPTION IS A RANGE OF.
+ *
+ * statedRangeInJd (lib/salary.ts) accepts any range within 160 characters of a pay word, which is
+ * the right net for FINDING a compensation figure and far too wide for ANSWERING with one. Measured
+ * on the branch (2026-09-02 probe, every case also live on origin/main): "We offer a $50 - $100
+ * monthly wellness stipend. Salary competitive." answered "expected salary" with 75; "Stipend
+ * $1,000 - $1,500 per month." answered "expected annual salary" with 1250; "Pay is 500 - 600 AED
+ * per day for the internship." answered with 550; "Hourly rate $18 - $22" answered with 20; and
+ * "Base salary $130,000 - $150,000 plus equity." answered "expected total compensation" with the
+ * base alone.
+ *
+ * So the text a jd-range is read out of has to say that the range IS the role's pay: it names
+ * salary, compensation, base or a pay range, and it names none of the benefits and one-off
+ * payments that sit next to a salary in a description without being one. A passage that names one
+ * of those nouns is still usable when the LABEL asks for that same thing - "expected monthly
+ * stipend" against a monthly stipend range - and that is the only way it is usable. Kept here
+ * rather than tightened in lib/salary.ts because that module is a port of the extension's copy and
+ * this rule is not in the extension yet.
+ *
+ * AND IT HAS TO BE THE SAME SENTENCE, which is what round 3 left open. Round 3 asked whether a
+ * 200-character window contained a pay word, and a window is not an assertion: the probe of
+ * 2026-09-02 answered "expected salary" with 7500 on "Salary competitive. Relocation allowance of
+ * $5,000 - $10,000.", and with 3500, 4500, 1500 and 750 on the same shape written with tuition
+ * reimbursement, a 401k match, a learning budget and a home-office allowance. That posting shape -
+ * "competitive salary" with no figure, and one benefit figure quoted nearby - is among the
+ * commonest there is. The range must now sit in the SAME SENTENCE as the pay word that claims it,
+ * that sentence must name none of the benefit nouns, and it must not be quoting what somebody
+ * ELSE earns ("Senior engineers earn a salary of $180,000 - $220,000. This intern role pays
+ * competitively." typed a senior band into an intern application). */
+const JD_RANGE_IS_THE_ROLE_PAY = /\bsalar(?:y|ies)\b|\bcompensation\b|\bbase\b|\bpay\s+range\b/i;
+const JD_RANGE_NOT_THE_SALARY: readonly RegExp[] = [
+  /\bstipends?\b/i,
+  /\bwellness\b/i,
+  /\bbonus(?:es)?\b/i,
+  /\bequity\b|\bstock\b|\brsus?\b/i,
+  /\bsigning\b|\bsign-?on\b/i,
+  /\ballowances?\b/i,
+  /\breimbursements?\b/i,
+  /\bbudgets?\b/i,
+  /\brelocation\b/i,
+  /\btuition\b/i,
+  /\b401\s?\(?k\)?\b|\bmatch(?:es|ed|ing)?\s+contributions?\b|\bpension\b|\bsuperannuation\b/i,
+  /\bpackage\s+worth\b/i,
+  /\bcommissions?\b/i,
+  /\bote\b|\bon-?target\s+earnings\b/i,
+  /\btotal\s+(?:compensation|package)\b/i,
+  /\bleave\b|\bvacation\b|\bpto\b/i,
+];
+/* Somebody else's band, stated as a fact about what they earn. The verb is load-bearing: a posting
+ * that calls its OWN role senior ("the salary range for this senior engineer role is ...") is this
+ * role's pay and still fills. */
+const JD_RANGE_IS_ANOTHER_POPULATION_PAY =
+  /\b(?:senior|staff|principal|lead|director|vice\s+president|vp|manager|mid-?level|entry-?level|junior|graduate|associate|intern)s?\b[^.;!?]{0,60}?\b(?:earns?|earned|makes?|receives?|(?:are|is|were|was)\s+paid)\b/i;
+function jdSentenceStatesTheRolePay(sentence: string, label: string): boolean {
+  if (!JD_RANGE_IS_THE_ROLE_PAY.test(sentence)) return false;
+  if (JD_RANGE_IS_ANOTHER_POPULATION_PAY.test(sentence)) return false;
+  for (const noun of JD_RANGE_NOT_THE_SALARY) {
+    if (noun.test(sentence) && !noun.test(label)) return false;
+  }
+  return true;
+}
+/* The salary words a description writes a range next to, matching lib/salary.ts's own net so the
+ * windows this reads are the windows that module would have read. */
+const JD_SALARY_CONTEXT_SRC = 'salar|compensat|stipend|remunerat|\\bpay\\b|\\bwage\\b|hourly rate';
+const JD_RANGE_WINDOW_BEFORE = 40;
+const JD_RANGE_WINDOW_AFTER = 160;
+function statedRolePayRangeInJd(
+  jdText: string,
+  label: string,
+): { range: StatedRange; context: string } | null {
+  const nearAPayWord = new Set<string>();
+  const answerable = new Map<string, { range: StatedRange; context: string }>();
+  for (const match of jdText.matchAll(new RegExp(JD_SALARY_CONTEXT_SRC, 'gi'))) {
+    const index = match.index ?? 0;
+    /* The wide window still decides AMBIGUITY: two money ranges written next to the pay words is
+     * not one stated range, whichever of them a sentence would have licensed. */
+    const window = jdText.slice(
+      Math.max(0, index - JD_RANGE_WINDOW_BEFORE),
+      index + JD_RANGE_WINDOW_AFTER,
+    );
+    for (const range of findStatedRanges(window)) nearAPayWord.add(rangeKey(range));
+    const sentence = sentenceAt(jdText, index);
+    if (!jdSentenceStatesTheRolePay(sentence, label)) continue;
+    for (const range of findStatedRanges(sentence)) {
+      answerable.set(rangeKey(range), { range, context: sentence });
+    }
+  }
+  /* Two different ranges in one description is not one stated range, exactly as statedRangeInJd
+   * has always held. */
+  if (nearAPayWord.size !== 1) return null;
+  return answerable.size === 1 ? [...answerable.values()].at(0)! : null;
+}
+/* The one range that answers "what do you expect to be paid": the label's own, or the
+ * description's when the description says the range is this role's pay and the units agree. */
+function statedRangeForExpectedPay(label: string, jdText: string | undefined): StatedRange | null {
+  const labelRange = statedRangeInLabel(label);
+  if (labelRange) return labelUnitMatchesRange(label, label, labelRange) ? labelRange : null;
+  if (!jdText) return null;
+  const found = statedRolePayRangeInJd(jdText, label);
+  if (!found) return null;
+  return labelUnitMatchesRange(label, found.context, found.range) ? found.range : null;
+}
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
 export const EMPLOYER_RESTRICTION_AGREEMENT_QUESTION =
   /\bbound\b[^?]{0,120}\bagreements?\b[^?]{0,180}\b(?:restrict|limit)\b[^?]{0,120}\b(?:ability\s+to\s+work|employment|duties)\b|\b(?:non-compete|non-solicitation|confidentiality|non-disclosure)\b[^?]{0,180}\b(?:restrict|limit|bound)\b/i;
+/* "current company org" is Lever's welded label for its Current company field (visible label plus
+ * the control's name, org), measured live on Apollo Research (application 0a5081aa, 2026-09-02) as
+ * an optional text left unanswered with current_employer on file. The bare-field arm takes the
+ * whole label: the noun the employer chose for the organisation, an optional "name" or the welded
+ * "org", nothing else. A sentence that merely mentions her current company ("does your current
+ * company know you are applying?") is a different question and stays off this rule. */
 const CURRENT_EMPLOYER_QUESTION =
-  /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b/i;
+  /\bcurrent\s+employer\b|\bwhere\s+do\s+you\s+(?:currently\s+)?work\b|\bwhere\s+are\s+you\s+currently\s+(?:employed|working)\b|^\s*current\s+(?:company|organi[sz]ation|org)(?:\s+(?:name|org))?\s*[*:]?\s*$|\bname\s+of\s+(?:your\s+)?current\s+(?:company|organi[sz]ation)\b/i;
+/* Lever's "Other website" field, discovered as "other url urls[other]" on the same Apollo Research
+ * form: the visible label with the control's name welded on. The handle is read here rather than
+ * stripped by normalizeDiscoveredLabel, because "urls[LinkedIn]" on its own is a name a person can
+ * read and the discovery walk is asserted to keep it as a label. What the field asks for is one
+ * more link, and the one link the profile holds that is not LinkedIn or GitHub is the portfolio.
+ * Anchored end to end so "other" in a sentence never reaches it. */
+const OTHER_WEBSITE_QUESTION = /^\s*other\s+(?:url|website|web\s*site|link|site)s?\s*(?:urls\s*\[\s*other\s*\])?\s*[*:]?\s*$/i;
 const MOST_RECENT_EMPLOYER_QUESTION =
   /\bwhere\s+have\s+you\s+most\s+recently\s+worked\b|\bmost\s+recent\s+employer\b/i;
 const PRIOR_EMPLOYER_OR_PROGRAM_QUESTION =
@@ -4726,6 +5243,14 @@ export const CONSENT_STRUCTURAL_FILLER: ReadonlySet<string> = new Set([
   // Politeness and discourse scaffolding.
   'please', 'hereby', 'herein', 'hereto', 'below', 'above', 'following', 'further', 'also', 'then',
   'thereby', 'accordance', 'accordingly', 'here', 'yes',
+  /* THE FORM'S OWN REQUIRED MARKER, welded into the label as a word. Teamtailor discovers its
+   * platform consent as "required. by submitting this application, i agree that i have read the
+   * privacy policy and confirm that tixtrack store my personal details to be able to process my
+   * job application." (TixTrack, 2026-09-02, permission granted): every other token was accounted
+   * for and the one leftover was "required", so the label held. A marker word names no document
+   * and no fact about her; it says the control must be filled, which is why the label is being
+   * read at all. */
+  'required', 'optional',
   /* The vocabulary of APPLYING and of the data itself. Not document names: every one of these
    * describes the act the applicant is performing or the material she is handing over, which is
    * what a consent sentence is made of once its document name has been removed. */
@@ -5392,7 +5917,7 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (/linkedin/i.test(l)) return 'linkedin_url';
   if (/github/i.test(l)) return 'github_url';
-  if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l)) return 'portfolio_url';
+  if (/portfolio|personal\s*(web)?site|\bwebsite\b/i.test(l) || OTHER_WEBSITE_QUESTION.test(l)) return 'portfolio_url';
   if (CURRENT_EMPLOYER_QUESTION.test(l)) return 'current_employer';
   if (MOST_RECENT_EMPLOYER_QUESTION.test(l)) return 'most_recent_employer';
   if (TERM_QUESTION.test(l)) return 'availability_term';
@@ -5566,12 +6091,55 @@ const COVER_LETTER_TEXT_LABEL =
   /^(?:cover\s+letter|motivation\s+letter|letter\s+of\s+motivation|anschreiben)$/i;
 
 export function isCoverLetterTextQuestion(label: string): boolean {
-  const stripped = (label ?? '')
+  /* A QUESTION MARK MEANS THE MARKER WORD IS PART OF THE QUESTION, NOT DECORATION ON A FIELD NAME.
+   * "cover letter required?" is a yes/no question about the employer's policy; strip its "required"
+   * after the punctuation strip has taken the "?" and it reads as the label of the letter itself,
+   * and the whole letter is typed into a control expecting "Yes". Teamtailor's welded marker never
+   * arrives on a label that asks anything ("cover letter* required"), so the strip is licensed only
+   * where there is no question to be part of. */
+  const asksAQuestion = /\?/.test(label ?? '');
+  const withoutDecoration = (label ?? '')
     .replace(/\((?:optional|required)\)/gi, ' ')
     .replace(/[*:;,.!?"'`]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  const stripped = asksAQuestion
+    ? withoutDecoration
+    /* THE MARKER WORD TEAMTAILOR WELDS ONTO THE LABEL. Its required textarea is discovered as
+     * "cover letter* required candidate[job_applications_attributes][0][cover_letter]" (TixTrack,
+     * 2026-09-02): the provider handle is stripped by normalizeDiscoveredLabel, the asterisk by the
+     * line above, and the bare word "required" was what was left keeping this exact match from
+     * firing, so a required cover-letter textarea sat empty while the review said the company took
+     * no cover letter. A leading or trailing marker word is decoration in the same sense the
+     * parenthesised one is; a label that reads "required" anywhere else is still not the letter. */
+    : withoutDecoration
+      .replace(/^(?:required|optional)\s+|\s+(?:required|optional)$/i, '')
+      .trim();
   return COVER_LETTER_TEXT_LABEL.test(stripped);
+}
+
+/**
+ * THE FORM TAKES THE COVER LETTER AS TEXT: a discovered control whose label is the cover letter
+ * itself and whose shape is a free-text box.
+ *
+ * The capability read that feeds `cover_letter_supported` counts file inputs (hasCoverLetterUpload,
+ * managedResultHasCoverLetterUpload), so a family that takes the letter in a textarea measured as
+ * "does not take a cover letter" even while discoverAndResolveQuestions was answering that very
+ * textarea from the stored letter. Same product, same letter, two answers to one question. This is
+ * the text half of the measurement, read off the discovery inventory with the same predicate the
+ * resolution loop applies, so the two cannot disagree about which control counts.
+ */
+export function discoveredFieldsTakeCoverLetterAsText(
+  fields: readonly Pick<DiscoveredQuestion, 'label' | 'inputType' | 'role' | 'options'>[],
+): boolean {
+  return fields.some((field) => {
+    const label = normalizeDiscoveredLabel(field.label);
+    if (!label || !isCoverLetterTextQuestion(label)) return false;
+    const role = field.role?.trim().toLowerCase();
+    if (role === 'combobox' || role === 'listbox') return false;
+    if ((field.options ?? []).some((option) => option.trim().length > 0)) return false;
+    return /^(?:text|textarea)$/i.test(field.inputType.trim() || 'text');
+  });
 }
 
 // The largest whole-sentence prefix of `text` that fits `maxLen`, or null when no real sentence
@@ -6449,6 +7017,13 @@ const EMPTY_BRACKET_HANDLE_RE = /\[\s*\]/g;
  * empty labels, which is right: "cards [field0]" names a field, tells the applicant nothing, and
  * cannot be answered by anyone. */
 const LEVER_CARD_HANDLE_RE = /\bcards\s*\[\s*field\d+\s*\]/gi;
+/* Teamtailor's Rails-style names: candidate[answers_attributes][0][answer],
+ * candidate[job_applications_attributes][0][cover_letter]. Welded onto the label exactly as
+ * above, measured on TixTrack (2026-09-02) as "cover letter* required
+ * candidate[job_applications_attributes][0][cover_letter]" and "what are your salary expectations
+ * for this position?* required candidate[answers_attributes][0][answer]". The word "candidate"
+ * followed immediately by a bracket is the handle; "candidate privacy policy" is untouched. */
+const TEAMTAILOR_CANDIDATE_HANDLE_RE = /\bcandidate\[[^\]]*\](?:\[[^\]]*\])*/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
 /* EVERY POSITIVELY IDENTIFIED PROVIDER HANDLE, in one list and in strip order.
@@ -6468,6 +7043,7 @@ const PROVIDER_HANDLE_STRIPPERS: readonly RegExp[] = [
   GREENHOUSE_SECTION_HANDLE_RE,
   EMPTY_BRACKET_HANDLE_RE,
   LEVER_CARD_HANDLE_RE,
+  TEAMTAILOR_CANDIDATE_HANDLE_RE,
   GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE,
 ];
 
@@ -7772,10 +8348,56 @@ export function resolveKnownAnswer(
         : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
     }
     case 'desired_salary': {
-      resolveSalary(
-        { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
-        storedSalaryOf(ap),
-      );
+      /* THE POSTING'S OWN RANGE ANSWERS THE POSTING'S OWN QUESTION.
+       *
+       * This arm used to call resolveSalary and throw the result away, refusing every salary
+       * question whatever it computed. Measured live on TixTrack (Teamtailor, 2026-09-02,
+       * application 6703778e): "what are your salary expectations for this position?" was a
+       * required number input refused while the description stated "Base annual salary range of
+       * $130,000 - $150,000". The median of a range the employer published is not a claim about
+       * her and not a figure Litos invented; it is the employer's number read back, which is the
+       * standing rule for salary fields.
+       *
+       * ONE VALUE WHATEVER THE CONTROL'S TYPE, and that is load-bearing rather than tidy. The first
+       * cut of this arm gave a number input "140000" and a text input "$140,000". The runner
+       * resolves with the live control's type and the refresh (refreshKnownQuestionAnswers, and
+       * knownAnswerLookup beside it) resolves with a hardcoded 'text', so the value the runner
+       * stored was rewritten on the next packet read, the audit and the fill disagreed about the
+       * question, and the send gate answered "application questions changed after packet
+       * approval" on every press: the packet_stale deadlock documented at the phone rule, and the
+       * reason lib/phoneCountry.ts returns a country name for every control type. So the figure is
+       * the bare median on both shapes, as lib/salary.ts computes it for a numeric field; a text
+       * input accepts "140000" as readily as a number input does, and a browser sanitises
+       * "$140,000" on <input type=number> to nothing at all.
+       *
+       * ONLY THE QUESTION THE RANGE ANSWERS. See EXPECTED_SALARY_QUESTION: the label has to ask
+       * for her expected, desired or required pay, must not point at a salary she has or had, and
+       * the control must be an open one; everything else SALARY_QUESTION routes here keeps the
+       * refusal it always had.
+       *
+       * Only a STATED range fills: the label's or the description's, exactly as lib/salary.ts
+       * finds them, and only when the description states one range rather than several. A stored
+       * figure still refuses here (its currency check lives in the extension path), and a posting
+       * with no range refuses with the same sentence it always has; the researched regional median
+       * that rule calls for is not computed in this resolver. */
+      const asksForHerExpectedPay = EXPECTED_SALARY_QUESTION.test(label)
+        && !NON_FIGURE_SALARY_ASK.test(label)
+        && !SALARY_HISTORY_QUESTION.test(label)
+        && !isPolarQuestion(label)
+        && OPEN_SALARY_CONTROL.test(inputType.trim());
+      if (asksForHerExpectedPay) {
+        /* The range is read here rather than through resolveSalary, because the decision needs the
+         * range ITSELF - its currency, and the text it was stated in - and that resolver returns
+         * only a string and a source. A stored figure is unreachable from this arm either way: it
+         * is the one salary source whose currency check lives in the extension path. */
+        const range = statedRangeForExpectedPay(label, jdText);
+        if (range) {
+          /* "$130,001 - $150,000" has a median of 140000.5, which a step=1 number input rejects.
+           * An annual figure is rounded to the unit; an hourly one (under 1000) keeps its cents. */
+          const wholeAnnualFigure = range.median >= 1000 && !Number.isInteger(range.median);
+          return { value: wholeAnnualFigure ? String(Math.round(range.median)) : range.fillNumeric };
+        }
+      }
       return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }
     case 'date_of_birth':

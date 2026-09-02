@@ -6,6 +6,17 @@
 //
 // Do not hand-edit the logic here without also updating the extension copy (and vice versa) -
 // two copies of the salary rule drifting apart is exactly how a currency-unsafe fill ships again.
+//
+// KNOWN DRIFT, 2026-09-02: REPEATED_CURRENCY_SRC below (a currency written again before the second
+// number of a range) exists only in this copy so far. The extension's salary.ts must take the same
+// change in the same release; until it does, a posting stating "$130,000 - $150,000" fills on the
+// managed path and matches nothing on the extension path.
+//
+// `collectCurrencies` is exported here and not in the extension copy. That is an export keyword and
+// nothing else: no line of logic differs, and the extension copy stays byte-comparable on every
+// statement. questionDiscovery.ts reads it to answer a question detectCurrency cannot, which is how
+// MANY currencies a label names - one, none, or two - because "expected salary (gbp or eur)" and
+// "expected salary in kronor" both come back null from detectCurrency and mean opposite things.
 
 export interface StoredSalaryProfile {
   desired_salary?: string;
@@ -47,7 +58,7 @@ function mapCurrencyToken(token: string): string | null {
   }
 }
 
-function collectCurrencies(text: string): Set<string> {
+export function collectCurrencies(text: string): Set<string> {
   const out = new Set<string>();
   for (const m of text.matchAll(new RegExp(CODE_SRC, 'gi'))) {
     const c = mapCurrencyToken(m[1]);
@@ -109,7 +120,14 @@ function groupDigits(n: number, grouping: NumToken['grouping']): string {
 
 const NUM_SRC = String.raw`\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?`;
 const SEP_SRC = String.raw`(?:\s*[-‐-―~]\s*|\s+(?:to|and|bis)\s+)`;
-const RANGE_SRC = `(${NUM_SRC})\\s*(k)?${SEP_SRC}(${NUM_SRC})\\s*(k)?`;
+// The currency written AGAIN before the second number: "$130,000 - $150,000", "USD 90k to USD 110k".
+// Measured live on TixTrack (2026-09-02), whose description states "Base annual salary range of
+// $130,000 - $150,000" and matched nothing, because the range shape expected the second number to
+// follow the separator directly. Only a currency symbol or code may sit there, never a word, so
+// "130,000 to the 150,000 band" still does not read as a range. Non-capturing on purpose: the four
+// numbered groups below are read by position.
+const REPEATED_CURRENCY_SRC = `(?:(?:${SYMBOL_SRC}|\\b(?:${CURRENCY_CODES.join('|')})\\b)\\s?)?`;
+const RANGE_SRC = `(${NUM_SRC})\\s*(k)?${SEP_SRC}${REPEATED_CURRENCY_SRC}(${NUM_SRC})\\s*(k)?`;
 
 function currencyPrefixAt(text: string, index: number): string {
   const window = text.slice(Math.max(0, index - 8), index);

@@ -285,7 +285,11 @@ test('every cover-letter capability rebuild preserves the caller controlled-resu
 
   assert.match(
     fn,
-    /if \(!supported\) \{[\s\S]{0,220}packet: omitCoverLetter\(await buildPacket\(strippedRow, controlledTest\)\), row: strippedRow/,
+    /* The row this branch hands back gained a second shape on 2026-09-02: a form that takes the
+       letter as TEXT keeps the stored letter on the row, because the resolution loop reads it off
+       that row to fill the textarea. The packet still carries no FILE either way, which is the half
+       this assertion exists for. */
+    /if \(!supported\) \{[\s\S]{0,220}packet: omitCoverLetter\(await buildPacket\(strippedRow, controlledTest\)\),\s*row: takenAsText \? row : strippedRow/,
     'a controlled form with no cover-letter input must keep fixture resume bytes after discovery, '
       + 'and must not fetch a cover letter this form has nowhere to put',
   );

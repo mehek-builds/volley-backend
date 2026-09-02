@@ -97,8 +97,17 @@ export type ApplicationReviewQuestion = {
    * resolver still say what it said when she disagreed with it" - so the override survives while the
    * profile agrees and is recomputed when it moves.
    *
-   * An ANSWER-CLAIM, so it dies with the answer it describes. Optional forever; absence reads as
-   * "cannot prove current", which recomputes. jsonb, so no migration.
+   * ABSENCE IS EVIDENCE OF THE OTHER SHAPE, not a gap, and that is what it means downstream since
+   * 2026-09-02. This field is written only when a resolver value existed at review time, so a
+   * current-round applicant_review answer WITHOUT it says the question reached the review screen
+   * with nothing on it: she is not disagreeing with a resolution, she is the only source the answer
+   * ever had. refreshKnownQuestionAnswers keeps that answer when a later widening teaches the
+   * resolver the question, precisely because there is no derivation to prove current - a reviewed
+   * salary figure, a reviewed sponsorship "No", a corrected company name. A reviewed BAND that
+   * contradicts her own stored fact is still recomputed there; that arm rules on ranges.
+   *
+   * An ANSWER-CLAIM, so it dies with the answer it describes. Optional forever. jsonb, so no
+   * migration.
    */
   answer_override_of?: string;
   /* The grant behind a 'consent_permission' answer: when she gave the permission, and the version of
@@ -542,8 +551,8 @@ export function mergeSubmittedApplicationReviewQuestions(
      * for a second correction the lookup answers the same value the chain would have anyway.
      *
      * NOTHING IS RECORDED WHEN NO RESOLVER VALUE CAN BE NAMED, rather than guessing with the stored
-     * answer. Absence reads as "cannot prove current" in derivationIsCurrent, exactly as it does for a
-     * band with no derivation, and the cost is one recomputation. It also keeps essays out of this
+     * answer. That absence is read as "she answered a question the resolver was silent on", and the
+     * refresh KEEPS such an answer rather than recomputing it, so the cost is no longer a lost edit. It also keeps essays out of this
      * field entirely: the resolver answers nothing for an essay label, and copying a 20,000-character
      * answer into a record no branch will ever read for an essay is pure weight in the packet spec.
      *
@@ -720,6 +729,23 @@ export type ManagedFormSnapshotV1 = {
   field_options: NonNullable<SubmissionPacket['fieldOptions']>;
   failed_fields: NonNullable<SubmissionPacket['failedFields']>;
   cover_letter_supported?: boolean;
+  /* THE HALF OF cover_letter_supported THAT DECIDES WHETHER A PDF IS ATTACHED, kept separately
+   * because the two halves are now different facts and the next run reads one of them back.
+   *
+   * cover_letter_supported means "this form takes a cover letter somehow" and since 2026-09-02 that
+   * includes a TEXTAREA. The attachment decision is narrower: it needs a FILE control. The prepare
+   * carries a capability forward across a flaky discovery pass (stableManagedDocumentCapability),
+   * and with only the wide value persisted the next prepare fed the text-inclusive true back into
+   * the file read as `prior` - so a form with no file control at all measured attachable on its
+   * SECOND prepare, the packet claimed an attached PDF, and the fill evidence reported that the
+   * filled form did not record it. Measured on this branch before the split (2026-09-02): run 1
+   * attachable false, run 2 attachable true, same text-only form.
+   *
+   * Absent on every snapshot written before that date. Absent reads as no carried evidence, so a
+   * pre-split row falls back to what this run's own discovery saw, which is the safe direction: a
+   * missed carry costs one re-read of the live form, a wrong carry attaches a file the form cannot
+   * take. */
+  cover_letter_attachable?: boolean;
   transcript_supported?: boolean;
 };
 
@@ -936,12 +962,16 @@ export type ApplicationReviewState = {
   security_code?: SecurityCodeState;
   handoff_expires_at?: string;
   final_approved_at?: string;
-  /* WHETHER THIS FORM HAS A COVER-LETTER FILE CONTROL LITOS CAN ATTACH TO. Nothing more.
+  /* WHETHER THIS FORM TAKES A COVER LETTER LITOS CAN PUT ON IT. Nothing more.
    *
    * Written from hasCoverLetterUpload / managedResultHasCoverLetterUpload, both of which count file
-   * inputs matching COVER_LETTER_UPLOAD_SELECTORS. It is a statement about the PORTAL's capability
-   * and about Litos's ability to use it, and it is deliberately FALSE on JazzHR and Breezy, whose
-   * employers do accept a cover letter but take it as a textarea Litos cannot attach a PDF to.
+   * inputs matching COVER_LETTER_UPLOAD_SELECTORS, and on the managed path also from
+   * discoveredFieldsTakeCoverLetterAsText, which counts a textarea whose label is the cover letter
+   * itself. The second half was added 2026-09-02 (TixTrack, Teamtailor): the textarea was being
+   * filled from the stored letter while this field said the company took none. It used to be
+   * deliberately FALSE on JazzHR, Breezy and Teamtailor for taking the letter as text; a text
+   * control now counts, and whether a PDF is ATTACHED is decided from the file read alone, so
+   * cover_letter_attached stays false on a text-only form.
    *
    * It has never meant "the employer requires a cover letter", and reading it that way is what made
    * Cresta packet 8142004c-3358-4538-8778-16df5e31c5bb unsendable: a complete Greenhouse form, every
@@ -1196,6 +1226,7 @@ export function normalizeManagedFormSnapshot(input: {
   fieldOptions?: SubmissionPacket['fieldOptions'];
   failedFields?: SubmissionPacket['failedFields'];
   coverLetterSupported?: boolean;
+  coverLetterAttachable?: boolean;
   transcriptSupported?: boolean;
 }): ManagedFormSnapshotV1 {
   if (input.fieldOptions !== undefined
@@ -1297,6 +1328,9 @@ export function normalizeManagedFormSnapshot(input: {
   if (input.coverLetterSupported !== undefined && typeof input.coverLetterSupported !== 'boolean') {
     throw new Error('Managed form snapshot cover letter capability must be boolean');
   }
+  if (input.coverLetterAttachable !== undefined && typeof input.coverLetterAttachable !== 'boolean') {
+    throw new Error('Managed form snapshot cover letter attachment capability must be boolean');
+  }
   if (input.transcriptSupported !== undefined && typeof input.transcriptSupported !== 'boolean') {
     throw new Error('Managed form snapshot transcript capability must be boolean');
   }
@@ -1306,6 +1340,9 @@ export function normalizeManagedFormSnapshot(input: {
     failed_fields: failedFields,
     ...(input.coverLetterSupported !== undefined
       ? { cover_letter_supported: input.coverLetterSupported }
+      : {}),
+    ...(input.coverLetterAttachable !== undefined
+      ? { cover_letter_attachable: input.coverLetterAttachable }
       : {}),
     ...(input.transcriptSupported !== undefined
       ? { transcript_supported: input.transcriptSupported }
@@ -1337,6 +1374,9 @@ export function readManagedFormSnapshot(
     fieldOptions: record.field_options as SubmissionPacket['fieldOptions'],
     failedFields: record.failed_fields as SubmissionPacket['failedFields'],
     coverLetterSupported: record.cover_letter_supported as boolean | undefined,
+    /* Read back so the carry survives the round trip. It mirrors no review column, so unlike the two
+     * capabilities below there is nothing for it to disagree with. */
+    coverLetterAttachable: record.cover_letter_attachable as boolean | undefined,
     transcriptSupported: record.transcript_supported as boolean | undefined,
   });
   if (snapshot.cover_letter_supported !== review.cover_letter_supported) {

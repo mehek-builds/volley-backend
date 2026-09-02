@@ -5,6 +5,7 @@ import {
   DISCOVER_QUESTIONS_SCRIPT,
   discoveredFieldIsFixedPortalProfileControl,
   discoveredFieldIsRequired,
+  discoveredFieldsTakeCoverLetterAsText,
   eeoAnswer,
   isCoreIdentityField,
   isCoverLetterTextQuestion,
@@ -19,6 +20,7 @@ import {
   isPolarQuestion,
   isProviderHandleOnly,
   isRefusedQuestion,
+  knownAnswerLookup,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
@@ -2003,9 +2005,351 @@ test('salary questions are left for human attention', () => {
   assert.ok(eur && 'skipReason' in eur);
 });
 
-test('salary questions stay blank even when the label states a range', () => {
-  const resolved = resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined);
-  assert.ok(resolved && 'skipReason' in resolved);
+/* The posting's own range answers the posting's own question. The arm used to compute this and
+ * discard it; measured on TixTrack (Teamtailor, 2026-09-02) as a required number input refused
+ * while the description stated "$130,000 - $150,000". */
+const TIXTRACK_SALARY_JD = [
+  frozenJobEmployerContext('TixTrack'),
+  'Base annual salary range of $130,000 - $150,000. Remote within the United States.',
+].join('\n');
+
+test('a salary question fills the median of the range the label or the description states', () => {
+  // The bare figure on every control type: a text input takes "100000" and a number input takes
+  // nothing else. See the refresh-path test below for why the spelling must not depend on type.
+  assert.deepEqual(
+    resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined),
+    { value: '100000' },
+  );
+  const tixtrack = 'what are your salary expectations for this position?* required';
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'number', {}, TIXTRACK_SALARY_JD), { value: '140000' });
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'text', {}, TIXTRACK_SALARY_JD), { value: '140000' });
+  assert.deepEqual(resolveKnownAnswer(tixtrack, 'textarea', {}, TIXTRACK_SALARY_JD), { value: '140000' });
+  for (const label of ['expected salary', 'salary requirements', 'what is your minimum salary?', 'target compensation']) {
+    assert.deepEqual(resolveKnownAnswer(label, 'number', {}, TIXTRACK_SALARY_JD), { value: '140000' }, label);
+  }
+  // A half-dollar median is rounded for the step=1 number input; an hourly figure keeps its cents.
+  assert.deepEqual(resolveKnownAnswer('expected salary', 'number', {}, 'Salary $130,001 - $150,000'), { value: '140001' });
+  /* The hourly figure is read off the LABEL's own range, because a description window that merely
+     says "Pay $20.50 - $25.50 per hour" does not say the range is this role's salary. See the
+     jd-range provenance rule and its must-refuse pins below. */
+  assert.deepEqual(
+    resolveKnownAnswer('expected hourly salary ($20.50 - $25.50 per hour)', 'number', {}, undefined),
+    { value: '23' },
+  );
+  // The description states the range as this role's pay, in the unit the label asks in.
+  assert.deepEqual(
+    resolveKnownAnswer('expected hourly salary', 'number', {}, 'Base pay range $20.50 - $25.50 per hour.'),
+    { value: '23' },
+  );
+});
+
+/* THE MEDIAN IS THE EMPLOYER'S NUMBER READ BACK, AND ONLY WHILE IT STILL MEANS WHAT THEY MEANT.
+ *
+ * Every label below took TixTrack's annual $130,000 - $150,000 median before this rule (probe,
+ * 2026-09-02) and every one of them holds on origin/main. A currency the posting never named and a
+ * period the range was not stated in are the two ways a true number becomes a false claim: 140000
+ * EUR is a figure in a currency nobody quoted, and 140000 "per month" is an eleven-fold
+ * overstatement of what the employer published. */
+test('a label that names a different currency or a different pay period refuses the range median', () => {
+  const mustRefuse: Array<[string, string, string]> = [
+    // Currency: the label names one and the range is stated in another.
+    ['expected salary (in eur)', 'number', TIXTRACK_SALARY_JD],
+    ['expected salary in gbp', 'text', TIXTRACK_SALARY_JD],
+    // Teamtailor is Swedish and this label is common there.
+    ['expected salary (sek)', 'number', TIXTRACK_SALARY_JD],
+    ['expected salary (usd)', 'number', 'Base annual salary range of £45,000 - £55,000.'],
+    ['expected salary in usd', 'text', 'Base annual salary range of £45,000 - £55,000.'],
+    // Period: the label asks per month, per hour or for part-time hours; the range is annual.
+    ['expected monthly salary', 'number', TIXTRACK_SALARY_JD],
+    ['expected salary per month (sek)', 'text', TIXTRACK_SALARY_JD],
+    ['salary expectation (monthly, gross)', 'text', TIXTRACK_SALARY_JD],
+    ['what are your salary expectations? (net per month)', 'text', TIXTRACK_SALARY_JD],
+    ['expected compensation per hour', 'text', TIXTRACK_SALARY_JD],
+    ['expected pay rate per hour', 'text', TIXTRACK_SALARY_JD],
+    ['expected salary for this internship (per month)', 'text', TIXTRACK_SALARY_JD],
+    ['salary expectations for a part-time (20h/week) role', 'text', TIXTRACK_SALARY_JD],
+  ];
+  for (const [label, type, jd] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} [${type}]`);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
+  // The currency the posting DOES name, and the period it does state, both still fill.
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary (usd)', 'number', {}, TIXTRACK_SALARY_JD),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected monthly salary', 'number', {}, 'Base salary range of $4,000 - $5,000 per month.'),
+    { value: '4500' },
+  );
+});
+
+/* ROUND 4: A UNIT THE READER CANNOT SEE IS NOT A UNIT THAT AGREES.
+ *
+ * Round 3 refused a unit it could see was different and filled everything else. An adversarial
+ * probe of 128 cases (2026-09-02) took that apart from the other side: sixteen labels named a unit
+ * the reader had no vocabulary for, or two units at once, and every one of them took TixTrack's
+ * annual US median. detectCurrency returns null for "expected salary" (names none), for "expected
+ * salary in kronor" (names one the table does not carry) and for "expected salary (gbp or eur)"
+ * (names two), and round 3 read all three as "no currency named". Each label below is that probe's
+ * case, pinned in the direction a wrong figure cannot be typed. */
+test('a currency or a period the label names but the reader cannot resolve refuses the median', () => {
+  const mustRefuse: Array<[string, string]> = [
+    // A currency word the four-entry table in lib/salary.ts does not carry.
+    ['expected salary in kronor', 'number'],
+    ['expected salary in swedish krona', 'number'],
+    ['expected salary in rupees', 'number'],
+    ['expected annual salary in yen', 'number'],
+    ['expected salary in zloty', 'number'],
+    ['expected salary in canadian dollars', 'number'],
+    ['expected salary in australian dollars', 'number'],
+    // "pounds" without "sterling" and "francs" without "swiss" name a family, not a currency.
+    ['expected salary in pounds', 'number'],
+    ['expected salary in francs', 'number'],
+    // Two currencies in one label: the median is in neither of the two the field offers.
+    ['expected salary (gbp or eur)', 'number'],
+    ['expected salary, state in eur or sek', 'text'],
+    // A pay period the four-pattern list did not carry. "bi-weekly" was caught and "biweekly" was
+    // not, because \bweekly\b has no word boundary inside the unhyphenated spelling.
+    ['expected biweekly salary', 'number'],
+    ['expected fortnightly salary', 'number'],
+    ['expected salary per fortnight', 'number'],
+    ['expected quarterly salary', 'number'],
+    ['expected salary per pay period', 'number'],
+  ];
+  for (const [label, type] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, TIXTRACK_SALARY_JD);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} [${type}]`);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
+  /* The currency the posting DOES name still fills, in the code, the symbol and the word, and so
+   * does the period it states. The rule is not the width of the vocabulary. */
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary (usd)', 'number', {}, TIXTRACK_SALARY_JD),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary in us dollars', 'number', {}, TIXTRACK_SALARY_JD),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected annual salary', 'number', {}, TIXTRACK_SALARY_JD),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected monthly salary', 'number', {}, 'Base salary range of €4,000 - €5,000 per month.'),
+    { value: '4500' },
+  );
+});
+
+/* THE PERIOD HAS TO QUALIFY THE RANGE, NOT MERELY SHARE A WINDOW WITH IT.
+ *
+ * The most realistic of the round-3 false positives and the largest error: an annual range that is
+ * DISBURSED monthly satisfied a monthly label, because the period arm asked whether the 200-char
+ * window contained the word. 140000 typed into "expected monthly salary" is a twelve-fold
+ * overstatement of what the employer published. The same defect fired on a description that
+ * reviews performance monthly and on one that states a 40-hour week. */
+test('a period word elsewhere in the description does not make the range monthly', () => {
+  const annual = 'Base annual salary range of $130,000 - $150,000';
+  const mustRefuse: Array<[string, string, string]> = [
+    ['expected monthly salary', 'number', `${annual}, paid out monthly. Remote within the United States.`],
+    ['expected salary per month', 'text', `${annual}, paid out monthly. Remote within the United States.`],
+    ['expected monthly salary', 'number', `${annual}. Performance is reviewed monthly with your manager.`],
+    ['expected weekly salary', 'number', `${annual}. Standard schedule is 40 hours per week.`],
+  ];
+  for (const [label, type, jd] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, [frozenJobEmployerContext('TixTrack'), jd].join('\n'));
+    assert.ok(resolved && 'skipReason' in resolved, `${label} :: ${jd}`);
+    assert.match(resolved.skipReason, /^salary question left for you/, jd);
+  }
+  // The annual question the same descriptions DO answer is unaffected by the stray word.
+  assert.deepEqual(
+    resolveKnownAnswer('expected annual salary', 'number', {}, `${annual}. Performance is reviewed monthly with your manager.`),
+    { value: '140000' },
+  );
+});
+
+/* WHAT THE RANGE IN THE DESCRIPTION IS A RANGE OF. lib/salary.ts accepts any range within 160
+ * characters of a pay word, which is the right net for finding a figure and far too wide for
+ * answering with one. Each of these filled before the provenance rule and each is live on
+ * origin/main: a wellness stipend answered "expected salary" with 75, a monthly stipend answered
+ * "expected annual salary" with 1250, a daily intern rate answered with 550, an hourly rate
+ * answered with 20, and a base-plus-equity sentence answered "expected total compensation" with the
+ * base alone. */
+test('a description range fills only when the description says it is this role\'s pay', () => {
+  const mustRefuse: Array<[string, string, string]> = [
+    ['expected salary', 'number', 'We offer a $50 - $100 monthly wellness stipend. Salary competitive.'],
+    ['expected annual salary', 'number', 'Stipend $1,000 - $1,500 per month.'],
+    ['expected salary', 'number', 'Pay is 500 - 600 AED per day for the internship.'],
+    ['expected salary', 'number', 'Hourly rate $18 - $22; typical week 20 - 30 hours.'],
+    ['expected total compensation', 'text', 'Base salary $130,000 - $150,000 plus equity.'],
+    ['expected salary', 'number', 'Signing bonus of $5,000 - $10,000. Salary competitive.'],
+  ];
+  for (const [label, type, jd] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} :: ${jd}`);
+    assert.match(resolved.skipReason, /^salary question left for you/, jd);
+  }
+  // A window that names the role's own pay, with an annual marker or with no period at all, fills.
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary', 'number', {}, 'Base salary $130,000 - $150,000 per year.'),
+    { value: '140000' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary', 'number', {}, 'Salary $130,000 - $150,000.'),
+    { value: '140000' },
+  );
+  // The label asking in the window's own unit is the one way a stipend range is usable.
+  assert.deepEqual(
+    resolveKnownAnswer('expected monthly stipend salary', 'number', {}, 'Monthly stipend salary of $1,000 - $1,500 per month.'),
+    { value: '1250' },
+  );
+});
+
+/* ROUND 4: "COMPETITIVE SALARY" PLUS ONE BENEFIT FIGURE IS THE COMMONEST POSTING THERE IS.
+ *
+ * Round 3 asked whether a 200-character window contained a pay word. A window is not an assertion:
+ * a posting that quotes no salary at all, and one relocation or tuition or 401k figure anywhere
+ * near the word "salary", answered "expected salary" with the median of the BENEFIT (measured
+ * 7500, 3500, 4500, 1500 and 750 on the five shapes below). The pay word and the range must now be
+ * in the same sentence, that sentence must name none of the benefit nouns, and it must not be
+ * quoting what somebody else earns. */
+test('a benefit figure, an OTE band or another level\'s pay never answers her expected salary', () => {
+  const mustRefuse: Array<[string, string, string]> = [
+    ['expected salary', 'number', 'Salary competitive. Relocation allowance of $5,000 - $10,000.'],
+    ['expected salary', 'number', 'Competitive salary. Relocation package worth $5,000 - $10,000.'],
+    ['expected salary', 'number', 'Compensation is competitive. Annual tuition reimbursement of $2,000 - $5,000.'],
+    ['expected annual salary', 'number', 'Salary is competitive. We match 401k contributions of $3,000 - $6,000 annually.'],
+    ['expected salary', 'number', 'Compensation includes an annual learning budget of $1,000 - $2,000.'],
+    ['expected annual salary', 'number', 'Competitive salary. Annual home-office allowance of $500 - $1,000.'],
+    // On-target earnings include commission, and a label that says "base" is not asking for the total.
+    ['expected salary', 'number', 'On-target earnings (OTE) compensation of $180,000 - $220,000 including commission.'],
+    ['expected base salary', 'number', 'Total compensation package of $200,000 - $250,000.'],
+    // Another level's published band, typed into an application for this one.
+    ['expected salary', 'number', 'Senior engineers earn a salary of $180,000 - $220,000. This intern role pays competitively.'],
+  ];
+  for (const [label, type, jd] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} :: ${jd}`);
+    assert.match(resolved.skipReason, /^salary question left for you/, jd);
+  }
+  /* A posting that calls its OWN role senior is still this role's pay: the refusal above turns on
+   * the sentence saying what other people EARN, not on the word "senior". */
+  assert.deepEqual(
+    resolveKnownAnswer('expected salary', 'number', {}, 'The base salary range for this senior engineer role is $130,000 - $150,000 per year.'),
+    { value: '140000' },
+  );
+});
+
+/* A LABEL THAT MENTIONS PAY WITHOUT ASKING FOR A FIGURE OF IT. Every one of these took the median
+ * before the head-of-phrase rule (probe, 2026-09-02) and every one holds on origin/main: a currency
+ * field answered with 140000, a bonus field answered with the base salary, a structure field and a
+ * range field answered with a single number that is neither. */
+test('the range median never answers a currency, a structure, a bonus or a range', () => {
+  for (const label of [
+    'preferred currency for compensation',
+    'preferred salary currency',
+    'preferred compensation structure (base vs equity)',
+    'expected equity compensation',
+    'expected bonus compensation',
+    'expected stock compensation',
+    'preferred salary frequency',
+    'preferred compensation schedule',
+    'expected salary range',
+    'expected salary (please state a range)',
+    'salary expectations (please specify currency)',
+    /* ROUND 4: a band and a bracket are a range under another name, and both are ordinary wording
+     * on a European form. "Gross or net?" asks which basis is being quoted, and one median says
+     * nothing about which of the two it is. All three took the median before this. */
+    'expected salary band',
+    'expected salary bracket',
+    'desired salary bands',
+    'expected salary, gross or net?',
+    'expected compensation, net or gross?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', {}, TIXTRACK_SALARY_JD);
+    assert.ok(resolved && 'skipReason' in resolved, label);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
+  /* The cents-preserving median survives all of it, from the label's own range and from a
+   * description that states an hourly base pay range. */
+  assert.deepEqual(
+    resolveKnownAnswer('expected hourly salary ($20.50 - $25.50 per hour)', 'number', {}, undefined),
+    { value: '23' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('expected hourly salary', 'number', {}, 'Base pay range $20.50 - $25.50 per hour.'),
+    { value: '23' },
+  );
+});
+
+/* The runner resolves with the live control's type; refreshKnownQuestionAnswers and
+ * knownAnswerLookup resolve with a hardcoded 'text'. A value that differed by type ("140000" against
+ * "$140,000") was rewritten on the next packet read, and the send gate then answered "application
+ * questions changed after packet approval" on every press of the TixTrack packet. */
+test('the salary figure the runner stores survives the refresh path unchanged', () => {
+  const raw = 'what are your salary expectations for this position?* required candidate[answers_attributes][0][answer]';
+  const runner = resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'number', {}, TIXTRACK_SALARY_JD);
+  assert.ok(runner && 'value' in runner);
+  assert.equal(knownAnswerLookup({}, TIXTRACK_SALARY_JD)({ question: raw }), runner.value);
+  const [refreshed] = refreshKnownQuestionAnswers(
+    [{ question: raw, answer: '140000', required: true, portal_input_type: 'number', kind: 'required' }],
+    {},
+    TIXTRACK_SALARY_JD,
+    undefined,
+    'us',
+    'US',
+  );
+  assert.equal(refreshed.answer, '140000');
+});
+
+/* SALARY_QUESTION routes every label that mentions pay here, and the first cut of the fill typed the
+ * posting's median into all of them (probe, 2026-09-02). A current-salary field filled with the
+ * employer's number is a false statement of her history; a polar question and a closed control want
+ * a yes or a no that no median can be. Every one of these refused on origin/main and must go on
+ * refusing, with the range on the posting AND on the label. */
+test('the range median fills only a question about her expected pay on an open control', () => {
+  const mustRefuse: Array<[string, string]> = [
+    ['current salary', 'number'],
+    ['what is your current base salary?', 'number'],
+    ['salary history', 'text'],
+    ['please list your compensation at your last three roles', 'textarea'],
+    ['what was your most recent salary?', 'number'],
+    ['previous salary', 'number'],
+    ['current salary (e.g. $90,000 - $110,000)', 'text'],
+    ['current compensation package (base + bonus)', 'text'],
+    ['have you ever received workers compensation?', 'radio'],
+    ['are you comfortable with the compensation range stated in the posting?', 'radio'],
+    ['is the salary range listed acceptable to you?', 'radio'],
+    ['do you have any questions about compensation?', 'textarea'],
+    ['are you willing to accept a salary within our stated range?', 'checkbox'],
+    ['compensation* required', 'text'],
+    ['salary', 'text'],
+    ['what are your salary expectations?', 'select'],
+    ['what are your salary expectations?', 'radio'],
+  ];
+  for (const [label, type] of mustRefuse) {
+    const resolved = resolveKnownAnswer(label, type, {}, TIXTRACK_SALARY_JD);
+    assert.ok(resolved && 'skipReason' in resolved, `${label} [${type}]`);
+    assert.match(resolved.skipReason, /^salary question left for you/, label);
+  }
+});
+
+test('a salary question with no stated range still refuses, whatever is stored', () => {
+  for (const jd of [undefined, 'Competitive compensation. Remote within the United States.']) {
+    const resolved = resolveKnownAnswer('what are your salary expectations for this position?', 'number', {}, jd);
+    assert.ok(resolved && 'skipReason' in resolved);
+    assert.match(resolved.skipReason, /^salary question left for you/);
+  }
+  // Two distinct ranges in one description is not one stated range.
+  const twoRanges = resolveKnownAnswer(
+    'what are your salary expectations?',
+    'text',
+    {},
+    'Salary $100,000 - $120,000 in Austin; salary $130,000 - $150,000 in New York.',
+  );
+  assert.ok(twoRanges && 'skipReason' in twoRanges);
 });
 
 test('eeoAnswer is exact-match-only, never a near-miss (R-018)', () => {
@@ -2033,6 +2377,13 @@ test('isCoverLetterTextQuestion matches only labels that are the cover letter it
   assert.equal(isCoverLetterTextQuestion('Motivation letter'), true);
   assert.equal(isCoverLetterTextQuestion('Letter of Motivation'), true);
   assert.equal(isCoverLetterTextQuestion('Anschreiben'), true);
+  // Teamtailor welds its marker word and its Rails name onto the label (TixTrack, 2026-09-02).
+  assert.equal(isCoverLetterTextQuestion('cover letter* required'), true);
+  assert.equal(
+    isCoverLetterTextQuestion(normalizeDiscoveredLabel('cover letter* required candidate[job_applications_attributes][0][cover_letter]')),
+    true,
+  );
+  assert.equal(isCoverLetterTextQuestion('Required cover letter'), true);
 });
 
 test('isCoverLetterTextQuestion never fires on labels that merely contain the words', () => {
@@ -2045,6 +2396,14 @@ test('isCoverLetterTextQuestion never fires on labels that merely contain the wo
   assert.equal(isCoverLetterTextQuestion('Why is a cover letter important to you?'), false);
   assert.equal(isCoverLetterTextQuestion('Please describe your motivation for applying'), false);
   assert.equal(isCoverLetterTextQuestion(''), false);
+  /* THE MARKER STRIP RUNS AFTER THE PUNCTUATION STRIP, so "cover letter required?" arrived here as
+     "cover letter required" and then as "cover letter" - a yes/no question read as the label of the
+     letter itself, with the whole letter typed into a control expecting "Yes". The strip is licensed
+     only where the label asks nothing; Teamtailor's welded marker never arrives on a question. */
+  assert.equal(isCoverLetterTextQuestion('cover letter required?'), false);
+  assert.equal(isCoverLetterTextQuestion('Cover Letter Required?'), false);
+  assert.equal(isCoverLetterTextQuestion('cover letter optional?'), false);
+  assert.equal(isCoverLetterTextQuestion('is a cover letter required?'), false);
 });
 
 test('a link question resolves via classifyField, so callers never reach the essay drafter', () => {
@@ -3969,10 +4328,31 @@ test('the page script and this module use ONE definition of a provider handle', 
     'urls[LinkedIn]',
     'Degree* degree--0',
     'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'candidate[answers_attributes][0][answer]',
+    'cover letter* required candidate[job_applications_attributes][0][cover_letter]',
     '姓名',
   ]) {
     assert.equal(compiled(value), isProviderHandleOnly(value), value);
   }
+});
+
+/* Teamtailor's Rails-style names, welded onto the label exactly as Lever's card handles are.
+ * Measured on TixTrack (2026-09-02): the salary question and the cover-letter textarea both
+ * carried one, and the cover-letter exact match could not fire through it. */
+test('a Teamtailor candidate[...] name is a provider handle, and the question survives without it', () => {
+  assert.equal(
+    normalizeDiscoveredLabel('what are your salary expectations for this position?* required candidate[answers_attributes][0][answer]'),
+    'what are your salary expectations for this position?* required',
+  );
+  assert.equal(
+    normalizeDiscoveredLabel('cover letter* required candidate[job_applications_attributes][0][cover_letter]'),
+    'cover letter* required',
+  );
+  assert.equal(isProviderHandleOnly('candidate[answers_attributes][0][answer]'), true);
+  assert.equal(normalizeDiscoveredLabel('candidate[answers_attributes][0][answer]'), '');
+  // The word on its own, or as part of a document name, is never a handle.
+  assert.equal(normalizeDiscoveredLabel('Candidate Privacy Notice'), 'Candidate Privacy Notice');
+  assert.equal(isProviderHandleOnly('candidate'), false);
 });
 
 test('the discovery walk falls through to a heading only for a handle, and only when it is unambiguous', () => {
@@ -4383,14 +4763,20 @@ test('an agreeing resolver carries the applicant claim forward but not the answe
   assert.equal('consent_permission_granted_at' in refreshed, false);
 });
 
+/* THE PROFILE IS THE SOURCE OF TRUTH FOR A RESOLUTION SHE DISAGREED WITH, and staleness is decided
+ * by the derivation she recorded when she disagreed. A review saved against a resolver value carries
+ * answer_override_of; once the profile moves out from under it, that note stops matching and the
+ * answer is recomputed. A review saved with NO note is a different record entirely - the resolver had
+ * nothing to say at the time - and is kept; see 'an answer she gave while the resolver was silent'. */
 test('a resolved answer that differs still replaces the value and drops the record with it', () => {
   const reviewedAt = '2026-08-12T13:45:27.969Z';
   const stored = [{
     question: 'what is your gender/gender identity? 4005628101',
-    // A stale value: the profile now says something else, and the employer must receive the profile.
+    // A stale value: she overrode "Male", the profile now says Female, and the note no longer matches.
     answer: 'Prefer not to say',
     answer_source: 'applicant_review',
     answer_reviewed_at: reviewedAt,
+    answer_override_of: 'Male',
   }];
 
   const refreshed = refreshKnownQuestionAnswers(stored, { eeo_prefs: { gender: 'Female' } }, undefined, reviewedAt);
@@ -4399,6 +4785,7 @@ test('a resolved answer that differs still replaces the value and drops the reco
   assert.equal(refreshed[0].answer_source, undefined,
     'the record described the answer that was just replaced, so it goes with it');
   assert.equal(refreshed[0].answer_reviewed_at, undefined);
+  assert.equal(refreshed[0].answer_override_of, undefined);
 });
 
 test('equality for keeping the record is exact, because casing is what gets typed on the form', () => {
@@ -4408,6 +4795,8 @@ test('equality for keeping the record is exact, because casing is what gets type
     answer: 'Decline To Self Identify',
     answer_source: 'applicant_review',
     answer_reviewed_at: reviewedAt,
+    // She overrode a resolution that has since moved: casing is the whole of the difference here.
+    answer_override_of: 'Decline to self-identify (previous wording)',
   }];
 
   const refreshed = refreshKnownQuestionAnswers(
@@ -4563,16 +4952,17 @@ test('a reviewed band the resolver cannot judge is kept, and one it contradicts 
   assert.equal(refreshed[2].answer_source, undefined);
 });
 
-test('the incomparable keep is for bands only: a plain reviewed answer keeps the override rules', () => {
+test('the incomparable keep is for bands only: a reviewed answer whose derivation moved is recomputed', () => {
   const reviewedAt = '2026-08-20T18:30:00.000Z';
   const refreshed = refreshKnownQuestionAnswers([
-    /* No band shape, no answer_override_of: the override branch's own requirements still decide,
-       and they refuse an unproven claim, exactly as before this change. */
+    /* No band shape, and an answer_override_of the profile has moved away from: the override
+       branch's own requirements still decide, and they refuse a claim they cannot prove current. */
     {
       question: 'what degree did you complete at the above university? ✱',
       answer: 'Some Other Degree',
       answer_source: 'applicant_review',
       answer_reviewed_at: reviewedAt,
+      answer_override_of: 'Master of Science in Computer Science',
     },
   ], { degree: 'Bachelor of Science in Computer Science' }, undefined, reviewedAt);
   assert.equal(refreshed[0].answer, 'Bachelor of Science in Computer Science');
@@ -4950,4 +5340,301 @@ test('the offer rule does not claim a location choice that mentions return offer
     resolveKnownAnswer('do you have any upcoming offer deadlines?', 'select', { has_outstanding_offers: false }, undefined),
     { value: 'No' },
   );
+});
+
+/* ---- the resolver round measured live on 2026-09-02 ----
+ *
+ * Five questions the managed prepare surfaced that the profile answers, each measured through this
+ * resolver before the fix (null, refused or held) and after (the expected answer). TixTrack is a
+ * Teamtailor tenant (application 6703778e); Apollo Research is Lever (application 0a5081aa). */
+
+const TIXTRACK_SPONSORSHIP_LABEL =
+  'us sponsorship* required will you now or in the future require tixtrack to commence (“sponsorship”) for employment visa status (e.g., h-1b visa status)?';
+
+test('a sponsorship question naming the employer as the one to commence it is answered from needs_sponsorship', () => {
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  const doesNot = { work_authorized: true, needs_sponsorship: false };
+  // Measured before: resolveKnownAnswer returned null and classifyField null; the radio sat empty.
+  assert.deepEqual(resolveKnownAnswer(TIXTRACK_SPONSORSHIP_LABEL, 'radio', needs, undefined), { value: 'Yes' });
+  assert.deepEqual(resolveKnownAnswer(TIXTRACK_SPONSORSHIP_LABEL, 'radio', doesNot, undefined), { value: 'No' });
+  assert.equal(WORK_ELIGIBILITY_QUESTION.test(TIXTRACK_SPONSORSHIP_LABEL), true);
+  // The same shape with other commencement verbs, scoped by the posting instead of by the label.
+  for (const label of [
+    'will you now or in the future require acme to initiate sponsorship for an employment visa?',
+    'do you now, or will you in the future, need the company to file for sponsorship of a work visa?',
+    'will you now or in the future require acme to commence sponsorship?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US'), { value: 'Yes' }, label);
+    // Unscoped and without a US marker, the country is unknown and the question still holds.
+    const unscoped = resolveKnownAnswer(label, 'radio', needs, undefined);
+    assert.ok(unscoped && 'skipReason' in unscoped, label);
+  }
+  // A future-only wording keeps the legacy-scalar rule it always had: one stored bit cannot say
+  // whether the need is present or future, so the question holds. The arm widens what is
+  // recognised as a sponsorship question, not what a stored declaration may say.
+  const futureOnly = resolveKnownAnswer('will you require acme to initiate sponsorship for an employment visa?', 'radio', needs, undefined, 'us', 'US');
+  assert.ok(futureOnly && 'skipReason' in futureOnly);
+  assert.match(futureOnly.skipReason, /^work-eligibility question left for you/);
+  // Nothing stored: held, never invented.
+  const unasked = resolveKnownAnswer(TIXTRACK_SPONSORSHIP_LABEL, 'radio', {}, undefined);
+  assert.ok(unasked && 'skipReason' in unasked);
+});
+
+test('the commencement arm never claims a past sponsorship or sponsoring someone else', () => {
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  for (const label of [
+    'have you previously been sponsored for a visa?',
+    'have you ever been sponsored by an employer in the united states?',
+    'are you able to sponsor a colleague for a work visa?',
+    'would you be willing to sponsor a new hire?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US');
+    assert.ok(!(resolved && 'value' in resolved), label);
+  }
+  /* A need expressed in the past tense, or a need on somebody else's behalf, reaches the
+   * require/need arms (the first two below answered "Yes" on origin/main as well, the rest through
+   * the commencement arm) and is held by PAST_OR_THIRD_PARTY_SPONSORSHIP_FRAME: needs_sponsorship
+   * says nothing about a history, and "Yes" here claims one she does not have. */
+  for (const label of [
+    'have you ever required an employer to file for sponsorship on your behalf?',
+    'have you ever required visa sponsorship in the past?',
+    'has a prior employer ever needed to file a petition for sponsorship for you?',
+    'did your previous employer need to initiate sponsorship for you?',
+    'did you previously need a company to initiate sponsorship?',
+    'as a manager in this role you will need to initiate sponsorship for your direct reports. are you comfortable with that?',
+    'will you need to file for sponsorship for new hires on your team?',
+    /* The third-party frame had no room for an ADJECTIVE before the noun, and these four reached the
+     * commencement arm through that gap and answered "Yes" from needs_sponsorship. The last asks
+     * whether she already HOLDS sponsorship, which is a different fact from needing one. */
+    'in this role you will need to file petitions for sponsorship of foreign national hires. describe your experience.',
+    'this position requires the successful candidate to provide sponsorship for junior staff. ok?',
+    'does your spouse or any dependent require us to initiate sponsorship?',
+    'this role requires you to obtain sponsorship independently; do you have it?',
+    'will you need to arrange sponsorship for your clients?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US');
+    assert.ok(resolved && 'skipReason' in resolved, label);
+    assert.match(resolved.skipReason, /^work-eligibility question left for you/, label);
+  }
+  // The now-or-future family carries none of those frames and still answers.
+  for (const label of [
+    'do you now or in the future require sponsorship for employment visa status?',
+    'will you now or in the future require sponsorship for employment visa status to work in the united states?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'radio', needs, undefined, 'us', 'US'), { value: 'Yes' }, label);
+  }
+});
+
+/* ROUND 4: NINE MORE OF BOTH SHAPES, EVERY ONE OF THEM ANSWERED "Yes" FROM needs_sponsorship.
+ *
+ * These are older than the branch - main's SPONSORSHIP_QUESTION routes all nine to the same arms -
+ * and round 3's widened frame did not reach them. The past half read "did you" and "did your" but
+ * not "did AN employer", "were you required" or "when you worked ... before". The third-party half
+ * was a list of nouns, so interns, contractors, researchers, a workforce and nationals walked past
+ * it, and its two-word adjective allowance was beaten by three words and by a possessive
+ * apostrophe. Six of the nine answered even with no posting country supplied, and three answered
+ * on the scoped work_eligibility_by_country path, so all three call shapes are pinned. */
+test('a sponsorship question about her past, or about anyone else, is held whatever the noun', () => {
+  const legacy = { work_authorized: true, needs_sponsorship: true };
+  const scoped = {
+    work_eligibility_by_country: [
+      { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: true },
+    ],
+  };
+  const mustHold = [
+    // Past tense, in subjects the frame list did not carry.
+    'in your last role in the united states, did an employer need to sponsor you?',
+    'were you required to obtain sponsorship for your us internship last summer?',
+    'when you worked in the united states before, did anyone need to sponsor you?',
+    // Somebody else is the one being sponsored.
+    'will you be required to initiate sponsorship for interns in the united states?',
+    'does this role require you to file sponsorship for contractors in the united states?',
+    'in this us role you will need to initiate sponsorship for visiting researchers. ok?',
+    'does this role require you to manage sponsorship for our international workforce in the united states?',
+    'will you be required to start sponsorship for the company’s international employees in the united states?',
+    'this us position requires you to provide sponsorship for our overseas engineering team members. ok?',
+  ];
+  for (const label of mustHold) {
+    for (const ap of [legacy, scoped]) {
+      const withCountry = resolveKnownAnswer(label, 'radio', ap, undefined, 'us', 'US');
+      assert.ok(withCountry && 'skipReason' in withCountry, label);
+      assert.match(withCountry.skipReason, /^work-eligibility question left for you/, label);
+      const withoutCountry = resolveKnownAnswer(label, 'radio', ap, undefined);
+      assert.ok(!(withoutCountry && 'value' in withoutCountry), `${label} (no posting country)`);
+    }
+  }
+  // Her own need, now or later, is still the question the stored bit answers.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'will you now or in the future require sponsorship for employment visa status in the united states?',
+      'radio',
+      legacy,
+      undefined,
+      'us',
+      'US',
+    ),
+    { value: 'Yes' },
+  );
+});
+
+/* DECIDED, NOT LEFT TO A SIDE EFFECT, AND DECIDED THE OTHER WAY IN ROUND 3.
+ *
+ * Widening what the resolver answers changes what refreshKnownQuestionAnswers does to an answer she
+ * reviewed while the resolver was still silent. applicationReview.ts records answer_override_of only
+ * when a resolver value existed at review time, so its absence on a current-round review says the
+ * question reached her unanswered and the string on the record is hers alone. The first cut let the
+ * newly widened resolver overwrite it and strip the provenance, which measured (probe against
+ * origin/main c6e2c25, same input on both trees) as: a reviewed sponsorship "No" becoming "Yes", a
+ * reviewed salary "$120,000" becoming the posting median, a corrected "Tonee Inc." becoming "Tonee",
+ * and an "Other website" holding a GitHub link becoming the portfolio URL - on every packet read,
+ * submitted packets included. The human review wins instead. */
+test('an answer she gave while the resolver was silent is kept once the resolver learns the question', () => {
+  const reviewedAt = '2026-09-02T00:00:00.000Z';
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  const silentThen = {
+    question: TIXTRACK_SPONSORSHIP_LABEL,
+    answer: 'No',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  };
+  const [kept] = refreshKnownQuestionAnswers([silentThen], needs, undefined, reviewedAt, 'us', 'US');
+  assert.equal(kept.answer, 'No', 'the resolver learning the question does not unsay her answer');
+  assert.equal(kept.answer_source, 'applicant_review', 'and the record still says a person wrote it');
+  assert.equal(kept.answer_reviewed_at, reviewedAt);
+  // Reviewed AGAINST the resolver's "Yes": the override is recorded and her answer stands too.
+  const [overridden] = refreshKnownQuestionAnswers(
+    [{ ...silentThen, answer_override_of: 'Yes' }],
+    needs,
+    undefined,
+    reviewedAt,
+    'us',
+    'US',
+  );
+  assert.equal(overridden.answer, 'No');
+  assert.equal(overridden.answer_source, 'applicant_review');
+  // A review from an EARLIER round is not the current round and is recomputed as it always was.
+  const [stale] = refreshKnownQuestionAnswers(
+    [{ ...silentThen, answer_reviewed_at: '2026-08-01T00:00:00.000Z' }],
+    needs,
+    undefined,
+    reviewedAt,
+    'us',
+    'US',
+  );
+  assert.equal(stale.answer, 'Yes');
+});
+
+/* THE SAME RULE ON THE FAMILY THIS ROUND WIDENED MOST. Before the desired_salary arm answered
+ * anything, a salary question on a posting with a stated range ALWAYS read "salary question left for
+ * you", so a figure in that field is always a figure she typed. Recomputing it to the posting median
+ * would replace her number with the employer's on a packet she has already approved. */
+test('a reviewed salary figure survives the arm that now answers salary questions', () => {
+  const reviewedAt = '2026-09-02T00:00:00.000Z';
+  const reviewed = (answer: string) => ({
+    question: 'what are your salary expectations for this position?* required',
+    answer,
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  });
+  for (const answer of ['$120,000', '135000']) {
+    const [kept] = refreshKnownQuestionAnswers(
+      [reviewed(answer)],
+      {},
+      TIXTRACK_SALARY_JD,
+      reviewedAt,
+    );
+    assert.equal(kept.answer, answer, answer);
+    assert.equal(kept.answer_source, 'applicant_review', answer);
+  }
+  // The figure the RUNNER stored carries no review claim and still refreshes to the median.
+  const [machine] = refreshKnownQuestionAnswers(
+    [{ question: 'what are your salary expectations for this position?* required', answer: '140000' }],
+    {},
+    TIXTRACK_SALARY_JD,
+    reviewedAt,
+  );
+  assert.equal(machine.answer, '140000');
+});
+
+test('a "us sponsorship" heading scopes the question to the United States', () => {
+  const needs = { work_authorized: true, needs_sponsorship: true };
+  assert.deepEqual(
+    resolveKnownAnswer('us sponsorship: will you now or in the future require sponsorship for employment visa status?', 'radio', needs, undefined),
+    { value: 'Yes' },
+  );
+  // A visa class named as an example is not a country: Redwood's label lists H-1B beside TN and
+  // E-3, and that family stays held until the posting supplies the country.
+  const unscoped = resolveKnownAnswer('will you now or in the future require sponsorship for employment visa status (e.g. h-1b)?', 'radio', needs, undefined);
+  assert.ok(unscoped && 'skipReason' in unscoped);
+});
+
+const TIXTRACK_CONSENT_LABEL =
+  'required. by submitting this application, i agree that i have read the privacy policy and confirm that tixtrack store my personal details to be able to process my job application.';
+
+test('a platform consent sentence that opens with the required marker word is accepted under the standing permission', () => {
+  const granted = {
+    consent_acknowledgement_permission: { granted_at: '2026-08-12T00:00:00.000Z', version: '2026-08-12' },
+  };
+  const context = frozenJobEmployerContext('TixTrack');
+  // Measured before: "required" was the one token nothing accounted for, and the label held.
+  assert.deepEqual(resolveKnownAnswer(TIXTRACK_CONSENT_LABEL, 'checkbox', granted, context), { value: 'Yes' });
+  // The applicant's stored profile booleans do not license it; only the standing permission does.
+  for (const profile of [{}, { accept_privacy_notices: true }]) {
+    const held = resolveKnownAnswer(TIXTRACK_CONSENT_LABEL, 'checkbox', profile, context);
+    assert.ok(held && 'skipReason' in held);
+    assert.match(held.skipReason, /privacy notice/);
+  }
+  // Without the packet's employer line the company name is unaccounted for and the label holds.
+  const noEmployer = resolveKnownAnswer(TIXTRACK_CONSENT_LABEL, 'checkbox', granted, undefined);
+  assert.ok(noEmployer && 'skipReason' in noEmployer);
+});
+
+test('the marker word does not open a truth attestation, an authorization or a covenant', () => {
+  const granted = {
+    consent_acknowledgement_permission: { granted_at: '2026-08-12T00:00:00.000Z', version: '2026-08-12' },
+    conduct_acknowledgement_permission: { granted_at: '2026-08-12T00:00:00.000Z', version: '2026-08-12' },
+  };
+  const context = frozenJobEmployerContext('TixTrack');
+  for (const label of [
+    'required. i certify that the information provided in this application is true and complete.',
+    'required. i authorize tixtrack to conduct a background check.',
+    'required. i agree to the non-compete agreement.',
+    'required. i agree to binding arbitration of any dispute.',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'checkbox', granted, context);
+    assert.ok(!(resolved && 'value' in resolved), label);
+  }
+});
+
+test("Lever's welded current-company and other-website labels answer from the profile", () => {
+  const ap = { current_employer: 'Tonee', portfolio_url: 'https://mehek.example' };
+  // Measured before: both returned null.
+  assert.equal(classifyField('current company org'), 'current_employer');
+  assert.deepEqual(resolveKnownAnswer('current company org', 'text', ap, undefined), { value: 'Tonee' });
+  assert.deepEqual(resolveKnownAnswer('Current company', 'text', ap, undefined), { value: 'Tonee' });
+  assert.deepEqual(resolveKnownAnswer('Name of current company', 'text', ap, undefined), { value: 'Tonee' });
+  assert.equal(classifyField('other url urls[other]'), 'portfolio_url');
+  assert.deepEqual(resolveKnownAnswer('other url urls[other]', 'text', ap, undefined), { value: 'https://mehek.example' });
+  assert.deepEqual(resolveKnownAnswer('Other website', 'text', ap, undefined), { value: 'https://mehek.example' });
+  // No portfolio stored: skipped, not invented.
+  assert.equal(resolveKnownAnswer('other url urls[other]', 'text', { current_employer: 'Tonee' }, undefined), null);
+  // A sentence that mentions the current company, and a link field for something else, stay off.
+  assert.equal(classifyField('does your current company know you are applying?'), null);
+  assert.equal(classifyField('what other urls should we look at when reviewing your work?'), null);
+  assert.notEqual(classifyField('urls[LinkedIn]'), 'portfolio_url');
+});
+
+test('discoveredFieldsTakeCoverLetterAsText counts only a free-text control that IS the cover letter', () => {
+  const textarea = {
+    label: 'cover letter* required candidate[job_applications_attributes][0][cover_letter]',
+    inputType: 'textarea',
+    options: null,
+  };
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([textarea]), true);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'text', options: [] }]), true);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'file', options: null }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'select', options: ['Yes', 'No'] }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Cover letter', inputType: 'text', role: 'combobox', options: null }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([{ label: 'Why is a cover letter important to you?', inputType: 'textarea', options: null }]), false);
+  assert.equal(discoveredFieldsTakeCoverLetterAsText([]), false);
 });
