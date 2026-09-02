@@ -18,6 +18,16 @@
 
 ### Fixed
 
+- The dashboard board loads again. GET /applications/board now returns the passive submission
+  authority collection the dashboard requires (top-level schema version and per-user authority
+  revision, plus a submission authority envelope on every card, built from the same authoritative
+  projection the submission path uses); without it the dashboard rejected the whole board as
+  incomplete and rendered "Could not load your board" for every user.
+- One card whose send state cannot be verified no longer takes the whole board down with it. A card
+  the server cannot publish an envelope for now carries an explicit marker naming why (an open
+  employer-boundary authorization with no press yet, a confirmation on a channel the dashboard has
+  no word for, or a projection that could not be read) instead of silently carrying nothing. That
+  card is not sendable and belongs in review; every other card on the board still loads.
 - Resume uploads no longer fail onboarding only because model-inferred target roles are unavailable.
 - PDF text reconstruction and local parsing now enforce item, character, entry, bullet, and skill
   ceilings so malformed or unusually large documents cannot create unbounded work.
