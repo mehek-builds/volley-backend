@@ -78,7 +78,7 @@ describe('submissionAuthorityEnvelopeForUnattemptedPacket', () => {
       submissionAuthorityEnvelopeForUnattemptedPacket({
         packetId: PACKET,
         projectionState: 'none',
-        retrySafetyKind: 'no_evidence',
+        retrySafety: { kind: 'no_evidence' },
         revision: '3',
       }),
       {
@@ -98,23 +98,69 @@ describe('submissionAuthorityEnvelopeForUnattemptedPacket', () => {
     assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId: PACKET,
       projectionState: 'repair_required',
-      retrySafetyKind: 'blocked_unverified',
+      retrySafety: {
+        kind: 'blocked_unverified',
+        attemptId: 'a3578398-c4cc-414d-9a44-c7943d8effb9',
+        at: '2026-08-28T08:00:00.000Z',
+        reason: 'opened',
+      },
       revision: '3',
     }), undefined);
-    // A none projection whose retry safety is anything but no_evidence is not provably empty.
+    // A block beside a none projection is the two reads disagreeing, never an envelope.
     assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId: PACKET,
       projectionState: 'none',
-      retrySafetyKind: 'safe_not_sent',
+      retrySafety: {
+        kind: 'blocked_unverified',
+        attemptId: 'a3578398-c4cc-414d-9a44-c7943d8effb9',
+        at: '2026-08-28T08:00:00.000Z',
+        reason: 'opened',
+      },
       revision: '3',
     }), undefined);
+  });
+
+  it('emits the envelope for an attempt the ledger proved never reached the employer', () => {
+    /* This pin used to assert the OPPOSITE ("anything but no_evidence is not provably empty"), and
+     * that was the defect: a `safe_not_sent` verdict is the ledger's typed proof that an opened
+     * attempt never crossed the boundary - the state every phantom attempt released by PR #861
+     * lands in - and refusing it here left /resume/history and /applications/:id/submission
+     * without an envelope while the board published one for the same packet (The Maven Group,
+     * crelate, 2026-09-02). The dashboard's send gate accepts safe_not_sent by name. */
+    assert.deepEqual(
+      submissionAuthorityEnvelopeForUnattemptedPacket({
+        packetId: PACKET,
+        projectionState: 'none',
+        retrySafety: {
+          kind: 'safe_not_sent',
+          attemptId: 'a3578398-c4cc-414d-9a44-c7943d8effb9',
+          proofKind: 'typed_pre_click_stop',
+          resolvedAt: '2026-09-02T19:27:41.561Z',
+        },
+        revision: '3',
+      }),
+      {
+        schema_version: 'submission-authority-v1',
+        revision: '3',
+        state: 'none',
+        application_id: PACKET,
+        packet_id: PACKET,
+        projection: { state: 'none' },
+        retry_safety: {
+          kind: 'safe_not_sent',
+          attemptId: 'a3578398-c4cc-414d-9a44-c7943d8effb9',
+          proofKind: 'typed_pre_click_stop',
+          resolvedAt: '2026-09-02T19:27:41.561Z',
+        },
+      },
+    );
   });
 
   it('emits no envelope when the authority revision could not be read', () => {
     assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId: PACKET,
       projectionState: 'none',
-      retrySafetyKind: 'no_evidence',
+      retrySafety: { kind: 'no_evidence' },
       revision: undefined,
     }), undefined);
   });
@@ -124,7 +170,7 @@ describe('submissionAuthorityEnvelopeForUnattemptedPacket', () => {
       assert.equal(submissionAuthorityEnvelopeForUnattemptedPacket({
         packetId: PACKET,
         projectionState: 'none',
-        retrySafetyKind: 'no_evidence',
+        retrySafety: { kind: 'no_evidence' },
         revision,
       }), undefined, `revision ${JSON.stringify(revision)} must be rejected`);
     }

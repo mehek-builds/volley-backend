@@ -1935,7 +1935,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const submissionAuthorityEnvelope = submissionAuthorityEnvelopeForUnattemptedPacket({
         packetId: row.id,
         projectionState: submissionAuthority?.byPacketId.get(row.id)?.state,
-        retrySafetyKind: submissionAuthority?.retrySafetyByPacketId.get(row.id)?.kind,
+        retrySafety: submissionAuthority?.retrySafetyByPacketId.get(row.id),
         revision,
       });
       return {

@@ -52,36 +52,71 @@ export type UnattemptedPacketSubmissionAuthorityEnvelope = {
   application_id: string;
   packet_id: string;
   projection: { state: 'none' };
-  retry_safety: { kind: 'no_evidence' };
+  retry_safety:
+    | { kind: 'no_evidence' }
+    | { kind: 'safe_not_sent'; attemptId: string; proofKind: string; resolvedAt: string };
 };
 
 /**
  * The envelope a `/resume/history` packet or a submission-state response must carry for the
  * dashboard to authorise a first employer send, and only for a packet whose immutable submission
- * history is genuinely empty.
+ * history proves nothing reached an employer.
  *
- * This returns that envelope ONLY when the authoritative projection is `none` and retry safety is
- * `no_evidence`, which hold together exactly when the packet has no attempt-opened event: the one
- * state that may become sendable, whose wire projection is the irreducible `{ state: 'none' }`. A
- * packet carries no embedded canonical row on those surfaces, so the gate's identity for it is the
- * packet id itself, which is what `application_id` and `packet_id` name.
+ * Two retry verdicts prove that, and this returns the envelope for exactly those two under a
+ * `none` projection:
+ *   - `no_evidence`: the packet has no attempt-opened event at all, the plain un-attempted case;
+ *   - `safe_not_sent`: an attempt WAS opened and the ledger then proved, with a typed not-sent
+ *     fact, that it never crossed the employer boundary. That is the state every packet lands in
+ *     after repairExpiredAttendedHandoffClaim releases a phantom attempt (PR #861), and it is
+ *     STRONGER evidence of safety than no evidence, not weaker.
+ * Admitting only the first was the defect measured live on The Maven Group (crelate) 2026-09-02:
+ * the board card published `safe_not_sent`, this builder returned undefined for the same packet,
+ * `/applications/:id/submission` therefore carried no envelope, and the dashboard's send gate -
+ * whose submissionRetrySafetyAllowsRetry explicitly accepts `safe_not_sent` - fell back to the
+ * packet's stored null and refused: "Litos cannot start another employer attempt until the exact
+ * prior submission evidence is verified", on a packet the ledger had just proven never sent.
  *
- * Any packet with attempt history classifies non-none (a sent one is `repair_required`) and gets
- * `undefined` here, so it stays without an envelope and as fail-closed at the gate as before: this
- * can free a genuinely un-attempted packet but can never turn a sent one sendable.
+ * The wire shape for `safe_not_sent` is the domain verdict passed through retrySafetyWire, the
+ * same bytes the board publishes, so the two surfaces can never disagree about one packet. A
+ * `safe_not_sent` whose resolvedAt is not a strict timestamp is refused rather than emitted with a
+ * field the client validator rejects. A packet carries no embedded canonical row on these
+ * surfaces, so the gate's identity for it is the packet id itself, which is what `application_id`
+ * and `packet_id` name.
+ *
+ * Any packet whose history is a block or a confirmation classifies non-none (a sent one is
+ * `repair_required`, a held one `unverified`) and gets `undefined` here, so it stays without an
+ * envelope and as fail-closed at the gate as before: this frees a provably un-sent packet and can
+ * never turn a sent or uncertain one sendable.
  */
 export function submissionAuthorityEnvelopeForUnattemptedPacket(input: {
   packetId: string;
   projectionState: string | undefined;
-  retrySafetyKind: string | undefined;
+  retrySafety: SubmissionAttemptRetrySafety | undefined;
   revision: string | undefined;
 }): UnattemptedPacketSubmissionAuthorityEnvelope | undefined {
   // The client validator only accepts a canonical numeric revision (digits, <= int64). Requiring
   // the same here means a divergent revision shape returns undefined at the source instead of
   // being emitted and silently rejected downstream, which would strand the packet with no signal.
-  if (input.projectionState !== 'none'
-    || input.retrySafetyKind !== 'no_evidence'
-    || !canonicalSubmissionAuthorityRevision(input.revision)) return undefined;
+  if (input.projectionState !== 'none' || !canonicalSubmissionAuthorityRevision(input.revision)) {
+    return undefined;
+  }
+  /* `safe_not_sent` is the ledger's proof, and it covers two shapes: an attempt that never crossed
+   * the boundary (the #861 release, typed_pre_click_stop) and a pressed attempt the applicant
+   * herself checked and attested was not there (applicant_checked_not_sent, admitted by the fold
+   * only after the boundary lease expired). Both are the ledger's verdict, not this builder's; the
+   * builder only refuses to emit a field the client validator would quarantine, hence the uuid
+   * and strict-timestamp checks - the same promise the `unverified` branch keeps below. */
+  const safety = input.retrySafety;
+  const retrySafety = safety?.kind === 'no_evidence'
+    ? { kind: 'no_evidence' as const }
+    : safety?.kind === 'safe_not_sent'
+      && strictTimestamp(safety.resolvedAt)
+      && projectionUuid(safety.attemptId)
+      ? retrySafetyWire(safety)
+      : undefined;
+  if (!retrySafety || (retrySafety.kind !== 'no_evidence' && retrySafety.kind !== 'safe_not_sent')) {
+    return undefined;
+  }
   return {
     schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
     revision: input.revision,
@@ -89,7 +124,7 @@ export function submissionAuthorityEnvelopeForUnattemptedPacket(input: {
     application_id: input.packetId,
     packet_id: input.packetId,
     projection: { state: 'none' },
-    retry_safety: { kind: 'no_evidence' },
+    retry_safety: retrySafety,
   };
 }
 
@@ -321,17 +356,25 @@ export function submissionAuthorityPublicationForPacket(input: {
   });
 
   if (projection.state === 'none') {
-    if (retrySafety.kind === 'no_evidence') {
+    /* BOTH provably-safe verdicts go through the one shared builder, so the board card and the
+     * per-packet submission response emit byte-identical envelopes for one packet. A separate
+     * safe_not_sent branch here is how the two surfaces came to disagree (Maven, 2026-09-02): the
+     * board published it, the builder refused it. A `safe_not_sent` with a malformed resolvedAt
+     * is the builder's undefined, named here as an unpublishable projection. */
+    if (retrySafety.kind === 'no_evidence' || retrySafety.kind === 'safe_not_sent') {
       const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
         packetId,
         projectionState: projection.state,
-        retrySafetyKind: retrySafety.kind,
+        retrySafety,
         revision,
       });
-      return envelope ? { published: true, envelope } : unavailable('revision_not_canonical');
-    }
-    if (retrySafety.kind === 'safe_not_sent' && strictTimestamp(retrySafety.resolvedAt)) {
-      return published({ state: 'none' }, retrySafetyWire(retrySafety));
+      if (envelope) return { published: true, envelope };
+      return unavailable(
+        retrySafety.kind === 'safe_not_sent'
+          && (!strictTimestamp(retrySafety.resolvedAt) || !projectionUuid(retrySafety.attemptId))
+          ? 'unpublishable_projection'
+          : 'revision_not_canonical',
+      );
     }
     // A block beside an empty projection is the two reads disagreeing, not a state to render.
     return unavailable('inconsistent_retry_evidence');
