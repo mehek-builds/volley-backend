@@ -31,18 +31,155 @@ export function canonicalSubmissionAuthorityRevision(revision: unknown): revisio
 const STRICT_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 /** The client's looser projection timestamp: ISO 8601 with a Z or offset, parseable. */
 const PROJECTION_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
-const PROJECTION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/* The client's projection uuid, split into the three parts a refusal can name separately. The
+ * three together are equivalent, character for character, to the one regex they replace:
+ *   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+ * and submissionAuthorityEnvelope.test.ts pins that equivalence over a table of shapes, so the
+ * classification below can never come to disagree with the predicate that does the refusing.
+ *
+ * SPLIT ON PURPOSE, 2026-09-03. The version nibble is the interesting one. This repo already
+ * carries two different opinions about it: the ledger's own UUID_PATTERN
+ * (lib/submissionAttemptLedger.ts:169), duplicateApplication.ts:469, postingIdentityDistinction.ts:23
+ * and canonicalFreeDocumentBinding.ts:33 all accept versions 1-8, while the client contract this
+ * file serialises accepts 1-5. Whether any identifier in the live ledger actually falls in that gap
+ * is NOT established here - see submissionAuthorityUuidShape. */
+const UUID_LAYOUT = /^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-([0-9a-f])[0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_VERSION = /^[1-5]$/;
+const UUID_VARIANT = /^[89ab]$/i;
+
+/**
+ * WHY ONE FIELD WAS REFUSED, as a class rather than as its value.
+ *
+ * The builders below deliberately withhold an envelope carrying a field the client would
+ * quarantine. That is the right failure direction, and it also means the offending value never
+ * reaches the wire and never reaches a log - so from every client surface the refusal is
+ * unfalsifiable. Measured live 2026-09-03 on mehekmandal05@gmail.com: `GET /applications/board`
+ * returned 200 cards, 35 with an envelope (`no_evidence` 27, `blocked_unverified` 7,
+ * `blocked_confirmed` 1) and 165 with a marker, of which 163 said `unpublishable_projection` and 2
+ * said `boundary_authorized`. SEVEN separate checks across FOUR projection branches in this file
+ * return that one word, so the census does not say which check fired, on which branch, or against
+ * which field - and 163 cards collapsed onto one string is a count, not a cause.
+ *
+ * That the reason is genuinely overloaded rather than one repeated defect is measured, not assumed.
+ * At 11:55Z the same day, resolving one packet's unverified record through the dashboard (DSI
+ * Innovations, packet a34e5ce2) produced a `safe_not_sent` verdict that published END TO END: a
+ * `none` projection, attempt id 37e4ca1b (version nibble 4, variant 8) and a resolvedAt with
+ * exactly three fractional digits, both accepted. So `safe_not_sent` is not structurally
+ * unpublishable and the attempt-id minting path is not globally broken; whatever refuses the 163 is
+ * something else, and the census alone cannot say what.
+ *
+ * These classes are what closes that gap. Each names the shape a value failed to have, never the
+ * value: `uuid_version_unsupported` says the identifier had the canonical 8-4-4-4-12 layout and a
+ * version nibble outside 1-5, and says nothing else about it. An attempt id is an internal
+ * identifier and stays one.
+ */
+export type SubmissionAuthorityRejectedShape =
+  | 'absent'
+  | 'not_a_string'
+  | 'blank'
+  | 'uuid_malformed'
+  | 'uuid_version_unsupported'
+  | 'uuid_variant_unsupported'
+  | 'timestamp_unparseable'
+  | 'timestamp_not_strict_iso'
+  | 'timestamp_not_iso'
+  | 'empty_list'
+  | 'bound_to_other_packet'
+  | 'outside_client_vocabulary'
+  | 'not_https_url'
+  | 'oversize'
+  | 'out_of_order';
+
+/** A shape check's answer: the class it failed, or `ok`. */
+type FieldShape = SubmissionAuthorityRejectedShape | 'ok';
+
+/**
+ * The one refusal a reader needs to act on: which branch classified the packet, which field of the
+ * shape that branch would have emitted failed, and how.
+ *
+ * Three stable keys, like the wire marker, and for the same reason. Unlike the marker this never
+ * goes on the wire: `submissionAuthorityUnavailableMarker` is still exactly
+ * {schema_version, packet_id, reason}, so no client parser sees a key or a reason it does not
+ * already know. This record is for the server's own log line.
+ */
+export type SubmissionAuthorityRejection = {
+  branch: 'none' | 'unverified' | 'repair_required' | 'confirmed';
+  field: string;
+  shape: SubmissionAuthorityRejectedShape;
+};
+
+/**
+ * How this value fails the client's projection-uuid contract, or `ok`.
+ *
+ * `ok` is true exactly when `projectionUuid` accepts the value, because that predicate is defined
+ * in terms of this function.
+ */
+export function submissionAuthorityUuidShape(value: unknown): FieldShape {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value !== 'string') return 'not_a_string';
+  if (!value.trim()) return 'blank';
+  const layout = UUID_LAYOUT.exec(value);
+  if (!layout) return 'uuid_malformed';
+  if (!UUID_VERSION.test(layout[1]!)) return 'uuid_version_unsupported';
+  if (!UUID_VARIANT.test(layout[2]!)) return 'uuid_variant_unsupported';
+  return 'ok';
+}
+
+/**
+ * How this value fails the client's strict retry-safety timestamp contract, or `ok`.
+ *
+ * `timestamp_not_strict_iso` is the one worth reading closely: the value IS a date the client can
+ * parse, it simply is not `Date#toISOString()` output (a different fractional precision, a
+ * `+00:00` offset instead of `Z`, a space instead of the `T`). Every server-side producer of these
+ * strings goes through `Date#toISOString()`, so this class firing would mean a string reached the
+ * fold from somewhere that does not - which is a fact, not a guess, once it appears in a log.
+ */
+export function submissionAuthorityStrictTimestampShape(value: unknown): FieldShape {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value !== 'string') return 'not_a_string';
+  if (!value.trim()) return 'blank';
+  if (!Number.isFinite(Date.parse(value))) return 'timestamp_unparseable';
+  if (!STRICT_TIMESTAMP.test(value)) return 'timestamp_not_strict_iso';
+  return 'ok';
+}
+
+/** How this value fails the looser projection-timestamp contract, or `ok`. */
+export function submissionAuthorityProjectionTimestampShape(value: unknown): FieldShape {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value !== 'string') return 'not_a_string';
+  if (!value.trim()) return 'blank';
+  if (!Number.isFinite(Date.parse(value))) return 'timestamp_unparseable';
+  if (!PROJECTION_TIMESTAMP.test(value)) return 'timestamp_not_iso';
+  return 'ok';
+}
+
+/**
+ * The first field of `fields` that is not `ok`, named for the branch that was being serialised.
+ *
+ * The caller lists the fields in the exact order its own refusal predicate evaluates them, so the
+ * named field is the one that predicate short-circuited on. Every classifier above is pure over
+ * its argument, so evaluating the whole list eagerly cannot differ from the `||` chain it mirrors.
+ */
+function firstRejection(
+  branch: SubmissionAuthorityRejection['branch'],
+  fields: ReadonlyArray<readonly [string, FieldShape]>,
+): SubmissionAuthorityRejection | undefined {
+  for (const [field, shape] of fields) {
+    if (shape !== 'ok') return { branch, field, shape };
+  }
+  return undefined;
+}
 
 function strictTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && STRICT_TIMESTAMP.test(value) && Number.isFinite(Date.parse(value));
+  return typeof value === 'string' && submissionAuthorityStrictTimestampShape(value) === 'ok';
 }
 
 function projectionTimestamp(value: unknown): value is string {
-  return typeof value === 'string' && PROJECTION_TIMESTAMP.test(value) && Number.isFinite(Date.parse(value));
+  return typeof value === 'string' && submissionAuthorityProjectionTimestampShape(value) === 'ok';
 }
 
 function projectionUuid(value: unknown): value is string {
-  return typeof value === 'string' && PROJECTION_UUID.test(value);
+  return typeof value === 'string' && submissionAuthorityUuidShape(value) === 'ok';
 }
 
 export type UnattemptedPacketSubmissionAuthorityEnvelope = {
@@ -261,6 +398,11 @@ function retrySafetyWire(safety: SubmissionAttemptRetrySafety): WireSubmissionRe
  *  - `unpublishable_projection`: any other shape the client's exact-shape parser would quarantine
  *    (a malformed identifier or timestamp, a projection bound to another packet, an oversize
  *    receipt text, a non-https final URL).
+ *
+ * That last member is a RESIDUAL class, and on 2026-09-03 it was carrying 163 of one account's 200
+ * cards - seven checks across four branches, all reported as one word, which is a count and not a
+ * cause. The vocabulary stays closed because a deployed dashboard parses it; what the word cannot
+ * say now travels beside it as a SubmissionAuthorityRejection, in the server's log line only.
  */
 export type SubmissionAuthorityUnavailableReason =
   | 'projection_read_failed'
@@ -287,9 +429,30 @@ export type PacketSubmissionAuthorityUnavailable = {
   reason: SubmissionAuthorityUnavailableReason;
 };
 
+/**
+ * A refusal, and - when a field shape is what caused it - which field and which shape.
+ *
+ * `reason` is unchanged and stays the ONLY thing that reaches the wire. `rejected` is present
+ * exactly when a shape check refused the card, and absent when the reason is already the whole
+ * story (`projection_read_failed`, `revision_not_canonical`, `boundary_authorized`,
+ * `inconsistent_retry_evidence`). An optional member is right here where it is wrong on the wire
+ * marker: a log reader branching on "did a field fail" is reading the answer, while a client
+ * branching on which keys arrived is guessing at authority.
+ *
+ * WHY THIS IS A LOG RECORD AND NOT A NEW REASON. `SubmissionAuthorityUnavailableReason` is a closed
+ * vocabulary a deployed dashboard parses, and the checkout of role-quick-website on this machine
+ * carries no reader for it at all - which is evidence that clone is behind the dashboard that
+ * shipped the check (role-quick-website #466, 2026-08-31, named in this file's own comments), not
+ * evidence the vocabulary is free. Widening a contract on the strength of a stale clone is how a
+ * card stops rendering; the diagnosis costs nothing on the wire, so it does not go there.
+ */
 export type SubmissionAuthorityPublication =
   | { published: true; envelope: PacketSubmissionAuthorityEnvelope }
-  | { published: false; reason: SubmissionAuthorityUnavailableReason };
+  | {
+    published: false;
+    reason: SubmissionAuthorityUnavailableReason;
+    rejected?: SubmissionAuthorityRejection;
+  };
 
 /** The marker as it goes on the wire. */
 export function submissionAuthorityUnavailableMarker(
@@ -331,8 +494,15 @@ export function submissionAuthorityPublicationForPacket(input: {
   revision: string | undefined;
 }): SubmissionAuthorityPublication {
   const { packetId, projection, retrySafety, revision } = input;
-  const unavailable = (reason: SubmissionAuthorityUnavailableReason): SubmissionAuthorityPublication =>
-    ({ published: false, reason });
+  /* The refusal, and beside it the shape check that caused it where there was one. Every
+   * `unpublishable_projection` below now passes a rejection, because that reason is the residual
+   * class - "any other shape the client's exact-shape parser would quarantine" - and a residual
+   * class with 163 members on one account (2026-09-03) is exactly the case where the word alone
+   * cannot be acted on. The rejection never reaches the wire; see SubmissionAuthorityPublication. */
+  const unavailable = (
+    reason: SubmissionAuthorityUnavailableReason,
+    rejected?: SubmissionAuthorityRejection,
+  ): SubmissionAuthorityPublication => ({ published: false, reason, ...(rejected ? { rejected } : {}) });
   if (!projection || !retrySafety) return unavailable('projection_read_failed');
   // The client validator only accepts a canonical numeric revision (digits, <= int64). Requiring
   // the same here means a divergent revision shape is named at the source instead of being emitted
@@ -369,12 +539,20 @@ export function submissionAuthorityPublicationForPacket(input: {
         revision,
       });
       if (envelope) return { published: true, envelope };
-      return unavailable(
-        retrySafety.kind === 'safe_not_sent'
-          && (!strictTimestamp(retrySafety.resolvedAt) || !projectionUuid(retrySafety.attemptId))
-          ? 'unpublishable_projection'
-          : 'revision_not_canonical',
-      );
+      /* Identical predicate to the one it replaces - a rejection exists exactly when the verdict is
+       * `safe_not_sent` and one of its two fields is malformed - only now it says WHICH. This is
+       * the branch the 2026-09-03 census was first read as, and it is measurably not the whole
+       * story: a `safe_not_sent` resolved through the dashboard the same morning published here
+       * without complaint (DSI Innovations, packet a34e5ce2). */
+      const rejected = retrySafety.kind === 'safe_not_sent'
+        ? firstRejection('none', [
+          ['retry_safety.attemptId', submissionAuthorityUuidShape(retrySafety.attemptId)],
+          ['retry_safety.resolvedAt', submissionAuthorityStrictTimestampShape(retrySafety.resolvedAt)],
+        ])
+        : undefined;
+      return rejected
+        ? unavailable('unpublishable_projection', rejected)
+        : unavailable('revision_not_canonical');
     }
     // A block beside an empty projection is the two reads disagreeing, not a state to render.
     return unavailable('inconsistent_retry_evidence');
@@ -382,9 +560,11 @@ export function submissionAuthorityPublicationForPacket(input: {
 
   if (projection.state === 'unverified') {
     if (projection.reason === 'boundary_authorized') return unavailable('boundary_authorized');
-    if (!projectionUuid(projection.attemptId) || !strictTimestamp(projection.observedAt)) {
-      return unavailable('unpublishable_projection');
-    }
+    const rejected = firstRejection('unverified', [
+      ['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)],
+      ['projection.observed_at', submissionAuthorityStrictTimestampShape(projection.observedAt)],
+    ]);
+    if (rejected) return unavailable('unpublishable_projection', rejected);
     return published(
       {
         state: 'unverified',
@@ -402,18 +582,36 @@ export function submissionAuthorityPublicationForPacket(input: {
   }
 
   if (projection.state === 'repair_required') {
-    if (projection.reasons.length === 0) return unavailable('unpublishable_projection');
+    if (projection.reasons.length === 0) {
+      return unavailable('unpublishable_projection', {
+        branch: 'repair_required',
+        field: 'projection.reasons',
+        shape: 'empty_list',
+      });
+    }
     // A repair projection bound to a different packet cannot be published under this card.
     if (typeof projection.packetId === 'string' && projection.packetId !== packetId) {
-      return unavailable('unpublishable_projection');
+      return unavailable('unpublishable_projection', {
+        branch: 'repair_required',
+        field: 'projection.packet_id',
+        shape: 'bound_to_other_packet',
+      });
     }
-    if (projection.attemptId !== undefined && !projectionUuid(projection.attemptId)) {
-      return unavailable('unpublishable_projection');
-    }
-    if (projection.canonicalApplicationId !== undefined
-      && !projectionUuid(projection.canonicalApplicationId)) {
-      return unavailable('unpublishable_projection');
-    }
+    /* Both ids are optional on a repair projection, so an absent one is not a defect and only a
+     * PRESENT malformed one refuses the card. Hence the undefined guard outside firstRejection
+     * rather than an `absent` class inside it. */
+    const rejectedIds = firstRejection('repair_required', [
+      ...(projection.attemptId !== undefined
+        ? [['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)] as const]
+        : []),
+      ...(projection.canonicalApplicationId !== undefined
+        ? [[
+          'projection.canonical_application_id',
+          submissionAuthorityUuidShape(projection.canonicalApplicationId),
+        ] as const]
+        : []),
+    ]);
+    if (rejectedIds) return unavailable('unpublishable_projection', rejectedIds);
     // The client rejects `no_evidence` and `safe_not_sent` beside a repair projection, and a block
     // that names a different attempt than the projection. `null` is the honest verdict there: the
     // projection alone already routes the card to review.
@@ -446,18 +644,50 @@ export function submissionAuthorityPublicationForPacket(input: {
   // produce a true send the client has no vocabulary for.
   if (!CONFIRMED_SOURCES.has(projection.source)
     || !receiptSourceIsPublishable(projection.source, receipt.source)) {
-    return unavailable('unpublishable_receipt_source');
+    // Which of the two it was, since a genuine send refused for its ATTEMPT source is a different
+    // repair from one refused for its RECEIPT source, and the reason word covers both.
+    return unavailable('unpublishable_receipt_source', firstRejection('confirmed', [
+      ['projection.source', CONFIRMED_SOURCES.has(projection.source) ? 'ok' : 'outside_client_vocabulary'],
+      ['receipt.source', 'outside_client_vocabulary'],
+    ]));
   }
-  if (projection.packetId !== packetId
-    || !projectionUuid(projection.attemptId)
-    || !projectionUuid(projection.canonicalApplicationId)
-    || !CONFIRMED_TRACKER_STAGES.has(projection.trackerStage)
-    || !projectionTimestamp(projection.submittedAt)
-    || !strictTimestamp(receipt.capturedAt)
-    || Date.parse(projection.submittedAt) > Date.parse(receipt.capturedAt)
-    || !receipt.confirmationText.trim()
-    || Buffer.byteLength(receipt.confirmationText, 'utf8') > 2000
-    || !safeHttpsUrl(receipt.finalUrl)) return unavailable('unpublishable_projection');
+  /* The packet binding stays its own statement rather than joining the list below, because the
+   * equality is also what narrows `projection.packetId` from `string | null` to the `string` the
+   * published projection needs. A check inside an array literal proves the same thing to a reader
+   * and nothing to the compiler. */
+  if (projection.packetId !== packetId) {
+    return unavailable('unpublishable_projection', {
+      branch: 'confirmed',
+      field: 'projection.packet_id',
+      shape: 'bound_to_other_packet',
+    });
+  }
+  /* The remaining nine clauses the `||` chain used to run as one anonymous verdict, in the same
+   * order, each now able to name itself. Every classifier is pure over its argument, so listing
+   * them eagerly answers exactly what short-circuiting them answered: `submitted_at` after
+   * `captured_at` still cannot fire on an unparseable `submitted_at`, because Date.parse gives NaN
+   * there and NaN is greater than nothing. */
+  const rejectedConfirmed = firstRejection('confirmed', [
+    ['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)],
+    ['projection.canonical_application_id', submissionAuthorityUuidShape(projection.canonicalApplicationId)],
+    [
+      'projection.tracker_stage',
+      CONFIRMED_TRACKER_STAGES.has(projection.trackerStage) ? 'ok' : 'outside_client_vocabulary',
+    ],
+    ['projection.submitted_at', submissionAuthorityProjectionTimestampShape(projection.submittedAt)],
+    ['receipt.captured_at', submissionAuthorityStrictTimestampShape(receipt.capturedAt)],
+    [
+      'projection.submitted_at',
+      Date.parse(projection.submittedAt) > Date.parse(receipt.capturedAt) ? 'out_of_order' : 'ok',
+    ],
+    ['receipt.confirmation_text', receipt.confirmationText.trim() ? 'ok' : 'blank'],
+    [
+      'receipt.confirmation_text',
+      Buffer.byteLength(receipt.confirmationText, 'utf8') > 2000 ? 'oversize' : 'ok',
+    ],
+    ['receipt.final_url', safeHttpsUrl(receipt.finalUrl) ? 'ok' : 'not_https_url'],
+  ]);
+  if (rejectedConfirmed) return unavailable('unpublishable_projection', rejectedConfirmed);
   return published(
     {
       state: 'confirmed',

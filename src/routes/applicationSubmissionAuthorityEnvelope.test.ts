@@ -54,7 +54,23 @@ test('the helper is fail-closed: same envelope builder as /resume/history, nothi
   // A projection read failure attaches nothing rather than throwing the whole response away.
   assert.match(helper, /catch \(error\) \{[\s\S]*?return \{\};/);
   // And an absent envelope attaches nothing, so a packet with attempt history is untouched.
-  assert.match(helper, /envelope \? \{ submission_authority: envelope \} : \{\}/);
+  assert.match(helper, /if \(envelope\) return \{ submission_authority: envelope \};/);
+  /* THE REFUSAL IS NAMED, NOT SWALLOWED, AND STILL CHANGES NOTHING ON THE WIRE.
+   *
+   * This helper used to return a bare `{}` on every refusal, so the one screen a student reads the
+   * "Litos cannot start another employer attempt" banner on left no server-side trace of which
+   * check refused the packet - while the board next door logged a reason per card. Measured
+   * 2026-09-03: that banner stood on 163 of one account's 200 packets, all reported under the one
+   * word `unpublishable_projection`, which seven checks across four branches can produce.
+   *
+   * submissionAuthorityPublicationForPacket classifies EVERY projection state, while this response
+   * may only ever carry the unattempted builder's envelope, so it is read here for its refusal
+   * alone. These two assertions are what keep that true: the publication is consulted, and no exit
+   * past the envelope attaches a `submission_authority` of any kind. */
+  assert.match(helper, /const publication = submissionAuthorityPublicationForPacket\(\{/);
+  const afterEnvelope = helper.slice(helper.indexOf('if (envelope) return { submission_authority: envelope };')
+    + 'if (envelope) return { submission_authority: envelope };'.length);
+  assert.doesNotMatch(afterEnvelope, /submission_authority:/, 'the diagnosis never becomes a published envelope');
   // Statuses with an attempt open (or opening) skip the projection transaction entirely, keeping
   // the dashboard's fill-run polling off the per-user submission-attempt advisory lock.
   assert.match(helper, /if \(!FIRST_SEND_REVIEW_STATUSES\.has\(reviewStatus\)\) return \{\};/);

@@ -836,12 +836,26 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
           // about any of them. The collection fields above are absent for the same reason.
           : ({ published: false, reason: 'projection_read_failed' } as const);
         if (!publication.published) {
+          /* WHICH FIELD, AND WHAT SHAPE. This line already named the packet, the reason, the
+           * projection state and the retry kind, and on 2026-09-03 that was still not enough to act
+           * on: 163 of this account's 200 cards came back `unpublishable_projection`, which SEVEN
+           * separate checks across FOUR branches of the builder can produce, and the value that
+           * failed is deliberately withheld from the wire so no client call could narrow it. The
+           * three rejection fields are the builder naming its own refusal - the branch that
+           * classified the packet, the field of the shape it would have emitted, and the class that
+           * field failed (see SubmissionAuthorityRejectedShape). They are a classification, never
+           * the value: an attempt id stays an internal identifier. Absent when the reason is
+           * already the whole story, and pino drops the keys then. */
+          const rejected = 'rejected' in publication ? publication.rejected : undefined;
           request.log.warn(
             {
               packetId: row.id,
               reason: publication.reason,
               projectionState: submissionAuthority?.byPacketId.get(row.id)?.state,
               retrySafetyKind: submissionAuthority?.retrySafetyByPacketId.get(row.id)?.kind,
+              rejectedBranch: rejected?.branch,
+              rejectedField: rejected?.field,
+              rejectedShape: rejected?.shape,
             },
             'board card has no publishable submission authority envelope; it is published as unverifiable',
           );
