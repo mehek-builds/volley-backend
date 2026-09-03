@@ -710,6 +710,94 @@ describe('base resume priority selection', () => {
     const oneReal = bankEntry({ id: 'one', org: 'Campus Club', title: 'Treasurer', bullet_variants: ['Managed the chapter budget'] });
     assert.equal(priorityEntryMayBeMandatory(oneReal, { sparseSelectionConfirmed: true }), true);
   });
+
+  test('the excuse stays bounded: only what the floor REPORTED is excused', () => {
+    /* THE PROPERTY THAT KEEPS THE GATE WORTH HAVING, and the one to re-check before touching
+     * either route's onDropped wiring. Excusing a below_floor drop is defensible only because the
+     * list is built exclusively from the floor's own callback: the floor is the last thing that
+     * can remove an entry before this gate, so what IT removed is unreachable and re-demanding it
+     * can only refuse the document forever.
+     *
+     * Every other way an entry can leave the page is NOT unreachable. pruneUngroundedContent cuts
+     * an ungrounded entry before the floor ever sees it, planResumeLayout trims whole entries to
+     * make one page, the maxEntries slice drops the tail, and the model can simply never write the
+     * entry at all. None of those call onDropped, so none of them reach the excuse - and all of
+     * them are cases a differently-worded rebuild can genuinely fix, which is exactly why the gate
+     * must keep refusing them.
+     *
+     * The tests above hand-build the excuse list to pin how it is KEYED. This one drives the real
+     * floor and asserts what it does NOT report, because the bound is a property of the wiring
+     * rather than of the lookup. */
+    const required = bankEntry({
+      id: 'required', org: 'Gamma Corp', title: 'Engineer', date_range: '2024 - Present',
+      bullet_variants: ['Gamma grounded sentence one', 'Gamma grounded sentence two'],
+    });
+    const thin = bankEntry({
+      id: 'thin', org: 'Delta Corp', title: 'Volunteer', date_range: '2023',
+      bullet_variants: ['Delta grounded sentence one'],
+    });
+    const kept = bankEntry({
+      id: 'kept', org: 'Epsilon Corp', title: 'Analyst', date_range: '2023',
+      bullet_variants: ['Epsilon grounded sentence one', 'Epsilon grounded sentence two'],
+    });
+
+    /* THE SHARP CASE. The floor really does drop something here, so the excuse list is NON-EMPTY -
+     * it just does not name the required entry, which the model never wrote. A blanket excuse, or
+     * one keyed on nothing, would swallow this and ship a resume silently missing the applicant's
+     * defining work. */
+    const withoutRequired = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [
+        { type: 'job' as const, org: kept.org, title: 'Analyst', date_range: '2023', bullets: ['Epsilon grounded sentence one', 'Epsilon grounded sentence two'] },
+        { type: 'job' as const, org: thin.org, title: 'Volunteer', date_range: '2023', bullets: ['Delta grounded sentence one'] },
+      ],
+    };
+    const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
+    const printed = enforceExperienceBulletFloor(withoutRequired, [required, thin, kept], {
+      onDropped: ({ sourceId, org, title }) => droppedByTheFloor.push({ sourceId, org, title }),
+    });
+    assert.deepEqual(droppedByTheFloor, [{ sourceId: thin.id, org: thin.org, title: 'Volunteer' }]);
+    assert.ok(!printed.experience.some((entry) => entry.org === required.org));
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [required], { requireFirst: false, droppedByTheFloor }),
+      ['required current or role-defining entry missing: Engineer at Gamma Corp'],
+    );
+
+    /* AFTER THE FLOOR, nothing reports - and this half is only worth writing because the excuse
+     * list is non-empty while the removal that matters is absent from it. An empty list proves
+     * nothing here: `relaxing position does NOT relax inclusion` above already covers a gate
+     * called with no excuses at all, and it passes under a blanket excuse for want of a list to
+     * blanket over.
+     *
+     * planResumeLayout hands the gate its trimmed spec on both routes (`spec = rendered.spec` on
+     * the tailored path, `printed = rendered.spec` on the base one), so an entry removed to make
+     * the page fit arrives with an excuse list that never heard about it. The floor is asserted to
+     * have KEPT it first, so the trim is a real second removal rather than an artifact of the
+     * entry never surviving. */
+    const floorKept: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
+    const survived = enforceExperienceBulletFloor(
+      {
+        ...SPEC,
+        education_position: 'top' as const,
+        experience: [
+          { type: 'job' as const, org: required.org, title: 'Engineer', date_range: '2024 - Present', bullets: ['Gamma grounded sentence one', 'Gamma grounded sentence two'] },
+          { type: 'job' as const, org: thin.org, title: 'Volunteer', date_range: '2023', bullets: ['Delta grounded sentence one'] },
+        ],
+      },
+      [required, thin],
+      { onDropped: ({ sourceId, org, title }) => floorKept.push({ sourceId, org, title }) },
+    );
+    /* The floor removed the thin entry and KEPT the required one. */
+    assert.deepEqual(floorKept, [{ sourceId: thin.id, org: thin.org, title: 'Volunteer' }]);
+    assert.deepEqual(survived.experience.map((entry) => entry.org), [required.org]);
+    /* Now the layout takes the survivor off to make the page fit, reporting nothing. */
+    const trimmedForFit = { ...survived, experience: [] };
+    assert.deepEqual(
+      baseResumeSelectionIssues(trimmedForFit, [required], { requireFirst: false, droppedByTheFloor: floorKept }),
+      ['required current or role-defining entry missing: Engineer at Gamma Corp'],
+    );
+  });
 });
 
 describe('applyBulletRepairs', () => {
