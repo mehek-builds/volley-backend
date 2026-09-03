@@ -1,5 +1,5 @@
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { distinctGroundedVariants, RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+import { groundedBulletsForEntry, RESUME_CONTENT_LIMITS, resumeBulletKey } from './resumeContentPolicy';
 import type { ExperienceBankEntry } from '../db/schema';
 import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
 import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation } from './resumePolicy';
@@ -1048,7 +1048,7 @@ export function validateResumeSpec(
 
   const kw = jdKeywords(jdText);
 
-  for (const entry of spec.experience) {
+  for (const [entryIndex, entry] of spec.experience.entries()) {
     /* THE EXPANDED CEILING, not the selection target, and the difference matters here.
      *
      * `maxBulletsPerEntry` is what the model is asked to SELECT - three, because the strongest three
@@ -1074,17 +1074,39 @@ export function validateResumeSpec(
       });
       const allowed = options.allowedSingleBulletEntries ?? [];
       const sourceIsAllowed = source && allowed.some((candidate) => candidate.id === source.id);
-      /* THE THIRD COUNTER, and it has to count the way the other two do. This asked whether the
-         bank row is genuinely sparse - the reason a one-bullet entry is forgivable - by counting
-         raw variant strings, while the floor collapses variants on a normalized key. A row
-         holding a sentence and the same sentence with a trailing period therefore looked like two
-         bullets here and one everywhere else: the entry was allowed onto the page by the floor's
-         confirmed-sparse allowance, and then failed HERE for having one bullet with a source this
-         function believed had two, which is a resume_quality_hold on every posting that no
-         rebuild can clear. distinctGroundedVariants is the same function the survivability rule
-         and the floor use. */
-      const sourceIsSparse = distinctGroundedVariants(source?.bullet_variants)
-        < RESUME_CONTENT_LIMITS.minBulletsPerEntry;
+      /* THE THIRD RULE THAT COUNTS THIS, and it has to reach the number the floor actually
+         reached. It asks whether the bank row is genuinely sparse - the reason a one-bullet entry
+         is forgivable - and it got that wrong twice, in two different ways.
+
+         It first counted RAW VARIANT STRINGS while the floor collapses variants on a normalized
+         key, so a row holding a sentence and the same sentence with a trailing period looked like
+         two bullets here and one everywhere else. Counting with resumeBulletKey closed that.
+
+         It was still wrong, because SHARED COUNTING IS NOT A SHARED ANSWER: the floor tops an
+         entry up only from sentences no EARLIER entry has already printed, so two bank rows
+         holding one sentence in common give the second row a ceiling of one bullet while a
+         page-blind count of either row says two. That is why this asks groundedBulletsForEntry -
+         the floor's own selection, run against the page as it stands - rather than counting the
+         row on its own. Nothing here would have caught it otherwise: the sparse allowance KEEPS
+         such an entry at one bullet, so it is never dropped, onDropped never fires, and the
+         dropped-entry excuse the required-entry gate carries never applies. See
+         groundedBulletsForEntry for the reproduction.
+
+         Entries before this one, not all of them: the floor is keep-first, and asking what a LATER
+         entry printed would forgive an entry on the strength of a collision that had not happened
+         yet when its bullets were chosen. */
+      const printedByEarlierEntries = new Set<string>();
+      for (const earlier of spec.experience.slice(0, entryIndex)) {
+        for (const bullet of earlier.bullets) {
+          const key = resumeBulletKey(bullet);
+          if (key) printedByEarlierEntries.add(key);
+        }
+      }
+      const sourceIsSparse = groundedBulletsForEntry(
+        entry.bullets,
+        source?.bullet_variants,
+        printedByEarlierEntries,
+      ).length < RESUME_CONTENT_LIMITS.minBulletsPerEntry;
       if (!sourceIsAllowed || !sourceIsSparse) {
         issues.push(
           `${entry.org}: ${entry.bullets.length} bullet selected (min ${RESUME_CONTENT_LIMITS.minBulletsPerEntry})`,

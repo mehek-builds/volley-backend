@@ -13,6 +13,7 @@ import {
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { ExperienceBankEntry } from '../db/schema';
 import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+import { allowedSparseEntriesForGeneration, enforceExperienceBulletFloor } from './resumePolicy';
 
 function bankEntry(partial: Partial<ExperienceBankEntry>): ExperienceBankEntry {
   return {
@@ -222,6 +223,130 @@ test('a source is sparse by DISTINCT sentences, so a punctuation twin is not two
 
   assert.ok(
     !result.issues.some((issue) => /bullet selected \(min 2\)/.test(issue)),
+    result.issues.join('; '),
+  );
+});
+
+/* THE FOURTH VARIANT of "a rule demands what another rule removes", and the only one the
+   dropped-entry excuse could never reach.
+ *
+ * The three before it were all closed by making the counters agree about what ONE SENTENCE is, or
+ * by excusing an entry the floor DROPPED. This one is neither. The floor dedupes across entries,
+ * so it tops an entry up only from sentences no earlier entry already printed - and two bank rows
+ * holding one sentence in common therefore give the second row a ceiling of one bullet, while a
+ * count of that row on its own still says two.
+ *
+ * Nothing was dropped, so nothing can be excused: the sparse allowance KEEPS the priority entry at
+ * one bullet, onDropped never fires, and droppedByTheFloor stays empty. The validator then called
+ * the source non-sparse and refused the build. Fail-closed, so the tailored route 422s with
+ * resume_quality_hold and the base route fails its ATS gate with nothing saved - on every posting,
+ * forever, because the bank rows never change. isProviderDependentResumeStyleIssue does not filter
+ * this string, so a local_fallback generation hit it too.
+ *
+ * THE FLOOR RUNS FOR REAL HERE rather than the post-floor spec being written out by hand. The whole
+ * bug is a disagreement between what the floor does and what the validator believes it did, so a
+ * test that asserts the validator's opinion of a spec someone typed cannot see it.
+ */
+test('a bullet the page already spent is not one this entry can still print', () => {
+  const shared = 'Coordinated a weekly investor update across the entire deal team';
+  const alphaOnly = 'Built a discounted cash flow model for a mid market acquisition target';
+  const betaOnly = 'Drafted diligence memos for three portfolio companies every quarter';
+
+  const alpha = bankEntry({
+    id: 'alpha',
+    org: 'Alpha Partners',
+    title: 'Analyst',
+    date_range: '2024 - 2025',
+    bullet_variants: [shared, alphaOnly],
+  });
+  /* The confirmed sparse priority - continue_with_found is what turns the allowance on, and
+     without it this entry would be DROPPED by the floor and excused by droppedByTheFloor. */
+  const beta = bankEntry({
+    id: 'beta',
+    org: 'Beta Ventures',
+    title: 'Associate',
+    date_range: '2025 - Present',
+    bullet_variants: [shared, betaOnly],
+  });
+
+  const dropped: string[] = [];
+  const printed = enforceExperienceBulletFloor(
+    spec([
+      { org: alpha.org, title: alpha.title ?? '', date_range: alpha.date_range ?? '', bullets: [shared, alphaOnly] },
+      { org: beta.org, title: beta.title ?? '', date_range: beta.date_range ?? '', bullets: [shared, betaOnly] },
+    ]),
+    [alpha, beta],
+    {
+      priorityEntryId: beta.id,
+      allowSparsePriority: true,
+      onDropped: (entry) => dropped.push(entry.org),
+    },
+  );
+
+  /* The shape the bug needs, pinned so a change in the floor cannot leave this test asserting
+     nothing. Beta is ON the page at one bullet, and nothing was dropped. */
+  assert.deepEqual(printed.experience.map((entry) => entry.bullets.length), [2, 1]);
+  assert.deepEqual(dropped, [], 'the floor dropped an entry, so this is not the case under test');
+
+  const result = validateResumeSpec(
+    printed,
+    '',
+    [alpha, beta],
+    undefined,
+    undefined,
+    undefined,
+    {
+      allowedSingleBulletEntries: allowedSparseEntriesForGeneration('model', [alpha, beta], [beta], true),
+    },
+  );
+
+  assert.ok(
+    !result.issues.some((issue) => /bullet selected \(min 2\)/.test(issue)),
+    result.issues.join('; '),
+  );
+});
+
+/* The other half of the same rule, because forgiving a one-bullet entry unconditionally would be
+   just as wrong and would pass the test above. A row with a second sentence NOTHING has printed can
+   still reach the floor, so a one-bullet entry against it is a real defect and stays reported. */
+test('an entry whose source can still reach the floor is not forgiven for having one bullet', () => {
+  const alphaOnly = 'Built a discounted cash flow model for a mid market acquisition target';
+  const betaFirst = 'Drafted diligence memos for three portfolio companies every quarter';
+  const betaSecond = 'Reconciled quarterly valuations across eleven active portfolio positions';
+
+  const alpha = bankEntry({
+    id: 'alpha',
+    org: 'Alpha Partners',
+    title: 'Analyst',
+    date_range: '2024 - 2025',
+    bullet_variants: [alphaOnly, 'Sized four adjacent markets for the investment committee memo'],
+  });
+  const beta = bankEntry({
+    id: 'beta',
+    org: 'Beta Ventures',
+    title: 'Associate',
+    date_range: '2025 - Present',
+    bullet_variants: [betaFirst, betaSecond],
+  });
+
+  /* Straight to the validator: the floor would have topped this entry up to two, which is exactly
+     why one bullet here means something went wrong further down (the one-page fit trims whole
+     bullets) and must not be waved through by the sparse allowance. */
+  const result = validateResumeSpec(
+    spec([
+      { org: alpha.org, title: alpha.title ?? '', date_range: alpha.date_range ?? '', bullets: [alphaOnly] },
+      { org: beta.org, title: beta.title ?? '', date_range: beta.date_range ?? '', bullets: [betaFirst] },
+    ]),
+    '',
+    [alpha, beta],
+    undefined,
+    undefined,
+    undefined,
+    { allowedSingleBulletEntries: [alpha, beta] },
+  );
+
+  assert.ok(
+    result.issues.some((issue) => /Beta Ventures: 1 bullet selected \(min 2\)/.test(issue)),
     result.issues.join('; '),
   );
 });

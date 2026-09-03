@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
-import { distinctGroundedVariants, RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
+import { groundedBulletsForEntry, RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 
 export const BASE_RESUME_MODEL_CALL_CAP_MS = 15_000;
 export const BASE_RESUME_REPAIR_CALL_CAP_MS = 8_000;
@@ -185,12 +185,18 @@ export function priorityEntryMayBeMandatory(
   entry: ExperienceBankEntry,
   options: { sparseSelectionConfirmed?: boolean } = {},
 ): boolean {
-  /* DISTINCT sentences, counted with the floor's own key. Counting raw strings answered a
-     different question than the floor asks: a row holding "Managed the chapter budget" and
-     "Managed the chapter budget." counted as two, was called survivable and made mandatory, and
-     the floor then collapsed the pair to one and dropped it - the same permanent refusal, reached
-     without any second bank row or any confirmation flag being involved. */
-  const groundedVariants = distinctGroundedVariants(entry.bullet_variants);
+  /* THE FLOOR'S OWN SELECTION, run on this row alone. Counting raw strings answered a different
+     question than the floor asks: a row holding "Managed the chapter budget" and "Managed the
+     chapter budget." counted as two, was called survivable and made mandatory, and the floor then
+     collapsed the pair to one and dropped it - the same permanent refusal, reached without any
+     second bank row or any confirmation flag being involved.
+
+     NO PAGE IS PASSED, and that is correct HERE and nowhere else. This runs before anything has
+     been generated, so there is no earlier entry whose sentences could already be spoken for, and
+     the question is genuinely about the row on its own. Every rule that asks this AFTER selection
+     has a page and must pass it - see groundedBulletsForEntry, and validateResumeSpec's sparse
+     check, which was refusing builds precisely because it did not. */
+  const groundedVariants = groundedBulletsForEntry([], entry.bullet_variants).length;
   /* NOTHING IS EVER MANDATORY WITH NO EVIDENCE, confirmation or not. The floor's zero-bullet drop
      is documented as running ahead of every sparse allowance, and pruneUngroundedContent removes
      an entry with no grounded bullets even earlier - silently, without an onDropped, so the

@@ -59,25 +59,76 @@ export function resumeBulletKey(bullet: string): string {
   return bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-/** Distinct grounded sentences in a bank row, counted the way the floor counts them. */
-export function distinctGroundedVariants(bulletVariants: unknown): number {
-  const variants = Array.isArray(bulletVariants) ? bulletVariants : [];
-  const keys = new Set<string>();
-  for (const variant of variants) {
-    if (typeof variant !== 'string' || variant.trim().length === 0) continue;
-    const key = resumeBulletKey(variant);
-    /* A KEYLESS VARIANT CANNOT RAISE AN ENTRY OFF THE FLOOR, so it must not be counted as though
-       it could. It is punctuation with no words in it, and the floor's top-up loop - the loop
-       that actually decides whether a bank row can carry an entry to minBulletsPerEntry - skips
-       exactly these (`if (!key || taken.has(key)) continue`). Counting one as a distinct sentence
-       therefore called a row survivable that the floor is still guaranteed to drop, which is the
-       overstatement this function exists to remove rather than relocate. (The floor does pass a
-       keyless bullet the MODEL wrote through to its length checks; that is a different question
-       from what the bank row can supply, and this counts the bank row.) */
-    if (key.length === 0) continue;
-    keys.add(key);
+/**
+ * THE BULLETS AN ENTRY CAN ACTUALLY PRINT, given what the page has already printed.
+ *
+ * This is the floor's own selection, lifted out of it so the quantity has exactly ONE definition.
+ * Three rules ask "how many bullets can this entry have" and each used to answer it separately,
+ * and every bug in this family has been two of those answers disagreeing:
+ *
+ *   - enforceExperienceBulletFloor SELECTED the bullets, deduping across entries;
+ *   - priorityEntryMayBeMandatory COUNTED the bank row's distinct sentences;
+ *   - validateResumeSpec COUNTED the bank row's distinct sentences again.
+ *
+ * The earlier disagreements were about NORMALIZATION - a row holding a sentence and the same
+ * sentence with a trailing period counted as two - and were closed by making the counters use
+ * resumeBulletKey. The one that was left is about the PAGE, and no amount of shared normalization
+ * could have closed it: the top-up below draws only on sentences an earlier entry has not already
+ * used, so two bank rows sharing one sentence give the second row a ceiling of ONE bullet while
+ * both counters still call it a two-sentence row.
+ *
+ * Reproduced 2026-09-03 against the real functions: bank rows `Alpha Partners` and `Beta Ventures`
+ * share one sentence, Beta is the confirmed sparse priority. The floor keeps Beta at one bullet
+ * under allowSparsePriority - so it is never DROPPED, onDropped never fires, and the dropped-entry
+ * excuse the required-entry gate carries cannot help - and the validator then counts Beta's source
+ * as two variants, concludes it is not genuinely sparse, and refuses every build with
+ * `Beta Ventures: 1 bullet selected (min 2)`. Fail-closed, so the tailored route 422s with
+ * resume_quality_hold and the base route fails its ATS gate with nothing saved, on every posting,
+ * for as long as the bank rows stay as they are.
+ *
+ * So the honest question is not "how many distinct sentences does this row hold" but "how many can
+ * this entry still print", and it is asked here, once. A caller with no page yet - the
+ * survivability rule runs before anything has been generated - passes no `alreadyPrinted` set and
+ * gets the page-blind answer, which for it is the correct one.
+ */
+export function groundedBulletsForEntry(
+  /* Bullets already chosen for this entry, in the order they should print. The floor passes the
+     model's selection; the validator passes what is on the page after fitting. */
+  selected: readonly string[],
+  /* The matched bank row's variants, unvalidated: callers read them straight off a JSON column. */
+  bulletVariants: unknown,
+  /* Keys printed under an EARLIER heading. A resume prints one sentence once. */
+  alreadyPrinted: ReadonlySet<string> = new Set<string>(),
+  /* WHERE THE TOP-UP STOPS, mirroring the floor's own break. Nothing above minBulletsPerEntry
+     changes any decision taken from this, and stopping there keeps the returned list identical to
+     what the floor selects rather than merely the same length. */
+  topUpTo: number = RESUME_CONTENT_LIMITS.minBulletsPerEntry,
+): string[] {
+  const taken = new Set(alreadyPrinted);
+  const bullets: string[] = [];
+  for (const bullet of selected) {
+    const key = resumeBulletKey(bullet);
+    /* An empty key is punctuation with no words in it. It cannot be "already printed" in any
+       meaningful sense and must not collapse two such bullets into one, so it is passed through to
+       the caller's length checks rather than tracked. */
+    if (key && taken.has(key)) continue;
+    if (key) taken.add(key);
+    bullets.push(bullet);
   }
-  return keys.size;
+  for (const variant of Array.isArray(bulletVariants) ? bulletVariants : []) {
+    if (bullets.length >= topUpTo) break;
+    if (typeof variant !== 'string' || variant.trim().length === 0) continue;
+    const trimmed = variant.trim();
+    const key = resumeBulletKey(trimmed);
+    /* A KEYLESS VARIANT CANNOT RAISE AN ENTRY OFF THE FLOOR, so it is skipped rather than counted
+       as though it could. (A keyless bullet the MODEL wrote is passed through above; what is
+       already on the page is a different question from what the bank row can still supply, and
+       this half answers the second one.) */
+    if (!key || taken.has(key)) continue;
+    taken.add(key);
+    bullets.push(trimmed);
+  }
+  return bullets;
 }
 
 export const RESUME_FIT_FALLBACKS = {
