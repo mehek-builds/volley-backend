@@ -6672,7 +6672,48 @@ export function isCoreIdentityField(label: string): boolean {
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
 const GREENHOUSE_TRAILING_LONG_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{8,14}\s*$/u;
-const GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{2,5}\s*$/u;
+/* A SHORT GREENHOUSE DEMOGRAPHIC ID, AND WHAT SAYS IT IS ONE IS THAT THE QUESTION ALREADY ENDED.
+ *
+ * The id itself is unremarkable - "245", "430" - so a two-to-five digit run cannot be told apart
+ * from a number the employer wrote by its length or by sitting last. What can tell them apart is
+ * the character in front of it. Greenhouse renders the visible label, its required glyph included,
+ * and discovery concatenates the control's name and id AFTER all of it, so a genuine handle always
+ * follows a label that has finished speaking:
+ *
+ *   "what is your gender? 245"        the question closed, then the id     -> plumbing
+ *   "are you a veteran? 248"          the question closed, then the id     -> plumbing
+ *   "...identify with? * 430"         closed, marker, then the id          -> plumbing
+ *   "Question 10"                     the number IS the noun phrase        -> the employer's words
+ *   "What was your SAT score out of 1600"                                  -> the employer's words
+ *
+ * So the rule anchors on sentence-final punctuation or the required marker rather than on position
+ * alone. `?`, `!`, `.`, a closing bracket and `*` all end a label; a letter does not.
+ *
+ * WHY IT HAD TO NARROW. The guard used to be `\s*\*?\s+`, which accepted any trailing two-to-five
+ * digit run. tidyLabel's job is to remove exactly the trailing `*`, and this strip runs BEFORE it,
+ * so "Question 10*" kept its number on the first pass and lost it on the second:
+ * normalizeStoredPortalQuestions re-normalizes on EVERY read, so the label discovery minted was not
+ * the label the next read produced, and the packet became the permanent superset of the approval
+ * that #902 closed for the repeat-collapse. Worse, it MERGED questions - twenty-five "Question N*"
+ * controls settle onto ten labels, sixteen of them onto the bare word "Question", which is employer
+ * questions being destroyed rather than cleaned. lib/trailingNumericHandle.test.ts holds both the
+ * fixpoint and the count, because "Question" is its own fixpoint and stability alone cannot see it.
+ *
+ * MEASURED, against the 847 distinct question labels stored in production on 2026-09-03 (601
+ * packets, 4,022 rows, plus posting_questions and saved_application_answers). Neither the old rule
+ * nor this one fires on any of them, so the narrowing changes no stored label. Every
+ * whitespace-separated trailing numeric run in that corpus is 7 digits (Workable option ids) or 10
+ * (Greenhouse demographic ids, which GREENHOUSE_TRAILING_LONG_NUMERIC_HANDLE_RE already owns); the
+ * two-to-five digit window matched nothing live. What the old guard DID reach was ordinary text:
+ * "What was your SAT score out of 1600" lost its denominator under it and keeps it under this one.
+ * The shapes that must still strip are the four HRT comboboxes measured in prod on 2026-09-02
+ * (245/248/249/250, joined to the board's published list by greenhouseDemographicQuestions.ts,
+ * which keys on the label with the id removed) and #252's "* 430" / "* 431".
+ *
+ * The group repeats and admits a trailing `*` so one pass reaches the fixpoint. Both only ever land
+ * on the value the old rule already reached after enough reads, so nothing here invents a label the
+ * system could not already produce. */
+const GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE = /(?<=[?!.)\]*])(?:\s*\*?\s+\d{2,5})+\s*\*?\s*$/u;
 // Greenhouse's repeated-section handles: degree--0, school--0, discipline--0, start-month--0,
 // end-year--1. Discovery concatenates the control's `name` and `id` onto the visible label, so
 // these land INSIDE the question text: prod packets stored questions literally titled
