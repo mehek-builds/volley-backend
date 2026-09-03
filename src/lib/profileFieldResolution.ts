@@ -924,7 +924,29 @@ const DECLINE_WORDINGS = [
 const EEO_RACE_QUESTION = /\brace\b|racial|ethnicit|ethnic\b/i;
 /** Asked as its own yes/no on nearly every US form, and answered from its own stored preference. */
 const EEO_HISPANIC_QUESTION = /hispanic|latin/i;
-const EEO_GENDER_IDENTITY_QUESTION = /\bgender\s+identity\b/i;
+/* ANY gender self-identification ask, not only one that spells "gender identity".
+ *
+ * Measured 2026-09-03 on Hudson River Trading (packet 4a79eec1, greenhouse job-boards): the label
+ * is "What is your gender?" and the employer's own options are Woman / Man / Non-binary / I don't
+ * wish to answer. Her stored answer is "Female", which is not on that list, so nothing snapped and
+ * a question Litos can answer was handed back to her - the only one of the four EEO controls that
+ * failed, and it failed on vocabulary alone. The old pattern required the literal phrase "gender
+ * identity", which that label does not carry, so the equivalence below never ran. */
+const EEO_GENDER_IDENTITY_QUESTION = /\bgender\b|\bsex\b/i;
+
+/* THE TWO SPELLINGS OF THE SAME ANSWER, both directions.
+ *
+ * Greenhouse's job-boards renderer offers Woman / Man; its older board and most other families
+ * offer Female / Male. A stored answer in either vocabulary must reach a list written in the other,
+ * and the ladder keeps HER wording first, so a list carrying her own spelling still wins. Only the
+ * two paired terms are equivalent: nothing here rewrites a non-binary, self-described or declined
+ * answer, which are hers alone. */
+const EEO_GENDER_EQUIVALENTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^female$/i, 'Woman'],
+  [/^woman$/i, 'Female'],
+  [/^male$/i, 'Man'],
+  [/^man$/i, 'Male'],
+];
 
 /**
  * THE MAPPING RULE, and it is deliberately the narrowest one that works.
@@ -993,8 +1015,8 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
   const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
     ? eeoFederalRaceCategory(base)
     : undefined;
-  const equivalentGender = EEO_GENDER_IDENTITY_QUESTION.test(label) && /^female$/i.test(base)
-    ? 'Woman'
+  const equivalentGender = EEO_GENDER_IDENTITY_QUESTION.test(label)
+    ? EEO_GENDER_EQUIVALENTS.find(([spelling]) => spelling.test(base))?.[1]
     : undefined;
   // When the answer is a refusal AND the control names its vocabulary, the vocabulary's own
   // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
