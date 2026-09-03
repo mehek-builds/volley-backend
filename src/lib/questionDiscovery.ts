@@ -2291,6 +2291,36 @@ export function sensitiveQuestionRequiresAttention(
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
 }
 
+/**
+ * THE SEND GATE FOR A CALLER THAT HAS THE WHOLE QUESTION RECORD, which is every send gate there is.
+ *
+ * IT EXISTS BECAUSE THE OPTIONAL ARGUMENT ABOVE IS A TRAP, and mutation testing is what said so
+ * rather than taste. Deleting the `question` argument from the route's call - one token, no type
+ * error, no test failure anywhere in the suite - silently reverts this entire change: the gate goes
+ * back to never seeing her confirmation, every confirmed sensitive answer starts refusing again, and
+ * the packet returns to the dead end with nothing red to say so. That is the unwired-module class:
+ * a feature whose implementation is correct and whose call site quietly stops using it.
+ *
+ * So the record is the FIRST and a REQUIRED parameter here, and callers holding a question use this.
+ * Dropping it is now a compile error instead of a regression nobody can see. The optional-argument
+ * form stays for the label-only callers and the tests that exercise the rule directly.
+ *
+ * 'text' matches knownAnswerLookup's own hardcoded input type, so the gate and the refresh resolve
+ * the same label the same way. See the comment there about a 'select' degree control resolving to
+ * something the refresh never returns.
+ */
+export function reviewQuestionRequiresAttention(
+  question: { question: string; answer: string; answer_confirmed_of?: unknown },
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+  postingCountry?: JobCountry,
+  postingCountryCode?: string,
+): boolean {
+  return sensitiveQuestionRequiresAttention(
+    question.question, question.answer, 'text', ap, jdText, postingCountry, postingCountryCode, question,
+  );
+}
+
 export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
   const label = question.question ?? '';
   const answer = question.answer?.trim() ?? '';

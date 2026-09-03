@@ -57,7 +57,7 @@ import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication
   transportVerifiedBuiltPacket,
 } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
-import { applicationContextForQuestionResolution, knownAnswerLookup, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, knownAnswerLookup, reviewQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -946,14 +946,13 @@ function sensitiveQuestionsFor(
        hold a complete application hostage to a section the employer itself marked optional. A
        REQUIRED sensitive question keeps the gate exactly as it stands, answered or not. */
     .filter((question) => question.required || question.answer.trim().length > 0)
-    .filter((question) => sensitiveQuestionRequiresAttention(
-      question.question, question.answer, 'text', profile, jdText, postingCountry, postingCountryCode,
-      /* THE RECORD ITSELF, so her own confirmation is an input to the gate that is asking about her.
-       * Without this argument the gate can only ask whether the resolver independently agrees, which
-       * a refused question makes false forever - the dead end traced in
-       * applicantConfirmedSensitiveAnswer. Passing the whole question rather than the field keeps
-       * the reading rule in one place. */
-      question,
+    /* THE RECORD-FIRST FORM, so her own confirmation is an input to the gate that is asking about
+     * her, and so that it cannot stop being one by accident. The label-and-answer form takes the
+     * record as a trailing optional argument, and deleting that argument here is a one-token change
+     * with no type error and no failing test that silently reverts the whole fix. See
+     * reviewQuestionRequiresAttention. */
+    .filter((question) => reviewQuestionRequiresAttention(
+      question, profile, jdText, postingCountry, postingCountryCode,
     ));
 }
 

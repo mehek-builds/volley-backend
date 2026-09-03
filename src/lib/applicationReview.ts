@@ -1768,7 +1768,24 @@ export function applyApplicationReviewEdit(
   const reviewedAt = new Date().toISOString();
   const mergedQuestions = mergeSubmittedApplicationReviewQuestions(
     current.questions,
-    edit.questions,
+    /* THE CONFIRMATION FLAG IS NOT THIS ROUTE'S TO CARRY, stripped here rather than left to a schema
+     * in another file.
+     *
+     * PUT /review is the BLANKET stamp path: applyApplicantReviewedAnswers below claims every
+     * non-blank answer in the body as hers, which is the writer the 802-answer laundering came
+     * through. `confirmed` is the one byte that mints answer_confirmed_of, and answer_confirmed_of is
+     * the only provenance the sensitive question gate accepts, so a blanket route that could also
+     * carry confirmations would be a blanket route that can open that gate.
+     *
+     * reviewBodySchema does not list the key and zod strips it, so nothing reaches here carrying one
+     * today. This makes that a property of the FUNCTION rather than of a schema someone can widen
+     * without ever opening this file, and it is the sort of thing worth being boring about: the cost
+     * is one map, and the thing on the other side is a legal declaration on a live application.
+     * Confirmations have one surface, PUT /review/answers, and it is the narrow one. */
+    edit.questions.map((question) => {
+      const { confirmed: _confirmed, ...withoutRequestFlag } = question as SubmittedApplicationReviewQuestion;
+      return withoutRequestFlag as ApplicationReviewQuestion;
+    }),
     current.questions_reviewed_at,
   );
   return {

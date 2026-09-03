@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import {
   applicantConfirmedSensitiveAnswer,
   refreshKnownQuestionAnswers,
+  reviewQuestionRequiresAttention,
   sensitiveQuestionRequiresAttention,
 } from './questionDiscovery';
 import {
   applyApplicantReviewedAnswers,
+  applyApplicationReviewEdit,
   mergeSubmittedApplicationReviewQuestions,
   type ApplicationReviewQuestion,
   type ApplicationReviewState,
@@ -317,6 +320,72 @@ test('the send-time refresh keeps a confirmed answer and still blanks an unconfi
     undefined,
     'and the blanked record keeps no claim beside the value it no longer holds',
   );
+});
+
+/* ---- the wiring, which mutation testing caught and nothing else did ---- */
+
+test('the record-first gate reads the confirmation off the question it is handed', () => {
+  /* reviewQuestionRequiresAttention exists because the trailing optional argument on the other form
+   * is a trap: deleting it at the call site is one token, compiles, and passes every other test in
+   * this suite while silently reverting the whole fix. This is the form the send gates use, and the
+   * record is not optional in it. */
+  assert.equal(
+    reviewQuestionRequiresAttention({ question: HRT_LABEL, answer: 'Yes' }, HER_PROFILE, undefined),
+    true,
+  );
+  assert.equal(
+    reviewQuestionRequiresAttention(
+      { question: HRT_LABEL, answer: 'Yes', answer_confirmed_of: HRT_LABEL }, HER_PROFILE, undefined,
+    ),
+    false,
+  );
+});
+
+test('every send gate reaches the applicant confirmation through the record-first form', async () => {
+  /* THE MUTATION THIS PINS, stated as the change it refuses. Rewriting the filter below to the
+   * label-and-answer form without its trailing record - `sensitiveQuestionRequiresAttention(
+   * question.question, question.answer, 'text', profile, jdText, ...)` - type-checks, and before this
+   * test the entire suite stayed green while every confirmed sensitive answer refused again in
+   * production. The three send gates and the dashboard list all read this one function, so pinning it
+   * here pins them. */
+  const source = await readFile('src/routes/applications.ts', 'utf8');
+  const start = source.indexOf('function sensitiveQuestionsFor(');
+  const end = source.indexOf('function sensitiveQuestionFor(', start);
+  assert.ok(start >= 0 && end > start, 'sensitiveQuestionsFor must remain the one place this is decided');
+  const body = source.slice(start, end);
+  assert.match(
+    body,
+    /\.filter\(\(question\) => reviewQuestionRequiresAttention\(\s*question, profile, jdText, postingCountry, postingCountryCode,/,
+    'the whole question record, or her confirmation is not an input to the send gate',
+  );
+  assert.doesNotMatch(
+    body,
+    /sensitiveQuestionRequiresAttention\(/,
+    'the label-and-answer form takes the record as an optional trailing argument, which is droppable in silence',
+  );
+  /* And the three send gates plus the dashboard list all still go through it rather than around it. */
+  assert.equal(source.split('sensitiveQuestionFor(').length - 1, 4, 'three send gates and one list');
+});
+
+test('the blanket review route cannot carry a confirmation even if a caller sends one', () => {
+  /* PUT /review claims every non-blank answer as hers, which is the writer the 802-answer laundering
+   * came through. reviewBodySchema does not list `confirmed` and zod strips it; this asserts the
+   * function refuses it too, so the one-writer property does not depend on a schema in another file
+   * staying narrow. */
+  const edited = applyApplicationReviewEdit(
+    {
+      questions: [storedQuestion({ answer: 'Yes' })],
+      questions_reviewed_at: REVIEWED_AT,
+    } as unknown as ApplicationReviewState,
+    {
+      questions: [{ ...storedQuestion({ answer: 'Yes' }), confirmed: true } as ApplicationReviewQuestion],
+      skipped_reasons: [],
+    },
+  );
+  const question = edited.questions[0]!;
+  assert.equal(question.answer_source, 'applicant_review', 'the blanket stamp still claims the answer');
+  assert.equal(question.answer_confirmed_of, undefined, 'and still cannot say she was shown it');
+  assert.equal(gate(question.question, question.answer, question), true);
 });
 
 test('a confirmed EEO self-identification is hers on the same rule', () => {
