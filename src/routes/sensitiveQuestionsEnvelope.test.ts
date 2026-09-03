@@ -168,14 +168,17 @@ before(async () => {
   const [account] = await db.insert(schema.users).values({ email: 'sensitive-envelope@example.test' }).returning();
   userId = account.id;
 
-  /* HER REAL SELF-IDENTIFICATION RECORD, in the column the resolver reads. This row is the whole
-   * provenance signal: nothing on the packet and nothing in a request can move it. */
-  await db.insert(schema.profiles).values({
+  /* HER REAL SELF-IDENTIFICATION RECORD, in the column the resolver actually reads.
+   *
+   * application_profile.eeo_prefs, NOT profiles.parsed_json. loadApplicationProfileLike takes
+   * eeo_prefs off the application_profile row and nowhere else, so a fixture that writes it into
+   * parsed_json produces a profile with no stated gender at all - and the gender question below is
+   * then listed for the wrong reason, which is a test that passes while proving nothing. */
+  await db.insert(schema.application_profile).values({
     user_id: userId,
-    parsed_json: {
-      eeo_prefs: { gender: 'Female', veteran_status: 'No', disability_status: 'No' },
-    },
+    eeo_prefs: { gender: 'Female', veteran_status: 'No', disability_status: 'No' },
   });
+  await db.insert(schema.profiles).values({ user_id: userId, parsed_json: {} });
 
   token = await new SignJWT({
     userId,
