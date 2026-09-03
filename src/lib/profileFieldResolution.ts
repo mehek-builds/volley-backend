@@ -76,8 +76,12 @@ import {
 } from './referralSource';
 import {
   comparableOption,
+  eeoFederalRaceCategory,
   isDeclineToState,
+  selfIdentificationAnswerStates,
   selfIdentificationDeclineWording,
+  selfIdentificationPolarClaimOption,
+  selfIdentificationStatedForms,
 } from './selfIdentification';
 
 export type ProfileFieldShape = {
@@ -129,7 +133,19 @@ export function isProfileBackedKey(key: ProfileKey | null | undefined): boolean 
 
 // comparableOption and isDeclineToState live in selfIdentification.ts, where questionDiscovery can
 // reach them too. Re-exported here because this module's public surface is what callers import.
-export { comparableOption, isDeclineToState, selfIdentificationDeclineWording };
+//
+// eeoFederalRaceCategory joined them on 2026-09-03 along with the rest of the self-identification
+// vocabulary, for the reason that file's own header now gives. It is re-exported rather than moved
+// out of this surface so every existing importer is untouched.
+export {
+  comparableOption,
+  eeoFederalRaceCategory,
+  isDeclineToState,
+  selfIdentificationAnswerStates,
+  selfIdentificationDeclineWording,
+  selfIdentificationPolarClaimOption,
+  selfIdentificationStatedForms,
+};
 
 function optionTokens(value: string): string[] {
   return comparableOption(value).split(' ').filter(Boolean);
@@ -920,86 +936,10 @@ const DECLINE_WORDINGS = [
   'I do not wish to disclose',
 ];
 
-/** A race or ethnicity question, as opposed to the rest of the self-identification block. */
-const EEO_RACE_QUESTION = /\brace\b|racial|ethnicit|ethnic\b/i;
-/** Asked as its own yes/no on nearly every US form, and answered from its own stored preference. */
-const EEO_HISPANIC_QUESTION = /hispanic|latin/i;
-/* ANY gender self-identification ask, not only one that spells "gender identity".
- *
- * Measured 2026-09-03 on Hudson River Trading (packet 4a79eec1, greenhouse job-boards): the label
- * is "What is your gender?" and the employer's own options are Woman / Man / Non-binary / I don't
- * wish to answer. Her stored answer is "Female", which is not on that list, so nothing snapped and
- * a question Litos can answer was handed back to her - the only one of the four EEO controls that
- * failed, and it failed on vocabulary alone. The old pattern required the literal phrase "gender
- * identity", which that label does not carry, so the equivalence below never ran. */
-const EEO_GENDER_IDENTITY_QUESTION = /\bgender\b|\bsex\b/i;
-
-/* THE TWO SPELLINGS OF THE SAME ANSWER, both directions.
- *
- * Greenhouse's job-boards renderer offers Woman / Man; its older board and most other families
- * offer Female / Male. A stored answer in either vocabulary must reach a list written in the other,
- * and the ladder keeps HER wording first, so a list carrying her own spelling still wins. Only the
- * two paired terms are equivalent: nothing here rewrites a non-binary, self-described or declined
- * answer, which are hers alone. */
-const EEO_GENDER_EQUIVALENTS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/^female$/i, 'Woman'],
-  [/^woman$/i, 'Female'],
-  [/^male$/i, 'Man'],
-  [/^man$/i, 'Male'],
-];
-
-/**
- * THE MAPPING RULE, and it is deliberately the narrowest one that works.
- *
- * A stored race value is rewritten to a US federal category ONLY when that category WHOLLY CONTAINS
- * it: the stored value names a subgroup that the federal definition of the category already
- * includes, so the rewrite loses detail and changes no membership. "South Asian" to "Asian" is that
- * shape - the EEOC defines Asian as origins in the Far East, Southeast Asia, or the Indian
- * subcontinent, so a person who wrote South Asian is inside Asian by the employer's own definition,
- * and the employer's list has no finer word to offer.
- *
- * Race is the applicant's own self-identification, so anything that is not a clean containment
- * declines instead of guessing, and declining is always available and always honest. The cases this
- * table deliberately does NOT contain, each for a stated reason:
- *
- *   "Central Asian"          the federal definition of Asian names the Far East, Southeast Asia and
- *                            the Indian subcontinent, and not Central Asia. Not a containment.
- *   "Asian/Pacific Islander" spans TWO federal categories. Picking either one narrows her answer.
- *   "Middle Eastern",        the enum has no such category and files them under White. That is a
- *   "North African"          contested reassignment, not a coarser word for the same thing.
- *   "Native American"        read as American Indian or Alaska Native by most, but not by all, and
- *                            it overlaps Native Hawaiian. Ambiguous, so it declines.
- *   "Indian"                 ambiguous between Asian Indian and American Indian. Never mapped.
- *
- * A category is only ever WIDENED. The reverse - a stored "Asian" against a list offering "South
- * Asian" and "East Asian" - is a narrowing, it invents detail she did not give, and chooseClosestOption
- * already refuses it because the extra word distinguishes the claim.
- */
-const EEO_FEDERAL_RACE_CATEGORIES: ReadonlyArray<{ category: string; subgroup: RegExp }> = [
-  { category: 'Asian', subgroup: /^(?:south|east|southeast|south east) asian$|^asian american$/ },
-  { category: 'Black or African American', subgroup: /^(?:black|african american)$/ },
-  { category: 'Hispanic or Latino', subgroup: /^(?:hispanic|latino|latina|latinx|latino\/a|hispanic\/latino)$/ },
-  { category: 'Native Hawaiian or Other Pacific Islander', subgroup: /^(?:native hawaiian|pacific islander)$/ },
-  { category: 'American Indian or Alaska Native', subgroup: /^(?:american indian|alaskan? native)$/ },
-  { category: 'White', subgroup: /^(?:white|caucasian)$/ },
-  { category: 'Two or More Races', subgroup: /^(?:multiracial|multi racial|biracial|bi racial|mixed race|two or more races)$/ },
-];
-
-/**
- * The single federal category that wholly contains a stored race value, or undefined.
- *
- * Undefined when NO category claims it and, just as deliberately, when more than one does: two
- * claimants is the ambiguity the rule above exists to refuse, and it must fail closed if this table
- * is ever extended carelessly.
- */
-export function eeoFederalRaceCategory(stored: string): string | undefined {
-  const key = comparableOption(stored);
-  if (!key) return undefined;
-  const claimed = EEO_FEDERAL_RACE_CATEGORIES.filter((entry) => entry.subgroup.test(key));
-  if (claimed.length !== 1) return undefined;
-  // Already the category itself: nothing to widen, and the exact stage would have taken it anyway.
-  return comparableOption(claimed[0].category) === key ? undefined : claimed[0].category;
-}
+/* The question patterns, the gender equivalence table and the federal race table used to live here
+ * and moved to selfIdentification.ts on 2026-09-03, unchanged. See that file's header for why:
+ * questionDiscovery.ts needs the same vocabulary and cannot import this module. eeoFederalRaceCategory
+ * is re-exported at the top of this file, so nothing that imported it from here has to move. */
 
 /**
  * The ranked forms of one EEO answer, best first.
@@ -1012,19 +952,16 @@ export function eeoFederalRaceCategory(stored: string): string | undefined {
 export function eeoAnswerLadder(label: string, stored: string): string[] {
   const base = stored.trim();
   if (!base) return [];
-  const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
-    ? eeoFederalRaceCategory(base)
-    : undefined;
-  const equivalentGender = EEO_GENDER_IDENTITY_QUESTION.test(label)
-    ? EEO_GENDER_EQUIVALENTS.find(([spelling]) => spelling.test(base))?.[1]
-    : undefined;
+  // Her own words, then the equivalent gender spelling and the coarser federal race category. See
+  // selfIdentificationStatedForms, which is the same three rungs this function always built.
+  const stated = selfIdentificationStatedForms(label, base);
   // When the answer is a refusal AND the control names its vocabulary, the vocabulary's own
   // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
   // writes it, so it can only ever replace a decline with the same decline.
   const vocabulary = isDeclineToState(base) ? selfIdentificationDeclineWording(label) : undefined;
   return vocabulary
-    ? ladder(vocabulary, base, equivalentGender, coarser, ...DECLINE_WORDINGS)
-    : ladder(base, equivalentGender, coarser, ...DECLINE_WORDINGS);
+    ? ladder(vocabulary, ...stated, ...DECLINE_WORDINGS)
+    : ladder(...stated, ...DECLINE_WORDINGS);
 }
 
 const PRONOUN_OPTION_FAMILIES: readonly (readonly string[])[] = [
@@ -1047,17 +984,23 @@ function equivalentPronounOption(
 /**
  * The option that carries an EEO answer, or null.
  *
- * Two stages. The ladder goes through the ordinary conservative matcher first, so an option that
- * states her answer wins whenever the list has one, and a list carrying two differently worded
- * refusals is settled there too, by DECLINE_WORDINGS order. Only if nothing on the list can hold
- * what she said does the intent matcher answer for it, and then only when EXACTLY ONE option reads
- * as a refusal, because at that point there is nothing left to rank two look-alikes by and picking
- * between them by DOM order is the guess this module exists to refuse.
+ * Four stages, ordered so that everything she actually said is tried before anything that stands in
+ * for it. Her own words and their equivalent spellings go through the ordinary conservative matcher
+ * first, so an option that states her answer wins whenever the list has one. Then the sentence this
+ * control uses to state that same answer, for the yes/no subjects whose lists are written as
+ * paragraphs (see selfIdentificationPolarClaimOption, and the note on the function below for what
+ * this stage costs when it is missing). Then the full ladder, which respells a REFUSAL she gave in
+ * the control's own vocabulary and settles a list carrying two differently worded refusals by
+ * DECLINE_WORDINGS order. Only if nothing on the list can hold what she said does the intent matcher
+ * answer for it, and then only when EXACTLY ONE option reads as a refusal, because at that point
+ * there is nothing left to rank two look-alikes by and picking between them by DOM order is the
+ * guess this module exists to refuse.
  *
  * Substituting the opt-out is not putting words in her mouth. It is the answer the employer wrote
  * into its own list for precisely this case, it states nothing about her that is not true, and the
  * alternative is a required field left blank on a voluntary question, which blocks the whole
- * application over the one family where a correct answer is guaranteed to exist.
+ * application over the one family where a correct answer is guaranteed to exist. It is still the
+ * LAST resort rather than an early one, which is the whole reason the stage order above matters.
  */
 /* ---- accepting a consent control ----
  *
@@ -1138,6 +1081,26 @@ export function consentAcceptanceValue(
   return chooseConsentOption(options);
 }
 
+/* A THIRD STAGE, AND IT HAD TO GO IN FRONT OF THE REFUSALS RATHER THAN BEHIND THEM.
+ *
+ * The header above describes two stages, and until 2026-09-03 they were the whole function. The
+ * failure they leave is not a blank control, which is what the header assumes throughout - it is a
+ * REFUSAL SUBSTITUTED FOR A STATED ANSWER, and it is silent, because it reports matchedOption.
+ *
+ * MEASURED on the Verkada greenhouse lists (packet f1b2df5a) with eeo_prefs holding veteran_status
+ * "No" and disability_status "No". "No" is in CLOSED_SET_ANSWER_RE, so no option may extend it, and
+ * the veteran list's own denial reads "I am not a protected veteran"; the ladder therefore matched
+ * nothing and stage two returned the sole refusal, "I don't wish to answer". The disability list
+ * lost twice over: its refusal is spelled "I do not want to answer", which is a DECLINE_WORDINGS
+ * entry byte for byte, so the ladder's exact pass took it before stage two was even reached.
+ *
+ * So the ordering below is the point of the change, not an implementation detail. Her own words
+ * first, then the sentence this control uses to state that same answer, and the refusals only after
+ * both have failed - the ladder's own rule, applied to a rung the ladder could not reach.
+ *
+ * The refusal stages are unchanged and still do their job: a stored refusal is respelled by the
+ * ladder (and a list carrying two of them is settled there by DECLINE_WORDINGS order), and the
+ * sole-refusal stage remains the last resort for a stated answer the list simply cannot hold. */
 export function chooseEeoOption(
   label: string,
   stored: string,
@@ -1145,8 +1108,12 @@ export function chooseEeoOption(
 ): string | null {
   const options = usableOptions(rawOptions);
   if (options.length === 0) return null;
-  const stated = chooseClosestOption(eeoAnswerLadder(label, stored), options);
+  const stated = chooseClosestOption(selfIdentificationStatedForms(label, stored), options);
   if (stated) return stated;
+  const claimed = selfIdentificationPolarClaimOption(label, stored, options);
+  if (claimed) return claimed;
+  const respelled = chooseClosestOption(eeoAnswerLadder(label, stored), options);
+  if (respelled) return respelled;
   const declines = options.filter((option) => isDeclineToState(option));
   return declines.length === 1 ? declines[0] : null;
 }
