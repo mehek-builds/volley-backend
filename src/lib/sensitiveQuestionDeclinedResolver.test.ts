@@ -92,15 +92,70 @@ test('a review never clears a never-fill question', () => {
   }
 });
 
-test('a question the resolver DOES answer is still judged by value, reviewed or not', () => {
-  /* The value branch is untouched by this fix: it is satisfiable today - an answer equal to the
-   * resolver's clears it - so it is not the unsatisfiable-gate defect and is deliberately left
-   * alone. Pinned here so a later change to that branch is a deliberate one. */
-  const known = resolveKnownAnswer('what is your gender?', 'text', PROFILE, undefined, undefined, 'US');
+test('a review NEVER overrides an answer the resolver can check - the R-004 guard', () => {
+  /* THE LINE AN EARLIER CUT OF THIS CHANGE CROSSED, pinned so it cannot be crossed again.
+   *
+   * That cut hoisted the review check above the resolver comparison, on the theory that a review
+   * is a review whichever branch it lands in. It is not. The comparison branch is the only place
+   * a sensitive answer is ever checked against what her profile actually says, and removing it let
+   * a stored contradiction through on the strength of a claim that the product itself can mint in
+   * bulk. R-004 is what that looks like in production: a false legal declaration, sent.
+   *
+   * Asserted unconditionally rather than under `if (known && 'value' in known)`, so this cannot
+   * quietly stop testing anything the day EEO resolution changes shape. */
+  const ETHNICITY = 'are you hispanic/latino? hispanic_ethnicity';
+  const known = resolveKnownAnswer(ETHNICITY, 'text', PROFILE, undefined, undefined, 'US');
+  assert.ok(known && 'value' in known, 'an EEO label resolves to a value, not a skipReason');
+
+  // Matching the resolver clears it, review or no review - unchanged behaviour.
+  assert.equal(requiresAttention(known.value, false, ETHNICITY), false);
+  assert.equal(requiresAttention(known.value, true, ETHNICITY), false);
+  // Contradicting it is refused EVEN with a current-round review.
+  assert.equal(requiresAttention('Yes', false, ETHNICITY), true);
+  assert.equal(requiresAttention('Yes', true, ETHNICITY), true, 'a review must not override the profile');
+});
+
+test('a reviewed work-authorization contradiction is still refused', () => {
+  /* The concrete R-004 shape: the profile says she is not authorized, the packet says she is. */
+  const UNAUTHORIZED = {
+    ...(PROFILE as Record<string, unknown>),
+    work_authorized: false,
+    needs_sponsorship: true,
+    work_eligibility_by_country: [{
+      country_code: 'US', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true,
+    }],
+  } as unknown as Parameters<typeof sensitiveQuestionRequiresAttention>[3];
+
+  const LABEL = 'are you legally authorized to work in the united states?';
+  const known = resolveKnownAnswer(LABEL, 'text', UNAUTHORIZED, undefined, undefined, 'US');
   if (known && 'value' in known) {
-    assert.equal(requiresAttention(known.value, false, 'what is your gender?'), false);
-    assert.equal(requiresAttention(`${known.value} (edited)`, true, 'what is your gender?'), true);
+    assert.equal(
+      sensitiveQuestionRequiresAttention(LABEL, 'Yes', 'text', UNAUTHORIZED, undefined, undefined, 'US', true),
+      true,
+      'a current-round review must not send a work-authorization claim the profile contradicts',
+    );
+  } else {
+    // The resolver declined instead, so the escape hatch is reachable - that is the visa case, and
+    // it is covered above. Either way this label must never pass unreviewed.
+    assert.equal(
+      sensitiveQuestionRequiresAttention(LABEL, 'Yes', 'text', UNAUTHORIZED, undefined, undefined, 'US', false),
+      true,
+    );
   }
+});
+
+test('the provenance half is the canonical predicate, whitespace and all', () => {
+  /* answerCarriesCurrentApplicantReview composes applicantChoseStoredAnswer rather than
+   * re-writing it. That helper trims answer_source; a hand-written copy here would not, and the
+   * two would disagree about the same record - the split-brain applicantAnswer.ts exists to end. */
+  const ROUND = '2026-09-02T12:23:29.281Z';
+  assert.equal(
+    answerCarriesCurrentApplicantReview(
+      { answer: VISA_ANSWER, answer_source: '  applicant_review  ', answer_reviewed_at: ROUND },
+      ROUND,
+    ),
+    true,
+  );
 });
 
 test('a review only counts for the round it was made in', () => {
@@ -115,6 +170,15 @@ test('a review only counts for the round it was made in', () => {
   );
   // Every other way the signal can be absent is fail-closed.
   assert.equal(answerCarriesCurrentApplicantReview(reviewed, undefined), false);
+  /* An EMPTY round is not a round. Comparing the two raw made '' equal '', so a packet that
+   * somehow persisted an empty questions_reviewed_at would have read every answer on it as her
+   * current-round review and opened this gate for answers nobody reviewed. */
+  assert.equal(
+    answerCarriesCurrentApplicantReview({ ...reviewed, answer_reviewed_at: '' }, ''),
+    false,
+    'an empty claim must not match an empty round',
+  );
+  assert.equal(answerCarriesCurrentApplicantReview({ ...reviewed, answer_reviewed_at: '  ' }, ROUND), false);
   assert.equal(
     answerCarriesCurrentApplicantReview({ ...reviewed, answer_source: 'profile' }, ROUND),
     false,
