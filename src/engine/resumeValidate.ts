@@ -1,5 +1,5 @@
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+import { distinctGroundedVariants, RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 import type { ExperienceBankEntry } from '../db/schema';
 import { wordSet, numberSignatures, ungroundedNumbers } from './grounding';
 import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation } from './resumePolicy';
@@ -1074,10 +1074,17 @@ export function validateResumeSpec(
       });
       const allowed = options.allowedSingleBulletEntries ?? [];
       const sourceIsAllowed = source && allowed.some((candidate) => candidate.id === source.id);
-      const sourceBullets = Array.isArray(source?.bullet_variants)
-        ? source.bullet_variants.filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
-        : [];
-      const sourceIsSparse = sourceBullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry;
+      /* THE THIRD COUNTER, and it has to count the way the other two do. This asked whether the
+         bank row is genuinely sparse - the reason a one-bullet entry is forgivable - by counting
+         raw variant strings, while the floor collapses variants on a normalized key. A row
+         holding a sentence and the same sentence with a trailing period therefore looked like two
+         bullets here and one everywhere else: the entry was allowed onto the page by the floor's
+         confirmed-sparse allowance, and then failed HERE for having one bullet with a source this
+         function believed had two, which is a resume_quality_hold on every posting that no
+         rebuild can clear. distinctGroundedVariants is the same function the survivability rule
+         and the floor use. */
+      const sourceIsSparse = distinctGroundedVariants(source?.bullet_variants)
+        < RESUME_CONTENT_LIMITS.minBulletsPerEntry;
       if (!sourceIsAllowed || !sourceIsSparse) {
         issues.push(
           `${entry.org}: ${entry.bullets.length} bullet selected (min ${RESUME_CONTENT_LIMITS.minBulletsPerEntry})`,

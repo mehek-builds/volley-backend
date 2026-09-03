@@ -66,11 +66,16 @@ export function distinctGroundedVariants(bulletVariants: unknown): number {
   for (const variant of variants) {
     if (typeof variant !== 'string' || variant.trim().length === 0) continue;
     const key = resumeBulletKey(variant);
-    /* An empty key is punctuation with no words in it. The floor passes such a bullet through to
-       its length checks rather than tracking it, so it is a real sentence for counting purposes
-       and cannot be collapsed with another one. The sentinel carries a colon, which
-       resumeBulletKey strips from every real key, so it can never collide with one. */
-    keys.add(key.length > 0 ? key : `unkeyed:${keys.size}`);
+    /* A KEYLESS VARIANT CANNOT RAISE AN ENTRY OFF THE FLOOR, so it must not be counted as though
+       it could. It is punctuation with no words in it, and the floor's top-up loop - the loop
+       that actually decides whether a bank row can carry an entry to minBulletsPerEntry - skips
+       exactly these (`if (!key || taken.has(key)) continue`). Counting one as a distinct sentence
+       therefore called a row survivable that the floor is still guaranteed to drop, which is the
+       overstatement this function exists to remove rather than relocate. (The floor does pass a
+       keyless bullet the MODEL wrote through to its length checks; that is a different question
+       from what the bank row can supply, and this counts the bank row.) */
+    if (key.length === 0) continue;
+    keys.add(key);
   }
   return keys.size;
 }

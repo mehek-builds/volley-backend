@@ -359,10 +359,24 @@ describe('base resume priority selection', () => {
       }),
       [],
     );
+    /* BOTH KEYS COUNT, and this case is why. matchingBankEntry breaks an exact org-containment
+     * tie by preferring the LONGER org, so with a re-upload duplicate the floor attributes the
+     * drop to the sibling row whichever copy the model wrote. Excusing by id alone, with identity
+     * used only when no id was reported, then refused this student on every posting - a
+     * regression on the exact scenario the excuse was written for. */
+    assert.deepEqual(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedByTheFloor: [{ sourceId: 'the-sibling-row', org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
+      }),
+      [],
+    );
+    /* Neither key matching is still an issue: a different role at the same organization, dropped,
+     * does not excuse this one. */
     assert.equal(
       baseResumeSelectionIssues(specWithoutIt, [required], {
         requireFirst: false,
-        droppedByTheFloor: [{ sourceId: 'a-different-row', org: 'Tri Coast Capital', title: 'Analyst' }],
+        droppedByTheFloor: [{ sourceId: 'a-different-row', org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
       }).length,
       1,
     );
@@ -500,7 +514,12 @@ describe('base resume priority selection', () => {
     /* THE EXCUSE IS ACTUALLY POPULATED. Passing the array to the gate proves nothing if nothing
      * ever pushes to it: delete the push and the array stays permanently empty, the duplicate
      * dead-end returns, and a test that builds its own local array cannot see it. */
-    assert.match(route, /droppedByTheFloor\.push\(\{ sourceId, org, title \}\)/);
+    /* UNCONDITIONALLY, which a substring match does not establish: re-adding the
+     * `if (reason === 'already_printed')` guard in front of this push leaves a plain
+     * `assert.match` for the push itself green, and the below_floor strand comes straight back.
+     * The mechanism test above collects its own array, so it cannot see the route's filter. */
+    assert.match(route, /onDropped: \(\{ org, title, sourceId, bullets, reason \}\) => \{\n\s*droppedByTheFloor\.push\(\{ sourceId, org, title \}\);/);
+    assert.doesNotMatch(route, /reason === 'already_printed'\) droppedByTheFloor/);
     assert.match(route, /requireFirst: false, droppedByTheFloor/);
   });
 
@@ -508,7 +527,12 @@ describe('base resume priority selection', () => {
     /* The two routes share the gate and the floor, so an excuse that is collected on one and not
      * the other is how they drift back apart. Same two pins. */
     const route = readFileSync(path.join(__dirname, '../routes/baseResume.ts'), 'utf8');
-    assert.match(route, /droppedByTheFloor\.push\(\{ sourceId, org, title \}\)/);
+    /* UNCONDITIONALLY, which a substring match does not establish: re-adding the
+     * `if (reason === 'already_printed')` guard in front of this push leaves a plain
+     * `assert.match` for the push itself green, and the below_floor strand comes straight back.
+     * The mechanism test above collects its own array, so it cannot see the route's filter. */
+    assert.match(route, /onDropped: \(\{ org, title, sourceId, bullets, reason \}\) => \{\n\s*droppedByTheFloor\.push\(\{ sourceId, org, title \}\);/);
+    assert.doesNotMatch(route, /reason === 'already_printed'\) droppedByTheFloor/);
     assert.match(route, /baseResumeSelectionIssues\(printed, priorityEntries, \{ droppedByTheFloor \}\)/);
   });
 
@@ -596,6 +620,34 @@ describe('base resume priority selection', () => {
     );
   });
 
+  test('the floor may attribute a duplicate drop to the SIBLING row, and the excuse still holds', () => {
+    /* End to end through the real matcher, because this is where excusing by id alone regressed.
+     * matchingBankEntry scores org containment and breaks the exact tie by preferring the longer
+     * org, so with two rows for one job the drop is reported against the LONG row whichever copy
+     * the model wrote - and the priority here is the short one, whose id therefore never appears
+     * among the drops at all. */
+    const shared = ['Modeled grounded deal comparables for midmarket targets', 'Wrote grounded diligence memos for the committee'];
+    const short = bankEntry({ id: 'short', org: 'Tri Coast Capital', title: 'Analyst', date_range: '2024 - Present', bullet_variants: [...shared] });
+    const long = bankEntry({ id: 'long', org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst', date_range: '2024 - Present', bullet_variants: [...shared] });
+    const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
+    const printed = enforceExperienceBulletFloor(
+      { ...SPEC, education_position: 'top' as const, experience: [
+        { type: 'job' as const, org: long.org, title: 'Analyst', date_range: '2024 - Present', bullets: [...shared] },
+        { type: 'job' as const, org: short.org, title: 'Analyst', date_range: '2024 - Present', bullets: [...shared] },
+      ] },
+      [short, long],
+      { onDropped: ({ org, title, sourceId }) => { droppedByTheFloor.push({ sourceId, org, title }); } },
+    );
+    /* The drop is attributed to the row the priority is NOT. */
+    assert.equal(droppedByTheFloor.length, 1);
+    assert.notEqual(droppedByTheFloor[0]?.sourceId, short.id);
+    assert.ok(!printed.experience.some((entry) => entry.org === short.org));
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [short], { requireFirst: false, droppedByTheFloor }),
+      [],
+    );
+  });
+
   test('survivability counts DISTINCT sentences, the way the floor counts them', () => {
     /* No second bank row and no confirmation flag needed for this one. A re-upload that reparsed
      * one bullet with a trailing period gives a row two variant STRINGS and one distinct
@@ -620,6 +672,25 @@ describe('base resume priority selection', () => {
     assert.equal(priorityEntryMayBeMandatory(bankEntry({
       id: 'real', bullet_variants: ['Managed the chapter budget', 'Ran the grounded speaker series'],
     })), true);
+    /* A PUNCTUATION-ONLY VARIANT IS NOT A SENTENCE THE FLOOR CAN USE. Its normalized key is
+     * empty, and the floor's top-up loop - the loop that decides whether a bank row can carry an
+     * entry to the floor - skips exactly those. Counting it called the row survivable while the
+     * floor still dropped it, which is the overstatement this count exists to remove. */
+    const punctuationOnly = bankEntry({
+      id: 'punct', org: 'Campus Lab', title: 'Intern',
+      bullet_variants: ['Managed the chapter budget for the year', '!!!'],
+    });
+    assert.equal(priorityEntryMayBeMandatory(punctuationOnly), false);
+    assert.equal(
+      enforceExperienceBulletFloor(
+        { ...SPEC, education_position: 'top' as const, experience: [
+          { type: 'job' as const, org: 'Campus Lab', title: 'Intern', date_range: '2024', bullets: ['Managed the chapter budget for the year'] },
+        ] },
+        [punctuationOnly],
+      ).experience.length,
+      0,
+      'the floor drops it, so the predicate must not call it survivable',
+    );
   });
 
   test('an entry with no grounded evidence is never mandatory, confirmed or not', () => {

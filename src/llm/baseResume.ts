@@ -346,10 +346,20 @@ export function baseResumeSelectionIssues(
   const excusedIds = new Set(
     droppedByTheFloor.map((entry) => entry.sourceId).filter((id): id is string => typeof id === 'string' && id.length > 0),
   );
+  /* BOTH KEYS, ALWAYS, never one instead of the other. Excusing by id ALONE and falling back to
+   * identity only when the id is absent looked tidier and was a regression, on the very case this
+   * excuse exists for. matchingBankEntry scores org containment and breaks an exact tie by
+   * preferring the LONGER org, so with a re-upload duplicate ("Tri Coast Capital" and "Tri Coast
+   * Capital Manhattan Beach, CA", same title and dates) the drop is attributed to the long row
+   * whichever copy the model actually wrote. If the short row is the priority, its id never
+   * appears among the drops, the identity that WOULD have matched was skipped because a sourceId
+   * was present, and the student is refused on every posting - something the identity-only code
+   * this replaced got right. The two keys answer different questions and neither is reliable
+   * alone: the id survives the model rewording an org, the identity survives the floor matching a
+   * sibling row. Union is strictly safer than either, and identity stays (org, title) so a
+   * different role at the same organization is still not excused. */
   const excusedIdentities = new Set(
-    droppedByTheFloor
-      .filter((entry) => !entry.sourceId)
-      .map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
+    droppedByTheFloor.map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
   );
   const issues = priorities
     .filter((entry) => !selected.has(entryIdentity(entry))
