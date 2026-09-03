@@ -3,6 +3,7 @@ import {
   referralAnswer as referrerDeclarationAnswer,
   graduationWindowAnswer as graduationWindowDeclarationAnswer,
 } from './heldAnswerQuestions';
+import { applicantReviewIsCurrent } from './applicantAnswer';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -2415,7 +2416,9 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       question.answer.trim()
       && withProvenance.answer_source === 'applicant_review'
       && typeof withProvenance.answer_reviewed_at === 'string'
-      && withProvenance.answer_reviewed_at === questionsReviewedAt,
+      /* At or after the round, not equal to it: the round is the packet's review epoch and this
+       * stamp is when she actually reviewed. See applicantReviewIsCurrent. */
+      && applicantReviewIsCurrent(withProvenance.answer_reviewed_at, questionsReviewedAt),
     );
     const derivedFrom = typeof withProvenance.answer_option_source === 'string'
       ? withProvenance.answer_option_source

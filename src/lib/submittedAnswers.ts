@@ -13,7 +13,13 @@ import { reopenUnfitClosedChoiceQuestions } from './questionMetadata';
  * whether to keep the answer or blank it; and the review that gets persisted has to carry the round
  * both of them were keyed to. Passing a different value to any one of the three silently discards
  * the claim, because a per-answer `answer_reviewed_at` is only meaningful beside the
- * `questions_reviewed_at` it equals.
+ * `questions_reviewed_at` it is measured against.
+ *
+ * MEASURED AGAINST, NOT EQUAL TO, AND THOSE ARE TWO DIFFERENT TIMESTAMPS. The round below is the
+ * packet's review EPOCH and stays frozen at the packet's first review; the clock reading handed to
+ * the merge is when THIS submit is happening. Writing the round into the per-answer stamp is what
+ * back-dated every later claim on packet 4a79eec1 to 2026-09-01, two days before the answers it was
+ * stamped onto were written. See applicantReviewIsCurrent.
  *
  * THE ROUND IS THE ONE THIS SUBMIT IS, and only falls back to a stored round when there is one.
  * `questions_reviewed_at` is written only by a save through the review routes, so a packet that has
@@ -36,8 +42,12 @@ export function resolveSubmittedApplicationAnswers(options: {
   asOf?: Date;
 }): { questions: ApplicationReviewQuestion[]; questionsReviewedAt: string } {
   const { current, submitted, profile, postingCountry, postingCountryCode } = options;
-  const questionsReviewedAt = current.questions_reviewed_at
-    ?? (options.now ?? (() => new Date().toISOString()))();
+  /* ONE CLOCK READING FOR THE WHOLE CALL, for the same reason the round is computed once: the mint
+   * below and the round beside it have to be talking about the same instant. On a packet with no
+   * stored round the two are deliberately the SAME string - this submit is that packet's first
+   * review, so its epoch opens now. */
+  const reviewedNowAt = (options.now ?? (() => new Date().toISOString()))();
+  const questionsReviewedAt = current.questions_reviewed_at ?? reviewedNowAt;
   const asOf = options.asOf ?? new Date();
   /* The SAME lookup the refresh below resolves with, handed to the merge above it. The merge has to
    * know what the resolver says for two decisions it cannot otherwise make - whether a submitted
@@ -50,6 +60,7 @@ export function resolveSubmittedApplicationAnswers(options: {
     submitted,
     questionsReviewedAt,
     resolverAnswerFor,
+    reviewedNowAt,
   );
   /* The re-open pass rides the same fixpoint the refresh does, so a save cannot store an answer a
    * strict closed control has no way to express: it settles as a blank question carrying the exact

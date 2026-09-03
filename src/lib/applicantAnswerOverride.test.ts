@@ -71,12 +71,19 @@ function saveThenRead(
   round: string | undefined = ROUND,
   readRound: string | undefined = ROUND,
   readProfile: ApplicationProfileLike = profile,
+  /* WHEN SHE PRESSED SAVE, which stopped being the same fact as `round` when the per-answer stamp
+   * became the clock instead of the packet's review epoch. Defaulted to `round`, so every case here
+   * reads as the ordinary first-review timeline it always described - she saved, and that save is
+   * what opened the epoch. The round-mismatch case below relies on the default: a claim made when
+   * the epoch opened is BEFORE a later epoch, which is the superseded shape it exists to pin. */
+  savedAt: string = round ?? ROUND,
 ) {
   const merged = mergeSubmittedApplicationReviewQuestions(
     stored,
     submitted,
     round,
     knownAnswerLookup(profile, undefined),
+    savedAt,
   ) as ApplicationReviewQuestion[];
   const read = refreshKnownQuestionAnswers(merged, readProfile, undefined, readRound);
   return { merged, read };

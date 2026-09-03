@@ -285,7 +285,7 @@ import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '
 import { loadApplicationProfileLike, loadUnattendedConsentGrant } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
-import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
+import { applicantChoseStoredAnswer, applicantReviewIsCurrent } from '../lib/applicantAnswer';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import {
   dedupeQuestionMetadataBlockers,
@@ -5923,12 +5923,12 @@ function applicantChoseStoredAnswerInRound(
   question: { answer: string; answer_source?: string; answer_reviewed_at?: string },
   questionsReviewedAt: string | undefined,
 ): boolean {
-  const answerReviewedAt = question.answer_reviewed_at?.trim();
-  const reviewRound = questionsReviewedAt?.trim();
+  /* IN ROUND MEANS NOT SUPERSEDED, not string-identical to the round. All ten call sites below ask
+   * the same thing - "did she choose this stored answer, and does that choice still stand" - and a
+   * claim she made AFTER this epoch opened is the strongest possible yes. See
+   * applicantReviewIsCurrent for why equality was only ever the frozen round's spelling of it. */
   return applicantChoseStoredAnswer(question)
-    && Boolean(answerReviewedAt)
-    && Boolean(reviewRound)
-    && answerReviewedAt === reviewRound;
+    && applicantReviewIsCurrent(question.answer_reviewed_at, questionsReviewedAt);
 }
 
 export async function discoverAndResolveQuestions(
