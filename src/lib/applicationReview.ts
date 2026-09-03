@@ -388,6 +388,23 @@ export function mergeSubmittedApplicationReviewQuestions(
    * profile to build it from and it stamps every non-empty answer itself anyway.
    */
   resolverAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
+  /**
+   * What Litos itself would WRITE INTO THIS CONTROL for the question, from
+   * submittedAnswers.machineAnswerLookup.
+   *
+   * THE OTHER HALF OF resolverAnswerFor, and it exists because those two are different strings on
+   * every snapped control. resolverAnswerFor is `resolveKnownAnswer`: what the answer IS, from the
+   * profile. This is `resolveProfileField`: the same answer written in the employer's own option
+   * text. The fill, the runner and the packet audit all resolve through the second one, and the
+   * review screen therefore DISPLAYS the second one - so a body that merely echoes the screen
+   * carries a string the first lookup has never heard of.
+   *
+   * READ BY ONE LINE, `applicantSuppliedAnswer`, and deliberately not by the override below: an
+   * override has to name the PRE-SNAP value it was made against or its own currency check can never
+   * pass. See machineAnswerLookup for the production record that forced this, and the mint gate for
+   * why an echo is not a choice.
+   */
+  machineAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
 ): ApplicationReviewQuestion[] {
   const submittedByQuestion = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number }>();
   const submittedByUniqueId = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number } | undefined>();
@@ -521,8 +538,48 @@ export function mergeSubmittedApplicationReviewQuestions(
     const resolverAnswer = resolverAnswerFor?.(question)?.trim() || undefined;
     const submittedAnswer = submittedQuestion.answer.trim();
     const submittedIsResolverValue = resolverAnswer !== undefined && submittedAnswer === resolverAnswer;
+    /* AND THE SAME TEST AGAINST THE STRING THE MACHINE ACTUALLY WRITES, which on a snapped control
+     * is not the string above.
+     *
+     * THE DEFECT, MEASURED IN PRODUCTION 2026-09-03 on packet 4a79eec1 (Hudson River Trading,
+     * greenhouse). The required gender control offers Woman / Man / Non-binary / I don't wish to
+     * answer; her profile says `Female`; the packet came back holding
+     *
+     *   answer "Woman", answer_source "applicant_review", answer_override_of "Female",
+     *   answer_reviewed_at "2026-09-01T21:28:12.934Z", equal to questions_reviewed_at
+     *
+     * asserting she reviewed that control two days earlier and overrode `Female` with `Woman`. She
+     * did not, and on 2026-09-01 no code in the repo could produce `Woman` for this label. This
+     * expression and the round it stamps are the whole of it, reproduced byte for byte in
+     * applicantClaimIsNotAnEcho.test.ts.
+     *
+     * WHY THE LINE ABOVE MISSED IT, in one step. `resolveKnownAnswer` decides what the answer IS
+     * from the profile; `resolveProfileField` decides how that same answer is WRITTEN into this
+     * particular control, snapping it onto the employer's own option text. Every path that fills a
+     * form or shows her a packet resolves through the second one, so the review screen renders
+     * `Woman` - and the client posts back the whole list it was rendering. The gate above asked only
+     * the first, so a snapped value looked like bytes she had typed.
+     *
+     * WHY THAT ONE FALSE STAMP IS NOT SELF-CORRECTING, which is what makes it worth a second
+     * lookup. refreshKnownQuestionAnswers returns a question untouched when
+     * `applicantReviewedCurrentAnswer && reviewedAnswerIsAnOfferedOption(...)`, ahead of every
+     * recompute rule. A machine value that acquires this claim is therefore immune to correction by
+     * any resolver Litos ships afterwards, permanently. On the HRT record the value happened to be
+     * right; the mechanism stamps whatever the resolver produced, right or wrong, and the same
+     * merge writes gender, disability and veteran answers.
+     *
+     * SEPARATE FROM submittedIsResolverValue rather than folded into it, because they have
+     * different readers. Only this line reads the snapped value: `applicantConfirmedAnswer` below
+     * stays deaf to both, so an explicit per-question confirmation still mints her claim over a
+     * machine value, and the override branch still names the PRE-SNAP resolver value, which is the
+     * only string its own currency check can recompute. */
+    const submittedIsMachineValue = (() => {
+      const machineAnswer = machineAnswerFor?.(question)?.trim() || undefined;
+      return machineAnswer !== undefined && submittedAnswer === machineAnswer;
+    })();
     const applicantSuppliedAnswer = Boolean(
-      questionsReviewedAt && submittedAnswer && !answerUnchanged && !submittedIsResolverValue,
+      questionsReviewedAt && submittedAnswer && !answerUnchanged
+      && !submittedIsResolverValue && !submittedIsMachineValue,
     );
     /* HER EXPLICIT CONFIRMATION, WHICH NO DIFF CAN EXPRESS. The two tests above exist to stop an
      * untouched Save being read as a choice, and they are right - but a CONFIRMED question is not an
