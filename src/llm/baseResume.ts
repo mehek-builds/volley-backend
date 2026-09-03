@@ -306,21 +306,51 @@ export function baseResumeSelectionIssues(
   priorities: ExperienceBankEntry[],
   options: {
     requireFirst?: boolean;
-    /* Entries the bullet floor dropped because their every bullet already prints under another
-     * heading. This gate exists to keep the applicant's defining work VISIBLE on the page, and a
-     * duplicate emptied by the cross-entry dedupe is visible - the same sentences sit under the
-     * other copy's heading. Demanding it anyway recreated the nothing-saved dead-end one level
-     * deeper: a duplicate bank row with a slightly different identity (a re-upload that renamed
-     * "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA") was required by identity,
-     * emptied by the dedupe, and refused by this gate on every rebuild. Keyed on (org, title),
-     * not org alone, so excusing a dropped duplicate cannot excuse a different role at the same
-     * organization. */
-    droppedAsAlreadyPrinted?: Array<{ org: string; title?: string | null }>;
+    /* WHAT THE BULLET FLOOR ITSELF REPORTED REMOVING, both of its reasons, and nothing else.
+     *
+     * This gate keeps the applicant's defining work VISIBLE, and it is the last word on both
+     * routes: enforceExperienceBulletFloor runs AFTER the repair loop has ended, so no retry and
+     * no enforcePrioritySelection stands between the drop and the refusal. Demanding back what the
+     * floor deliberately removed is therefore not a defect report, it is a permanent
+     * resume_quality_hold that every rebuild reproduces and that no wording the model chooses can
+     * clear - the floor tops entries up from the same fixed variant list every time.
+     *
+     * BOTH REASONS, because the excuse is about reachability, not about visibility, and only one
+     * of the two was ever about visibility:
+     *
+     *   already_printed - the entry is empty because its every sentence prints under an earlier
+     *     heading. The work IS on the page, so the gate's own purpose is already met. Closed in
+     *     #872 (base) and #880 (tailored).
+     *
+     *   below_floor - the entry is genuinely off the page, and excusing it is a deliberate
+     *     tradeoff rather than a technicality. It is reachable for an entry that passed
+     *     priorityEntryMayBeMandatory, because survivability counts the bank row's grounded
+     *     variants in isolation while the floor deduplicates ACROSS entries, keep-first: two
+     *     near-duplicate rows with different (org, title) identity and partially overlapping
+     *     variants (a re-upload that renamed the org AND edited one bullet) leave the later one
+     *     with fewer DISTINCT sentences than minBulletsPerEntry, and the top-up cannot replace
+     *     what an earlier entry already printed. No count taken before generation can predict
+     *     this: which sentences are still free depends on what the model wrote and in what order.
+     *     Refusing here would deny the student every resume, forever, over one repeated sentence.
+     *     Producing the page and SAYING what came off is strictly better, and the droppedForLength
+     *     line on the omissions channel already says it in the student's terms ("Left Beta Corp
+     *     off: it has 1 bullet and we recommend at least 2. Add another and it goes on.").
+     *
+     * IT CANNOT OVER-EXCUSE, and that is the property to preserve when editing either route: this
+     * list is populated exclusively from the floor's own onDropped callback, so an entry that
+     * vanished any OTHER way - never written by the model, cut by pruneUngroundedContent, trimmed
+     * by the one-page layout, sliced off by maxEntries - is absent from it and still fails this
+     * gate. Those are the cases where a rebuild or a repair genuinely can put the entry back, and
+     * they are exactly the ones the gate must keep refusing.
+     *
+     * Keyed on (org, title), not org alone, so excusing a dropped entry cannot excuse a different
+     * role at the same organization. */
+    droppedByBulletFloor?: Array<{ org: string; title?: string | null }>;
   } = {},
 ): string[] {
   const selected = new Set(spec.experience.map((entry) => entryIdentity(entry)));
   const excused = new Set(
-    (options.droppedAsAlreadyPrinted ?? []).map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
+    (options.droppedByBulletFloor ?? []).map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
   );
   const issues = priorities
     .filter((entry) => !selected.has(entryIdentity(entry)) && !excused.has(entryIdentity(entry)))

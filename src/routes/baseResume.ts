@@ -655,10 +655,16 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          the one omission the student can act on, and the sentence says how - one more bullet. The
          two generators must not differ in whether they tell them. */
       const droppedForLength: string[] = [];
-      /* Fed to the required-entry gate below: an entry emptied because its every sentence already
-         prints under another heading is VISIBLE on the page, so the gate may not demand it - see
-         baseResumeSelectionIssues for the dead-end this closes. */
-      const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+      /* Fed to the required-entry gate below, for BOTH of the floor's reasons. The floor is the
+         last thing that can remove an entry before that gate, and the repair loop above has
+         already ended - so anything it drops and the gate then demands is a resume_quality_hold
+         that no rebuild can clear. An entry emptied by the dedupe is still VISIBLE under another
+         heading; an entry left under the floor by that same dedupe is not, and comes off with a
+         warning naming the fix, which is the strictly better outcome. Populated only from the
+         floor's own callback, so an entry that vanished any other way is still demanded - see
+         baseResumeSelectionIssues for both dead-ends this closes and for why it cannot
+         over-excuse. */
+      const droppedByBulletFloor: Array<{ org: string; title?: string | null }> = [];
       const spec = enforceExperienceBulletFloor(pruned.spec, bank, {
         priorityEntryId: selectedEntryId,
         allowSparsePriority: recentReview?.continue_with_found === true,
@@ -668,7 +674,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
            page under another heading, so a fourth bullet changes nothing and the student would be
            sent round a loop. Say what actually happened instead. */
         onDropped: ({ org, title, bullets, reason }) => {
-          if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
+          droppedByBulletFloor.push({ org, title });
           droppedForLength.push(
             reason === 'already_printed'
               ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
@@ -809,7 +815,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          * succeeded. */
         const issues = [
           ...finalValidation.issues.filter((issue) => !providerStyleIssues.includes(issue)),
-          ...baseResumeSelectionIssues(printed, priorityEntries, { droppedAsAlreadyPrinted }),
+          ...baseResumeSelectionIssues(printed, priorityEntries, { droppedByBulletFloor }),
           ...layout.issues,
           ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
           ...findPdfTextFidelityIssues(parsedPdf.text, printed, contact),

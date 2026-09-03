@@ -336,14 +336,14 @@ describe('base resume priority selection', () => {
     assert.deepEqual(
       baseResumeSelectionIssues(specWithoutIt, [required], {
         requireFirst: false,
-        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
+        droppedByBulletFloor: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
       }),
       [],
     );
     assert.equal(
       baseResumeSelectionIssues(specWithoutIt, [required], {
         requireFirst: false,
-        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
+        droppedByBulletFloor: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
       }).length,
       1,
     );
@@ -470,7 +470,14 @@ describe('base resume priority selection', () => {
     assert.match(route, /priorityEntryId: selectedEntry\?\.id/);
     /* The dedupe's excuse reaches the post-floor gate, the way routes/baseResume.ts feeds its
      * own. Without it a survivable duplicate is mandatory, emptied, and refused forever. */
-    assert.match(route, /requireFirst: false, droppedAsAlreadyPrinted/);
+    assert.match(route, /requireFirst: false, droppedByBulletFloor/);
+    /* Every drop, not the already_printed ones: filtering by reason here is exactly the bug the
+       test below reproduces, and it is invisible to any test that does not read this line. */
+    assert.match(route, /droppedByBulletFloor\.push\(\{ org, title \}\);/);
+    /* Named, not the loose /dropped/ it would be tempting to write: droppedForLength legitimately
+       branches on this exact reason to choose its sentence, and a pin that cannot tell the two
+       lists apart would fire on a harmless rewrite of that ternary into an if. */
+    assert.doesNotMatch(route, /reason === 'already_printed'\) droppedByBulletFloor/);
   });
 
   test('the tailored gate excuses a required entry the cross-entry dedupe emptied', () => {
@@ -499,20 +506,142 @@ describe('base resume priority selection', () => {
         { type: 'job' as const, org: renamed.org, title: 'Analyst', date_range: '2024 - Present', bullets: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'] },
       ],
     };
-    const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+    const droppedByBulletFloor: Array<{ org: string; title?: string | null }> = [];
+    const reasons: string[] = [];
     const printed = enforceExperienceBulletFloor(generated, [original, renamed], {
       onDropped: ({ org, title, reason }) => {
-        if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
+        droppedByBulletFloor.push({ org, title });
+        reasons.push(reason);
       },
     });
     assert.ok(!printed.experience.some((entry) => entry.org === renamed.org));
-    assert.deepEqual(droppedAsAlreadyPrinted, [{ org: renamed.org, title: 'Analyst' }]);
+    assert.deepEqual(droppedByBulletFloor, [{ org: renamed.org, title: 'Analyst' }]);
+    /* WHOLLY overlapping variants, so this one empties and the reason is already_printed. The
+     * partial-overlap sibling below reports below_floor from the same construction. */
+    assert.deepEqual(reasons, ['already_printed']);
 
     assert.equal(baseResumeSelectionIssues(printed, [renamed], { requireFirst: false }).length, 1);
     assert.deepEqual(
-      baseResumeSelectionIssues(printed, [renamed], { requireFirst: false, droppedAsAlreadyPrinted }),
+      baseResumeSelectionIssues(printed, [renamed], { requireFirst: false, droppedByBulletFloor }),
       [],
     );
+  });
+
+  test('a required entry the dedupe left UNDER the floor is excused too, on both routes', () => {
+    /* THE THIRD INSTANCE, and the one that survived #872, #875 and #880. Those three excused the
+     * dedupe only where it empties an entry completely, which is the case of two bank rows whose
+     * variant lists match exactly. PARTIAL overlap is the ordinary shape of the same accident - a
+     * re-upload that renamed the org AND edited one bullet - and it lands somewhere else entirely:
+     * the entry keeps its own unshared sentence, so it is not empty, and the top-up cannot make up
+     * the difference because it reads the very variant list the earlier entry already spent. It
+     * comes off as below_floor, and the already_printed-only excuse walked straight past it.
+     *
+     * DETERMINISTIC whenever the distinct-sentence count is under minBulletsPerEntry: the floor
+     * tops up from a fixed list, so no wording the model chooses can rescue it, and every rebuild
+     * reproduces the refusal on the base path and on EVERY posting on the tailored one. */
+    const alpha = bankEntry({
+      id: 'alpha', org: 'Alpha Corp', title: 'Analyst', date_range: '2024 - Present',
+      bullet_variants: ['Shared sentence one', 'Alpha only sentence'],
+    });
+    const beta = bankEntry({
+      id: 'beta', org: 'Beta Corp', title: 'Associate', date_range: '2024 - Present',
+      bullet_variants: ['Shared sentence one', 'Beta only sentence'],
+    });
+    /* Two grounded variants each, so BOTH clear the survivability rule #872/#875/#880 added and
+     * both are legitimately mandatory. Nothing checkable before generation separates them. */
+    assert.equal(priorityEntryMayBeMandatory(alpha), true);
+    assert.equal(priorityEntryMayBeMandatory(beta), true);
+
+    const generated = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [
+        { type: 'job' as const, org: alpha.org, title: 'Analyst', date_range: '2024 - Present', bullets: ['Shared sentence one', 'Alpha only sentence'] },
+        { type: 'job' as const, org: beta.org, title: 'Associate', date_range: '2024 - Present', bullets: ['Shared sentence one', 'Beta only sentence'] },
+      ],
+    };
+    const droppedByBulletFloor: Array<{ org: string; title?: string | null }> = [];
+    const reasons: string[] = [];
+    const printed = enforceExperienceBulletFloor(generated, [alpha, beta], {
+      onDropped: ({ org, title, reason }) => {
+        droppedByBulletFloor.push({ org, title });
+        reasons.push(reason);
+      },
+    });
+    /* Keep-first, so Alpha prints the shared sentence and Beta is left holding one. */
+    assert.deepEqual(printed.experience.map((entry) => entry.org), [alpha.org]);
+    assert.deepEqual(droppedByBulletFloor, [{ org: beta.org, title: 'Associate' }]);
+    /* NOT already_printed. This is the whole reason the earlier excuse missed it. */
+    assert.deepEqual(reasons, ['below_floor']);
+
+    /* The refusal, on the tailored gate... */
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [beta], { requireFirst: false }),
+      ['required current or role-defining entry missing: Associate at Beta Corp'],
+    );
+    /* ...and on the base gate, which demands position as well as inclusion. */
+    assert.equal(baseResumeSelectionIssues(printed, [alpha, beta]).length, 1);
+
+    /* Excused on both, now that the gate takes every drop the floor reported. */
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [beta], { requireFirst: false, droppedByBulletFloor }),
+      [],
+    );
+    assert.deepEqual(baseResumeSelectionIssues(printed, [alpha, beta], { droppedByBulletFloor }), []);
+  });
+
+  test('the excuse cannot cover an entry the floor did not report dropping', () => {
+    /* THE PROPERTY THAT KEEPS THE GATE HONEST, and the one to re-check before touching either
+     * route. Excusing below_floor is safe only because the list is built exclusively from the
+     * floor's own callback. Every other way an entry can leave the page - the model never wrote
+     * it, pruneUngroundedContent cut it as ungrounded, the one-page layout trimmed it, the
+     * maxEntries slice dropped it - reports nothing, so the entry stays absent from the list and
+     * the gate still refuses. Those are exactly the cases a rebuild CAN fix, which is why the gate
+     * must keep refusing them: the excuse is for what is unreachable, not for what is missing. */
+    const required = bankEntry({
+      id: 'required', org: 'Gamma Corp', title: 'Engineer', date_range: '2024 - Present',
+      bullet_variants: ['Gamma grounded sentence one', 'Gamma grounded sentence two'],
+    });
+    const other = bankEntry({
+      id: 'other', org: 'Delta Corp', title: 'Analyst', date_range: '2023',
+      bullet_variants: ['Delta grounded sentence one', 'Delta grounded sentence two'],
+    });
+    /* A page the floor never touched: Gamma is simply not on it. */
+    const withoutIt = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [
+        { type: 'job' as const, org: other.org, title: 'Analyst', date_range: '2023', bullets: ['Delta grounded sentence one', 'Delta grounded sentence two'] },
+      ],
+    };
+    const droppedByBulletFloor: Array<{ org: string; title?: string | null }> = [];
+    const printed = enforceExperienceBulletFloor(withoutIt, [required, other], {
+      onDropped: ({ org, title }) => droppedByBulletFloor.push({ org, title }),
+    });
+    assert.deepEqual(droppedByBulletFloor, []);
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [required], { requireFirst: false, droppedByBulletFloor }),
+      ['required current or role-defining entry missing: Engineer at Gamma Corp'],
+    );
+    /* And a drop of a DIFFERENT role at the same organization does not excuse it either. */
+    assert.equal(
+      baseResumeSelectionIssues(printed, [required], {
+        requireFirst: false,
+        droppedByBulletFloor: [{ org: 'Gamma Corp', title: 'Intern' }],
+      }).length,
+      1,
+    );
+  });
+
+  test('/resume/base/stream feeds its gate every floor drop, not just the emptied ones', () => {
+    /* The base route's own source pin, matching the tailored one above and for the same reason:
+       the predicate, the floor and the gate are each individually correct while the route decides
+       which drops the gate ever hears about. #872 wired this list filtered by reason, which is
+       precisely the defect the partial-overlap test above reproduces. */
+    const route = readFileSync('src/routes/baseResume.ts', 'utf8');
+    assert.match(route, /droppedByBulletFloor\.push\(\{ org, title \}\);/);
+    assert.match(route, /baseResumeSelectionIssues\(printed, priorityEntries, \{ droppedByBulletFloor \}\)/);
+    assert.doesNotMatch(route, /reason === 'already_printed'\) droppedByBulletFloor/);
   });
 });
 

@@ -1102,14 +1102,19 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * only the code knew. These ride the same `omissions` channel the renderer already uses for
      * what it trimmed to make the page fit. */
     const droppedForLength: string[] = [];
-    /* THE SECOND WAY THE GATE AND THE FLOOR CONTRADICT, and the tailored path was missing the
-       excuse that closes it. A duplicate bank row with a slightly different identity (a re-upload
-       that renamed "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA") has two
-       grounded variants, so it is survivable and therefore mandatory - and then the floor's
-       cross-entry dedupe empties it, because its every sentence already prints under the other
-       copy's heading. Demanding it anyway is the same deterministic refusal by another route.
-       Fed to the post-fit gate below exactly as routes/baseResume.ts feeds its own. */
-    const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+    /* THE SECOND WAY THE GATE AND THE FLOOR CONTRADICT, in both of the floor's reasons. A
+       duplicate bank row with a slightly different identity (a re-upload that renamed "Tri Coast
+       Capital" to "Tri Coast Capital Manhattan Beach, CA") has two grounded variants, so it is
+       survivable and therefore mandatory - and then the floor's cross-entry dedupe removes it.
+
+       WHOLLY overlapping variants empty it and it comes off as already_printed. PARTIALLY
+       overlapping ones - the same re-upload having also edited one bullet - leave it with fewer
+       DISTINCT sentences than minBulletsPerEntry and it comes off as below_floor instead, which
+       the already_printed-only excuse did not cover. Both are the same deterministic refusal, and
+       neither is reachable by any check made before generation: survivability counts one bank row
+       in isolation, while what the dedupe leaves free depends on what the model wrote and in what
+       order. Fed to the post-fit gate below exactly as routes/baseResume.ts feeds its own. */
+    const droppedByBulletFloor: Array<{ org: string; title?: string | null }> = [];
     spec = enforceExperienceBulletFloor(spec, bank, {
       /* Keyed on the SELECTION and gated by the confirmation, so the entry the floor is allowed
          to keep is the same entry the gate above is allowed to require. */
@@ -1121,7 +1126,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
          page under another heading, so a fourth bullet changes nothing and the student would be
          sent round a loop. Say what actually happened instead. */
       onDropped: ({ org, title, bullets, reason }) => {
-        if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
+        droppedByBulletFloor.push({ org, title });
         droppedForLength.push(
           reason === 'already_printed'
             ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
@@ -1245,10 +1250,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       );
     }
     if (priorityEntry) {
-      /* Post-floor, so this is the gate the dedupe can contradict - and the only one, since the
-         in-loop check above runs before the floor has touched anything. */
+      /* Post-floor, so this is the gate the floor can contradict - and the only one. The in-loop
+         check above runs before the floor has touched anything and KEEPS its full strictness:
+         there a missing entry is a genuine omission that a retry or enforcePrioritySelection can
+         still repair, so excusing it would suppress a defect the pipeline can actually fix. */
       finalSpecValidation.issues.push(
-        ...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false, droppedAsAlreadyPrinted }),
+        ...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false, droppedByBulletFloor }),
       );
     }
     /* The complete citation is re-checked after fitting. If the one-page pass removed the exact
