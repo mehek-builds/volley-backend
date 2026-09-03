@@ -1250,8 +1250,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       );
     }
     if (priorityEntry) {
-      /* Post-floor, so this is the gate the dedupe can contradict - and the only one, since the
-         in-loop check above runs before the floor has touched anything. */
+      /* Post-floor, so this is the gate the dedupe can contradict; the in-loop check above runs
+         before the floor has touched anything and needs no excuse. It is NOT the only way an
+         entry can be gone by this point: planResumeLayout trims whole entries to make the page
+         fit and `spec` is reassigned from its output, so a trimmed priority entry still reaches
+         this gate unexcused. That is a separate mechanism with its own reporting (the layout's
+         own omissions) and is left alone here rather than quietly folded into this excuse. */
       finalSpecValidation.issues.push(
         ...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false, droppedByTheFloor }),
       );
@@ -1282,7 +1286,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           ready_to_attach: false,
           issues: finalSpecValidation.issues,
           warnings: specWarnings,
-          omissions: layoutOmissions,
+          /* groundingRemoved rides along, so a required entry the PRUNER removed is explained.
+             The pruner drops an ungrounded entry silently, with no onDropped and so no line in
+             droppedForLength - which meant this refusal could name an entry as missing while
+             nothing anywhere said where it went. */
+          omissions: [...layoutOmissions, ...groundingRemoved],
           visual_warnings: visualWarnings,
         },
       }));

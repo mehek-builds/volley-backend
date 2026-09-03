@@ -195,6 +195,37 @@ test('a source-limited priority role may keep its only grounded bullet without i
   assert.ok(!result.issues.some((issue) => /bullet selected \(min 2\)/.test(issue)));
 });
 
+test('a source is sparse by DISTINCT sentences, so a punctuation twin is not two bullets', () => {
+  /* THE THIRD COUNTER of the same quantity, and it disagreed with the other two. The allowance
+     above forgives a one-bullet entry only when its bank row is genuinely sparse. Counting raw
+     variant strings made a row holding one sentence and that sentence with a trailing period look
+     like two, so a confirmed sparse selection was allowed onto the page by the floor and then
+     failed HERE - a resume_quality_hold on every posting that no rebuild can clear, since the
+     bank row never changes. The floor collapses the pair on its normalized key; so does this. */
+  const sentence = 'Managed the chapter budget and reconciled every line of it monthly';
+  const twin = bankEntry({
+    id: 'twin',
+    org: 'IISE UF Chapter',
+    title: 'Treasurer',
+    date_range: '2025 - Present',
+    bullet_variants: [sentence, `${sentence}.`],
+  });
+  const result = validateResumeSpec(
+    spec([{ org: twin.org, title: twin.title ?? '', date_range: twin.date_range ?? '', bullets: [sentence] }]),
+    '',
+    [twin],
+    undefined,
+    undefined,
+    undefined,
+    { allowedSingleBulletEntries: [twin] },
+  );
+
+  assert.ok(
+    !result.issues.some((issue) => /bullet selected \(min 2\)/.test(issue)),
+    result.issues.join('; '),
+  );
+});
+
 /* The near-duplicate check used to loop per entry, so a pair sharing 30% of its words inside one
    entry was flagged while a pair sharing 100% across two entries passed in silence. That is how a
    live resume printed the same three sentences under EXPERIENCE and again under PROJECTS with
