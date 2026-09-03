@@ -6126,7 +6126,21 @@ function eeoStoredQuestion(
  * deliberately strict equality replaces the stored answer - so the two sides differed with no
  * evidence between them.
  *
- * Every row below is the live control list; the expected bytes are measured, not chosen. */
+ * Every row below is the live control list; the expected bytes are measured, not chosen.
+ *
+ * THE DIVERGENCE ITSELF IS GONE AS OF 2026-09-03, and this test now measures that rather than the
+ * exemption that used to tolerate it. refreshKnownQuestionAnswers keeps a self-identification answer
+ * whose recorded snap still names the profile's current value, so the audit reading returns the
+ * employer's own spelling instead of recomputing the canonical one, and the two sides are byte-equal
+ * before the gate is consulted. The assertion below moved from "the audit answer is always the
+ * canonical wording" to "the audit answer is the row's own answer", which is the same fact read from
+ * the other side.
+ *
+ * The exemption is still real and still load-bearing - a snap the refresh cannot prove current is
+ * recomputed, and the gate then needs the claim - so the second half of the loop still exercises it,
+ * with the audit side derived from the SAME undocumented row rather than from the documented one.
+ * That pairing is the one production can actually produce, and it is the pre-fix signature exactly:
+ * answer moved, no evidence, run parks. */
 test('a case-only option snap records its claim, so the 6de82956 EEO rows stop parking', () => {
   const ap = {
     full_name: 'Mehek Mandal',
@@ -6194,8 +6208,10 @@ test('a case-only option snap records its claim, so the 6de82956 EEO rows stop p
 
     const stored = eeoStoredQuestion(built);
     const acknowledged = refreshKnownQuestionAnswers([stored], ap, undefined);
-    // The audit reading is the canonical wording on every row: this is the divergence itself.
-    assert.equal(acknowledged[0].answer, 'Decline to self-identify', `${row.name}: audit answer`);
+    /* A DOCUMENTED SNAP SURVIVES THE AUDIT READING NOW, so the two sides say the same bytes. The
+     * canonical wording is what the row already holds where nothing was snapped, which is why the
+     * 'no drift at all' control needs no separate expectation. */
+    assert.equal(acknowledged[0].answer, built.answer, `${row.name}: audit answer`);
 
     const packetSide = packetQuestionsForFill([stored]);
     const auditSide = packetQuestionsForFill(acknowledged);
@@ -6205,17 +6221,20 @@ test('a case-only option snap records its claim, so the 6de82956 EEO rows stop p
       `${row.name}: the built packet must no longer park`,
     );
 
-    // THE OTHER HALF OF THE RULE, pinned so neither can be relaxed by accident: strip the claim and
-    // the identical pair refuses. The gate accepts a DOCUMENTED snap, never a bare rewrite.
+    // THE OTHER HALF OF THE RULE, pinned so neither can be relaxed by accident: without the claim
+    // the refresh cannot prove the answer current, recomputes it, and the pair refuses. The gate
+    // accepts a DOCUMENTED snap, never a bare rewrite.
     if (built.claim !== undefined) {
-      const undocumented = packetQuestionsForFill([{ ...stored, answer_option_source: undefined }]);
+      const bare = { ...stored, answer_option_source: undefined };
+      const undocumented = packetQuestionsForFill([bare]);
+      const undocumentedAudit = packetQuestionsForFill(refreshKnownQuestionAnswers([bare], ap, undefined));
       assert.deepEqual(
-        packetQuestionsDriftDiagnostic(undocumented, auditSide).changed,
+        packetQuestionsDriftDiagnostic(undocumented, undocumentedAudit).changed,
         [{ question: built.reviewLabel, fields: ['answer'] }],
         `${row.name}: the pre-fix signature is answer-only`,
       );
       assert.equal(
-        packetQuestionsMatchAcknowledged(undocumented, auditSide),
+        packetQuestionsMatchAcknowledged(undocumented, undocumentedAudit),
         false,
         `${row.name}: an undocumented rewrite must still refuse`,
       );
@@ -6248,7 +6267,12 @@ test('a genuinely changed answer still parks the run, snap or no snap', () => {
   const acknowledged = packetQuestionsForFill(
     refreshKnownQuestionAnswers([approvedRow], declining, undefined),
   );
-  assert.equal(acknowledged[0].answer, 'Decline to self-identify');
+  /* The employer's own spelling, because the snap claim still names the profile value and the
+   * refresh keeps a self-identification answer it can prove current (2026-09-03). This line is the
+   * fixture's setup rather than its point; every safety assertion below compares against whatever
+   * the acknowledged reading holds, and each one is about an answer that MOVED away from it. */
+  assert.equal(acknowledged[0].answer, approvedBuild.answer);
+  assert.equal(approvedBuild.answer, 'Decline To Self-Identify', 'the control spells it this way');
 
   const rebuilt = resolveClosedChoiceAsBuildDoes(lgbtqia, options, corrected);
   assert.equal(rebuilt.answer, 'Yes', 'the profile now answers the question');

@@ -171,3 +171,265 @@ export function declineWordingForControl(label: string, answer: string): string 
   if (!isDeclineToState(answer)) return answer;
   return selfIdentificationDeclineWording(label) ?? answer;
 }
+
+/* ---------------------------------------------------------------------------------------------
+ * A STATED SELF-IDENTIFICATION ANSWER, IN THE WORDS A CONTROL OFFERS.
+ *
+ * The three question patterns, the gender equivalence table and the federal race table below were
+ * moved here from profileFieldResolution.ts on 2026-09-03, byte for byte and with their own
+ * comments. Nothing about what they say changed; where they live did.
+ *
+ * WHY THEY MOVED, and it is the same reason comparableOption did. refreshKnownQuestionAnswers in
+ * questionDiscovery.ts now has to ask the question the resolver asks - "does this string still
+ * state the answer the profile holds?" - and profileFieldResolution imports questionDiscovery, so a
+ * leaf module is the only home both readers can reach. Two copies of this vocabulary would drift,
+ * and the drift would be a snapped demographic answer that one reader recognises and the other
+ * silently replaces, which is exactly the defect measured below. profileFieldResolution re-exports
+ * every name it exported before, so no import outside these two files changes.
+ * ------------------------------------------------------------------------------------------- */
+
+/** A race or ethnicity question, as opposed to the rest of the self-identification block. */
+const EEO_RACE_QUESTION = /\brace\b|racial|ethnicit|ethnic\b/i;
+/** Asked as its own yes/no on nearly every US form, and answered from its own stored preference. */
+const EEO_HISPANIC_QUESTION = /hispanic|latin/i;
+/* ANY gender self-identification ask, not only one that spells "gender identity".
+ *
+ * Measured 2026-09-03 on Hudson River Trading (packet 4a79eec1, greenhouse job-boards): the label
+ * is "What is your gender?" and the employer's own options are Woman / Man / Non-binary / I don't
+ * wish to answer. Her stored answer is "Female", which is not on that list, so nothing snapped and
+ * a question Litos can answer was handed back to her - the only one of the four EEO controls that
+ * failed, and it failed on vocabulary alone. The old pattern required the literal phrase "gender
+ * identity", which that label does not carry, so the equivalence below never ran. */
+const EEO_GENDER_IDENTITY_QUESTION = /\bgender\b|\bsex\b/i;
+
+/* THE TWO SPELLINGS OF THE SAME ANSWER, both directions.
+ *
+ * Greenhouse's job-boards renderer offers Woman / Man; its older board and most other families
+ * offer Female / Male. A stored answer in either vocabulary must reach a list written in the other,
+ * and the ladder keeps HER wording first, so a list carrying her own spelling still wins. Only the
+ * two paired terms are equivalent: nothing here rewrites a non-binary, self-described or declined
+ * answer, which are hers alone. */
+const EEO_GENDER_EQUIVALENTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^female$/i, 'Woman'],
+  [/^woman$/i, 'Female'],
+  [/^male$/i, 'Man'],
+  [/^man$/i, 'Male'],
+];
+
+/**
+ * THE MAPPING RULE, and it is deliberately the narrowest one that works.
+ *
+ * A stored race value is rewritten to a US federal category ONLY when that category WHOLLY CONTAINS
+ * it: the stored value names a subgroup that the federal definition of the category already
+ * includes, so the rewrite loses detail and changes no membership. "South Asian" to "Asian" is that
+ * shape - the EEOC defines Asian as origins in the Far East, Southeast Asia, or the Indian
+ * subcontinent, so a person who wrote South Asian is inside Asian by the employer's own definition,
+ * and the employer's list has no finer word to offer.
+ *
+ * Race is the applicant's own self-identification, so anything that is not a clean containment
+ * declines instead of guessing, and declining is always available and always honest. The cases this
+ * table deliberately does NOT contain, each for a stated reason:
+ *
+ *   "Central Asian"          the federal definition of Asian names the Far East, Southeast Asia and
+ *                            the Indian subcontinent, and not Central Asia. Not a containment.
+ *   "Asian/Pacific Islander" spans TWO federal categories. Picking either one narrows her answer.
+ *   "Middle Eastern",        the enum has no such category and files them under White. That is a
+ *   "North African"          contested reassignment, not a coarser word for the same thing.
+ *   "Native American"        read as American Indian or Alaska Native by most, but not by all, and
+ *                            it overlaps Native Hawaiian. Ambiguous, so it declines.
+ *   "Indian"                 ambiguous between Asian Indian and American Indian. Never mapped.
+ *
+ * A category is only ever WIDENED. The reverse - a stored "Asian" against a list offering "South
+ * Asian" and "East Asian" - is a narrowing, it invents detail she did not give, and chooseClosestOption
+ * already refuses it because the extra word distinguishes the claim.
+ */
+const EEO_FEDERAL_RACE_CATEGORIES: ReadonlyArray<{ category: string; subgroup: RegExp }> = [
+  { category: 'Asian', subgroup: /^(?:south|east|southeast|south east) asian$|^asian american$/ },
+  { category: 'Black or African American', subgroup: /^(?:black|african american)$/ },
+  { category: 'Hispanic or Latino', subgroup: /^(?:hispanic|latino|latina|latinx|latino\/a|hispanic\/latino)$/ },
+  { category: 'Native Hawaiian or Other Pacific Islander', subgroup: /^(?:native hawaiian|pacific islander)$/ },
+  { category: 'American Indian or Alaska Native', subgroup: /^(?:american indian|alaskan? native)$/ },
+  { category: 'White', subgroup: /^(?:white|caucasian)$/ },
+  { category: 'Two or More Races', subgroup: /^(?:multiracial|multi racial|biracial|bi racial|mixed race|two or more races)$/ },
+];
+
+/**
+ * The single federal category that wholly contains a stored race value, or undefined.
+ *
+ * Undefined when NO category claims it and, just as deliberately, when more than one does: two
+ * claimants is the ambiguity the rule above exists to refuse, and it must fail closed if this table
+ * is ever extended carelessly.
+ */
+export function eeoFederalRaceCategory(stored: string): string | undefined {
+  const key = comparableOption(stored);
+  if (!key) return undefined;
+  const claimed = EEO_FEDERAL_RACE_CATEGORIES.filter((entry) => entry.subgroup.test(key));
+  if (claimed.length !== 1) return undefined;
+  // Already the category itself: nothing to widen, and the exact stage would have taken it anyway.
+  return comparableOption(claimed[0].category) === key ? undefined : claimed[0].category;
+}
+
+/**
+ * The forms of a STATED self-identification answer, best first.
+ *
+ * Her own words at the head, then the wordings that say the same thing in a vocabulary a control is
+ * more likely to use. NEVER a refusal: the decline wordings are appended one rung down by
+ * eeoAnswerLadder, for the same reason "Other" is last on the referral ladder.
+ */
+export function selfIdentificationStatedForms(label: string, stored: string): string[] {
+  const base = stored.trim();
+  if (!base) return [];
+  const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
+    ? eeoFederalRaceCategory(base)
+    : undefined;
+  const equivalentGender = EEO_GENDER_IDENTITY_QUESTION.test(label)
+    ? EEO_GENDER_EQUIVALENTS.find(([spelling]) => spelling.test(base))?.[1]
+    : undefined;
+  return [base, equivalentGender, coarser].filter((value): value is string => Boolean(value?.trim()));
+}
+
+/* THE SENTENCE A CONTROL USES TO SAY YES OR NO, per subject, because the answer is stored as a
+ * polarity and the employer's list is written as a paragraph.
+ *
+ * MEASURED 2026-09-03 on two live forms, with eeo_prefs holding veteran_status "No" and
+ * disability_status "No":
+ *
+ *   Verkada (greenhouse, packet f1b2df5a)
+ *     veteran     "I don't wish to answer" / "I identify as one or more of the classifications of
+ *                 a protected veteran" / "I am not a protected veteran"
+ *     disability  "I do not want to answer" / "No, I do not have a disability and have not had one
+ *                 in the past" / "Yes, I have a disability, or have had one in the past"
+ *   Zeus Fire and Security (breezy, packet f04623c3)
+ *     veteran     the same three, upper-cased, under name="eeoc.veteran_status"
+ *     disability  "Yes, I have a disability, or have had one in the past" / "No, I don't have a
+ *                 disability" / "I don't wish to answer"
+ *
+ * WHAT HAPPENED WITHOUT THIS TABLE, and it is worse than the blank it looks like. chooseEeoOption
+ * ran the ladder for "No" - which is CLOSED_SET_ANSWER_RE, so no option may extend it - matched
+ * nothing, and fell through to the stage that picks the sole option reading as a refusal. Measured
+ * on the Verkada lists above, that stage returned "I don't wish to answer" for veteran and "I do
+ * not want to answer" for disability, with matchedOption true, so nothing was even surfaced to her.
+ * She said "No"; Litos was about to tell two employers she declined to say. A refusal states
+ * nothing false, but it is not her answer, and this module's own rule is that a truthful specific
+ * answer must never be displaced by a catch-all. On the Breezy disability list, whose only refusal
+ * is worded "I don't wish to answer", the same substitution was one option away.
+ *
+ * A MATCHER, NOT A GENERATOR, and that is the whole safety of it. Nothing here writes a sentence
+ * onto a form: each pattern can only recognise a sentence the EMPLOYER already wrote, and the
+ * caller then requires exactly one option to match and refuses any option that reads as a refusal.
+ * Both patterns for a subject are anchored at the start of the option so the two can never overlap:
+ * "I am not a protected veteran" cannot satisfy `affirms`, and "Yes, I have a disability" cannot
+ * satisfy `denies`.
+ *
+ * WHAT IS MEASURED AND WHAT IS REASONED, because the difference matters to whoever edits this next.
+ *
+ *   MEASURED. Veteran and disability, on the four live lists quoted above. Those are the two that
+ *   were substituting a refusal for her answer, and they are the whole reason this table exists.
+ *
+ *   REASONED, not observed on any list this repo has recorded. Hispanic and transgender. Every
+ *   hispanic control in the corpus offers a bare "Yes"/"No", which the exact stage already takes;
+ *   the spelled-out wording is what other boards write, and eeo_prefs carries transgender_status
+ *   "No" against the same yes/no-against-a-sentence shape. Both are written in the measured
+ *   entries' style so a first sighting needs no new rule, and neither changes any measured list.
+ *
+ * Gender and race are deliberately ABSENT: neither is a yes/no question, their equivalences are the
+ * two tables above, and a polar rule for them would have to invent a category she did not name.
+ *
+ * "I do not identify as having a disability" is deliberately NOT matched by the disability denial.
+ * It is a real substantive claim and selfIdentificationDecline.test.ts pins it as one, but the
+ * "identify as" family is the one this file has already been burned by, and the reach is not worth
+ * it while every measured list carries the plain wording. */
+type SelfIdentificationPolarClaim = {
+  /** Tested against the comparable form of the LABEL. */
+  subject: RegExp;
+  /** Tested against the comparable form of an OPTION. */
+  affirms: RegExp;
+  denies: RegExp;
+};
+
+const SELF_ID_POLAR_CLAIMS: readonly SelfIdentificationPolarClaim[] = [
+  {
+    subject: /veteran|military/,
+    affirms: /^(?:yes )?i (?:identify as one or more of the classifications\b|am (?:a |an )?(?:protected )?veteran\b)/,
+    denies: /^(?:no )?(?:i am )?not (?:a |an )?(?:protected )?veteran\b/,
+  },
+  {
+    subject: /disab/,
+    affirms: /^(?:yes )?i have (?:a |an |any )?disabilit/,
+    denies: /^(?:no )?i (?:do not|dont) have (?:a |an |any )?disabilit/,
+  },
+  {
+    subject: /hispanic|latin/,
+    affirms: /^(?:yes )?i am hispanic (?:or|and) latin/,
+    denies: /^(?:no )?i am not hispanic (?:or|and) latin/,
+  },
+  {
+    // REASONED, not measured on a live list. See the note above.
+    subject: /transgender/,
+    affirms: /^(?:yes )?i (?:am|identify as) (?:a )?transgender/,
+    denies: /^(?:no )?i (?:am not|do not identify as|dont identify as) (?:a )?transgender/,
+  },
+];
+
+/**
+ * The one option on this control that states the stored yes-or-no answer, or null.
+ *
+ * Fails closed on every kind of doubt, and each condition is load-bearing:
+ *
+ *   - the stored answer must be the bare polarity. Anything else is already a sentence and belongs
+ *     to the ordinary matcher, and restricting to "yes"/"no" means this rule can never reinterpret
+ *     a race, a gender or a refusal.
+ *   - exactly ONE subject may claim the label, so a label naming two of them answers neither.
+ *   - exactly ONE option may match, because at that point there is nothing left to rank two
+ *     look-alikes by and picking between them by DOM order is the guess this family must refuse.
+ *   - an option that reads as a refusal is never eligible, whatever else it says. That is belt and
+ *     braces: it keeps a wording like "I do not wish to answer whether I am a protected veteran"
+ *     from ever being read as her denial.
+ */
+export function selfIdentificationPolarClaimOption(
+  label: string,
+  stored: string,
+  options: readonly string[] | null | undefined,
+): string | null {
+  const polarity = stored.trim().toLowerCase();
+  if (polarity !== 'yes' && polarity !== 'no') return null;
+  const subject = comparableOption(label);
+  if (!subject) return null;
+  const claimed = SELF_ID_POLAR_CLAIMS.filter((claim) => claim.subject.test(subject));
+  if (claimed.length !== 1) return null;
+  const pattern = polarity === 'yes' ? claimed[0].affirms : claimed[0].denies;
+  const matched = new Map<string, string>();
+  for (const raw of options ?? []) {
+    const option = typeof raw === 'string' ? raw.trim() : '';
+    if (!option || isDeclineToState(option)) continue;
+    const key = comparableOption(option);
+    if (key && pattern.test(key)) matched.set(key, option);
+  }
+  return matched.size === 1 ? [...matched.values()][0] : null;
+}
+
+/**
+ * Does `answer` still state what the profile says, for this control?
+ *
+ * The question refreshKnownQuestionAnswers asks about a snapped demographic answer, and the exact
+ * converse of what chooseEeoOption does: an answer this says yes to is one the resolver would have
+ * chosen from a list offering only it, for the profile value in hand.
+ *
+ * A REFUSAL FOR A REFUSAL AND A CLAIM FOR A CLAIM, never one for the other, which is why the
+ * decline test comes before anything else. eeoAnswerLadder appends the decline wordings to every
+ * ladder, so a membership test alone would say "Decline to self-identify" states a stored "No" -
+ * the substitution this whole file exists to make impossible.
+ */
+export function selfIdentificationAnswerStates(label: string, stored: string, answer: string): boolean {
+  const storedKey = comparableOption(stored);
+  const answerKey = comparableOption(answer);
+  if (!storedKey || !answerKey) return false;
+  if (storedKey === answerKey) return true;
+  if (isDeclineToState(answer) || isDeclineToState(stored)) {
+    return isDeclineToState(answer) && isDeclineToState(stored);
+  }
+  if (selfIdentificationStatedForms(label, stored).some((form) => comparableOption(form) === answerKey)) {
+    return true;
+  }
+  return selfIdentificationPolarClaimOption(label, stored, [answer]) !== null;
+}

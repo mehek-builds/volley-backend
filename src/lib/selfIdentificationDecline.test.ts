@@ -20,9 +20,13 @@
 
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
-import { declineWordingForControl, isDeclineToState } from './selfIdentification';
-import { chooseClosestOption, resolveProfileField } from './profileFieldResolution';
-import type { ApplicationProfileLike } from './questionDiscovery';
+import {
+  declineWordingForControl,
+  isDeclineToState,
+  selfIdentificationPolarClaimOption,
+} from './selfIdentification';
+import { chooseClosestOption, chooseEeoOption, resolveProfileField } from './profileFieldResolution';
+import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
 
 process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
 
@@ -202,5 +206,242 @@ describe('what the predicate is used for', () => {
     // borrow one.
     assert.equal(chooseClosestOption(['Yes'], ['Yes', 'No']), 'Yes');
     assert.equal(chooseClosestOption(['South Asian'], ['White', 'Asian']), null);
+  });
+});
+
+/* THE OTHER DIRECTION OF THE SAME MISTAKE: A REFUSAL STANDING IN FOR A STATED ANSWER.
+ *
+ * Everything above is about not reading a claim as a refusal. This block is about not ANSWERING
+ * with a refusal when she stated something, which is the failure the same stage produces from the
+ * other side, and it is silent where the first one is visible: the option is selected, the resolver
+ * reports matchedOption, and nothing is surfaced to her.
+ *
+ * Every option list below is verbatim from a control measured on 2026-09-03. eeo_prefs for the
+ * owner account holds veteran_status "No" and disability_status "No", and neither of those two
+ * words appears on either employer's list.
+ */
+const OWNER_EEO_PREFS: ApplicationProfileLike = {
+  eeo_prefs: {
+    race: 'South Asian',
+    gender: 'Female',
+    veteran_status: 'No',
+    disability_status: 'No',
+    sexual_orientation: 'Heterosexual',
+    transgender_status: 'No',
+  },
+};
+
+// Verkada, greenhouse, packet f1b2df5a.
+const VERKADA_VETERAN = [
+  "I don't wish to answer",
+  'I identify as one or more of the classifications of a protected veteran',
+  'I am not a protected veteran',
+];
+const VERKADA_DISABILITY = [
+  'I do not want to answer',
+  'No, I do not have a disability and have not had one in the past',
+  'Yes, I have a disability, or have had one in the past',
+];
+/* Zeus Fire and Security, breezy, packet f04623c3. The employer writes the veteran block in caps,
+ * and the three radios share name="eeoc.veteran_status" - which is why the label discovery stores
+ * for this control is the FIRST option's own text rather than a question. */
+const BREEZY_VETERAN = [
+  'I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERAN LISTED ABOVE',
+  'I AM NOT A PROTECTED VETERAN',
+  "I DON'T WISH TO ANSWER",
+];
+const BREEZY_VETERAN_LABEL = 'I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERAN LISTED ABOVE';
+const BREEZY_DISABILITY = [
+  'Yes, I have a disability, or have had one in the past',
+  "No, I don't have a disability",
+  "I don't wish to answer",
+];
+
+describe('a stated answer is never answered with a refusal', () => {
+  test('a stored "No" reaches the sentence the control uses to say no', () => {
+    /* MEASURED before this rule existed: both of these returned the list's opt-out, because "No" is
+     * in CLOSED_SET_ANSWER_RE so no option may extend it, and the stage below the ladder picks the
+     * sole option that reads as a refusal. The disability list lost even earlier - its refusal is
+     * spelled "I do not want to answer", which is a DECLINE_WORDINGS entry byte for byte, so the
+     * ladder's own exact pass took it. */
+    assert.equal(chooseEeoOption('Veteran Status', 'No', VERKADA_VETERAN), 'I am not a protected veteran');
+    assert.equal(
+      chooseEeoOption('Disability Status', 'No', VERKADA_DISABILITY),
+      'No, I do not have a disability and have not had one in the past',
+    );
+    // The same two questions in the other employer's wording, including the shouted one.
+    assert.equal(chooseEeoOption(BREEZY_VETERAN_LABEL, 'No', BREEZY_VETERAN), 'I AM NOT A PROTECTED VETERAN');
+    assert.equal(
+      chooseEeoOption('Voluntary Self-Identification of Disability', 'No', BREEZY_DISABILITY),
+      "No, I don't have a disability",
+    );
+  });
+
+  test('and the affirmative sentence is never what a stored "No" reaches', () => {
+    // The failure direction that would put a claim she did not make on a live application.
+    for (const [label, options] of [
+      ['Veteran Status', VERKADA_VETERAN],
+      [BREEZY_VETERAN_LABEL, BREEZY_VETERAN],
+      ['Disability Status', VERKADA_DISABILITY],
+      ['Voluntary Self-Identification of Disability', BREEZY_DISABILITY],
+    ] as const) {
+      const chosen = chooseEeoOption(label, 'No', options);
+      assert.equal(/^(?:yes|i identify as one or more)/i.test(chosen ?? ''), false, `${label}: ${chosen}`);
+    }
+  });
+
+  test('a stored "Yes" reaches the affirmative and nothing else', () => {
+    /* Both directions, so the rule cannot be satisfied by a table that only ever says no. The
+     * profile below is not the owner's; it exists to assert that an applicant who IS a protected
+     * veteran gets her own answer rather than the opt-out. */
+    assert.equal(
+      chooseEeoOption('Veteran Status', 'Yes', VERKADA_VETERAN),
+      'I identify as one or more of the classifications of a protected veteran',
+    );
+    assert.equal(
+      chooseEeoOption('Disability Status', 'Yes', VERKADA_DISABILITY),
+      'Yes, I have a disability, or have had one in the past',
+    );
+  });
+
+  test('a stored refusal still reaches the refusal, on the same lists', () => {
+    // The behaviour the new stage sits in front of, asserted so it cannot be lost to it.
+    assert.equal(chooseEeoOption('Veteran Status', 'Decline to self-identify', VERKADA_VETERAN), "I don't wish to answer");
+    assert.equal(chooseEeoOption('Disability Status', 'Prefer not to say', VERKADA_DISABILITY), 'I do not want to answer');
+  });
+
+  test('the measured hyphen case binds, end to end, and reports a match', () => {
+    /* The Verkada hispanic control. The stored answer is the resolver's constant
+     * "Decline to self-identify" and the list carries "Decline To Self Identify": one hyphen and
+     * two capitals apart. comparableOption has always folded both, and this pins that it still
+     * does AND that the resolver says so, because matchedOption false is what makes the runner
+     * mint "none of the options match your saved answer". */
+    const resolved = resolveProfileField(
+      { label: 'Are you Hispanic/Latino?', inputType: 'select', options: ['Yes', 'No', 'Decline To Self Identify'] },
+      OWNER_EEO_PREFS,
+    );
+    assert.equal(resolved?.value, 'Decline To Self Identify');
+    assert.equal(resolved?.matchedOption, true);
+  });
+
+  test('a lone affirmative option answers nothing at all', () => {
+    /* THE STALE BREEZY SNAPSHOT, and the honest outcome for it. Discovery read this control before
+     * stratus-browser-cloud walked the same-name peers (fixed there 2026-09-01), so the packet's
+     * field_options held ONE option for a three-radio group: the affirmative claim, and no denial
+     * and no opt-out. There is nothing on this list she can truthfully be given, so the question
+     * comes back to her. It must not be the affirmative, and there is no refusal to fall back to. */
+    assert.equal(chooseEeoOption(BREEZY_VETERAN_LABEL, 'No', [BREEZY_VETERAN_LABEL]), null);
+    assert.equal(
+      chooseEeoOption('Voluntary Self-Identification of Disability', 'No', ['Yes, I have a disability, or have had one in the past']),
+      null,
+    );
+  });
+
+  test('the polar rule refuses an ambiguous list and never picks a refusal', () => {
+    // Two options state the same denial: there is nothing left to rank them by, so it declines.
+    assert.equal(
+      selfIdentificationPolarClaimOption('Veteran Status', 'No', ['I am not a protected veteran', 'I am not a veteran']),
+      null,
+    );
+    /* An opt-out that happens to spell out the subject is still an opt-out. Without the refusal
+     * guard this wording satisfies the denial pattern's own shape on some lists. */
+    assert.equal(
+      selfIdentificationPolarClaimOption('Veteran Status', 'No', ["I don't wish to answer", 'I decline to self-identify for protected veteran status']),
+      null,
+    );
+  });
+
+  test('the polar rule never fires on a question that is not a yes or a no', () => {
+    /* Gender and race are deliberately absent from the table: neither is a polar question, and a
+     * polar rule for them could only invent a category. Asserted as a rule so a later edit that
+     * adds one fails here. */
+    assert.equal(selfIdentificationPolarClaimOption('Gender', 'Female', ['Male', 'Female']), null);
+    assert.equal(selfIdentificationPolarClaimOption('Race', 'South Asian', ['Asian', 'White']), null);
+    // And a stored answer that is already a sentence belongs to the ordinary matcher, not this one.
+    assert.equal(
+      selfIdentificationPolarClaimOption('Veteran Status', 'I am not a protected veteran', VERKADA_VETERAN),
+      null,
+    );
+  });
+});
+
+/* THE REFRESH IS THE OTHER HALF, AND WITHOUT IT NONE OF THE ABOVE REACHES AN EMPLOYER.
+ *
+ * refreshKnownQuestionAnswers recomputes every known answer on packet rebuild, from the profile and
+ * with no option list in hand, and overwrites the stored one unless a branch proves it current.
+ * MEASURED on 2026-09-03 by running it over the shapes the packets actually hold: all three snapped
+ * self-identification answers were replaced with the profile's own wording, which is a string the
+ * control does not offer. That is the dashboard row reading ANSWERED with nothing selected.
+ */
+describe('a snapped self-identification answer survives the rebuild', () => {
+  const refreshed = (row: Record<string, string>): string => {
+    const [out] = refreshKnownQuestionAnswers([row as never], OWNER_EEO_PREFS, undefined, undefined);
+    return (out as { answer: string }).answer;
+  };
+
+  test('the employer spelling of a refusal is kept, not rewritten to hers', () => {
+    assert.equal(
+      refreshed({
+        question: 'Are you Hispanic/Latino?',
+        answer: 'Decline To Self Identify',
+        answer_option_source: 'Decline to self-identify',
+      }),
+      'Decline To Self Identify',
+    );
+    /* AND THE CASE-ONLY SPELLING, which is the shape that parked application 6de82956 and the one a
+     * comparableOption-based "is there anything to preserve" guard silently drops: these two strings
+     * fold to the same key, so such a guard reads "nothing moved" about the row that moved. The
+     * guard is a byte comparison for this reason and this assertion is what holds it there. */
+    assert.equal(
+      refreshed({
+        question: 'Do you identify as a member of the LGBTQIA community?',
+        answer: 'Decline To Self-Identify',
+        answer_option_source: 'Decline to self-identify',
+      }),
+      'Decline To Self-Identify',
+    );
+  });
+
+  test('the sentence that states a stored "No" is kept', () => {
+    assert.equal(
+      refreshed({ question: 'Veteran Status', answer: 'I am not a protected veteran', answer_option_source: 'No' }),
+      'I am not a protected veteran',
+    );
+    assert.equal(
+      refreshed({
+        question: 'Disability Status',
+        answer: 'No, I do not have a disability and have not had one in the past',
+        answer_option_source: 'No',
+      }),
+      'No, I do not have a disability and have not had one in the past',
+    );
+    // The gender equivalence too, which is the same shape on the Hudson River Trading control.
+    assert.equal(refreshed({ question: 'Gender', answer: 'Woman', answer_option_source: 'Female' }), 'Woman');
+  });
+
+  test('a REFUSAL recorded against a stated answer is not kept', () => {
+    /* The one thing this branch must never do. A packet written before the stage above existed can
+     * carry the opt-out beside a snap claim of "No", and preserving it would freeze the exact
+     * substitution the rest of this file exists to prevent. It recomputes instead, and the next
+     * resolution against a real option list produces the denial. */
+    assert.equal(
+      refreshed({ question: 'Veteran Status', answer: "I don't wish to answer", answer_option_source: 'No' }),
+      'No',
+    );
+  });
+
+  test('a derivation the profile has moved past is not kept', () => {
+    // She corrected her answer after the snap, so the record is stale and is overwritten, exactly
+    // as every other family's stale record is. This is what keeps the profile the source of truth.
+    assert.equal(
+      refreshed({ question: 'Veteran Status', answer: 'I am not a protected veteran', answer_option_source: 'Yes' }),
+      'No',
+    );
+  });
+
+  test('an answer with no recorded snap is not kept', () => {
+    // Absent answer_option_source means "cannot prove this is current", which is the same reading
+    // storedOptionAnswerIsCurrent takes and for the same reason.
+    assert.equal(refreshed({ question: 'Veteran Status', answer: 'I am not a protected veteran' }), 'No');
   });
 });

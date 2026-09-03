@@ -27,7 +27,11 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { usStateScopeSkipReason } from './residenceScope';
-import { comparableOption, declineWordingForControl } from './selfIdentification';
+import {
+  comparableOption,
+  declineWordingForControl,
+  selfIdentificationAnswerStates,
+} from './selfIdentification';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -2502,6 +2506,53 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         if (isConsentAcceptingWording(question.answer)
           && comparableOption(question.answer) !== comparableOption(known.value)) return question;
       }
+      /* A SELF-IDENTIFICATION ANSWER IS CURRENT WHILE IT STILL STATES WHAT THE PROFILE SAYS, and
+       * the band mechanism below could never ask that question about this family.
+       *
+       * THE DEFECT THIS CLOSES, measured on 2026-09-03 by running this function over the packet
+       * shapes the owner account actually holds. eeo_prefs carries no hispanic key, so the resolver
+       * answers "Decline to self-identify"; resolveProfileField snaps that onto the Verkada control's
+       * own "Decline To Self Identify" and records the snap. Then every rebuild ran through here,
+       * storedOptionAnswerIsCurrent asked for a date or number BAND, an opt-out wording is neither,
+       * and the line below replaced the employer's spelling with hers. Measured, one refresh:
+       *
+       *   "Decline To Self Identify"                                  ->  "Decline to self-identify"
+       *   "I am not a protected veteran"                              ->  "No"
+       *   "No, I do not have a disability and have not had one ..."   ->  "No"
+       *
+       * None of those three replacements is a string the control offers. That is the dashboard row
+       * reading ANSWERED with no option selected, and it is why the case-folding matcher looked
+       * broken when it was not: chooseEeoOption binds "Decline to self-identify" to
+       * "Decline To Self Identify" correctly, on every list measured, and this line then threw the
+       * binding away. It is the same prepare-versus-submit divergence the comment above records for
+       * graduation bands and the branch above it records for consents, in the third family.
+       *
+       * THE TWO CONDITIONS ARE THE CONSENT BRANCH'S, asked of the thing that makes a demographic
+       * answer current. derivationIsCurrent says the profile has not moved since the snap - correct
+       * her eeo_prefs and this stops firing, and the answer is recomputed like any other stale
+       * record. selfIdentificationAnswerStates says the stored string still SAYS what the profile
+       * says, under the same vocabulary chooseEeoOption used to choose it, so a refusal can only
+       * ever hold for a refusal and a claim for a claim. Absent either, nothing is preserved and the
+       * behaviour is exactly what it was.
+       *
+       * Not folded into storedOptionAnswerIsCurrent on purpose. That predicate is shared with the
+       * fill path and every other family, and relaxing its shape rule there would let any stale
+       * non-band answer ride a matching derivation. This is one family, with its own proof.
+       *
+       * THE INEQUALITY IS A BYTE COMPARISON AND MUST STAY ONE. The consent branch above spells its
+       * equivalent with comparableOption, and copying that here silently removed the commonest case
+       * this branch exists for: "Decline To Self-Identify" and "Decline to self-identify" differ by
+       * case and one hyphen, which comparableOption folds, so the guard read "nothing to preserve"
+       * about precisely the row that parked application 6de82956 and that the Verkada hispanic
+       * control still hits. Byte inequality keeps the branch inert only when the resolver really did
+       * recompute the answer to itself, and that row falls through to the branch at the bottom which
+       * already returns it, provenance and all. */
+      if (label
+        && question.answer.trim()
+        && EEO_QUESTION.test(label)
+        && question.answer.trim() !== known.value.trim()
+        && derivationIsCurrent(derivedFrom, known.value)
+        && selfIdentificationAnswerStates(label, known.value, question.answer)) return question;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
       /* 'covers' keeps the reviewed range because the profile still sits inside it, exactly as
        * the boolean rule always did and for any parseable two-part range. 'incomparable' keeps it
