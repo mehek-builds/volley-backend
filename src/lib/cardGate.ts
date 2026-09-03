@@ -278,6 +278,48 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/applications/:id/packet-audit',
   '/applications/:id/packet-audit/acknowledge',
   '/applications/:id/submit-request',
+  /* THE SEND THAT PARKED SHORT OF FINISHING, added 2026-09-03, and the same dead-end class the
+   * three routes above were added to close.
+   *
+   * A send does not always end at a status. prepare()'s fill run can reach an employer's emailed
+   * security-code screen (submissionRunner.ts, 'A fill run reached an emailed security-code
+   * screen'), which parks the packet at 'awaiting_security_code' -- and that state writes NONE of
+   * the four facts alreadyAtEmployer() reads. Not status='submitted'; not pipeline_stage='applied'
+   * (only confirmedPacketPipelineProjection writes that, off a real receipt); not an unresolved
+   * unverified_submission (unverifiedSubmissionPatch writes 'needs_attention' in the same breath,
+   * so the two states are mutually exclusive); and not the legacy attention-text twin
+   * (securityCodeAttentionReason opens "Litos submitted this application and the employer asked
+   * for a human check", nowhere near LEGACY_UNVERIFIED_ATTEMPT_PREFIX). The other writers of the
+   * status -- withholdInvalidLeadAlignment and the held-packet-audit stop -- are pre-send stops
+   * that record a not_sent fact, so they write none of them either.
+   *
+   * So at the exact moment a locked account's one free onboarding send parks here, TIER B2 is
+   * still OPEN, and this route was on no tier at all: the account 402s on the one route its own
+   * packet points at, two screens short of the payment step. That is the shape rqw #512 fixed for
+   * the packet-audit pair, pointed at the state after the send instead of the state before it.
+   *
+   * TIER B2 rather than TIER B1 because this route cannot outlive the audit pair it depends on.
+   * The route gates on currentAcknowledgedPacketAudit, and the only two routes that can produce a
+   * current acknowledgement -- /packet-audit and /packet-audit/acknowledge, which carve
+   * awaiting_security_code out of their own refusal precisely so this step can clear -- are on this
+   * tier. Putting the code step one tier up would buy it nothing: it would answer
+   * PACKET_AUDIT_ACK_REQUIRED instead of 402, from a tier that had already closed underneath the
+   * routes it needs. When the send this packet is waiting on does complete, or folds to an
+   * unresolved unverified_submission, the tier closes and the route answers 409 'not_awaiting'
+   * anyway, with POST /submission/unverified on TIER B1 as the remaining door.
+   *
+   * WHAT THIS DOES NOT CLOSE, because the closure is per-ACCOUNT and the strand is per-PACKET.
+   * hasApprovedSubmittedApplication asks whether the USER has any row at alreadyAtEmployer(), not
+   * whether THIS packet reached an employer, and ONBOARDING_BUILD_LIMIT is 2. So a locked account
+   * can park packet A at awaiting_security_code (writing no closing fact, tier still open), build
+   * and send packet B, land B at 'submitted', and close the tier on A's behalf: A is still unfiled,
+   * still genuinely awaiting a code, and this route plus both audit routes 402 again. That is the
+   * same per-account/per-packet mismatch that put POST /submission/unverified on TIER B1, and no
+   * tier choice for this one route fixes it, because the whole audit chain closes together. Closing
+   * it needs a per-packet signal rather than a per-account one, and that is a larger change than
+   * this entry. Tracked separately; the single-packet case, which is the measured one, is fixed
+   * here. */
+  '/applications/:id/security-code',
 ]);
 
 export function isCardGateAllowedPath(rawPath: string): boolean {
