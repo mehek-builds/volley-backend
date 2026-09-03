@@ -21,7 +21,10 @@ import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissio
 import { SUBMISSION_AUTHORITY_SCHEMA_VERSION } from '../lib/submissionAuthorityRevision';
 import {
   submissionAuthorityPublicationForPacket,
+  submissionAuthorityRefusalForWire,
+  submissionAuthorityRefusalTallies,
   submissionAuthorityUnavailableMarker,
+  type SubmissionAuthorityRefusal,
 } from '../lib/submissionAuthorityEnvelope';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
@@ -889,6 +892,128 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
             : { submission_authority_unavailable: submissionAuthorityUnavailableMarker(row.id, publication.reason) }),
         };
       }),
+    });
+  });
+
+  /**
+   * GET /applications/board/authority-rejections
+   *
+   * WHY THIS IS A ROUTE AND NOT A FIELD, 2026-09-03.
+   *
+   * #894 gave every shape-caused refusal a SubmissionAuthorityRejection - the branch that classified
+   * the packet, the field of the wire shape it would have emitted, the class that field failed - and
+   * put it in two server log lines. That was the correct place for it and it turned out to be an
+   * unreadable one: Litos serves from Railway, the person debugging this has no log reader wired up
+   * here, and the two Vercel projects are abandoned aliases with empty logs. So the largest single
+   * send blocker on the account (163 of 200 cards refused on 2026-09-03, all under the one word
+   * `unpublishable_projection`) stayed unfalsifiable from every surface she can actually reach.
+   *
+   * WHY IT CANNOT QUARANTINE A CARD. It publishes no card. The board's payload, its collection
+   * fields, its envelopes and its `submission_authority_unavailable` markers are not touched by a
+   * byte, and neither is the per-packet submission response in applications.ts. The dashboard's
+   * exact-shape parser is applied to the ENVELOPE object and to nothing else, so the only way to
+   * quarantine a card is to change what an envelope or its card looks like, and this route changes
+   * neither. That is the whole reason it exists as a separate read rather than as an additive key.
+   *
+   * WHAT WAS MEASURED ABOUT THE CLIENT, 2026-09-03, and what it does NOT say. #894 reported that the
+   * role-quick-website checkout carries no reader for `submission_authority` at all. That checkout
+   * is a shallow clone whose main tree is effectively its 2026-08-26 clone state; the readers live
+   * in a sibling worktree of the same repo (rq-counter, branch
+   * fix/home-sent-count-survives-a-failed-inventory, 2026-09-02), and they say this:
+   *   - features/applications/domain/submission-authority-envelope.ts:174 applies `exactKeys` to the
+   *     envelope, its projection and its receipt. Nothing applies it to the card or to the response
+   *     root, and infrastructure/response-shape.ts:184 spreads unknown top-level keys through.
+   *   - domain/board-submission-authority.ts:29 treats a card with no `submission_authority` as
+   *     ABSENT rather than corrupt, and the collection check at :58 skips it, so one unpublishable
+   *     card no longer takes the board down.
+   *   - `submission_authority_unavailable` appears ZERO times in that tree. The marker the board
+   *     has published per card since 56ab02a ("One unverifiable card is one card, not the whole
+   *     board") is read by nothing.
+   * So an additive key on the marker would very likely have been inert too. "Very likely" against a
+   * worktree that may not be the deployed commit is not the standard this contract is held to, and a
+   * quarantined card is exactly the failure being diagnosed, so the diagnosis goes where it cannot
+   * be wrong: its own route.
+   *
+   * A CLASSIFICATION, NEVER A VALUE. Only branch, field and shape travel, all three from closed
+   * vocabularies re-checked at the boundary by submissionAuthorityRefusalForWire. The attempt id,
+   * timestamp, URL or receipt text that failed is not carried in any form. `packet_id` is the
+   * caller's own row id.
+   *
+   * SCOPED TO THE CALLER, like every other read in this file: the row select is filtered by
+   * `user_id` before anything is classified, so a `packet_id` naming somebody else's packet
+   * classifies nothing and returns an empty census rather than a 404 that confirms it exists.
+   *
+   * Deliberately NOT under /internal: that family is uniformly gated by the cron secret
+   * (isCronAuthorized) and serves no user's own rows. A route that answers "which of MY packets" has
+   * to authenticate as the user, which is what /metrics/funnel next door already does. It inherits
+   * /applications' drain rule and is refused during a submission cutover, which is correct - it is a
+   * diagnostic, not an evidence sink, and nothing here should widen the drain surface.
+   */
+  fastify.get('/applications/board/authority-rejections', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const query = z.object({ packet_id: z.string().uuid().optional() }).safeParse(request.query ?? {});
+    if (!query.success) return reply.status(400).send({ error: 'Invalid packet id' });
+
+    /* ONE COLUMN. The board's own select projects seven, because it draws cards; this classifies
+     * them, and every input the classification needs comes from the projection read below. Pulling
+     * `job_context` here would carry a whole job description per row into a diagnostic. Same
+     * ordering and same BOARD_LIMIT as the board, so "the 163" here are the same 163 there. */
+    const rows = await db
+      .select({ id: generated_resumes.id })
+      .from(generated_resumes)
+      .where(query.data.packet_id
+        ? and(eq(generated_resumes.user_id, userId), eq(generated_resumes.id, query.data.packet_id))
+        : eq(generated_resumes.user_id, userId))
+      .orderBy(desc(generated_resumes.created_at))
+      .limit(BOARD_LIMIT);
+
+    const submissionAuthority = await (async () => {
+      try {
+        return await authoritativeSubmissionProjection({ userId, packetIds: rows.map((row) => row.id) });
+      } catch (error) {
+        request.log.warn(
+          { err: error },
+          'submission authority projection unavailable for the rejection census; every packet reports projection_read_failed',
+        );
+        return null;
+      }
+    })();
+
+    const refusals: SubmissionAuthorityRefusal[] = [];
+    for (const row of rows) {
+      const publication = submissionAuthority
+        ? submissionAuthorityPublicationForPacket({
+          packetId: row.id,
+          projection: submissionAuthority.byPacketId.get(row.id),
+          retrySafety: submissionAuthority.retrySafetyByPacketId.get(row.id),
+          revision: submissionAuthority.revision,
+        })
+        // The same fallback the board uses when the batched read failed for every packet on the
+        // page: the server has no opinion about any of them, and says so per packet.
+        : ({ published: false, reason: 'projection_read_failed' } as const);
+      const refusal = submissionAuthorityRefusalForWire(row.id, publication);
+      if (refusal) refusals.push(refusal);
+    }
+
+    return reply.status(200).send({
+      schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
+      /* Null, not absent, when the projection could not be read. The board omits its collection
+       * fields in that case because their presence is what proves the payload is authority the
+       * client may act on; nothing here is authority to act on anything, so an explicit null is the
+       * honest answer and saves a reader guessing whether the key was dropped or the read failed. */
+      submission_authority_revision: submissionAuthority?.revision ?? null,
+      /* The denominator, so a small census cannot be misread as a small problem, and the reader can
+       * tell "no packet was refused" from "no packet was classified". */
+      packets_classified: rows.length,
+      packets_refused: refusals.length,
+      /* The largest refusal class first. This is the reading the 2026-09-03 census could not
+       * produce: 163 cards under one reason word is a count over seven return sites, while a ranked
+       * (branch, field, shape) table is a list of repairs. */
+      summary: submissionAuthorityRefusalTallies(refusals),
+      /* And the packets themselves, so a repair can be verified on the exact rows it was aimed at.
+       * Bounded by BOARD_LIMIT above, so this is at most one id and three closed-vocabulary strings
+       * per board card. */
+      rejections: refusals,
     });
   });
 
