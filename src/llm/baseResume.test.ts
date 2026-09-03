@@ -1,5 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   applyBulletRepairs,
   BASE_RESUME_GENERATION_FALLBACK_MODEL,
@@ -13,7 +14,9 @@ import {
   BaseResumeStreamReader,
   parseSpecText,
   priorityEntriesForBaseResume,
+  priorityEntryMayBeMandatory,
 } from './baseResume';
+import { enforceExperienceBulletFloor } from '../engine/resumePolicy';
 import {
   BACKSTOP_REPAIR_ALLOWANCE_MS,
   baseResumeBackstopAllowed,
@@ -395,6 +398,120 @@ describe('base resume priority selection', () => {
     assert.deepEqual(
       priorityEntriesForBaseResume([sparse, coop], 'Industrial Engineer', 'coop').map((entry) => entry.id),
       ['coop'],
+    );
+  });
+
+  test('the TAILORED path cannot require a selection the floor is guaranteed to drop', () => {
+    /* THE THIRD HEAD, on /resume/generate. #872 and #875 closed both base-resume branches and
+     * left this one open: the tailored route required whatever `bank.find(entry => entry.id ===
+     * selectedEntryId)` returned, with no survivability or confirmation check at all. So the same
+     * account healed in onboarding could still dead-end on EVERY application - and worse than the
+     * base case, because no wording of any posting changes it: the floor drops the entry, both
+     * gates demand it, and the packet is refused with resume_quality_hold every time.
+     *
+     * Run here as the route runs it, floor first and gate second, because the contradiction only
+     * exists between the two. */
+    const sparse = bankEntry({
+      id: 'sparse', type: 'leadership', org: 'IISE UF Chapter', title: 'Treasurer',
+      date_range: '2025 - Present', bullet_variants: ['Managed the chapter budget'],
+    });
+    const coop = bankEntry({
+      id: 'coop', org: 'Distribution Center', title: 'Engineering Co-op', date_range: 'Jan 2026 - Jun 2026',
+      bullet_variants: ['Mapped grounded pick paths', 'Built grounded dashboards'],
+    });
+    const generated = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [
+        { type: 'leadership' as const, org: sparse.org, title: 'Treasurer', date_range: '2025 - Present', bullets: ['Managed the chapter budget'] },
+        { type: 'job' as const, org: coop.org, title: 'Engineering Co-op', date_range: 'Jan 2026 - Jun 2026', bullets: ['Mapped grounded pick paths', 'Built grounded dashboards'] },
+      ],
+    };
+
+    /* Unconfirmed, the floor removes it - allowSparsePriority keys on continue_with_found, so
+     * naming it as the priority entry buys nothing. */
+    const printed = enforceExperienceBulletFloor(generated, [sparse, coop], {
+      priorityEntryId: sparse.id,
+      allowSparsePriority: false,
+    });
+    assert.ok(!printed.experience.some((entry) => entry.org === sparse.org));
+    /* ...and requiring it anyway is the dead-end, reachable on every posting. */
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [sparse], { requireFirst: false }),
+      ['required current or role-defining entry missing: Treasurer at IISE UF Chapter'],
+    );
+
+    /* The rule the route now applies before it decides what is mandatory. */
+    assert.equal(priorityEntryMayBeMandatory(sparse), false);
+    assert.equal(priorityEntryMayBeMandatory(coop), true);
+    assert.equal(priorityEntryMayBeMandatory(sparse, { sparseSelectionConfirmed: true }), true);
+
+    /* CONFIRMED, nothing changes: the allowance keeps the entry on the page, so demanding it is
+     * coherent and the student still gets the selection they asked to continue with. */
+    const withAllowance = enforceExperienceBulletFloor(generated, [sparse, coop], {
+      priorityEntryId: sparse.id,
+      allowSparsePriority: true,
+    });
+    assert.ok(withAllowance.experience.some((entry) => entry.org === sparse.org));
+    assert.deepEqual(baseResumeSelectionIssues(withAllowance, [sparse], { requireFirst: false }), []);
+  });
+
+  test('/resume/generate computes what is mandatory rather than requiring the raw selection', () => {
+    /* Pinned against the source because the mechanism above cannot see the route, and the route
+     * is where this defect lived for both of its lives: the gate, the floor and the predicate were
+     * each individually correct while /resume/generate simply handed the gate a bank row nobody
+     * had checked. A test that only exercises the predicate goes green on the broken route.
+     *
+     * Both gates must be fed the CHECKED entry, and the floor and the model hint must be fed the
+     * selection - so what may be required and what may be kept can never disagree. */
+    const route = readFileSync('src/routes/resume.ts', 'utf8');
+    assert.match(route, /const priorityEntry = selectedEntry\s*\n\s*&& priorityEntryMayBeMandatory\(selectedEntry, \{ sparseSelectionConfirmed \}\)/);
+    assert.doesNotMatch(route, /const priorityEntry = bank\.find/);
+    assert.match(route, /priorityEntryId: selectedEntry\?\.id/);
+    /* The dedupe's excuse reaches the post-floor gate, the way routes/baseResume.ts feeds its
+     * own. Without it a survivable duplicate is mandatory, emptied, and refused forever. */
+    assert.match(route, /requireFirst: false, droppedAsAlreadyPrinted/);
+  });
+
+  test('the tailored gate excuses a required entry the cross-entry dedupe emptied', () => {
+    /* The other head of the same contradiction, and the one the survivability rule cannot reach:
+     * this row has TWO grounded variants, so it is mandatory by every rule above - and the floor
+     * still empties it, because a re-upload created a second row for the same work under a
+     * renamed org and its every sentence already prints under the first copy's heading. Demanded
+     * and removed is a permanent resume_quality_hold on every posting. routes/baseResume.ts has
+     * excused this since #872; the tailored route did not collect the list at all. */
+    const original = bankEntry({
+      id: 'original', org: 'Tri Coast Capital', title: 'Analyst', date_range: '2024 - Present',
+      bullet_variants: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'],
+    });
+    const renamed = bankEntry({
+      id: 'renamed', org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst', date_range: '2024 - Present',
+      bullet_variants: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'],
+    });
+    /* Survivable, so the mandatory rule from the test above lets it through. */
+    assert.equal(priorityEntryMayBeMandatory(renamed), true);
+
+    const generated = {
+      ...SPEC,
+      education_position: 'top' as const,
+      experience: [
+        { type: 'job' as const, org: original.org, title: 'Analyst', date_range: '2024 - Present', bullets: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'] },
+        { type: 'job' as const, org: renamed.org, title: 'Analyst', date_range: '2024 - Present', bullets: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'] },
+      ],
+    };
+    const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+    const printed = enforceExperienceBulletFloor(generated, [original, renamed], {
+      onDropped: ({ org, title, reason }) => {
+        if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
+      },
+    });
+    assert.ok(!printed.experience.some((entry) => entry.org === renamed.org));
+    assert.deepEqual(droppedAsAlreadyPrinted, [{ org: renamed.org, title: 'Analyst' }]);
+
+    assert.equal(baseResumeSelectionIssues(printed, [renamed], { requireFirst: false }).length, 1);
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [renamed], { requireFirst: false, droppedAsAlreadyPrinted }),
+      [],
     );
   });
 });

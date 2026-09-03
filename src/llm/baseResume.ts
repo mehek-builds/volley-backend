@@ -163,6 +163,36 @@ function bankEntryText(entry: ExperienceBankEntry): string {
 }
 
 /**
+ * MANDATORY IMPLIES SURVIVABLE OR CONFIRMED - the one predicate both resume paths ask.
+ *
+ * Requiring an entry to appear on the page is only coherent while the pipeline downstream is
+ * permitted to keep it there. enforceExperienceBulletFloor drops any entry that cannot reach
+ * minBulletsPerEntry grounded bank variants, and its sparse allowance activates only on
+ * recent_experience_review.continue_with_found - so an entry that is neither survivable nor
+ * confirmed is demanded by the gate and removed by the floor, the fail-closed check refuses the
+ * build, and every retry reproduces it with nothing saved.
+ *
+ * This lives in one function because the two halves have already drifted apart once. The base
+ * path grew the rule in two branches (an explicit selection, then the legacy fallback) while the
+ * tailored path in routes/resume.ts kept requiring whatever bank.find returned, so the same
+ * account that was healed on onboarding could still dead-end on an application.
+ *
+ * Being MANDATORY is the only thing this decides. A sparse entry stays perfectly selectable: the
+ * model may put it on the page, and the floor drops it with the honest "add another and it goes
+ * on" warning rather than refusing the whole document.
+ */
+export function priorityEntryMayBeMandatory(
+  entry: ExperienceBankEntry,
+  options: { sparseSelectionConfirmed?: boolean } = {},
+): boolean {
+  const groundedVariants = (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
+    .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
+    .length;
+  return groundedVariants >= RESUME_CONTENT_LIMITS.minBulletsPerEntry
+    || options.sparseSelectionConfirmed === true;
+}
+
+/**
  * Evidence the base resume may not displace with older work.
  *
  * Three states, not two. A selection that can survive the bullet floor (or a sparse one the
@@ -187,10 +217,6 @@ export function priorityEntriesForBaseResume(
   } = {},
 ): ExperienceBankEntry[] {
   if (bank.length === 0) return [];
-  const countGroundedVariants = (entry: ExperienceBankEntry): number =>
-    (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
-      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
-      .length;
   const explicitlySelected = bank.find((entry) => entry.id === selectedEntryId);
   /* AN AUTO-SEEDED SELECTION IS NOT A CONFIRMATION. Every upload seeds
    * recent_experience_review.selected_entry_id (buildRecentExperienceReview picks the most recent
@@ -205,10 +231,13 @@ export function priorityEntriesForBaseResume(
    * fine). A sparse selection is mandatory only once the applicant confirms continuing with the
    * found evidence, which is also the moment the floor and validator gain their allowance for it;
    * unconfirmed, it falls through to the legacy fallback below and its survivability filter. */
-  if (explicitlySelected) {
-    const survivesTheFloor =
-      countGroundedVariants(explicitlySelected) >= RESUME_CONTENT_LIMITS.minBulletsPerEntry;
-    if (survivesTheFloor || options.sparseSelectionConfirmed) return [explicitlySelected];
+  if (
+    explicitlySelected
+    && priorityEntryMayBeMandatory(explicitlySelected, {
+      sparseSelectionConfirmed: options.sparseSelectionConfirmed,
+    })
+  ) {
+    return [explicitlySelected];
   }
   /* THE LEGACY FALLBACK MAY NOT REQUIRE AN ENTRY THE FLOOR IS GUARANTEED TO DROP. The gate
    * (baseResumeSelectionIssues) demands every priority entry appear on the page, while
@@ -224,7 +253,7 @@ export function priorityEntriesForBaseResume(
    * will drop it with an honest warning - it just cannot be MANDATORY. The explicit selection
    * above is untouched: a student who confirmed a sparse entry has the continue_with_found
    * escape, which is the allowance this path lacks. */
-  const survivable = bank.filter((entry) => countGroundedVariants(entry) >= RESUME_CONTENT_LIMITS.minBulletsPerEntry);
+  const survivable = bank.filter((entry) => priorityEntryMayBeMandatory(entry));
   const rankedByRecency = survivable
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) =>
