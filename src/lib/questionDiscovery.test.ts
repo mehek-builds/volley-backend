@@ -5436,3 +5436,15 @@ test('a language used as an adjective on something else is not a proficiency ask
   assert.deepEqual(resolveKnownAnswer('language skills: english custom_attribute_4230717 field-language', 'select', ap, undefined, undefined, undefined, ['None', 'A1', 'A2', 'B1', 'B2', 'C1']), { value: 'C1' });
   assert.deepEqual(resolveKnownAnswer('English proficiency', 'select', ap, undefined, undefined, undefined, scale), { value: 'Expert' });
 });
+
+test('a permit DETAIL ask never takes a record-backed Yes either', () => {
+  const german = { needs_sponsorship: false, citizenship: 'German', address_country: 'Germany',
+    work_eligibility_by_country: [{ country_code: 'DE', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false }] } as unknown as ApplicationProfileLike;
+  for (const label of ['EU work permit number', 'Please upload a copy of your EU work permit', 'If yes, which EU work permit do you hold?',
+    'Do you have an EU work permit? If yes, which one?', 'EU work permit issue date', 'Work permit for Germany: expiry', 'Work permit for Germany - number',
+    'Upload a copy of your work permit for Germany', 'Comments on your EU work permit', 'Will you have a valid EU work permit by the start date?']) {
+    const r = resolveKnownAnswer(label, 'text', german, 'DE');
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(resolveKnownAnswer('Work permit for Germany', 'select', german, 'DE', undefined, undefined, ['Yes', 'No']), { value: 'Yes' });
+});

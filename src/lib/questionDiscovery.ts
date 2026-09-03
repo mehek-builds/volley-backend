@@ -7619,6 +7619,15 @@ function blocWorkPermitAnswer(
    * asks wearing the permit noun (B7). Each stands the rule down; nothing else answers them. */
   if (/\b(?:need|needs|needed|require|requires|required|requiring|arrange|obtain|apply\s+for)\b/i.test(label)) return null;
   if (/\b(?:ever|previously|prior|past|held|refused|denied|revoked|did\s+you|have\s+you\s+(?:ever|previously|been))\b/i.test(label)) return null;
+  /* A DETAIL ASK IS NEVER A YES OR A NO, whichever branch would answer it: "permit number", "upload
+   * a copy", "if yes, which…", "…: expiry", a two-question label, a comments box. Round 2 kept these
+   * guards on the derived branch only and a record-backed Yes reached "EU work permit number" and
+   * "Upload a copy of your work permit for Germany" for an EU-authorized applicant (review of PR
+   * #879, round 2). They stand the whole rule down. */
+  if (/\bif\s+(?:yes|not|so)\b|\bnumber\b|\bupload\b|\bcopy\b|\bwhich\b|\bexpir|\bissue\s+date\b|\bdetails?\b|\bcomments?\b|\bdescribe\b|\bexplain\b|\b(?:id|reference)\b/i.test(label)) return null;
+  if ((label.match(/\?/g) || []).length > 1) return null;
+  /* A FUTURE ask ("Will you have … by the start date?") asks about a permit she may yet obtain. */
+  if (/\bwill\s+you\s+(?:have|hold)\b|\bby\s+(?:the\s+)?start\b|\bwhen\s+the\s+contract\b/i.test(label)) return null;
   if (AUTHORIZATION_TYPE_QUESTION.test(label) || AUTHORIZATION_EXPIRY_QUESTION.test(label)
     || WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) return null;
   if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) return null;
@@ -7668,11 +7677,8 @@ function blocWorkPermitAnswer(
    * does. Both must be on record before "No" is typed in her name (review of PR #879, B8). */
   /* THE DERIVED ANSWER ONLY FITS A YES/NO ASK. A record-backed Yes above may name the permit a
    * select offers ("Work permit for Germany" with a German record), but a derived No has no
-   * business on "If yes, which permit…", "permit number", "upload a copy" or a two-question label
-   * (review of PR #879, B7). */
+   * business on a label that is not a question (review of PR #879, B7). */
   if (!isPolarQuestion(label)) return { skipReason: workEligibilitySkipReason(label) };
-  if (/\bif\s+(?:yes|not|so)\b|\bnumber\b|\bupload\b|\bcopy\b|\bwhich\b|\bexpir/i.test(label)) return { skipReason: workEligibilitySkipReason(label) };
-  if ((label.match(/\?/g) || []).length > 1) return { skipReason: workEligibilitySkipReason(label) };
   if (ap.needs_sponsorship === true && provablyOutsideEuropeanFreeMovement(ap)) return { value: 'No' };
   return { skipReason: workEligibilitySkipReason(label) };
 }
