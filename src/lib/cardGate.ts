@@ -278,6 +278,35 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/applications/:id/packet-audit',
   '/applications/:id/packet-audit/acknowledge',
   '/applications/:id/submit-request',
+  /* THE SEND THAT PARKED SHORT OF FINISHING, added 2026-09-03, and the same dead-end class the
+   * three routes above were added to close.
+   *
+   * A send does not always end at a status. prepare()'s fill run can reach an employer's emailed
+   * security-code screen (submissionRunner.ts, 'A fill run reached an emailed security-code
+   * screen'), which parks the packet at 'awaiting_security_code' -- and that state writes NONE of
+   * the four facts alreadyAtEmployer() reads. Not status='submitted'; not pipeline_stage='applied'
+   * (only confirmedPacketPipelineProjection writes that, off a real receipt); not an unresolved
+   * unverified_submission (unverifiedSubmissionPatch writes 'needs_attention' in the same breath,
+   * so the two states are mutually exclusive); and not the legacy attention-text twin
+   * (securityCodeAttentionReason opens "Litos submitted this application and the employer asked
+   * for a human check", nowhere near LEGACY_UNVERIFIED_ATTEMPT_PREFIX). The other writers of the
+   * status -- withholdInvalidLeadAlignment and the held-packet-audit stop -- are pre-send stops
+   * that record a not_sent fact, so they write none of them either.
+   *
+   * So at the exact moment a locked account's one free onboarding send parks here, TIER B2 is
+   * still OPEN, and this route was on no tier at all: the account 402s on the one route its own
+   * packet points at, two screens short of the payment step. That is the shape rqw #512 fixed for
+   * the packet-audit pair, pointed at the state after the send instead of the state before it.
+   *
+   * TIER B2 rather than TIER B1 because the tier boundary lands exactly right on its own: the
+   * route is reachable precisely while the packet is unfinished, and the moment the send completes
+   * (status='submitted', pipeline_stage='applied') or folds to an unresolved unverified_submission,
+   * this tier closes -- by which point the route answers 409 'not_awaiting' regardless, and the
+   * applicant's remaining door is POST /submission/unverified on TIER B1. A spent account gains
+   * nothing here, and the route's own currentAcknowledgedPacketAudit gate is served by the two
+   * audit routes above, which stay open on this same tier for this same state (see the
+   * awaiting_security_code carve-out in POST /applications/:id/packet-audit). */
+  '/applications/:id/security-code',
 ]);
 
 export function isCardGateAllowedPath(rawPath: string): boolean {
