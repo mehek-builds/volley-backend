@@ -69,6 +69,18 @@ function experienceBankType(value: string): 'job' | 'project' | 'leadership' | u
  * that carries a date range. Projects and leadership are excluded on both sources - they are not
  * employment. Undefined when nothing dated is on file, which the resolver refuses on.
  *
+ * EACH ENTRY ALSO CARRIES ITS OWN TITLE AND BULLETS, and they are skill evidence, never dates.
+ * skillScopedExperienceAnswer answers "how many years of hands on experience do you have with X"
+ * by summing only the roles whose own words name X, so the span and the words it belongs to have to
+ * arrive together. Nothing in the tenure arithmetic reads either field (see ExperiencePeriod), so
+ * carrying them cannot move a total that this function already produced. The bullets are joined
+ * into one string rather than kept as an array because every reader of them asks the same question,
+ * "is this skill named anywhere in this role", and one string is the honest shape for that.
+ *
+ * The bank rows deliberately contribute no evidence text: a bank row is an organisation, a title
+ * and a date range with no bullets, and a title alone is not where a tool gets named. They still
+ * count toward total tenure exactly as before.
+ *
  * Pure, and exported for the loader test: loadApplicationProfileLike itself needs a database.
  */
 export function experiencePeriodsFromSources(
@@ -77,6 +89,19 @@ export function experiencePeriodsFromSources(
   bankRows: readonly { type?: string | null; date_range?: string | null }[],
 ): ExperiencePeriod[] | undefined {
   const dateText = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  /* Every shape the parse and the resume spec write their prose in: a single `description`, a
+   * `summary`, or the `bullets`/`highlights` arrays the resume spec uses. Non-string members are
+   * dropped rather than stringified, so an object never reaches the matcher as "[object Object]". */
+  const evidenceText = (entry: Record<string, unknown>): string | undefined => {
+    const parts: string[] = [];
+    for (const key of ['description', 'summary', 'bullets', 'highlights', 'responsibilities']) {
+      const value = entry[key];
+      if (typeof value === 'string') parts.push(value);
+      else if (Array.isArray(value)) parts.push(...value.filter((item): item is string => typeof item === 'string'));
+    }
+    const joined = parts.map((part) => part.trim()).filter(Boolean).join(' ');
+    return joined || undefined;
+  };
   const fromResume = (source: Record<string, unknown>): ExperiencePeriod[] | undefined => {
     const experience = source.experience;
     if (!Array.isArray(experience)) return undefined;
@@ -87,7 +112,9 @@ export function experiencePeriodsFromSources(
       const start = dateText(entry.start ?? entry.start_date ?? entry.startDate ?? entry.from);
       const end = dateText(entry.end ?? entry.end_date ?? entry.endDate ?? entry.to);
       const date_range = dateText(entry.date_range ?? entry.dates);
-      if (start || end || date_range) periods.push({ start, end, date_range });
+      const title = dateText(entry.title ?? entry.role ?? entry.position);
+      const description = evidenceText(entry);
+      if (start || end || date_range) periods.push({ start, end, date_range, title, description });
     }
     return periods;
   };

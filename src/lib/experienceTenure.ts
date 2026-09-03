@@ -34,6 +34,17 @@ export type ExperiencePeriod = {
   end?: string | null;
   /** The bank's single "Feb 2026 - Present" column, read only when start/end are absent. */
   date_range?: string | null;
+  /**
+   * The role's own title, and the role's bullets or summary joined into one string.
+   *
+   * READ BY EXACTLY ONE THING, experienceEvidencing, and only to decide whether a dated role is
+   * evidence for a NAMED SKILL. Neither field is a date and neither may ever reach the arithmetic:
+   * totalExperienceMonths does not look at them, so adding them cannot move any total that exists
+   * today. They are on this type rather than in a second parallel array because the skill and the
+   * span have to travel together, and splitting them is how the two would drift out of alignment.
+   */
+  title?: string | null;
+  description?: string | null;
 };
 
 const MONTHS = [
@@ -162,6 +173,142 @@ export function totalExperienceMonths(
   }
   total += current.to - current.from;
   return total;
+}
+
+/* ---- the same arithmetic, scoped to ONE NAMED SKILL ---- */
+
+/*
+ * WHY A SECOND ENTRY POINT RATHER THAN A WIDER FIRST ONE. "How many years of hands on experience
+ * do you have with X" is not the question totalExperienceMonths answers, and answering it from the
+ * total is the exact substitution this whole family exists to prevent: it hands an employer a
+ * figure about her whole career in reply to a question about one tool. So the scoping is applied
+ * by SELECTING ENTRIES, and the surviving subset then goes through totalExperienceMonths unchanged.
+ * Every guarantee that function documents - month granularity, exclusive differences, merged
+ * overlaps, and a single unreadable date poisoning the whole total - is therefore the same
+ * guarantee here, because it is literally the same code. Nothing about the counting is re-decided.
+ *
+ * WHAT COUNTS AS EVIDENCE, and this is the one judgement in the file. A dated role evidences a
+ * skill when the role's own title or its own bullets NAME that skill. That is the applicant's
+ * writing about that role, so it is her claim that she worked with the thing during it, and it is
+ * the same reading a human gives a resume. The alternative readings were both rejected:
+ *   - the skills LIST alone is not evidence. It carries no dates, so it can place a skill on the
+ *     profile and can never place it in time. A question about duration cannot be answered from it.
+ *   - the whole tenure, filtered by nothing, is not evidence. See the paragraph above.
+ * The residual risk is a bullet that names a skill in passing ("migrated a Python service to Go"),
+ * which counts that role's whole span. It is accepted knowingly: the answer is a coarse band, every
+ * step of the arithmetic underneath rounds down, and the alternative is refusing every question in
+ * this family. It is written here so the next reader is deciding it again rather than discovering it.
+ */
+
+/** Regex-escape, local because this file has no imports on purpose (see the header). */
+function escapeForPattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Does `text` name `skill` as a whole term?
+ *
+ * The boundary is written as alphanumeric lookaround rather than `\b`, because the skills that
+ * matter here are not all word characters: `\b` after the "+" of "C++" requires a word character
+ * and so never matches, and `\b` around "Node.js" splits at the dot. Alphanumeric lookaround gets
+ * both right, and it keeps the refusals that matter: "React" does not match inside "Reactive", and
+ * "SQL" does not match inside "PostgreSQL" (a Postgres question is not answered from SQL evidence).
+ * Internal whitespace is relaxed so a two-word skill ("AI agents") matches however the text spaces it.
+ */
+export function skillNamedIn(text: string | null | undefined, skill: string): boolean {
+  const haystack = text?.trim();
+  const needle = skill?.trim();
+  /* TWO CHARACTERS MINIMUM. "C" and "R" are real languages and are also single letters that occur
+   * all over ordinary prose and inside provider handles; a one-letter scope match would be noise
+   * with the authority of a measurement. They are refused rather than guessed at. */
+  if (!haystack || !needle || needle.length < 2) return false;
+  const pattern = needle.split(/\s+/).map(escapeForPattern).join('\\s+');
+  return new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').test(haystack);
+}
+
+/** The dated roles whose own title or bullets name this skill. */
+export function experienceEvidencing(
+  entries: readonly ExperiencePeriod[] | null | undefined,
+  skill: string,
+): ExperiencePeriod[] {
+  if (!entries) return [];
+  return entries.filter((entry) => skillNamedIn(entry.title, skill) || skillNamedIn(entry.description, skill));
+}
+
+/**
+ * Whole months of dated employment that evidences one named skill, or null.
+ *
+ * null for every way this cannot be answered, and every one of them is a refusal downstream rather
+ * than a zero: no dated roles on file at all, no dated role that names the skill, a matching role
+ * whose date cannot be read (totalExperienceMonths' own poison rule), and a matching set that sums
+ * to nothing readable. "No role mentions it" is emphatically NOT zero years of experience with the
+ * thing - it is Litos having no dated evidence either way, and stating zero would be a claim about
+ * her that her resume does not make.
+ *
+ * THE EMPTY-SUBSET CASE IS NOT GUARDED HERE, DELIBERATELY. An explicit `evidencing.length === 0`
+ * check was written first and then removed: totalExperienceMonths already refuses an empty list on
+ * its first line, so the check could not change any result, and a mutation run confirmed deleting
+ * it moved nothing. A second copy of a rule that cannot be observed is not a safety net, it is the
+ * seam two copies of the same rule drift apart along. "No role names this skill" therefore refuses
+ * through exactly the same line as "no dated role on file", which is the point: they are the same
+ * finding, and they cannot come to disagree.
+ */
+export function skillScopedExperienceMonths(
+  entries: readonly ExperiencePeriod[] | null | undefined,
+  skill: string,
+  asOf: Date,
+): number | null {
+  return totalExperienceMonths(experienceEvidencing(entries, skill), asOf);
+}
+
+/**
+ * The ONE skill from the applicant's own skills list that this label names.
+ *
+ * The scope is read by matching the label against HER vocabulary, never by parsing the sentence.
+ * That inversion is the safety property: the function never has to understand "hands on experience
+ * do you have with", it only has to answer "does this question name something she has listed". A
+ * question about a skill she has not listed therefore returns null and is left for her, which is
+ * the correct outcome and needs no extra rule.
+ *
+ * TWO DISTINCT SKILLS IS AMBIGUOUS, NOT AN ANSWER. "years of experience with Python and Kubernetes"
+ * wants an intersection; "with Python or Java" wants a union; the two read the same to a matcher and
+ * differ by years. Reported as `ambiguous` so the caller can hand it back with a reason instead of
+ * silently answering one half of it. Overlapping matches are NOT two skills: "React Native" also
+ * matches the listed skill "React", so matches whose spans touch are collapsed and the longest,
+ * most specific one wins.
+ */
+export type NamedSkillScope = { skill: string } | { ambiguous: string[] } | null;
+
+export function namedProfileSkill(
+  label: string,
+  skills: readonly string[] | null | undefined,
+): NamedSkillScope {
+  const text = label?.trim();
+  if (!text || !skills) return null;
+  type Hit = { skill: string; start: number; end: number };
+  const hits: Hit[] = [];
+  const seen = new Set<string>();
+  for (const raw of skills) {
+    const skill = typeof raw === 'string' ? raw.trim() : '';
+    if (!skill || skill.length < 2) continue;
+    const key = skill.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!skillNamedIn(text, skill)) continue;
+    const pattern = skill.split(/\s+/).map(escapeForPattern).join('\\s+');
+    const match = new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').exec(text);
+    if (match) hits.push({ skill, start: match.index, end: match.index + match[0].length });
+  }
+  if (hits.length === 0) return null;
+  hits.sort((a, b) => a.start - b.start || b.end - a.end);
+  const groups: Hit[][] = [];
+  for (const hit of hits) {
+    const group = groups[groups.length - 1];
+    if (group && hit.start < group[group.length - 1].end) group.push(hit);
+    else groups.push([hit]);
+  }
+  if (groups.length > 1) return { ambiguous: groups.map((group) => group[0].skill) };
+  return { skill: groups[0].reduce((best, hit) => (hit.end - hit.start > best.end - best.start ? hit : best)).skill };
 }
 
 /* ---- the employer's bands ---- */

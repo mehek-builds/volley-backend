@@ -62,16 +62,36 @@ test('the dated roles reach the resolver from the parse, the base resume, and th
     { type: 'leadership', date_range: 'Jan 2019 - Present' },
     { type: 'job', date_range: null },
   ];
-  // Leadership and projects never count, on either source; an undated entry is dropped.
+  /* Leadership and projects never count, on either source; an undated entry is dropped.
+   *
+   * Each surviving entry also carries its own title and its own bullets, which are SKILL EVIDENCE
+   * and never dates: skillScopedExperienceAnswer answers "how many years of hands on experience do
+   * you have with X" by summing only the roles whose own words name X, so the words have to travel
+   * with the span. An empty description stays undefined rather than becoming an empty string, so a
+   * role with no prose evidences nothing instead of matching everything. A bank row contributes no
+   * evidence text at all: it is an organisation, a title and a date range, with no bullets. */
   assert.deepEqual(experiencePeriodsFromSources(parsed, {}, bank), [
-    { start: 'Feb 2026', end: 'Present', date_range: undefined },
-    { start: 'Feb 2025', end: 'May 2025', date_range: undefined },
+    { start: 'Feb 2026', end: 'Present', date_range: undefined, title: 'AI Engineer', description: undefined },
+    { start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'PM Intern', description: undefined },
     { date_range: 'Sep 2025 - Present' },
   ]);
   // The base resume is read only when the parse carries no experience array at all.
   assert.deepEqual(experiencePeriodsFromSources({}, { experience: [{ start: '2024-01', end: '2024-06' }] }, []), [
-    { start: '2024-01', end: '2024-06', date_range: undefined },
+    { start: '2024-01', end: '2024-06', date_range: undefined, title: undefined, description: undefined },
   ]);
+
+  /* THE EVIDENCE TEXT, from every shape the parse and the resume spec write prose in. The bullets
+   * are joined into one string because every reader asks the same question of them, "is this skill
+   * named anywhere in this role", and non-string members are dropped rather than stringified so an
+   * object can never reach the matcher as "[object Object]". */
+  assert.deepEqual(
+    experiencePeriodsFromSources(
+      { experience: [{ start: 'Feb 2025', end: 'May 2025', role: 'Backend Intern', bullets: ['Shipped a Python service', { note: 'x' }, 'Wrote SQL'] }] },
+      {},
+      [],
+    ),
+    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'Backend Intern', description: 'Shipped a Python service Wrote SQL' }],
+  );
   // Nothing dated anywhere is undefined - "never on file" - and the resolver refuses on it.
   assert.equal(experiencePeriodsFromSources({}, {}, []), undefined);
   assert.equal(experiencePeriodsFromSources({ experience: [] }, {}, [{ type: 'job', date_range: '' }]), undefined);

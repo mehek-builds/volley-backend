@@ -42,7 +42,13 @@ import {
 import type { CountryWorkEligibility } from './workEligibility';
 import { eligibilityForCountry, isIsoCountryCode, namedCountryCodes } from './workEligibility';
 import { paylocityCanonicalFieldLabel } from './paylocityFields';
-import { chooseExperienceBand, totalExperienceMonths, type ExperiencePeriod } from './experienceTenure';
+import {
+  chooseExperienceBand,
+  namedProfileSkill,
+  skillScopedExperienceMonths,
+  totalExperienceMonths,
+  type ExperiencePeriod,
+} from './experienceTenure';
 
 // R-055 fix: the dashboard-driven submission flow used to never discover a posting's custom
 // questions (GPA, sponsorship, GitHub, essays, ...) - only the Chrome extension did, client-side.
@@ -105,10 +111,12 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   /**
    * THE DATED ROLES, for arithmetic and nothing else: every employment entry the parsed resume
    * carries (`parsed_json.experience`, falling back to the base resume) plus every `job` row of the
-   * experience bank that has a date range. Read by exactly one rule, yearsOfExperienceAnswer, which
-   * sums them (see lib/experienceTenure.ts for how, and for why every choice there rounds DOWN).
-   * Projects and leadership rows are never in this list - they are not employment. undefined is
-   * "no dated role on file", and the rule refuses on it rather than answering zero.
+   * experience bank that has a date range. Read by two rules, yearsOfExperienceAnswer, which sums
+   * all of them, and skillScopedExperienceAnswer, which sums only the ones whose own title or
+   * bullets name the skill a question asks about (see lib/experienceTenure.ts for how, and for why
+   * every choice there rounds DOWN). Projects and leadership rows are never in this list - they are
+   * not employment. undefined is "no dated role on file", and both rules refuse on it rather than
+   * answering zero.
    */
   experience_periods?: ExperiencePeriod[];
   school?: string;
@@ -7996,6 +8004,122 @@ function yearsOfExperienceAnswer(
     : { skipReason: `years of experience left for you (none of the offered bands holds your ${months} months): "${label.slice(0, 60)}"` };
 }
 
+/* ---- 4. Experience with ONE NAMED SKILL, from the dated roles that evidence that skill ---- */
+
+/*
+ * WHAT THIS CLOSES (measured live on account a18f774b, 2026-09-03, three boards in one sweep).
+ * Employers ask "how long have you been doing X" as a closed bucket list, and Litos selected
+ * nothing on any of them, so a required control stayed empty, Save stayed disabled, and the
+ * applicant was asked a question her own stored profile answers:
+ *   - Confluence Technologies (pinpoint): two separate "how many years of hands on experience do
+ *     you..." selects, both empty. yearsOfExperienceAnswer sees them and correctly declines: its
+ *     EXPERIENCE_SCOPE_QUALIFIER catches "hands", because total tenure is not the answer to a
+ *     question about one tool. Nothing then picked them up. This rule is what picks them up.
+ *   - Apollo Research (lever): "How many hours of coding experience do you have in python or a
+ *     similar coding language?" over ["<100 hours", "100-1000 hours", ">1000 hours"]. It stays
+ *     hers. See THE UNIT below, which is the whole argument.
+ * The third board, xolife (personio), asks the UNSCOPED "years of experience" and is already
+ * answered by yearsOfExperienceAnswer above; it is pinned in the tests beside these so the two
+ * rules cannot quietly swap questions.
+ *
+ * THE UNIT, AND WHY HOURS ARE NOT AN ANSWER HERE.
+ *
+ * A calendar span states years and months without assuming anything: "September 2025 to present"
+ * IS twelve months, and that is a fact about the resume, not a model of it. Hours are a different
+ * quantity. Converting a span to hours needs an hours-per-week figure, and no such figure is
+ * stored anywhere on the profile, in the resume, or in the experience bank. Inventing one and
+ * hiding it inside a bucket does not make it measured.
+ *
+ * THE GENEROUS ARGUMENT WAS TESTED ON THE REAL QUESTION AND FAILS IT. The argument runs: the
+ * buckets are coarse, so perhaps every plausible hours-per-week lands in the same one, and then the
+ * bucket is forced even though the number is a guess. Do the arithmetic on Apollo's own boundary.
+ * 1000 hours is 25 weeks at 40 h/week, 50 weeks at 20, 100 weeks at 10, and 200 weeks at 5. So for
+ * a twelve-month span the answer flips between "100-1000 hours" and ">1000 hours" at about
+ * 19 h/week, and BOTH sides of that line are ordinary for a student's dated role. The bucket is not
+ * forced; it is decided entirely by the invented figure. The argument only ever succeeds for a span
+ * long enough that even the lowest rate clears the boundary, and "the lowest plausible rate" is
+ * itself a number nobody measured, so the whole case rests on a made-up floor.
+ *
+ * SO THE UNIT IS THE GATE, not the buckets, and the refusal is explicit rather than incidental.
+ * readExperienceBand already returns null for every hours-worded option, so this question would
+ * fall out unanswered even with no gate here at all - but it would fall out reporting that none of
+ * the bands held her figure, which names the wrong culprit and invites someone to "fix" the band
+ * reader. It is refused up front, in its own words, and pinned by its own test. Years and months
+ * pass; hours, days and weeks do not. Leaving it to her costs one click on a list already open in
+ * front of her. Answering it puts a number on her application that nothing on file supports.
+ */
+
+/* The unit is captured, because the unit decides whether there is an answer at all. Two shapes:
+ * "<unit> of ... experience" ("years of hands on experience", "hours of coding experience", the
+ * bare "years of experience"), and the trailing "experience (in years)" / "experience in years". */
+const EXPERIENCE_DURATION_UNIT_ASK =
+  /\b(?:how\s+(?:many|much)\s+)?(hours?|hrs?|days?|weeks?|months?|mos?|years?|yrs?)\s+of\s+(?:[^?]{0,40}?\s+)?experience\b/i;
+const EXPERIENCE_TRAILING_UNIT_ASK =
+  /\bexperience\b\s*(?:\(\s*(?:in\s+)?(hours?|days?|weeks?|months?|years?)\s*\)|\bin\s+(hours?|days?|weeks?|months?|years?)\b)/i;
+/** The units a month-granular calendar span states without an assumption. Everything else refuses. */
+const DERIVABLE_DURATION_UNIT = /^(?:months?|mos?|years?|yrs?)$/i;
+
+function experienceDurationUnit(label: string): string | null {
+  const direct = EXPERIENCE_DURATION_UNIT_ASK.exec(label);
+  if (direct) return direct[1];
+  const trailing = EXPERIENCE_TRAILING_UNIT_ASK.exec(label);
+  if (trailing) return trailing[1] ?? trailing[2] ?? null;
+  return null;
+}
+
+/**
+ * "How many years of hands on experience do you have with X", answered from the dated roles that
+ * name X and from nothing else.
+ *
+ * Sits BELOW yearsOfExperienceAnswer on purpose, so an unscoped ask is settled as total tenure
+ * before this rule ever sees it, and this rule can never answer "years of experience" from a
+ * subset. Holds the option list for the reason that rule and languageProficiencyAnswer both hold
+ * it: the run and the refresh have to compute the same string, and only the employer's own band
+ * gives them one to agree on.
+ *
+ * NULL, NOT A REFUSAL, when the label names no skill of hers. That is not this rule declining her
+ * question, it is this rule having no question: a duration ask about something she has never
+ * listed is not about her stored profile at all, and later rules keep whatever behaviour they have
+ * today. Every other exit IS a refusal with a reason, because in each of those the question is
+ * hers, Litos looked, and Litos could not ground an answer.
+ */
+function skillScopedExperienceAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  options: readonly string[] | undefined,
+  asOf: Date,
+): { value: string } | { skipReason: string } | null {
+  const unit = experienceDurationUnit(label);
+  if (!unit) return null;
+  /* "Do you have 5+ years with Python?" is a Yes/No claim, not a quantity, and a band answer is not
+   * an answer to it. Refused for the same reason yearsOfExperienceAnswer refuses it. */
+  if (isPolarQuestion(label)) return null;
+  const scope = namedProfileSkill(label, ap.skills);
+  if (!scope) return null;
+  if ('ambiguous' in scope) {
+    return {
+      skipReason: `experience question left for you (it asks about ${scope.ambiguous.join(' and ')} at once, and those are different spans): "${label.slice(0, 60)}"`,
+    };
+  }
+  const { skill } = scope;
+  if (!DERIVABLE_DURATION_UNIT.test(unit)) {
+    return {
+      skipReason: `${skill} experience left for you (this asks in ${unit.toLowerCase()}, and your resume dates give months, not ${unit.toLowerCase()}): "${label.slice(0, 60)}"`,
+    };
+  }
+  const months = skillScopedExperienceMonths(ap.experience_periods, skill, asOf);
+  if (months === null) {
+    return { skipReason: `${skill} experience left for you (no dated role on your resume evidences it): "${label.slice(0, 60)}"` };
+  }
+  if (!options || options.length === 0) {
+    return { skipReason: `${skill} experience left for you (this control offered no bands to choose from): "${label.slice(0, 60)}"` };
+  }
+  const band = chooseExperienceBand(options, months);
+  return band
+    ? { value: band }
+    : { skipReason: `${skill} experience left for you (none of the offered bands holds your ${months} months): "${label.slice(0, 60)}"` };
+}
+
 export function resolveKnownAnswer(
   label: string,
   inputType: string,
@@ -8342,6 +8466,14 @@ export function resolveKnownAnswer(
    * the first). Null for a polar or a scoped ask, so those keep today's behaviour. */
   const yearsOfExperience = yearsOfExperienceAnswer(label, ap, options, asOf);
   if (yearsOfExperience) return yearsOfExperience;
+
+  /* IMMEDIATELY BELOW the total-tenure rule, and the order is the rule, not a convenience. An
+   * unscoped ask is settled above as her whole career; only what that rule declined reaches here,
+   * so a question about one named skill can never be answered from the total and the total can
+   * never be answered from one skill's subset. See skillScopedExperienceAnswer, and see the unit
+   * argument above it for why the hours question stays hers. */
+  const skillScopedExperience = skillScopedExperienceAnswer(label, ap, options, asOf);
+  if (skillScopedExperience) return skillScopedExperience;
 
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
