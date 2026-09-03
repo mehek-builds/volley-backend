@@ -94,17 +94,77 @@ export type SubmissionAuthorityRejectedShape =
 type FieldShape = SubmissionAuthorityRejectedShape | 'ok';
 
 /**
+ * EVERY FIELD NAME A REFUSAL MAY NAME, closed, 2026-09-03.
+ *
+ * `field` was `string` while the rejection lived only in a log line, and that was survivable there.
+ * It is not survivable now that the rejection travels to an authenticated caller: `string` is a slot
+ * an author can interpolate a value into, and the ONE promise this diagnosis makes is that the value
+ * that failed never leaves the server. A closed union makes that promise a compile error rather than
+ * a review convention, and `submissionAuthorityRefusalForWire` re-checks membership at run time for
+ * the case the compiler cannot see (a cast, a JSON round trip, a future caller).
+ *
+ * Fourteen names, in the order the branches evaluate them. Twelve of the fourteen belong to the
+ * seven `unpublishable_projection` sites (eighteen clauses); `projection.source` and
+ * `receipt.source` belong to `unpublishable_receipt_source`, which is a different repair and so
+ * keeps its own reason.
+ */
+export const SUBMISSION_AUTHORITY_REJECTED_FIELDS = [
+  'retry_safety.attemptId',
+  'retry_safety.resolvedAt',
+  'projection.attempt_id',
+  'projection.observed_at',
+  'projection.reasons',
+  'projection.packet_id',
+  'projection.canonical_application_id',
+  'projection.source',
+  'projection.tracker_stage',
+  'projection.submitted_at',
+  'receipt.source',
+  'receipt.captured_at',
+  'receipt.confirmation_text',
+  'receipt.final_url',
+] as const;
+
+export type SubmissionAuthorityRejectedField = typeof SUBMISSION_AUTHORITY_REJECTED_FIELDS[number];
+
+const REJECTED_FIELDS: ReadonlySet<string> = new Set(SUBMISSION_AUTHORITY_REJECTED_FIELDS);
+
+const REJECTION_BRANCHES: ReadonlySet<string> = new Set(['none', 'unverified', 'repair_required', 'confirmed']);
+
+const REJECTED_SHAPES: ReadonlySet<string> = new Set<SubmissionAuthorityRejectedShape>([
+  'absent',
+  'not_a_string',
+  'blank',
+  'uuid_malformed',
+  'uuid_version_unsupported',
+  'uuid_variant_unsupported',
+  'timestamp_unparseable',
+  'timestamp_not_strict_iso',
+  'timestamp_not_iso',
+  'empty_list',
+  'bound_to_other_packet',
+  'outside_client_vocabulary',
+  'not_https_url',
+  'oversize',
+  'out_of_order',
+]);
+
+/**
  * The one refusal a reader needs to act on: which branch classified the packet, which field of the
  * shape that branch would have emitted failed, and how.
  *
- * Three stable keys, like the wire marker, and for the same reason. Unlike the marker this never
- * goes on the wire: `submissionAuthorityUnavailableMarker` is still exactly
+ * Three stable keys, like the wire marker, and for the same reason. All three are drawn from closed
+ * vocabularies and none of them is derived from a value, which is what lets this record travel to an
+ * authenticated caller (see submissionAuthorityRefusalForWire) while the identifier or timestamp
+ * that failed stays on the server.
+ *
+ * It still does not travel on `submission_authority_unavailable`. That marker is still exactly
  * {schema_version, packet_id, reason}, so no client parser sees a key or a reason it does not
- * already know. This record is for the server's own log line.
+ * already know; the diagnosis reaches its reader through a route of its own instead.
  */
 export type SubmissionAuthorityRejection = {
   branch: 'none' | 'unverified' | 'repair_required' | 'confirmed';
-  field: string;
+  field: SubmissionAuthorityRejectedField;
   shape: SubmissionAuthorityRejectedShape;
 };
 
@@ -162,7 +222,7 @@ export function submissionAuthorityProjectionTimestampShape(value: unknown): Fie
  */
 function firstRejection(
   branch: SubmissionAuthorityRejection['branch'],
-  fields: ReadonlyArray<readonly [string, FieldShape]>,
+  fields: ReadonlyArray<readonly [SubmissionAuthorityRejectedField, FieldShape]>,
 ): SubmissionAuthorityRejection | undefined {
   for (const [field, shape] of fields) {
     if (shape !== 'ok') return { branch, field, shape };
@@ -432,19 +492,39 @@ export type PacketSubmissionAuthorityUnavailable = {
 /**
  * A refusal, and - when a field shape is what caused it - which field and which shape.
  *
- * `reason` is unchanged and stays the ONLY thing that reaches the wire. `rejected` is present
- * exactly when a shape check refused the card, and absent when the reason is already the whole
- * story (`projection_read_failed`, `revision_not_canonical`, `boundary_authorized`,
+ * `reason` is unchanged and stays the ONLY thing the board's own marker carries. `rejected` is
+ * present exactly when a shape check refused the card, and absent when the reason is already the
+ * whole story (`projection_read_failed`, `revision_not_canonical`, `boundary_authorized`,
  * `inconsistent_retry_evidence`). An optional member is right here where it is wrong on the wire
- * marker: a log reader branching on "did a field fail" is reading the answer, while a client
+ * marker: a diagnostic reader branching on "did a field fail" is reading the answer, while a client
  * branching on which keys arrived is guessing at authority.
  *
- * WHY THIS IS A LOG RECORD AND NOT A NEW REASON. `SubmissionAuthorityUnavailableReason` is a closed
- * vocabulary a deployed dashboard parses, and the checkout of role-quick-website on this machine
- * carries no reader for it at all - which is evidence that clone is behind the dashboard that
- * shipped the check (role-quick-website #466, 2026-08-31, named in this file's own comments), not
- * evidence the vocabulary is free. Widening a contract on the strength of a stale clone is how a
- * card stops rendering; the diagnosis costs nothing on the wire, so it does not go there.
+ * WHY THIS IS STILL NOT A NEW REASON, AND STILL NOT A KEY ON THE MARKER. #894 declined to widen the
+ * wire because the role-quick-website checkout on this machine carried no reader for
+ * `submission_authority` at all. That was the right call on better evidence than it knew: the
+ * checkout is a shallow clone whose main tree is effectively its 2026-08-26 clone state, and its
+ * BoardCard type (features/applications/infrastructure/applications-api.ts:177) does not even name
+ * `run_revision`, a field this backend has been sending for weeks. The readers are on this machine,
+ * in a sibling worktree of the same repo, and they were read on 2026-09-03 (rq-counter, branch
+ * fix/home-sent-count-survives-a-failed-inventory, 2026-09-02):
+ *
+ *   - `exactKeys` is applied to the ENVELOPE, its projection and its receipt
+ *     (domain/submission-authority-envelope.ts:174) and to nothing else. Neither the card nor the
+ *     response root is key-checked, and infrastructure/response-shape.ts:184 spreads unknown
+ *     top-level keys straight through;
+ *   - a card with no envelope is ABSENT rather than corrupt, and the collection check skips it
+ *     (domain/board-submission-authority.ts:29 and :58), so one unpublishable card no longer takes
+ *     the whole board down;
+ *   - `submission_authority_unavailable` appears ZERO times in that tree. The marker below is read
+ *     by nothing.
+ *
+ * So an additive key on the marker would very likely have been inert too. "Very likely", against a
+ * worktree that may not be the deployed commit, is not the standard this contract is held to, and a
+ * quarantined card cannot be sent, which is the exact failure being diagnosed.
+ *
+ * So the rejection reaches its reader by a route that publishes no card at all - see
+ * `submissionAuthorityRefusalForWire` and GET /applications/board/authority-rejections. A surface
+ * that publishes no card cannot quarantine one, whatever the deployed reader turns out to do.
  */
 export type SubmissionAuthorityPublication =
   | { published: true; envelope: PacketSubmissionAuthorityEnvelope }
@@ -460,6 +540,103 @@ export function submissionAuthorityUnavailableMarker(
   reason: SubmissionAuthorityUnavailableReason,
 ): PacketSubmissionAuthorityUnavailable {
   return { schema_version: SUBMISSION_AUTHORITY_SCHEMA_VERSION, packet_id: packetId, reason };
+}
+
+/**
+ * ONE REFUSED PACKET, as the diagnostic route publishes it.
+ *
+ * Deliberately NOT part of any card, any envelope or any marker. #894 put the branch, the field and
+ * the shape in two server log lines, which was the right first move and turned out to be an
+ * unreadable one: Litos runs on Railway, and the person debugging this has no log reader, so the
+ * largest send blocker on the account (163 of 200 packets on 2026-09-03) stayed unfalsifiable from
+ * every surface she can actually reach. This type is that same record on a surface she can read.
+ *
+ * A CLASSIFICATION, NEVER A VALUE. `reason`, `branch` and `shape` are closed unions; `field` is
+ * closed as of 2026-09-03 (SUBMISSION_AUTHORITY_REJECTED_FIELDS). The identifier, timestamp, URL or
+ * receipt text that failed is not carried, not hashed and not truncated into any of them: an
+ * attempt id is an internal identifier and stays one, and `uuid_version_unsupported` is the whole of
+ * what a reader is told about it. `packet_id` is the caller's own row id, which the caller supplied
+ * to get here.
+ */
+export type SubmissionAuthorityRefusal = {
+  packet_id: string;
+  reason: SubmissionAuthorityUnavailableReason;
+  rejected?: SubmissionAuthorityRejection;
+};
+
+/**
+ * The refusal for one packet, or `undefined` when the packet published.
+ *
+ * THE MEMBERSHIP RE-CHECK IS THE POINT. `field` and `shape` are closed unions, so the compiler
+ * already refuses an interpolated value at every site in this file. This function refuses one again
+ * at run time, because the compiler cannot see a cast, a structuredClone or a caller that builds a
+ * rejection from parsed JSON, and a leaked identifier is not a bug you get to fix after it has been
+ * served. An unrecognised branch, field or shape drops the whole `rejected` record and keeps the
+ * reason, which degrades this route to exactly what #894 already published.
+ */
+export function submissionAuthorityRefusalForWire(
+  packetId: string,
+  publication: SubmissionAuthorityPublication,
+): SubmissionAuthorityRefusal | undefined {
+  if (publication.published) return undefined;
+  const rejected = publication.rejected;
+  /* Rebuilt key by key rather than spread, for the same reason the dashboard's own seed builder
+   * projects a document mark field by field: a spread copies whatever the record happens to hold,
+   * and this is the one function standing between an internal identifier and a response body. */
+  const classified = rejected !== undefined
+    && REJECTION_BRANCHES.has(rejected.branch)
+    && REJECTED_FIELDS.has(rejected.field)
+    && REJECTED_SHAPES.has(rejected.shape)
+    ? { branch: rejected.branch, field: rejected.field, shape: rejected.shape }
+    : undefined;
+  return {
+    packet_id: packetId,
+    reason: publication.reason,
+    ...(classified ? { rejected: classified } : {}),
+  };
+}
+
+/** One (reason, branch, field, shape) cell of the refusal census, with the packets it covers. */
+export type SubmissionAuthorityRefusalTally = {
+  reason: SubmissionAuthorityUnavailableReason;
+  branch?: SubmissionAuthorityRejection['branch'];
+  field?: SubmissionAuthorityRejectedField;
+  shape?: SubmissionAuthorityRejectedShape;
+  packets: number;
+};
+
+/**
+ * The refusals grouped, largest class first.
+ *
+ * THIS IS THE ANSWER THE COUNT COULD NOT GIVE. "163 packets say `unpublishable_projection`" is a
+ * count over seven return sites and eighteen clauses. "159 packets say (none,
+ * retry_safety.attemptId, uuid_version_unsupported) and 4 say (confirmed, receipt.final_url,
+ * not_https_url)" is two repairs, ranked, from one request. Ordered by packet count and then by the
+ * key itself, so two runs over the same data print the same table and a diff between two days is a
+ * diff about the packets rather than about map iteration order.
+ */
+export function submissionAuthorityRefusalTallies(
+  refusals: readonly SubmissionAuthorityRefusal[],
+): SubmissionAuthorityRefusalTally[] {
+  const byKey = new Map<string, SubmissionAuthorityRefusalTally>();
+  for (const refusal of refusals) {
+    const cell: SubmissionAuthorityRefusalTally = {
+      reason: refusal.reason,
+      ...(refusal.rejected
+        ? { branch: refusal.rejected.branch, field: refusal.rejected.field, shape: refusal.rejected.shape }
+        : {}),
+      packets: 0,
+    };
+    const key = [cell.reason, cell.branch ?? '', cell.field ?? '', cell.shape ?? ''].join('|');
+    const existing = byKey.get(key);
+    if (existing) existing.packets += 1;
+    else byKey.set(key, { ...cell, packets: 1 });
+  }
+  return [...byKey.entries()]
+    .sort(([leftKey, left], [rightKey, right]) => (
+      right.packets - left.packets || (leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0)
+    ))
+    .map(([, tally]) => tally);
 }
 
 /**

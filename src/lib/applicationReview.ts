@@ -123,6 +123,52 @@ export type ApplicationReviewQuestion = {
    * is gone. See ANSWER_CLAIM_FIELDS below. */
   consent_permission_granted_at?: string;
   consent_permission_version?: string;
+  /**
+   * THE EXACT QUESTION TEXT SHE WAS LOOKING AT WHEN SHE CONFIRMED THIS ANSWER, and nothing else.
+   *
+   * WHAT IT IS FOR, which is one thing only: it is the single piece of provenance the sensitive
+   * question gate is allowed to accept as "the applicant made this declaration herself". See
+   * applicantConfirmedSensitiveAnswer in questionDiscovery.ts.
+   *
+   * WHY answer_source WAS NOT ENOUGH, and this is the whole reason the field exists rather than a
+   * refinement of one that does. 'applicant_review' is minted by three different writers and two of
+   * them are blanket: applyApplicantReviewedAnswers stamps EVERY non-blank answer in a PUT /review
+   * body, and applicantSuppliedAnswer below mints on any answer that merely differs from the stored
+   * one. Both are correct for what they claim - a review round happened, an answer moved - and
+   * neither can distinguish "she read this legal declaration and affirmed it" from "a list went past
+   * her". That distinction is the entire content of the sensitive gate, so keying the gate on
+   * 'applicant_review' would have let a machine-derived legal declaration through the one gate built
+   * to stop exactly that. The 802-answer laundering documented at the mint site is what that looks
+   * like in production, and 'do you now or will you in the future require immigration sponsorship'
+   * -> 'Yes' was one of the 802.
+   *
+   * SO IT HAS EXACTLY ONE WRITER: applicantConfirmedAnswer below, which fires only on a request that
+   * carried `confirmed: true` for this specific question. That flag is accepted by exactly one body
+   * schema, reviewAnswersBodySchema on PUT /applications/:id/review/answers, and set by exactly one
+   * control, the dashboard's per-question CONFIRM. No resolver, no drafter, no fill, no rebuild and
+   * no blanket stamp can produce it, because none of them submits that flag. Unmintable by a machine
+   * is a property of the writer list, not of the value, which is why the value is deliberately
+   * boring.
+   *
+   * IT STORES THE LABEL RATHER THAN A BARE `true`, and that is what makes it self-verifying. As an
+   * ANSWER-CLAIM it dies when the answer changes, which covers half of what a confirmation asserts;
+   * the other half is WHICH QUESTION she was answering, and an answer-claim survives a rename by
+   * rule. A confirmation of "do you require sponsorship in the United States?" must not carry over
+   * to "do you require sponsorship in the United Kingdom?" still reading "Yes" - for this applicant
+   * those two have different true answers, which is the whole reason the resolver refuses the
+   * multi-country wording. So the reader compares this against the question's CURRENT text and a
+   * rename breaks the proof on its own, without depending on any carry rule remembering to.
+   *
+   * NO TIMESTAMP, deliberately. answer_reviewed_at already dates the round, and a second date would
+   * be a second copy of the frozen-round defect (submittedAnswers.ts computes
+   * `questions_reviewed_at ?? now()`, so the round does not advance and every later claim carries the
+   * first review's date). One thing to fix is better than two, and the gate does not need a date:
+   * what it needs is that this answer, under this text, was affirmed.
+   *
+   * Optional forever, jsonb, no migration. Absence reads as "not confirmed", which is what every
+   * record written before this field existed honestly is.
+   */
+  answer_confirmed_of?: string;
 };
 
 /* ---- the two kinds of provenance, and the rule that keys each one ----
@@ -156,16 +202,28 @@ type AnswerProvenanceField =
   | 'answer_option_source'
   | 'answer_override_of'
   | 'consent_permission_granted_at'
-  | 'consent_permission_version';
+  | 'consent_permission_version'
+  | 'answer_confirmed_of';
 
 /** Keyed on RECORD IDENTITY. Falsified by a rename or a stale review round. */
 export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as const;
-/** Keyed on THE ANSWER. Falsified only by replacing the answer. */
+/** Keyed on THE ANSWER. Falsified only by replacing the answer.
+ *
+ * answer_confirmed_of is on THIS list and not the other one, which looks backwards for something
+ * whose whole subject is what the applicant did, and is not. An applicant-claim is keyed on record
+ * identity, which includes the review ROUND, and a confirmation that expired every time the round
+ * moved would put the sensitive gate straight back into the dead end this field exists to open: she
+ * confirms, the round advances for an unrelated reason, and the send refuses again with no action
+ * left for her to take. What must falsify a confirmation is the answer changing, which is exactly
+ * the answer-claim rule; the other half - that the QUESTION has not been renamed underneath it - the
+ * field carries in its own value and its reader checks directly, so it needs no help from the carry
+ * rule here. */
 export const ANSWER_CLAIM_FIELDS = [
   'answer_option_source',
   'answer_override_of',
   'consent_permission_granted_at',
   'consent_permission_version',
+  'answer_confirmed_of',
 ] as const;
 
 /* The partition, enforced by the compiler rather than by a reviewer.
@@ -388,6 +446,23 @@ export function mergeSubmittedApplicationReviewQuestions(
    * profile to build it from and it stamps every non-empty answer itself anyway.
    */
   resolverAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
+  /**
+   * What Litos itself would WRITE INTO THIS CONTROL for the question, from
+   * submittedAnswers.machineAnswerLookup.
+   *
+   * THE OTHER HALF OF resolverAnswerFor, and it exists because those two are different strings on
+   * every snapped control. resolverAnswerFor is `resolveKnownAnswer`: what the answer IS, from the
+   * profile. This is `resolveProfileField`: the same answer written in the employer's own option
+   * text. The fill, the runner and the packet audit all resolve through the second one, and the
+   * review screen therefore DISPLAYS the second one - so a body that merely echoes the screen
+   * carries a string the first lookup has never heard of.
+   *
+   * READ BY ONE LINE, `applicantSuppliedAnswer`, and deliberately not by the override below: an
+   * override has to name the PRE-SNAP value it was made against or its own currency check can never
+   * pass. See machineAnswerLookup for the production record that forced this, and the mint gate for
+   * why an echo is not a choice.
+   */
+  machineAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
 ): ApplicationReviewQuestion[] {
   const submittedByQuestion = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number }>();
   const submittedByUniqueId = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number } | undefined>();
@@ -521,9 +596,50 @@ export function mergeSubmittedApplicationReviewQuestions(
     const resolverAnswer = resolverAnswerFor?.(question)?.trim() || undefined;
     const submittedAnswer = submittedQuestion.answer.trim();
     const submittedIsResolverValue = resolverAnswer !== undefined && submittedAnswer === resolverAnswer;
-    const applicantSuppliedAnswer = Boolean(
+    /* AND THE SAME TEST AGAINST THE STRING THE MACHINE ACTUALLY WRITES, which on a snapped control
+     * is not the string above.
+     *
+     * THE DEFECT, MEASURED IN PRODUCTION 2026-09-03 on packet 4a79eec1 (Hudson River Trading,
+     * greenhouse). The required gender control offers Woman / Man / Non-binary / I don't wish to
+     * answer; her profile says `Female`; the packet came back holding
+     *
+     *   answer "Woman", answer_source "applicant_review", answer_override_of "Female",
+     *   answer_reviewed_at "2026-09-01T21:28:12.934Z", equal to questions_reviewed_at
+     *
+     * asserting she reviewed that control two days earlier and overrode `Female` with `Woman`. She
+     * did not, and on 2026-09-01 no code in the repo could produce `Woman` for this label. This
+     * expression and the round it stamps are the whole of it, reproduced byte for byte in
+     * applicantClaimIsNotAnEcho.test.ts.
+     *
+     * WHY THE LINE ABOVE MISSED IT, in one step. `resolveKnownAnswer` decides what the answer IS
+     * from the profile; `resolveProfileField` decides how that same answer is WRITTEN into this
+     * particular control, snapping it onto the employer's own option text. Every path that fills a
+     * form or shows her a packet resolves through the second one, so the review screen renders
+     * `Woman` - and the client posts back the whole list it was rendering. The gate above asked only
+     * the first, so a snapped value looked like bytes she had typed.
+     *
+     * WHY THAT ONE FALSE STAMP IS NOT SELF-CORRECTING, which is what makes it worth a second
+     * lookup. refreshKnownQuestionAnswers returns a question untouched when
+     * `applicantReviewedCurrentAnswer && reviewedAnswerIsAnOfferedOption(...)`, ahead of every
+     * recompute rule. A machine value that acquires this claim is therefore immune to correction by
+     * any resolver Litos ships afterwards, permanently. On the HRT record the value happened to be
+     * right; the mechanism stamps whatever the resolver produced, right or wrong, and the same
+     * merge writes gender, disability and veteran answers.
+     *
+     * SEPARATE FROM submittedIsResolverValue rather than folded into it, because they have
+     * different readers. Only this line reads the snapped value: `applicantConfirmedAnswer` below
+     * stays deaf to both, so an explicit per-question confirmation still mints her claim over a
+     * machine value, and the override branch still names the PRE-SNAP resolver value, which is the
+     * only string its own currency check can recompute. */
+    const bodyChangedTheAnswer = Boolean(
       questionsReviewedAt && submittedAnswer && !answerUnchanged && !submittedIsResolverValue,
     );
+    /* Asked LAST and only of a body that has already survived every cheaper test, because the
+     * lookup runs a full profile resolution per question and the overwhelming majority of rows in a
+     * save are untouched. Nothing about the order changes the verdict. */
+    const submittedIsMachineValue = bodyChangedTheAnswer
+      && submittedAnswer === (machineAnswerFor?.(question)?.trim() || undefined);
+    const applicantSuppliedAnswer = bodyChangedTheAnswer && !submittedIsMachineValue;
     /* HER EXPLICIT CONFIRMATION, WHICH NO DIFF CAN EXPRESS. The two tests above exist to stop an
      * untouched Save being read as a choice, and they are right - but a CONFIRMED question is not an
      * untouched Save. The client sets the flag only on a question she deliberately confirmed, so the
@@ -603,6 +719,7 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
+      answer_confirmed_of: _answerConfirmedOf,
       ...questionWithoutProvenance
     } = question;
     /* Every ANSWER-CLAIM rides on `answerUnchanged`, by the rule above rather than field by field.
@@ -685,6 +802,67 @@ export function mergeSubmittedApplicationReviewQuestions(
       /* Beside the claim and never without it, because it is only meaningful as the other half of
        * that claim. See overriddenResolverValue. */
       ...(overriddenResolverValue ? { answer_override_of: overriddenResolverValue } : {}),
+      /* AND WHEN THE GATE ABOVE REFUSED THE CLAIM, THE MACHINE'S OWN RECORD TAKES ITS PLACE.
+       *
+       * REFUSING A CLAIM IS NOT A NO-OP, and that is the whole of this clause. `submittedIsMachineValue`
+       * can only be true while `bodyChangedTheAnswer` is true, so every save it fires on is one where
+       * the answer on the row is being REPLACED - which means `answerUnchanged` is false, which means
+       * the strip above has already dropped `answer_option_source` with the rest of the answer-claims.
+       * Leaving it dropped hands refreshKnownQuestionAnswers a bare string with no provenance at all:
+       * every keep branch misses, the answer is recomputed to the UN-SNAPPED profile wording, and on a
+       * strict closed control reopenUnfitClosedChoiceQuestions then blanks it. Measured end to end on
+       * the HRT round with `eeo_prefs.gender = "Female"`, before this clause existed:
+       *
+       *   stored "Man",  body "Woman"                        ->  ""    (draft "Female")
+       *   stored "",     body "Woman"  (the re-opened row)   ->  ""
+       *   veteran, body "I am not a protected veteran"       ->  "No"  (on no option the control offers)
+       *   disability, body "No, I do not have a disability"  ->  "No"  (same)
+       *
+       * So declining to say SHE chose it was destroying the answer or rewriting it to a string the
+       * employer's control does not offer, which is the ANSWERED-with-nothing-selected divergence the
+       * self-identification keep branch exists to prevent.
+       *
+       * The honest record is not silence, it is the OTHER provenance: this value is a machine snap, and
+       * `answer_option_source` is the field that says so. The value written is `resolverAnswer`, the
+       * pre-snap string, because that is precisely what refreshKnownQuestionAnswers recomputes to test
+       * whether the snap is still current - the same rule, the same string and the same reason as
+       * optionSnapClaim on the fill path, which records `profileKnown.value` beside the snapped answer.
+       * With it, the employer's own spelling stands on the row and the packet says truthfully that
+       * Litos put it there.
+       *
+       * ONLY WHEN A PRE-SNAP STRING EXISTS, and refusing without writing one is safe there rather than
+       * a second version of the bug. `resolveProfileField` returns null unless `resolveKnownAnswer`
+       * gave it a value, and `knownAnswerLookup` asks that same resolver, so a row with no
+       * `resolverAnswer` is one the refresh also has no value for - and the refresh leaves such a row
+       * exactly as it stands. Measured: a "rate your C++ skill level" select resolves to nothing on
+       * both lookups, the refresh returns it untouched, and an edit of it still mints her claim. No
+       * resolver value means nothing recomputes, so there is nothing for a derivation record to
+       * protect, and a derivation that cannot be checked is the kind of claim this file exists to
+       * keep off a packet. Written last so it wins over anything carriedForward brought along, and
+       * never on a branch that minted an applicant claim: the two are alternatives, not neighbours. */
+      ...(submittedIsMachineValue && resolverAnswer ? { answer_option_source: resolverAnswer } : {}),
+      /* THE ONE WRITER OF THE ONE PROVENANCE THE SENSITIVE GATE ACCEPTS.
+       *
+       * Gated on applicantConfirmedAnswer ALONE, and deliberately not on applicantSuppliedAnswer
+       * beside it, which is the difference between this field and the answer_source above. An edit
+       * mints an applicant-claim because an answer moved and only she moves answers, and that is a
+       * true and useful thing to record - but it is inferred from a diff, and a diff cannot tell
+       * "she read this legal declaration and chose Yes" from "something posted a different string".
+       * For a REFUSED question the second test that normally guards the inference is dead by
+       * construction: the resolver returns no value, so submittedIsResolverValue is always false and
+       * `!answerUnchanged` is the only barrier left. A confirmation is not inferred from anything -
+       * the request states it, per question, for this exact text - and that is the whole reason the
+       * gate can accept it.
+       *
+       * `question.question` and not the submitted label, matching the `question:` line above. The
+       * stored text is the form identity; applicantConfirmedAnswer has already required the two to
+       * be equal, so this is that decision written down rather than a second copy of it.
+       *
+       * Recorded for EVERY confirmed answer, not only the sensitive ones. What it asserts - she was
+       * shown these words and affirmed this value - is equally true of a confirmed graduation date,
+       * and a writer that has to work out whether a label is sensitive before recording the truth
+       * about it is a writer that will get that test wrong somewhere. The gate does the selecting. */
+      ...(applicantConfirmedAnswer ? { answer_confirmed_of: question.question } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
@@ -707,6 +885,11 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
+      /* And this one for a fourth reason that matters more than the other three: it is the only
+       * provenance the sensitive question gate accepts, so a caller allowed to send it could open
+       * that gate by asserting its own conclusion. There is no stored question here for her to have
+       * been shown, which is precisely why a confirmation of one cannot be true. */
+      answer_confirmed_of: _answerConfirmedOf,
       /* The request flag, spent above and never stored: a persisted `confirmed` would be a second,
        * uncheckable copy of the claim answer_source already carries. */
       confirmed: _confirmed,
@@ -1682,7 +1865,24 @@ export function applyApplicationReviewEdit(
   const reviewedAt = new Date().toISOString();
   const mergedQuestions = mergeSubmittedApplicationReviewQuestions(
     current.questions,
-    edit.questions,
+    /* THE CONFIRMATION FLAG IS NOT THIS ROUTE'S TO CARRY, stripped here rather than left to a schema
+     * in another file.
+     *
+     * PUT /review is the BLANKET stamp path: applyApplicantReviewedAnswers below claims every
+     * non-blank answer in the body as hers, which is the writer the 802-answer laundering came
+     * through. `confirmed` is the one byte that mints answer_confirmed_of, and answer_confirmed_of is
+     * the only provenance the sensitive question gate accepts, so a blanket route that could also
+     * carry confirmations would be a blanket route that can open that gate.
+     *
+     * reviewBodySchema does not list the key and zod strips it, so nothing reaches here carrying one
+     * today. This makes that a property of the FUNCTION rather than of a schema someone can widen
+     * without ever opening this file, and it is the sort of thing worth being boring about: the cost
+     * is one map, and the thing on the other side is a legal declaration on a live application.
+     * Confirmations have one surface, PUT /review/answers, and it is the narrow one. */
+    edit.questions.map((question) => {
+      const { confirmed: _confirmed, ...withoutRequestFlag } = question as SubmittedApplicationReviewQuestion;
+      return withoutRequestFlag as ApplicationReviewQuestion;
+    }),
     current.questions_reviewed_at,
   );
   return {

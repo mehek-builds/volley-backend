@@ -2195,6 +2195,74 @@ function comparableAnswer(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * DID THE APPLICANT HERSELF MAKE THIS DECLARATION, on this exact question, for this exact answer.
+ *
+ * THE DEAD END THIS OPENS, traced end to end on packet 4a79eec1 (Hudson River Trading, greenhouse)
+ * on 2026-09-03. The packet was ready_for_final_approval with the server audit passed, 27 of 27
+ * questions answered, 46 fields filled and the resume verified on the employer's own form, and
+ * every press of Send answered 422:
+ *
+ *   Sensitive question requires your attention: will you now, or in the future, require visa
+ *   sponsorship to legally work in the country specified for this position?
+ *
+ * The question was answered "Yes", by her, with answer_source 'applicant_review'. The refusal was
+ * not a bug in the resolver: HRT's posting lists Austin, Chicago, New York, London and Singapore,
+ * "the country specified for this position" therefore names three countries, and her position
+ * differs between them - authorized now in the US on F-1 CPT/OPT with no sponsorship needed yet,
+ * sponsorship needed in the UK and Singapore. workEligibilityAnswer refuses a multi-country
+ * sponsorship label for exactly that reason and R-004 is the logged incident where guessing one sent
+ * a false legal declaration to an employer. The refusal is right and stays.
+ *
+ * THE BUG WAS THAT HER ANSWER WAS NEVER AN INPUT. sensitiveQuestionRequiresAttention asked one
+ * question - does the resolver independently compute this same value - and a refusal makes that
+ * false forever. So a sensitive question the resolver cannot answer could never be cleared by her
+ * answering it: she could answer correctly, have it stamped reviewed, and the send would still
+ * refuse, on this packet and on every multi-country posting after it. There was no reachable path,
+ * which is what makes it a dead end rather than a strict gate.
+ *
+ * THE PRINCIPLE. The gate exists to stop THE MACHINE filing an unreviewed legal declaration. It must
+ * not stop HER from making one. So a sensitive question is satisfied when the applicant has
+ * genuinely answered it herself, and is not satisfied by a machine answer she has never seen.
+ *
+ * AND THE ONLY THING THAT PROVES THE FIRST WITHOUT ADMITTING THE SECOND is answer_confirmed_of. It
+ * is tempting to read answer_source 'applicant_review' here and it would be wrong: that stamp has
+ * three writers, two of which are blanket (applyApplicantReviewedAnswers over a whole PUT /review
+ * body, and applicantSuppliedAnswer over any answer that merely differs from the stored one), and
+ * the 802-answer laundering is the measured case of a machine value wearing it - sponsorship
+ * included. answer_confirmed_of has one writer, fired only by a per-question `confirmed: true` that
+ * one body schema accepts and one dashboard control sends. See its doc in applicationReview.ts.
+ *
+ * THE THREE TESTS, none of which is decoration:
+ *   - NOT A NEVER_FILL LABEL. An SSN or a CAPTCHA is refused whatever anybody confirms; those are
+ *     not declarations Litos may carry at all. Same order as the gate below, so the two agree.
+ *   - THE ANSWER IS NOT BLANK. A blank is not a declaration and cannot have been affirmed.
+ *   - THE CONFIRMATION NAMES THIS QUESTION'S CURRENT TEXT, byte for byte. The stored claim is what
+ *     makes a rename detectable: a confirmation made against the United States wording must not
+ *     carry over to a United Kingdom one, and for this applicant those two have different true
+ *     answers. Byte equality rather than questionKey, matching every other exact-identity test in
+ *     this codebase, because a rename that folds to the same key is still a different sentence in
+ *     front of an employer.
+ *
+ * The answer half needs no test here: answer_confirmed_of is an ANSWER-CLAIM, so the merge drops it
+ * the moment the answer changes and no confirmation can survive onto a value it was not made for.
+ *
+ * Read by two callers on purpose - this gate, and refreshKnownQuestionAnswers' refusal branch, which
+ * would otherwise blank the very answer this proves is hers. One rule, two readers, so they cannot
+ * drift apart into "she confirmed it and the refresh deleted it".
+ */
+export function applicantConfirmedSensitiveAnswer(question: {
+  question?: string;
+  answer?: string;
+  answer_confirmed_of?: unknown;
+}): boolean {
+  const label = question.question ?? '';
+  if (!label || !isRefusedQuestion(label)) return false;
+  if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return false;
+  if (!(question.answer ?? '').trim()) return false;
+  return typeof question.answer_confirmed_of === 'string' && question.answer_confirmed_of === label;
+}
+
 export function sensitiveQuestionRequiresAttention(
   label: string,
   answer: string,
@@ -2203,11 +2271,55 @@ export function sensitiveQuestionRequiresAttention(
   jdText: string | undefined,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* The question record this label came off, when the caller has it. Only answer_confirmed_of is
+   * read. OPTIONAL so every existing caller keeps its exact behaviour - absence is "no confirmation
+   * on file", which is what a caller that cannot supply one honestly means, and what every record
+   * written before the field existed is. */
+  confirmation?: { answer_confirmed_of?: unknown },
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
+  /* AHEAD of the resolver, because the resolver has nothing to say about this question: for the
+   * whole family this branch exists for it returns a skipReason by design, and running it first is
+   * what made the refusal permanent. Her own confirmation settles the question the resolver
+   * declined, which is the only order in which the gate has an exit. */
+  if (applicantConfirmedSensitiveAnswer({
+    question: label,
+    answer,
+    answer_confirmed_of: confirmation?.answer_confirmed_of,
+  })) return false;
   const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+}
+
+/**
+ * THE SEND GATE FOR A CALLER THAT HAS THE WHOLE QUESTION RECORD, which is every send gate there is.
+ *
+ * IT EXISTS BECAUSE THE OPTIONAL ARGUMENT ABOVE IS A TRAP, and mutation testing is what said so
+ * rather than taste. Deleting the `question` argument from the route's call - one token, no type
+ * error, no test failure anywhere in the suite - silently reverts this entire change: the gate goes
+ * back to never seeing her confirmation, every confirmed sensitive answer starts refusing again, and
+ * the packet returns to the dead end with nothing red to say so. That is the unwired-module class:
+ * a feature whose implementation is correct and whose call site quietly stops using it.
+ *
+ * So the record is the FIRST and a REQUIRED parameter here, and callers holding a question use this.
+ * Dropping it is now a compile error instead of a regression nobody can see. The optional-argument
+ * form stays for the label-only callers and the tests that exercise the rule directly.
+ *
+ * 'text' matches knownAnswerLookup's own hardcoded input type, so the gate and the refresh resolve
+ * the same label the same way. See the comment there about a 'select' degree control resolving to
+ * something the refresh never returns.
+ */
+export function reviewQuestionRequiresAttention(
+  question: { question: string; answer: string; answer_confirmed_of?: unknown },
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+  postingCountry?: JobCountry,
+  postingCountryCode?: string,
+): boolean {
+  return sensitiveQuestionRequiresAttention(
+    question.question, question.answer, 'text', ap, jdText, postingCountry, postingCountryCode, question,
+  );
 }
 
 export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
@@ -2400,6 +2512,10 @@ function withoutAnswerProvenance<T>(question: T): T {
     answer_override_of: _answerOverrideOf,
     consent_permission_version: _consentPermissionVersion,
     consent_permission_granted_at: _consentPermissionGrantedAt,
+    /* A confirmation is a statement about a VALUE she was shown, so it cannot outlive that value
+     * any more than the option derivation beside it can. Every branch reaching this helper is
+     * rewriting or blanking the answer. */
+    answer_confirmed_of: _answerConfirmedOf,
     ...rest
   } = question as T & {
     answer_source?: unknown;
@@ -2408,6 +2524,7 @@ function withoutAnswerProvenance<T>(question: T): T {
     answer_override_of?: unknown;
     consent_permission_version?: unknown;
     consent_permission_granted_at?: unknown;
+    answer_confirmed_of?: unknown;
   };
   return rest as T;
 }
@@ -2599,6 +2716,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       answer_override_of?: unknown;
       consent_permission_version?: unknown;
       consent_permission_granted_at?: unknown;
+      answer_confirmed_of?: unknown;
     };
     const applicantReviewedCurrentAnswer = Boolean(
       question.answer.trim()
@@ -2656,12 +2774,8 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
      * it was not derived from is a lie the next reader has no way to detect: a record reading
      * answer "May 2028" with answer_option_source "May 2027" claims a snap that never happened. The
-     * one branch that keeps the answer keeps it, which is the whole point of recording it. */
-    /* answer_option_source goes with the answer it describes, and only ever with that answer.
-     *
-     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
-     * it was not derived from is a lie the next reader has no way to detect. The consent grant is
-     * the same kind of claim and drops on the same rule. */
+     * one branch that keeps the answer keeps it, which is the whole point of recording it. The
+     * consent grant and the confirmation are the same kind of claim and drop on the same rule. */
     /* The field list itself lives on withoutAnswerProvenance, so this rule and the snap's cannot
      * drift into two different ideas of what belongs to an answer. */
     const withoutProvenance = (): T => withoutAnswerProvenance(withProvenance) as T;
@@ -2874,6 +2988,18 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
           answer_override_of: _overrideOf,
           consent_permission_granted_at: _grantedAt,
           consent_permission_version: _grantVersion,
+          /* answer_confirmed_of IS NOT ON THIS LIST, and leaving it off is the decision rather than
+           * an oversight. Every field above is dropped because it describes a derivation or a grant
+           * that this branch has just made unprovable or untrue. A confirmation describes neither:
+           * it says she was shown this exact text and affirmed this exact value, and this branch is
+           * the one place that proves nothing moved - same label, same answer, byte for byte. It is
+           * as true here as the applicant-claim beside it, which is kept for the identical reason.
+           *
+           * Only an EEO label can reach this line while carrying a confirmation, since a refused
+           * sponsorship question resolves to a skipReason and never enters this block at all. On
+           * that label the gate would pass on the resolver's own agreement anyway, so keeping the
+           * record changes no verdict; it stops the record lying about itself, which is what the
+           * paragraph above claims for the applicant-claim and is worth the same here. */
           ...withApplicantClaim
         } = withProvenance;
         return withApplicantClaim as T;
@@ -2901,7 +3027,30 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
     }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
       || Boolean(label && isRefusedQuestion(label));
-    if (currentResolverRefuses && !applicantReviewedCurrentAnswer) {
+    /* HER CONFIRMATION KEEPS HER ANSWER, and without this the gate's exit is unreachable in
+     * production even though the gate itself is correct.
+     *
+     * This line blanks any answer to a refused question that cannot prove it came from her, which is
+     * right and is what stops an earlier run's resolution replaying as a declaration. The proof it
+     * accepts is applicantReviewedCurrentAnswer, which requires answer_reviewed_at to equal the
+     * CURRENT round - so it holds only while the round stands still. It stands still today because
+     * submittedAnswers.ts computes `questions_reviewed_at ?? now()` and never advances it, and the
+     * moment that is fixed - it is being fixed - a confirmed sponsorship answer would start being
+     * blanked on the next unrelated save, the send would refuse for a blank required answer instead
+     * of an unconfirmed sensitive one, and this packet would be back in a dead end wearing a
+     * different sentence.
+     *
+     * A confirmation is not keyed on the round for exactly that reason, so it is the durable half of
+     * the proof and belongs here beside the round-keyed one. Same predicate the gate uses, so the
+     * two cannot disagree about whether an answer is hers; a NEVER_FILL label is excluded inside it,
+     * so a typed SSN is still blanked here rather than retained on the record. */
+    if (currentResolverRefuses
+      && !applicantReviewedCurrentAnswer
+      && !applicantConfirmedSensitiveAnswer({
+        question: question.question,
+        answer: question.answer,
+        answer_confirmed_of: withProvenance.answer_confirmed_of,
+      })) {
       return { ...withoutProvenance(), answer: '' };
     }
     return question;
@@ -6922,7 +7071,69 @@ export function isProviderHandleOnly(value: string): boolean {
   return !/\p{L}/u.test(stripProviderHandles(value ?? ''));
 }
 
-function collapseRepeatedLabel(value: string): string {
+/* A QUESTION'S IDENTITY HAS TO BE A FIXPOINT OF ITS OWN NORMALIZER, or an approval can never cover
+ * the form it was taken against.
+ *
+ * A stored question is normalized EVERY time it is read: normalizeStoredPortalQuestions runs
+ * normalizeDiscoveredLabel over the label already on the row. Discovery, meanwhile, mints the row
+ * from ONE application of the same normalizer. So if a second application moves the label, the
+ * label discovery writes is not the label any later read produces, and the two are different
+ * questions to every comparison keyed on the employer's words - including the one that decides
+ * whether the packet about to be filled is the packet she approved.
+ *
+ * THE SHAPE THAT TRIPS IT. Managed discovery concatenates visible label text, placeholder text,
+ * name and id into one string (see normalizeDiscoveredLabel), which is FOUR parts:
+ * "Gender Gender gender gender". collapseRepeatedLabel halves that to "Gender Gender" and stops,
+ * because it looked once. The next read halves it again to "Gender". From then on:
+ *
+ *   discovery mints          "Gender Gender"   ->  merged into the review beside
+ *   the stored read produces "Gender"          ->  two rows, one control
+ *   the audit-side reading   collapses both    ->  ONE row
+ *
+ * so the built packet permanently carries one question more than the approval bound. The fill
+ * reports `this form asks questions the packet approval never covered`, parks, and clears the
+ * acknowledgement; she answers, approves, and the next fill says exactly the same thing. The count
+ * moves N -> N+1 once and then stands still forever, because the extra row was never a NEW
+ * question - it is the same control wearing the label its own normalizer had not finished with.
+ * routes/questionIdentityFixpoint.test.ts replays that over the real merge and the real
+ * acknowledgement predicate, and pins the property as idempotence rather than as a list of shapes.
+ *
+ * WHAT IS MEASURED AND WHAT IS NOT. The symptom is the one four boards carried on 2026-09-02 and
+ * that application 4a79eec1 (Hudson River Trading, greenhouse) carried by hand on 2026-09-03:
+ * attention_categories ["required_field"], the sentence above, and a question count that moved
+ * once and then froze. The concatenation is measured on this same employer - discovery stored
+ * "first name* first name first_name" and "preferred first name preferred first name
+ * preferred_name" on it, both three-part joins of exactly this shape. NOT claimed: that a
+ * four-part join is what fired on 4a79eec1's own rows. Its 27 stored labels are stable today, so
+ * this closes the mechanism rather than that packet.
+ *
+ * ITERATING ADDS NO REACHABLE LABEL. Every value this returns is one the system already reaches on
+ * the row's second read; all that changes is that the FIRST application lands there too, so the
+ * mint and every later read agree.
+ *
+ * ONLY THE COLLAPSE ITERATES. normalizeDiscoveredLabel as a whole deliberately does not: its
+ * handle strip is bounded to at most four tokens so no text rule can run away down a sentence, and
+ * re-running the whole function eats another four (labelHygiene pins both halves). Iterating just
+ * the halving leaves that bound exactly where it was.
+ *
+ * Bounded and terminating: a pass that changes nothing stops, and the ceiling is the same eight
+ * packetQuestionFixpoint uses, so a normalizer that ever cycles degrades to today's behaviour
+ * instead of hanging. */
+const LABEL_NORMALIZATION_MAX_PASSES = 8;
+
+function labelNormalizationFixpoint(value: string, step: (input: string) => string): string {
+  let current = value;
+  for (let pass = 0; pass < LABEL_NORMALIZATION_MAX_PASSES; pass += 1) {
+    const next = step(current);
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+/* ONE pass of the collapse. Never called anywhere but from the fixpoint below: a single halving is
+ * a step towards the label, not the label. */
+function collapseRepeatedLabelOnce(value: string): string {
   const requiredMarkerParts = value.match(/^(.*?)\s+\*\s+(.*?)$/u);
   if (requiredMarkerParts) {
     const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -6937,6 +7148,10 @@ function collapseRepeatedLabel(value: string): string {
   const right = words.slice(half).join(' ');
   const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return comparable(left) === comparable(right) ? left.replace(/[\s*.,;:!?]+$/u, '').trim() : value;
+}
+
+function collapseRepeatedLabel(value: string): string {
+  return labelNormalizationFixpoint(value, collapseRepeatedLabelOnce);
 }
 
 /**

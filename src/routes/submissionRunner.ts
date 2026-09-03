@@ -6574,9 +6574,31 @@ export async function discoverAndResolveQuestions(
         const skipOutlivedItsAnswer = existing.answer_state === 'skipped'
           && existing.answer.trim() !== ''
           && knownValue.trim() !== existing.answer.trim();
+        /* AND SO DOES THE OVERRIDE RECORD, which is the same rule and was the one field this spread
+         * still carried across a replacement.
+         *
+         * MEASURED 2026-09-03 by running this function over the HRT gender shapes: a row holding
+         * `answer_override_of: "Female"` beside her `Female` came out of the fill as
+         * `answer: "Woman"` with the override note intact, and it survived the whole writeback into
+         * the persisted packet. `answer_override_of` says "the resolution she disagreed with when
+         * she chose the value on this record" - a statement about a string this line is replacing -
+         * and refreshKnownQuestionAnswers reads it to decide whether to KEEP an answer, so a stale
+         * one is not inert. Its own writer drops it the moment the resolver agrees with the answer
+         * (see the `known.value === question.answer` branch in questionDiscovery.ts); a machine
+         * value with no claim beside it has nothing to be an override OF at all.
+         *
+         * KEYED ON THE ANSWER CHANGING, not on the source, because that is what makes the record
+         * stale, and it is the same test provenanceStillHers and skipOutlivedItsAnswer are built
+         * from. Omitted rather than set to undefined: these rows are compared as records. */
+        const answerReplacesTheStoredOne = knownValue.trim() !== existing.answer.trim();
         const { answer_state: _skipOnAReplacedAnswer, ...existingWithoutStaleSkip } = existing;
+        const { answer_override_of: _overrideOfAReplacedAnswer, ...existingWithoutStaleOverride } = (
+          skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing
+        );
         questions.push({
-          ...(skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing),
+          ...(answerReplacesTheStoredOne
+            ? existingWithoutStaleOverride
+            : (skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing)),
           ...(existing.answer_source === 'applicant_review' && !provenanceStillHers
             ? { answer_source: undefined, answer_reviewed_at: undefined }
             : {}),
