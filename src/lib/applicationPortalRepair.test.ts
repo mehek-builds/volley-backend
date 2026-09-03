@@ -168,3 +168,54 @@ test('history preserves generic portal behavior only for a manual packet with no
     current,
   );
 });
+
+/* MEASURED 2026-09-02 21:10:30 on Hudson River Trading (packet 4a79eec1): the greenhouse fill had
+ * just completed 41 fields when a read-time repair could not re-prove the monitored row (its text
+ * had been refreshed, so the hash no longer matched) and stripped portal_url and ats_name; the
+ * dashboard then offered "Add the job again" on a packet one press from ready. */
+test('a refreshed posting text does not erase the URL: identity agrees, so the source-owned URL is restored', async () => {
+  const select = mockMonitoredJob([{
+    external_id: 'lever-job-1',
+    apply_url: 'https://jobs.lever.co/acme/lever-job-1',
+    ats_name: 'lever',
+    board_token: 'acme',
+    company_name: 'Acme',
+    title: 'Software Engineer',
+    description: `${DESCRIPTION}\n\nUpdated: we now also hire in Austin.`,
+  }]);
+  try {
+    // The stripped shape an earlier pass left behind: no URL at all.
+    const stripped = { ...review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever'), portal_url: undefined, ats_name: undefined, portal_supported: false };
+    const healed = await repairReviewPortalFromMonitoredJob(row(jobContext()), stripped as ApplicationReviewState);
+    assert.equal(healed.portal_url, 'https://jobs.lever.co/acme/lever-job-1/apply');
+    assert.equal(healed.ats_name, 'lever');
+    assert.equal(healed.portal_supported, true);
+  } finally {
+    select.mock.restore();
+  }
+});
+
+test('an unavailable monitored row keeps a URL a managed run has already used', async () => {
+  const select = mockMonitoredJob([]);
+  try {
+    const used = { ...review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever'), filled_fields: ['first_name', 'resume'], submission_run_id: 'd712aa9f-0000-4000-8000-000000000000' };
+    const kept = await repairReviewPortalFromMonitoredJob(row(jobContext()), used as ApplicationReviewState);
+    assert.equal(kept.portal_url, 'https://jobs.lever.co/acme/lever-job-1/apply');
+    assert.equal(kept.ats_name, 'lever');
+    assert.equal(kept.portal_supported, true);
+  } finally {
+    select.mock.restore();
+  }
+});
+
+test('an unavailable monitored row still strips a URL no run has used', async () => {
+  const select = mockMonitoredJob([]);
+  try {
+    const unused = review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever');
+    const stripped = await repairReviewPortalFromMonitoredJob(row(jobContext()), unused);
+    assert.equal(stripped.portal_url, undefined);
+    assert.equal(stripped.portal_supported, false);
+  } finally {
+    select.mock.restore();
+  }
+});

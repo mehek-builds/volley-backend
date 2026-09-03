@@ -52,6 +52,24 @@ function withoutPortal(current: ApplicationReviewState): ApplicationReviewState 
   return { ...rest, portal_supported: false };
 }
 
+/* A URL A MANAGED RUN HAS ALREADY USED IS A FACT ABOUT HOW SHE APPLIED, not a claim this repair
+ * gets to re-prove. Measured 2026-09-02 21:10:30 on Hudson River Trading (packet 4a79eec1): the
+ * fill had just completed 41 fields on job-boards.greenhouse.io/wehrtyou when a read-time repair
+ * could not re-prove the monitored row (the posting's text had been refreshed, so its hash no
+ * longer matched the packet's) and stripped portal_url and ats_name from the review. The
+ * dashboard then showed "This record has no employer form URL. Add the job again", and every
+ * managed action on a packet that had been one press from ready disappeared. The strip exists for
+ * a packet that never had a provable URL; a packet that has filled, previewed or run against its
+ * URL keeps it whatever the monitored row says today. */
+function keepUsedPortal(current: ApplicationReviewState): ApplicationReviewState | null {
+  if (!current.portal_url) return null;
+  const used = (current.filled_fields?.length ?? 0) > 0
+    || Boolean(current.submission_run_id)
+    || Boolean(current.preview_screenshot_url)
+    || Boolean(current.submission_attempted_at);
+  return used ? current : null;
+}
+
 function repairManualPortal(current: ApplicationReviewState): ApplicationReviewState {
   const currentCanonicalUrl = canonicalSupportedPortalUrl(current.portal_url, current.ats_name);
   if (currentCanonicalUrl && currentCanonicalUrl !== current.portal_url) {
@@ -142,7 +160,7 @@ export async function repairReviewPortalFromMonitoredJob(
       eq(career_page_sources.enabled, true),
     ))
     .limit(1);
-  if (!job) return withoutPortal(current);
+  if (!job) return keepUsedPortal(current) ?? withoutPortal(current);
   const applyUrl = canonicalMonitoredPortalUrl(
     job.apply_url,
     job.ats_name,
@@ -150,10 +168,16 @@ export async function repairReviewPortalFromMonitoredJob(
     job.external_id,
     job.posting_url,
   );
-  if (!applyUrl) return withoutPortal(current);
-  if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return withoutPortal(current);
-  if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return withoutPortal(current);
-  if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)) return withoutPortal(current);
+  if (!applyUrl) return keepUsedPortal(current) ?? withoutPortal(current);
+  if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return keepUsedPortal(current) ?? withoutPortal(current);
+  if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return keepUsedPortal(current) ?? withoutPortal(current);
+  /* THE POSTING'S PROSE IS NOT ITS IDENTITY. Company and title agree and the source owns a
+   * canonical URL for this job id; a refreshed description changes the hash and nothing about where
+   * the application goes. The URL is restored (or kept), which is also what heals a row an earlier,
+   * stricter pass stripped. Only the JD text itself stays as the packet recorded it. */
+  if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description) && !current.portal_url) {
+    return { ...current, portal_url: applyUrl, ats_name: detectPortal(applyUrl), portal_supported: true };
+  }
   return {
     ...current,
     portal_url: applyUrl,
