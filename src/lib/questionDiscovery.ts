@@ -6741,7 +6741,69 @@ export function isProviderHandleOnly(value: string): boolean {
   return !/\p{L}/u.test(stripProviderHandles(value ?? ''));
 }
 
-function collapseRepeatedLabel(value: string): string {
+/* A QUESTION'S IDENTITY HAS TO BE A FIXPOINT OF ITS OWN NORMALIZER, or an approval can never cover
+ * the form it was taken against.
+ *
+ * A stored question is normalized EVERY time it is read: normalizeStoredPortalQuestions runs
+ * normalizeDiscoveredLabel over the label already on the row. Discovery, meanwhile, mints the row
+ * from ONE application of the same normalizer. So if a second application moves the label, the
+ * label discovery writes is not the label any later read produces, and the two are different
+ * questions to every comparison keyed on the employer's words - including the one that decides
+ * whether the packet about to be filled is the packet she approved.
+ *
+ * THE SHAPE THAT TRIPS IT. Managed discovery concatenates visible label text, placeholder text,
+ * name and id into one string (see normalizeDiscoveredLabel), which is FOUR parts:
+ * "Gender Gender gender gender". collapseRepeatedLabel halves that to "Gender Gender" and stops,
+ * because it looked once. The next read halves it again to "Gender". From then on:
+ *
+ *   discovery mints          "Gender Gender"   ->  merged into the review beside
+ *   the stored read produces "Gender"          ->  two rows, one control
+ *   the audit-side reading   collapses both    ->  ONE row
+ *
+ * so the built packet permanently carries one question more than the approval bound. The fill
+ * reports `this form asks questions the packet approval never covered`, parks, and clears the
+ * acknowledgement; she answers, approves, and the next fill says exactly the same thing. The count
+ * moves N -> N+1 once and then stands still forever, because the extra row was never a NEW
+ * question - it is the same control wearing the label its own normalizer had not finished with.
+ * routes/questionIdentityFixpoint.test.ts replays that over the real merge and the real
+ * acknowledgement predicate, and pins the property as idempotence rather than as a list of shapes.
+ *
+ * WHAT IS MEASURED AND WHAT IS NOT. The symptom is the one four boards carried on 2026-09-02 and
+ * that application 4a79eec1 (Hudson River Trading, greenhouse) carried by hand on 2026-09-03:
+ * attention_categories ["required_field"], the sentence above, and a question count that moved
+ * once and then froze. The concatenation is measured on this same employer - discovery stored
+ * "first name* first name first_name" and "preferred first name preferred first name
+ * preferred_name" on it, both three-part joins of exactly this shape. NOT claimed: that a
+ * four-part join is what fired on 4a79eec1's own rows. Its 27 stored labels are stable today, so
+ * this closes the mechanism rather than that packet.
+ *
+ * ITERATING ADDS NO REACHABLE LABEL. Every value this returns is one the system already reaches on
+ * the row's second read; all that changes is that the FIRST application lands there too, so the
+ * mint and every later read agree.
+ *
+ * ONLY THE COLLAPSE ITERATES. normalizeDiscoveredLabel as a whole deliberately does not: its
+ * handle strip is bounded to at most four tokens so no text rule can run away down a sentence, and
+ * re-running the whole function eats another four (labelHygiene pins both halves). Iterating just
+ * the halving leaves that bound exactly where it was.
+ *
+ * Bounded and terminating: a pass that changes nothing stops, and the ceiling is the same eight
+ * packetQuestionFixpoint uses, so a normalizer that ever cycles degrades to today's behaviour
+ * instead of hanging. */
+const LABEL_NORMALIZATION_MAX_PASSES = 8;
+
+function labelNormalizationFixpoint(value: string, step: (input: string) => string): string {
+  let current = value;
+  for (let pass = 0; pass < LABEL_NORMALIZATION_MAX_PASSES; pass += 1) {
+    const next = step(current);
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+/* ONE pass of the collapse. Never called anywhere but from the fixpoint below: a single halving is
+ * a step towards the label, not the label. */
+function collapseRepeatedLabelOnce(value: string): string {
   const requiredMarkerParts = value.match(/^(.*?)\s+\*\s+(.*?)$/u);
   if (requiredMarkerParts) {
     const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -6756,6 +6818,10 @@ function collapseRepeatedLabel(value: string): string {
   const right = words.slice(half).join(' ');
   const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   return comparable(left) === comparable(right) ? left.replace(/[\s*.,;:!?]+$/u, '').trim() : value;
+}
+
+function collapseRepeatedLabel(value: string): string {
+  return labelNormalizationFixpoint(value, collapseRepeatedLabelOnce);
 }
 
 /**
