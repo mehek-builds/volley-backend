@@ -52,7 +52,10 @@ const HER_PROFILE = {
     needs_sponsorship_future: true,
     authorization_type: 'F-1 CPT/OPT',
   }],
-} as unknown as Parameters<typeof sensitiveQuestionRequiresAttention>[3];
+/* Index 4, not 3: the gate takes the packet's questions ahead of the label, so the profile moved
+ * one place along. Kept as a positional type derived from the function rather than an imported one
+ * so a signature change surfaces here as a compile error instead of a silently mistyped fixture. */
+} as unknown as Parameters<typeof sensitiveQuestionRequiresAttention>[4];
 
 /** The employer's own wording, byte for byte off the packet. */
 const HRT_LABEL =
@@ -65,8 +68,12 @@ function gate(
   answer: string,
   confirmation?: { answer_confirmed_of?: unknown },
 ): boolean {
+  /* An EMPTY packet, deliberately: every case in this file is about the CONFIRMATION exit, so the
+   * gate must see no work-location answers and therefore no indicated country. That keeps the
+   * refusals below meaning "the resolver still cannot answer this label", which is what they are
+   * asserting, rather than passing because the packet happened to settle the country. */
   return sensitiveQuestionRequiresAttention(
-    label, answer, 'text', HER_PROFILE, undefined, undefined, undefined, confirmation,
+    [], label, answer, 'text', HER_PROFILE, undefined, undefined, undefined, confirmation,
   );
 }
 
@@ -91,7 +98,7 @@ test('the dead end is real: the resolver refuses this label and no answer alone 
    * that the refusal is about multi-country ambiguity rather than about her record being unreadable.
    * needs_sponsorship_future is true, so the resolver answers "Yes" and agrees with her. */
   assert.equal(
-    sensitiveQuestionRequiresAttention(HRT_LABEL, 'Yes', 'text', HER_PROFILE, undefined, undefined, 'US'),
+    sensitiveQuestionRequiresAttention([], HRT_LABEL, 'Yes', 'text', HER_PROFILE, undefined, undefined, 'US'),
     false,
     'a single-country posting was never blocked, which is why this only ever bit multi-country ones',
   );
@@ -330,12 +337,12 @@ test('the record-first gate reads the confirmation off the question it is handed
    * this suite while silently reverting the whole fix. This is the form the send gates use, and the
    * record is not optional in it. */
   assert.equal(
-    reviewQuestionRequiresAttention({ question: HRT_LABEL, answer: 'Yes' }, HER_PROFILE, undefined),
+    reviewQuestionRequiresAttention([], { question: HRT_LABEL, answer: 'Yes' }, HER_PROFILE, undefined),
     true,
   );
   assert.equal(
     reviewQuestionRequiresAttention(
-      { question: HRT_LABEL, answer: 'Yes', answer_confirmed_of: HRT_LABEL }, HER_PROFILE, undefined,
+      [], { question: HRT_LABEL, answer: 'Yes', answer_confirmed_of: HRT_LABEL }, HER_PROFILE, undefined,
     ),
     false,
   );
@@ -353,9 +360,13 @@ test('every send gate reaches the applicant confirmation through the record-firs
   const end = source.indexOf('function sensitiveQuestionFor(', start);
   assert.ok(start >= 0 && end > start, 'sensitiveQuestionsFor must remain the one place this is decided');
   const body = source.slice(start, end);
+  /* The packet's own questions now lead the call, carrying the OTHER exit from this gate: the
+   * country she indicated on the form. Both are required parameters, so this pin still says exactly
+   * what it said before - the whole record reaches the gate, and dropping it is not a silent
+   * change - and it now says the same about the form. */
   assert.match(
     body,
-    /\.filter\(\(question\) => reviewQuestionRequiresAttention\(\s*question, profile, jdText, postingCountry, postingCountryCode,/,
+    /\.filter\(\(question\) => reviewQuestionRequiresAttention\(\s*packetQuestions,\s*question, profile, jdText, postingCountry, postingCountryCode,/,
     'the whole question record, or her confirmation is not an input to the send gate',
   );
   assert.doesNotMatch(

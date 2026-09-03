@@ -4611,6 +4611,7 @@ function greenhouseCurrentOptionAnswer(
   const source = item.answerOptionSource?.trim();
   if (source && packet.applicationProfile) {
     const current = knownAnswerLookup(
+      packet.questions,
       packet.applicationProfile,
       packet.jdText,
       packet.roleCountry,

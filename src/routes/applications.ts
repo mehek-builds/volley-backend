@@ -938,7 +938,15 @@ function sensitiveQuestionsFor(
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
 ): ApplicationReviewQuestion[] {
-  return normalizeApplicationReviewQuestions(questions)
+  /* NORMALIZED ONCE AND HANDED TO THE GATE WHOLE.
+   *
+   * The predicate reads the country she indicated on THIS form, so it needs every question on it,
+   * not only the one being judged - and it must read the same normalized list the filter below
+   * walks, or the gate and the row it is deciding about would disagree about what the form says.
+   * Note it is the list BEFORE the required/answered filter, because a question she answered is
+   * evidence about the form whether or not the employer marked it required. */
+  const packetQuestions = normalizeApplicationReviewQuestions(questions);
+  return packetQuestions
     /* An OPTIONAL sensitive question with no answer is an offer, not a blocker. R-096 now mints
        answerless records for refused questions the employer left voluntary (the normal case for
        an EEO section) so she can answer them in the product; an empty answer generates no fill
@@ -946,12 +954,14 @@ function sensitiveQuestionsFor(
        hold a complete application hostage to a section the employer itself marked optional. A
        REQUIRED sensitive question keeps the gate exactly as it stands, answered or not. */
     .filter((question) => question.required || question.answer.trim().length > 0)
-    /* THE RECORD-FIRST FORM, so her own confirmation is an input to the gate that is asking about
-     * her, and so that it cannot stop being one by accident. The label-and-answer form takes the
-     * record as a trailing optional argument, and deleting that argument here is a one-token change
-     * with no type error and no failing test that silently reverts the whole fix. See
+    /* THE RECORD FORM, so her own confirmation is an input to the gate that is asking about her,
+     * and so that it cannot stop being one by accident. The label-and-answer form takes the record
+     * as a trailing optional argument, and deleting that argument here is a one-token change with
+     * no type error and no failing test that silently reverts the whole fix. The packet beside it
+     * is required for the same reason and carries the other exit, the country she indicated. See
      * reviewQuestionRequiresAttention. */
     .filter((question) => reviewQuestionRequiresAttention(
+      packetQuestions,
       question, profile, jdText, postingCountry, postingCountryCode,
     ));
 }
@@ -2721,6 +2731,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * The same lookup also names the value an override was made against. See the merge's
        * resolverAnswerFor parameter. */
       const resolverAnswerFor = knownAnswerLookup(
+        current.questions,
         await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
         current.jd_text,
         postingCountryFromJobContext(row.job_context),
