@@ -210,9 +210,19 @@ export function usableOptions(options: readonly string[] | null | undefined): st
  *
  * `textarea` is not here. It is already outside every closed-choice gate, and adding it would
  * change the checkbox/multi-select reading of a control this rule has no measurement about.
+ *
+ * `search` IS NOT HERE EITHER, AND THAT EXCLUSION IS THE ONE THIS SET WOULD HAVE GOT WRONG.
+ * Select2 v4 renders its combobox search field as `<input type="search" class="select2-search__
+ * field">` - the very class stratus's own CHOICE_SHELL_CLASSES matches on to recognise a choice
+ * control. So `search` is a type a real searchable menu DOES render, and admitting it here would
+ * mint a Lever Select2 degree picker as free entry and refuse to snap her answer onto the
+ * employer's own row. That is the worse bug in the opposite direction, and it is exactly what this
+ * whole set exists to avoid, so the rule stands: a type qualifies only if no combobox in the corpus
+ * renders it. `password` is left out for the plainer reason that it has no measurement behind it
+ * and nothing to gain: no profile answer is ever resolved into one.
  */
 export const FREE_ENTRY_INPUT_TYPE =
-  /^(?:number|tel|email|url|date|datetime-local|month|week|time|range|search|password)$/i;
+  /^(?:number|tel|email|url|date|datetime-local|month|week|time|range)$/i;
 
 /**
  * Does this control's option list BIND its answer - is the value one the applicant picks from that

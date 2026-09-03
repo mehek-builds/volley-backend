@@ -160,12 +160,37 @@ test('the free-entry set is positive DOM evidence only, and never claims `text`'
    * Resolution.ts's own header warns that nothing may depend on inputType being accurate. Nothing
    * does: every type on this list is one the DOM states outright AND one a searchable combobox
    * never renders - react-select's search box is always <input type="text">. */
-  for (const type of ['number', 'tel', 'email', 'url', 'date', 'range', 'search', 'password']) {
+  for (const type of ['number', 'tel', 'email', 'url', 'date', 'datetime-local', 'month', 'week', 'time', 'range']) {
     assert.ok(FREE_ENTRY_INPUT_TYPE.test(type), `${type} can only ever be typed`);
   }
   for (const type of ['text', 'textarea', 'select', 'select-one', 'radio', 'checkbox', 'combobox', 'listbox']) {
     assert.ok(!FREE_ENTRY_INPUT_TYPE.test(type), `${type} must stay outside the free-entry set`);
   }
+  /* THE EXCLUSION THAT WOULD OTHERWISE HAVE COST HER A REAL MENU. Select2 v4 renders its combobox
+   * search field as <input type="search" class="select2-search__field"> - the same class stratus
+   * matches on to recognise a choice control - so `search` is a type a genuine searchable menu DOES
+   * render. Admitting it would mint a Lever Select2 degree picker as free entry and stop her answer
+   * ever snapping onto the employer's own row. The rule this set is built on is that a type
+   * qualifies only if no combobox in the corpus renders it, and `search` fails that rule. */
+  assert.ok(
+    !FREE_ENTRY_INPUT_TYPE.test('search'),
+    "Select2's combobox search field is type=search, so it can never be treated as free entry",
+  );
+});
+
+test("a Select2-shaped search input with a real list is still a menu, end to end", () => {
+  // The same exclusion asserted through the two functions that read the set, not just the regex.
+  assert.equal(
+    discoveredQuestionControlType(discovered('search', null, ["Bachelor's Degree", "Master's Degree"])),
+    'search',
+    'the raw type is preserved, as it was before this change',
+  );
+  const resolved = resolveProfileField(
+    { label: 'Degree', inputType: 'search', options: ['High School', "Bachelor's Degree", "Master's Degree"] },
+    STORED_PROFILE,
+  );
+  assert.equal(resolved?.value, "Bachelor's Degree", 'a searchable menu still binds her answer');
+  assert.equal(resolved?.matchedOption, true);
 });
 
 test('optionsBindTheAnswer needs BOTH a real list and a control that can hold one', () => {
