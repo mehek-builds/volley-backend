@@ -60,7 +60,7 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type Jo
 import { applicationContextForQuestionResolution, knownAnswerLookup, reviewQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
-import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
+import { machineAnswerLookup, resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import {
   blankRequiredQuestionLabels,
   preparedRunCanRestart,
@@ -2720,8 +2720,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * typed as her own - measured on a stale Gender record displayed as a self-identification.
        * The same lookup also names the value an override was made against. See the merge's
        * resolverAnswerFor parameter. */
+      const answersSaveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       const resolverAnswerFor = knownAnswerLookup(
-        await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
+        answersSaveProfile,
+        current.jd_text,
+        postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
+      );
+      /* AND THE SNAPPED HALF OF THE SAME RESOLUTION, because the paragraph above is right about the
+       * mechanism and named only half of the strings it produces. What the screen displays is
+       * resolveProfileField's output - the resolver's value written in the employer's own option
+       * text - and knownAnswerLookup answers the value BEFORE that snap. So a control offering
+       * "Woman" against a profile that says "Female" rendered "Woman", the body echoed it, and the
+       * merge read an edit. See machineAnswerLookup for the packet this was measured on. */
+      const machineAnswerFor = machineAnswerLookup(
+        answersSaveProfile,
         current.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
@@ -2741,6 +2754,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         parsed.data.questions as SubmittedApplicationReviewQuestion[],
         reviewedAt,
         resolverAnswerFor,
+        machineAnswerFor,
       );
       const next: ApplicationReviewState = {
         ...current,

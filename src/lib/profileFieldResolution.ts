@@ -1290,6 +1290,15 @@ export function resolveProfileField(
      parameter's own note there: it is where the POSTING is, and omitting it only ever refuses. */
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* THE CLOCK THIS RESOLUTION IS ASKED AGAINST, passed straight through to resolveKnownAnswer for
+     the same reason the two above are. Defaulted, so every existing caller keeps the wall clock it
+     already had and nothing about a live fill changes. It exists because the callers that HAVE an
+     `asOf` were silently losing it here: current enrollment, study year, availability window, years
+     of experience and the age attestation are all decided from a date, and every one of them can
+     arrive on a control with an option list. A caller pinning a moment for the rest of its
+     resolution and getting `new Date()` from this one is a disagreement that only shows up on the
+     dates it straddles. */
+  asOf?: Date,
 ): ResolvedProfileField | null {
   const label = normalizeDiscoveredLabel(shape.label);
   if (!label) return null;
@@ -1297,7 +1306,7 @@ export function resolveProfileField(
      reads it there. A declared absence of standardized test scores has no canonical spelling, so
      the resolver needs the form's own list to say it; everything else is decided from the label and
      the profile, and then snapped onto the list below exactly as before. */
-  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode, shape.options ?? undefined);
+  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode, shape.options ?? undefined, asOf);
   if (!known || !('value' in known)) return null;
   const base = known.value.trim();
   if (!base) return null;
