@@ -123,6 +123,52 @@ export type ApplicationReviewQuestion = {
    * is gone. See ANSWER_CLAIM_FIELDS below. */
   consent_permission_granted_at?: string;
   consent_permission_version?: string;
+  /**
+   * THE EXACT QUESTION TEXT SHE WAS LOOKING AT WHEN SHE CONFIRMED THIS ANSWER, and nothing else.
+   *
+   * WHAT IT IS FOR, which is one thing only: it is the single piece of provenance the sensitive
+   * question gate is allowed to accept as "the applicant made this declaration herself". See
+   * applicantConfirmedSensitiveAnswer in questionDiscovery.ts.
+   *
+   * WHY answer_source WAS NOT ENOUGH, and this is the whole reason the field exists rather than a
+   * refinement of one that does. 'applicant_review' is minted by three different writers and two of
+   * them are blanket: applyApplicantReviewedAnswers stamps EVERY non-blank answer in a PUT /review
+   * body, and applicantSuppliedAnswer below mints on any answer that merely differs from the stored
+   * one. Both are correct for what they claim - a review round happened, an answer moved - and
+   * neither can distinguish "she read this legal declaration and affirmed it" from "a list went past
+   * her". That distinction is the entire content of the sensitive gate, so keying the gate on
+   * 'applicant_review' would have let a machine-derived legal declaration through the one gate built
+   * to stop exactly that. The 802-answer laundering documented at the mint site is what that looks
+   * like in production, and 'do you now or will you in the future require immigration sponsorship'
+   * -> 'Yes' was one of the 802.
+   *
+   * SO IT HAS EXACTLY ONE WRITER: applicantConfirmedAnswer below, which fires only on a request that
+   * carried `confirmed: true` for this specific question. That flag is accepted by exactly one body
+   * schema, reviewAnswersBodySchema on PUT /applications/:id/review/answers, and set by exactly one
+   * control, the dashboard's per-question CONFIRM. No resolver, no drafter, no fill, no rebuild and
+   * no blanket stamp can produce it, because none of them submits that flag. Unmintable by a machine
+   * is a property of the writer list, not of the value, which is why the value is deliberately
+   * boring.
+   *
+   * IT STORES THE LABEL RATHER THAN A BARE `true`, and that is what makes it self-verifying. As an
+   * ANSWER-CLAIM it dies when the answer changes, which covers half of what a confirmation asserts;
+   * the other half is WHICH QUESTION she was answering, and an answer-claim survives a rename by
+   * rule. A confirmation of "do you require sponsorship in the United States?" must not carry over
+   * to "do you require sponsorship in the United Kingdom?" still reading "Yes" - for this applicant
+   * those two have different true answers, which is the whole reason the resolver refuses the
+   * multi-country wording. So the reader compares this against the question's CURRENT text and a
+   * rename breaks the proof on its own, without depending on any carry rule remembering to.
+   *
+   * NO TIMESTAMP, deliberately. answer_reviewed_at already dates the round, and a second date would
+   * be a second copy of the frozen-round defect (submittedAnswers.ts computes
+   * `questions_reviewed_at ?? now()`, so the round does not advance and every later claim carries the
+   * first review's date). One thing to fix is better than two, and the gate does not need a date:
+   * what it needs is that this answer, under this text, was affirmed.
+   *
+   * Optional forever, jsonb, no migration. Absence reads as "not confirmed", which is what every
+   * record written before this field existed honestly is.
+   */
+  answer_confirmed_of?: string;
 };
 
 /* ---- the two kinds of provenance, and the rule that keys each one ----
@@ -156,16 +202,28 @@ type AnswerProvenanceField =
   | 'answer_option_source'
   | 'answer_override_of'
   | 'consent_permission_granted_at'
-  | 'consent_permission_version';
+  | 'consent_permission_version'
+  | 'answer_confirmed_of';
 
 /** Keyed on RECORD IDENTITY. Falsified by a rename or a stale review round. */
 export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as const;
-/** Keyed on THE ANSWER. Falsified only by replacing the answer. */
+/** Keyed on THE ANSWER. Falsified only by replacing the answer.
+ *
+ * answer_confirmed_of is on THIS list and not the other one, which looks backwards for something
+ * whose whole subject is what the applicant did, and is not. An applicant-claim is keyed on record
+ * identity, which includes the review ROUND, and a confirmation that expired every time the round
+ * moved would put the sensitive gate straight back into the dead end this field exists to open: she
+ * confirms, the round advances for an unrelated reason, and the send refuses again with no action
+ * left for her to take. What must falsify a confirmation is the answer changing, which is exactly
+ * the answer-claim rule; the other half - that the QUESTION has not been renamed underneath it - the
+ * field carries in its own value and its reader checks directly, so it needs no help from the carry
+ * rule here. */
 export const ANSWER_CLAIM_FIELDS = [
   'answer_option_source',
   'answer_override_of',
   'consent_permission_granted_at',
   'consent_permission_version',
+  'answer_confirmed_of',
 ] as const;
 
 /* The partition, enforced by the compiler rather than by a reviewer.
@@ -603,6 +661,7 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
+      answer_confirmed_of: _answerConfirmedOf,
       ...questionWithoutProvenance
     } = question;
     /* Every ANSWER-CLAIM rides on `answerUnchanged`, by the rule above rather than field by field.
@@ -685,6 +744,28 @@ export function mergeSubmittedApplicationReviewQuestions(
       /* Beside the claim and never without it, because it is only meaningful as the other half of
        * that claim. See overriddenResolverValue. */
       ...(overriddenResolverValue ? { answer_override_of: overriddenResolverValue } : {}),
+      /* THE ONE WRITER OF THE ONE PROVENANCE THE SENSITIVE GATE ACCEPTS.
+       *
+       * Gated on applicantConfirmedAnswer ALONE, and deliberately not on applicantSuppliedAnswer
+       * beside it, which is the difference between this field and the answer_source above. An edit
+       * mints an applicant-claim because an answer moved and only she moves answers, and that is a
+       * true and useful thing to record - but it is inferred from a diff, and a diff cannot tell
+       * "she read this legal declaration and chose Yes" from "something posted a different string".
+       * For a REFUSED question the second test that normally guards the inference is dead by
+       * construction: the resolver returns no value, so submittedIsResolverValue is always false and
+       * `!answerUnchanged` is the only barrier left. A confirmation is not inferred from anything -
+       * the request states it, per question, for this exact text - and that is the whole reason the
+       * gate can accept it.
+       *
+       * `question.question` and not the submitted label, matching the `question:` line above. The
+       * stored text is the form identity; applicantConfirmedAnswer has already required the two to
+       * be equal, so this is that decision written down rather than a second copy of it.
+       *
+       * Recorded for EVERY confirmed answer, not only the sensitive ones. What it asserts - she was
+       * shown these words and affirmed this value - is equally true of a confirmed graduation date,
+       * and a writer that has to work out whether a label is sensitive before recording the truth
+       * about it is a writer that will get that test wrong somewhere. The gate does the selecting. */
+      ...(applicantConfirmedAnswer ? { answer_confirmed_of: question.question } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
@@ -707,6 +788,11 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
+      /* And this one for a fourth reason that matters more than the other three: it is the only
+       * provenance the sensitive question gate accepts, so a caller allowed to send it could open
+       * that gate by asserting its own conclusion. There is no stored question here for her to have
+       * been shown, which is precisely why a confirmation of one cannot be true. */
+      answer_confirmed_of: _answerConfirmedOf,
       /* The request flag, spent above and never stored: a persisted `confirmed` would be a second,
        * uncheckable copy of the claim answer_source already carries. */
       confirmed: _confirmed,
