@@ -282,10 +282,37 @@ export function selfIdentificationStatedForms(label: string, stored: string): st
   const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
     ? eeoFederalRaceCategory(base)
     : undefined;
+  return [...selfIdentificationRespellings(label, base), coarser]
+    .filter((value): value is string => Boolean(value?.trim()));
+}
+
+/**
+ * THE SAME STATED ANSWER, RE-SPELLED: her own wording, then the paired term the other vocabulary
+ * uses for that identical answer. Nothing else, ever.
+ *
+ * This is the FIRST RUNG of selfIdentificationStatedForms, split out because the second rung is a
+ * different kind of act and one caller may only have the first. A re-spelling is SYMMETRIC and
+ * lossless: EEO_GENDER_EQUIVALENTS carries Female/Woman and Male/Man in both directions, so
+ * "Female" and "Woman" are one answer written twice and either may stand for the other. Widening
+ * "South Asian" to "Asian" is one-way and loses detail; that is safe when a resolver is CHOOSING
+ * which option to put into an empty control, and it is not the same act when something rewrites an
+ * answer already stored in a packet, where leaving it alone means the applicant is asked and
+ * answers for herself.
+ *
+ * So the two rungs have two callers. resolveProfileField and chooseEeoOption fill a control and
+ * take both. snapAnswerToOfferedOption in questionDiscovery.ts rewrites a stored answer and takes
+ * only this one; the rule and the measurement are on that function.
+ *
+ * NEVER A REFUSAL. The decline wordings are appended a rung further down by eeoAnswerLadder and
+ * cannot reach either of these lists, which is the property both callers depend on.
+ */
+export function selfIdentificationRespellings(label: string, stored: string): string[] {
+  const base = stored.trim();
+  if (!base) return [];
   const equivalentGender = EEO_GENDER_IDENTITY_QUESTION.test(label)
     ? EEO_GENDER_EQUIVALENTS.find(([spelling]) => spelling.test(base))?.[1]
     : undefined;
-  return [base, equivalentGender, coarser].filter((value): value is string => Boolean(value?.trim()));
+  return [base, equivalentGender].filter((value): value is string => Boolean(value?.trim()));
 }
 
 /* THE SENTENCE A CONTROL USES TO SAY YES OR NO, per subject, because the answer is stored as a

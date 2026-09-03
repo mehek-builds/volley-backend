@@ -31,6 +31,7 @@ import {
   comparableOption,
   declineWordingForControl,
   selfIdentificationAnswerStates,
+  selfIdentificationRespellings,
 } from './selfIdentification';
 import {
   availabilityWindowForPosting,
@@ -2243,7 +2244,12 @@ export function knownAnswerLookup(
   postingCountry?: JobCountry,
   postingCountryCode?: string,
   asOf: Date = new Date(),
-): (question: { question: string; answer?: string }) => string | undefined {
+): (question: {
+  question: string;
+  answer?: string;
+  portal_input_type?: string;
+  options?: readonly string[] | null;
+}) => string | undefined {
   return (question) => {
     const label = normalizeReviewQuestionLabel(question.question ?? '');
     if (!label) return undefined;
@@ -2268,7 +2274,20 @@ export function knownAnswerLookup(
       storedAsCandidate,
       asOf,
     );
-    return known && 'value' in known ? known.value : undefined;
+    if (!(known && 'value' in known)) return undefined;
+    /* AND THE SNAP THE REFRESH APPLIES, because this function's whole contract is "what will the
+     * refresh serve" and the refresh now serves the employer's spelling of the resolved value.
+     *
+     * NOT COSMETIC, AND THE COST OF SKIPPING IT IS THE ONE THING THAT MUST NEVER HAPPEN HERE. The
+     * review screen displays what the refresh serves, because GET /applications/:id/submission
+     * refreshes on read and does not persist. So the client posts back "Woman" on an untouched
+     * Save, mergeSubmittedApplicationReviewQuestions asks whether that equals the resolver's value,
+     * and a lookup still answering "Female" would call an untouched Save an edit and stamp
+     * `answer_source: 'applicant_review'` on a gender she never selected. That is the 802-answer
+     * laundering this comparison exists to prevent, arriving through the half of the refresh the
+     * lookup had not been taught. The stored row carries the control and its options, so the same
+     * question the refresh snapped is the one snapped here. */
+    return snapAnswerToOfferedOption({ ...question, answer: known.value }).answer;
   };
 }
 
@@ -2357,6 +2376,134 @@ export function reviewedAnswerIsAnOfferedOption(question: {
   );
 }
 
+/**
+ * THE PROVENANCE THAT BELONGS TO ONE ANSWER STRING, dropped whenever that string is replaced.
+ *
+ * Every field here is a CLAIM ABOUT THE ANSWER rather than about the control: who put this value
+ * here, when she reviewed it, what it was derived from, what resolution she overrode with it, and
+ * the permission under which it was accepted. Left beside a value they were not made about, each of
+ * them is a lie the next reader cannot detect, and the worst of them, `answer_source:
+ * 'applicant_review'`, asserts that the applicant chose bytes she was never shown.
+ *
+ * ONE DEFINITION, TWO CALLERS, DELIBERATELY. refreshKnownQuestionAnswers rewrites an answer on
+ * about a dozen branches and snapAnswerToOfferedOption rewrites it on one more; a second copy of
+ * this field list would drift, and the drift would be a machine value wearing an applicant claim.
+ * `answer_state` is NOT here on purpose: it is a claim about the CONTROL ("leave this one blank"),
+ * it is stored against an empty answer, and the refresh has its own narrower rule for it.
+ */
+function withoutAnswerProvenance<T>(question: T): T {
+  const {
+    answer_source: _answerSource,
+    answer_reviewed_at: _answerReviewedAt,
+    answer_option_source: _answerOptionSource,
+    answer_override_of: _answerOverrideOf,
+    consent_permission_version: _consentPermissionVersion,
+    consent_permission_granted_at: _consentPermissionGrantedAt,
+    ...rest
+  } = question as T & {
+    answer_source?: unknown;
+    answer_reviewed_at?: unknown;
+    answer_option_source?: unknown;
+    answer_override_of?: unknown;
+    consent_permission_version?: unknown;
+    consent_permission_granted_at?: unknown;
+  };
+  return rest as T;
+}
+
+/**
+ * THE SAME ANSWER SHE ALREADY GAVE, WRITTEN THE WAY THE EMPLOYER'S OWN CONTROL WRITES IT.
+ *
+ * MEASURED 2026-09-03 in production. Packet 4a79eec1, Hudson River Trading, greenhouse. The
+ * required control asks "What is your gender?" and offers Woman / Man / Non-binary / I don't wish
+ * to answer. Her stored answer is "Female". Pressing Save on the review screen ran the resolver,
+ * which returned "Female" again, reopenUnfitClosedChoiceQuestions blanked it because the control
+ * cannot hold that word, the card rendered with every radio unchecked, and the packet could not
+ * proceed. Commit 7a3d1b2 had already shipped the Female/Woman equivalence and was measured on this
+ * exact packet, but it lives in the FILL path (chooseEeoOption), and no save has ever reached it:
+ * resolveKnownAnswer decides from the label and the profile and, by the rule on its own `options`
+ * parameter, must never consult a control's list. So the equivalence was correct, deployed, and
+ * unreachable. This is the half that runs on a save.
+ *
+ * THE RULE, AND IT IS THE NARROWEST ONE THAT CLEARS THAT PACKET: replace the answer only with an
+ * option that is the SAME STATED ANSWER re-spelled. Never a decline. Never a different substantive
+ * answer. If nothing on the list re-spells what she said, the answer is returned untouched, the
+ * re-open blanks it exactly as it does today, and SHE picks.
+ *
+ * WHY IT CANNOT WRITE A DECLINE, structurally rather than by inspection. The only candidates are
+ * selfIdentificationRespellings, which is her own wording plus the paired term from
+ * EEO_GENDER_EQUIVALENTS (Female/Woman, Male/Man, both directions). The decline wordings live one
+ * rung further down, in eeoAnswerLadder, and this function does not call it. There is no input for
+ * which a refusal is a candidate, so "South Asian" against a list of federal categories, "Middle
+ * Eastern" against any list, "Trans woman" against Woman/Man/Non-binary, and an age of "20" are all
+ * returned exactly as they stand: unpaintable, re-opened, and answered by the applicant.
+ *
+ * WHY IT CANNOT WRITE A DIFFERENT SUBSTANTIVE ANSWER, and this is the pair of clauses to keep
+ * together. The gate below refuses the moment ANY offered option denotes the stored answer, and the
+ * matcher then looks for an option denoting a re-spelling. Both ask comparableOption, THE SAME
+ * RELATION, so the first candidate - her own wording, which is always first - is exactly the one
+ * the gate has already proved matches nothing, and the only reachable rewrite is the paired term.
+ * That is what makes the C# case safe: "C#" and "C" collapse to the same comparable string, so
+ * against ["C", "C#", "Java", "Python"] the gate sees an option denoting the answer and refuses,
+ * where a gate asking a STRICTER question than the matcher would have called "C#" off-list and then
+ * matched it to "C". A gate and a matcher on two relations is not a narrow rule, it is a rewrite
+ * with a decorative guard.
+ *
+ * OPTIONS ARE READ RAW, exactly as reviewedAnswerIsAnOfferedOption above reads them and for the
+ * reason written there: usableOptions lives in profileFieldResolution, which imports this module,
+ * and its placeholder filter only removes rows like "Select..." that no re-spelling of a stated
+ * answer can equal. An absent or empty list therefore cannot produce a rewrite at all, which is the
+ * "the list must be complete" condition arriving by construction: nothing can be adopted that the
+ * employer did not put on the control.
+ *
+ * TWO LITERAL OPTIONS DENOTING THE SAME RE-SPELLING REFUSE, like every other matcher in this
+ * family: there is nothing left to rank them by, and picking by DOM order is the guess this code
+ * exists to avoid.
+ *
+ * THE PROVENANCE GOES WITH THE OLD STRING. A snapped answer is a MACHINE value, so it may not wear
+ * `answer_source: 'applicant_review'`, and that is not a nicety: refreshKnownQuestionAnswers keeps
+ * a reviewed answer that matches an offered option ahead of every recompute rule, so a laundered
+ * claim here would make the rewritten value immune to every later correction. See
+ * withoutAnswerProvenance.
+ *
+ * Deterministic and idempotent: what it returns IS an offered option, so the gate refuses it on the
+ * next pass and packetQuestionFixpoint settles.
+ */
+export function snapAnswerToOfferedOption<T extends { question: string; answer: string }>(
+  question: T,
+): T {
+  const withControl = question as T & { portal_input_type?: unknown; options?: unknown };
+  const controlType = typeof withControl.portal_input_type === 'string'
+    ? withControl.portal_input_type.trim().toLowerCase()
+    : '';
+  if (!SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType)) return question;
+  const offered = (Array.isArray(withControl.options) ? withControl.options : [])
+    .filter((option): option is string => typeof option === 'string' && option.trim().length > 0);
+  const answerKey = comparableOption(question.answer);
+  /* THE GATE, and it asks comparableOption because the matcher below does. An option that denotes
+   * the stored answer means there is nothing to re-spell: either the control already holds her
+   * answer, or the two differ only by punctuation this relation folds, and in either case a rewrite
+   * could only swap in a value the relation cannot tell apart from the one already there.
+   *
+   * It is also what makes the loop below start where it means to. Her own wording is always the
+   * first candidate, and its key IS answerKey, so this line is the proof that the first candidate
+   * matches nothing and the only rewrite the loop can reach is the paired re-spelling. Weaken this
+   * to a stricter relation than the matcher's and "C#" against ["C", "C#", "Java", "Python"] is
+   * judged off-list and then matched to "C". */
+  if (offered.some((option) => comparableOption(option) === answerKey)) return question;
+  const label = normalizeReviewQuestionLabel(question.question);
+  for (const respelling of selfIdentificationRespellings(label, question.answer)) {
+    const key = comparableOption(respelling);
+    if (!key) continue;
+    const matches = new Set(offered.filter((option) => comparableOption(option) === key)
+      .map((option) => option.trim()));
+    /* TWO LITERAL OPTIONS DENOTING THE SAME RE-SPELLING REFUSE, and none is simply no match. */
+    if (matches.size !== 1) continue;
+    return { ...withoutAnswerProvenance(question), answer: [...matches][0] };
+  }
+  return question;
+}
+
 export function refreshKnownQuestionAnswers<T extends { question: string; answer: string }>(
   questions: readonly T[],
   ap: ApplicationProfileLike,
@@ -2366,7 +2513,13 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   postingCountryCode?: string,
   asOf: Date = new Date(),
 ): T[] {
-  return questions.map((question) => {
+  /* THE RESOLVER'S ANSWER, THEN THE EMPLOYER'S SPELLING OF IT, in that order and never the other
+   * way round. resolveKnownAnswer decides what the answer IS from the label and the profile alone;
+   * snapAnswerToOfferedOption decides only how that same answer is WRITTEN, from the control's own
+   * list. Composing them here rather than at the call sites means no reader of this function can
+   * forget the second half, and the three packet-shaping paths that already compose the re-open on
+   * this function's output get it without wiring. */
+  const refreshOne = (question: T): T => {
     const label = normalizeReviewQuestionLabel(question.question);
     /* THE STORED ANSWER IS OFFERED BACK AS THE CANDIDATE LIST, and that is not a trick.
      *
@@ -2377,18 +2530,28 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      *   RESULT  the fill is undone, and the row stays blocked
      *
      * A declared absence is answerable only in the employer's OWN wording, so the resolver needs a
-     * list to say it. This path has none: ApplicationReviewQuestion carries portal_input_type and
-     * no options, so the refresh could not see what the control offered, produced the
-     * declared-absence skipReason, and blanked the very answer step 1 had just chosen. Three live
-     * consequences: blankRequiredQuestionLabels is `required && !answer.trim()`, so the row stays
-     * blocked, which is the symptom this feature exists to clear; buildPacket ships the empty
-     * string from twelve call sites; and applications.ts compares refreshed against stored, so
+     * list to say it. This path had none when the rule was written: ApplicationReviewQuestion
+     * carried portal_input_type and no options, so the refresh could not see what the control
+     * offered, produced the declared-absence skipReason, and blanked the very answer step 1 had
+     * just chosen. Three live consequences: blankRequiredQuestionLabels is
+     * `required && !answer.trim()`, so the row stays blocked, which is the symptom this feature
+     * exists to clear; buildPacket ships the empty string from twelve call sites; and
+     * applications.ts compares refreshed against stored, so
      * "N/A" against "" reads as `changed` and aborts the attended handoff.
      *
      * PERSISTING OPTIONS ON THE REVIEW QUESTION WAS THE OTHER OPTION AND IS WORSE HERE. It widens a
      * stored type that twelve call sites and every historical packet already share, to carry a
      * snapshot of a control's list that is stale the moment the employer edits the form, purely so
      * this one rule can re-derive an answer it already has.
+     *
+     * THE FIRST HALF OF THAT IS NOW HISTORY AND THE SECOND HALF IS NOT. ApplicationReviewQuestion
+     * DOES carry `options` (see its own field comment: added so the answers screen can show her the
+     * choices instead of a bare box), so the sentence above describes why this rule was written,
+     * not a fact about the type today. What has NOT changed is why the list is still not an input
+     * to resolveKnownAnswer: a snapshot that goes stale the moment the employer edits the form is a
+     * bad basis for DECIDING an answer. Deciding stays here, from the label and the profile;
+     * writing the decided answer in the control's own spelling is snapAnswerToOfferedOption, one
+     * pass later, where a stale snapshot can only fail to match and leave the answer as it stands.
      *
      * WHAT THIS ASKS INSTEAD IS THE QUESTION THE REFRESH IS ACTUALLY FOR: is the answer already
      * stored still supported by the profile as it stands now? The stored answer IS the option the
@@ -2473,18 +2636,9 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
      * it was not derived from is a lie the next reader has no way to detect. The consent grant is
      * the same kind of claim and drops on the same rule. */
-    const withoutProvenance = (): T => {
-      const {
-        answer_source: _answerSource,
-        answer_reviewed_at: _answerReviewedAt,
-        answer_option_source: _answerOptionSource,
-        answer_override_of: _answerOverrideOf,
-        consent_permission_version: _consentPermissionVersion,
-        consent_permission_granted_at: _consentPermissionGrantedAt,
-        ...rest
-      } = withProvenance;
-      return rest as T;
-    };
+    /* The field list itself lives on withoutAnswerProvenance, so this rule and the snap's cannot
+     * drift into two different ideas of what belongs to an answer. */
+    const withoutProvenance = (): T => withoutAnswerProvenance(withProvenance) as T;
     /* AN ANSWER THIS FUNCTION CANNOT RECOMPUTE, AND CAN STILL PROVE IS CURRENT.
      *
      * The line below is right about almost everything and was silently wrong about one class of
@@ -2725,7 +2879,8 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       return { ...withoutProvenance(), answer: '' };
     }
     return question;
-  });
+  };
+  return questions.map((question) => snapAnswerToOfferedOption(refreshOne(question)));
 }
 
 /* The bare \bcountry\b alternative carries a lookahead because "country code" is telephony, not
