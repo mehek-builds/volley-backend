@@ -24,6 +24,46 @@ export type QuestionMetadataBlocker = {
 };
 
 const GENERIC_ANSWER_CONTROL_LABEL = /^(?:(?:please\s+)?(?:type|enter|write)(?:\s+your)?\s+)?(?:your\s+)?(?:answer|response)(?:\s+here)?[\s.:]*$/i;
+/* WHAT THE BOX DOES, NOT WHAT THE EMPLOYER ASKED.
+ *
+ * Sibling of GENERIC_ANSWER_CONTROL_LABEL above and routed exactly the same way: a control whose
+ * only text describes the control's own mechanics has no question in it, so it becomes a
+ * `missing_question_text` blocker and reaches the applicant as "Litos could not read the employer's
+ * exact question text for one application field, so it did not guess at that field."
+ *
+ * That surface is the honest one, and it is the point of this list. Measured on account
+ * a18f774b-a306-4804-93f3-cd6020c27fb3, 2026-09-02: Crelate renders its help text as the control's
+ * placeholder and nothing reads the question above it, so Blueprint Hires and Prediktive stored
+ * "enter a number number-" and "maximum 400 characters short-" as questions. The dashboard drew a
+ * card headed "Enter a number" with an empty box, no options and a disabled Save. A number of what?
+ * The applicant could not answer it, and neither could Litos.
+ *
+ * EVERY SHAPE MATCHES THE WHOLE LABEL, WHICH IS WHAT MAKES THE LIST SAFE. A rule that fires only
+ * when the entire label is the mechanics sentence cannot swallow an employer's question, because a
+ * label that is nothing but "Maximum 400 characters" contains no question to lose. Suppressing a
+ * real question is the expensive failure here; letting noise through is not. So every entry is
+ * anchored at both ends, which also bounds it: none of these can match a consent paragraph.
+ *
+ * Deliberately NOT here: a numbered section heading with prose after it ("1. Personal details, we
+ * will need these details in order to be able to contact you"). It is the same length and shape as a
+ * real long-form question, there is no text evidence separating them, and it is a BINDING defect
+ * anyway - the heading belongs to the section, not to the control that was bound to it. */
+const FIELD_MECHANICS_LABEL: readonly RegExp[] = [
+  // "Maximum 400 characters", "Max. 400 characters", "Up to 400 characters"
+  /^(?:max(?:imum)?\.?|up\s+to|no\s+more\s+than|limited?\s+to)\s+\d{1,6}\s+characters?[\s.:]*$/i,
+  // "400 characters max", "400 characters or less"
+  /^\d{1,6}\s+characters?\s+(?:max(?:imum)?|limit|or\s+less)[\s.:]*$/i,
+  // "0 / 400", "0/400 characters": a live character counter read as a question.
+  /^\d{1,6}\s*\/\s*\d{1,6}(?:\s+characters?)?[\s.:]*$/i,
+  /* "Enter a number", "Please enter a value", "Enter a date". Anchored at the end, so a question
+   * that merely OPENS this way keeps every word: "enter a number of years of experience" and
+   * "enter a date you could start" match nothing here. */
+  /^(?:please\s+)?(?:type|enter|input|write|provide)\s+(?:a|an|the|your)?\s*(?:number|numeric\s+value|value|date|text)[\s.:]*$/i,
+  /* "4. Submit application". Pinpoint captions its send area that way and discovery bound the
+   * caption to the consent checkbox inside it, so the applicant was asked to answer a section
+   * heading. No employer question is the whole string "submit application". */
+  /^(?:\d{1,2}\s*[.)]\s*)?(?:submit|send)\s+(?:your\s+)?application[\s.:]*$/i,
+];
 const CLOSED_CONTROL_TYPE = /^(?:select(?:-one|-multiple)?|radio|combobox|listbox)$/i;
 const EXACT_OPTIONS_BEFORE_RESOLUTION_TYPE = /^(?:select(?:-one|-multiple)?|radio|listbox)$/i;
 const QUESTION_CONTROL_TYPE = /^(?:text|textarea|select(?:-one|-multiple)?|radio|checkbox|combobox|listbox)$/i;
@@ -34,7 +74,9 @@ type MetadataDiscoveryField = Pick<
 >;
 
 export function questionLabelIsGenericAnswerControl(label: string): boolean {
-  return GENERIC_ANSWER_CONTROL_LABEL.test(normalizeReviewQuestionLabel(label));
+  const normalized = normalizeReviewQuestionLabel(label);
+  if (GENERIC_ANSWER_CONTROL_LABEL.test(normalized)) return true;
+  return FIELD_MECHANICS_LABEL.some((shape) => shape.test(normalized));
 }
 
 export function discoveredQuestionsForExactOptionProbe(

@@ -4,7 +4,7 @@ import {
   graduationWindowAnswer as graduationWindowDeclarationAnswer,
 } from './heldAnswerQuestions';
 import { isSameCompany } from './companyIdentity';
-import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
+import { isOpaqueIdentifier, stripFormAttributeHandles, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
 import { countryForPhoneField, isCallingCodeQuestion } from './phoneCountry';
@@ -6828,11 +6828,18 @@ function collapseRepeatedLabel(value: string): string {
  * Managed Ashby discovery may concatenate visible label text, placeholder text, name, and id into
  * one string. Strip only positively identified provider handles and generic answer placeholders,
  * leaving the employer's full question intact for both display and label-based filling.
+ *
+ * THE CONTROL'S OWN `name` AND `id` COME OFF BEFORE THE REPEAT COLLAPSE, not only inside tidyLabel
+ * afterwards. Personio stores "phone phone field-phone" and "location location field-location":
+ * that is one label rendered twice with the id behind it, and collapseRepeatedLabel halves on an
+ * EVEN word count, so the handle made the count three and the doubled label survived into the
+ * stored question. stripFormAttributeHandles is idempotent, so the second application inside
+ * tidyLabel finds nothing left to take.
  */
 export function normalizeDiscoveredLabel(raw: string): string {
-  const withoutHandles = stripProviderHandles(raw)
+  const withoutHandles = stripFormAttributeHandles(stripProviderHandles(raw)
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim());
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
   const label = tidyLabel(collapseRepeatedLabel(withoutPlaceholder));
   return label && !isOpaqueIdentifier(label) ? label : '';

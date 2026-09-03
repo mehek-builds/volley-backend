@@ -30,6 +30,19 @@ const FLATTENED_HANDLE_RE = /^(job_application|answers?)_|_attributes_|(^|_)\d+(
 const STRUCTURAL_TOKEN_RE = /^\S*[[\]:]\S/;
 // customQuestion12345, applicantAnswer42: a long lowerCamel run ending in digits.
 const LONG_CAMEL_WITH_DIGITS_RE = /^[a-z]{4,}[A-Z][A-Za-z]*\d+$/;
+/* THE TYPE PREFIX A UUID STRIP LEAVES STANDING.
+ *
+ * Crelate names every custom control `<type>-<uuid>` (short-, number-, yesno-, single-, date-,
+ * rating-), so once INLINE_UUID_RE has cleared the uuid out of the concatenated label the handle
+ * is a bare word ending in the separator that used to join the two halves. Measured on Blueprint
+ * Hires (packet e3a22025, 2026-09-02): the stored question was the single token "yesno-", which
+ * the dashboard rendered as a heading with an empty answer box and a disabled Save.
+ *
+ * A single token ending in a hyphen or underscore is never something a person wrote, so this is
+ * positive evidence of a handle rather than an absence of evidence of a label. It is judged only
+ * inside the unspaced-token branch below, so a real question that happens to end in a dash
+ * ("What is your work status - ") is out of its reach. */
+const DANGLING_HANDLE_PREFIX_RE = /^[a-z][a-z0-9]*[-_]$/i;
 // Browser fallback prose injected by an icon component when its SVG cannot render. This can sit
 // inside a real <label>, but it names no form field and must never become user-facing blocker text.
 const PROVIDER_RENDERING_NOISE_RE = /^SVGs?\s+not supported by this browser\.?$/i;
@@ -66,6 +79,7 @@ export function isOpaqueIdentifier(value: string): boolean {
     if (FLATTENED_HANDLE_RE.test(trimmed)) return true;
     if (STRUCTURAL_TOKEN_RE.test(trimmed)) return true;
     if (LONG_CAMEL_WITH_DIGITS_RE.test(trimmed)) return true;
+    if (DANGLING_HANDLE_PREFIX_RE.test(trimmed)) return true;
   }
   // No letters in ANY script. \p{L} rather than [a-z]: an ASCII-only test classified every
   // non-Latin label as a machine id, so a localised Greenhouse or Ashby posting told the student
@@ -79,15 +93,148 @@ export function isOpaqueIdentifier(value: string): boolean {
   return false;
 }
 
-/** Collapse whitespace and strip the decoration portals hang off required labels. */
+/* ---------------------------------------------------------------------------------------------
+ * THE CONTROL'S OWN name AND id, TRAILING THE EMPLOYER'S QUESTION.
+ *
+ * Discovery names a control by concatenating everything that might be its label, and the last two
+ * parts of that join are the control's `name` and `id` attributes (see the `parts` join in the
+ * managed runner's questionLabel). On a control that carries NO written label those handles are
+ * all there is, and the existing PROVIDER_HANDLE_STRIPPERS already reduce that case to nothing.
+ * On a control that DOES carry a written label the handles are simply welded onto the end of a
+ * perfectly good question, and nothing removed them. Measured live on account
+ * a18f774b-a306-4804-93f3-cd6020c27fb3, 2026-09-02, four boards:
+ *
+ *   personio, xolife       "available from* (required) available_from field-available_from"
+ *   personio, xolife       "expected salary* (required) salary_expectations field-salary_expectations"
+ *   pinpoint, Confluence   "phone application_form[application][phone] application_form_application_phone"
+ *   teamtailor, TixTrack   "cover letter* required candidate[job_applications_attributes][0][cover_letter]
+ *                           candidate_job_applications_attributes_0_cover_letter"
+ *
+ * Every one of those is a real question the applicant was shown with a machine handle glued to it.
+ *
+ * THE SAFETY INVARIANT: THE STRIP ONLY EVER RUNS WHEN IT LEAVES TEXT BEHIND. If removing the
+ * trailing run would empty the label, the strip is abandoned and the original stands unchanged. So
+ * this can never turn a readable question into an unreadable one, and it can never disagree with
+ * isProviderHandleOnly: a label the page script calls handle-only is one this module already
+ * normalizes to '', and a label with words in front of its handles is one neither of them touches
+ * the verdict on. That is why nothing here is added to PROVIDER_HANDLE_STRIPPERS, whose list is
+ * shared verbatim with the page script and whose two halves have to keep agreeing.
+ *
+ * UNDERSCORE IS MACHINE, HYPHEN IS HUMAN, and that asymmetry is the whole reason the generic slug
+ * shape accepts only `_`. "self-employed", "part-time" and "e-mail" are words a person writes and
+ * routinely end a real question; `available_from` and `salary_expectations` are not. A hyphenated
+ * handle is recognised only behind an explicit `field-` prefix, or on the positive evidence below.
+ *
+ * BOUNDED, because an unbounded text rule is how a consent paragraph becomes a question: at most
+ * MAX_TRAILING_HANDLE_TOKENS tokens are removed (a `name` and an `id` is two, and a flattened id
+ * can split into no more), and a token longer than MAX_HANDLE_TOKEN_LENGTH is prose, not a handle.
+ */
+const MAX_TRAILING_HANDLE_TOKENS = 4;
+const MAX_HANDLE_TOKEN_LENGTH = 200;
+const FORM_ATTRIBUTE_HANDLE_SHAPES: readonly RegExp[] = [
+  // A bracketed attribute path: application_form[application][phone], candidate[job_application][cover_letter]
+  /^[a-z][a-z0-9_]*(?:\[[a-z0-9_.-]*\])+$/i,
+  // An explicitly field-prefixed slug, which is the one place a hyphen is trusted: field-available_from
+  /^field[-_][a-z0-9]+(?:[-_][a-z0-9]+)*$/i,
+  // A bare snake_case slug: available_from, salary_expectations, application_form_application_phone
+  /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/i,
+  // The type prefix a uuid strip leaves standing: "enter a number number-", "maximum 400 characters short-"
+  /^[a-z][a-z0-9]*[-_]$/i,
+];
+/* HANDLES THAT ARE READ BACK OUT OF THE STORED LABEL, and so must survive it.
+ *
+ * managedOptionProbeControlId recovers a control id from the label when the provider addressed the
+ * element by data attribute and left no selector to read, and on the stored-question path that
+ * label is this one, already normalized. Greenhouse's five self-identification controls are named
+ * by exactly the snake_case shape above ("are you hispanic/latino? hispanic_ethnicity"), so
+ * stripping them would silently skip the option probe for gender, ethnicity, veteran and
+ * disability status, which is the defect PR #428's plumbing exists to prevent. Kept as the same
+ * explicit five-id ATS-family fact portalSubmission states, not as a pattern.
+ *
+ * The other recoverable shapes need no entry here: `discipline--0` and `question_12` are already
+ * gone before this runs, and a trailing six-digit id matches none of the shapes above. */
+const LABEL_RECOVERABLE_CONTROL_HANDLES = /^(?:gender|hispanic_ethnicity|veteran_status|disability_status|race)$/i;
+const HYPHENATED_SLUG_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/i;
+
+const comparableWords = (value: string): string => ` ${value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()} `;
+
+/**
+ * Whether one trailing token is the control's handle rather than a word of the question.
+ *
+ * `preceding` is everything to the left of the token, and it is read for ONE purpose: a hyphenated
+ * slug is trusted as a handle only when the words it spells are ALREADY IN THE LABEL. Pinpoint's
+ * optional summary is stored as "personal summary this section is optional. use it to tell us a
+ * little more about yourself. application_form[application][summary] personal-summary", where
+ * `personal-summary` is the id and repeats the heading verbatim, and where refusing every
+ * hyphenated token also stranded the bracketed `name` behind it. "are you currently self-employed"
+ * has no "self employed" anywhere to its left, so the word stays and the walk stops there. The
+ * evidence is what separates the two; shape alone cannot.
+ */
+function tokenIsFormAttributeHandle(token: string, preceding: readonly string[]): boolean {
+  if (FORM_ATTRIBUTE_HANDLE_SHAPES.some((shape) => shape.test(token))) return true;
+  if (!HYPHENATED_SLUG_RE.test(token)) return false;
+  return comparableWords(preceding.join(' ')).includes(comparableWords(token.split('-').join(' ')));
+}
+
+function stripTrailingFormAttributeHandles(value: string): string {
+  const tokens = value.split(' ').filter(Boolean);
+  let kept = tokens.length;
+  while (kept > 0 && tokens.length - kept < MAX_TRAILING_HANDLE_TOKENS) {
+    const token = tokens[kept - 1] as string;
+    if (token.length > MAX_HANDLE_TOKEN_LENGTH) break;
+    if (LABEL_RECOVERABLE_CONTROL_HANDLES.test(token)) break;
+    if (!tokenIsFormAttributeHandle(token, tokens.slice(0, kept - 1))) break;
+    kept -= 1;
+  }
+  // Nothing but handles: the label is left exactly as it was. A single meaningful attribute name is
+  // often the only thing naming a core identity control ("first_name", "linkedin_url"), and
+  // isCoreIdentityField and classifyField both read it off this string.
+  if (kept === 0 || kept === tokens.length) return value;
+  return tokens.slice(0, kept).join(' ');
+}
+
+/**
+ * The employer's question with the control's own `name` and `id` taken off the end of it.
+ *
+ * APPLIED EXACTLY ONCE PER PATH, and that is a correctness requirement rather than tidiness: the
+ * MAX_TRAILING_HANDLE_TOKENS cap is per call, so a second application would quietly double it and
+ * the bound would stop meaning what it says. So this is NOT folded into tidyLabel. The two human
+ * facing label surfaces each call it once: normalizeDiscoveredLabel for the stored question text,
+ * and humanFieldLabel for the blocker sentence, which keeps the two saying the same words about
+ * the same control.
+ *
+ * normalizeDiscoveredLabel has to run it BEFORE collapseRepeatedLabel. Personio stores "phone phone
+ * field-phone" and "location location field-location": that is one label rendered twice with the id
+ * behind it, and collapseRepeatedLabel halves on an EVEN word count, so the handle made the count
+ * three and the doubled label survived into the stored question.
+ */
+export function stripFormAttributeHandles(value: string): string {
+  return stripTrailingFormAttributeHandles(value.replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * Collapse whitespace and strip the decoration portals hang off required labels.
+ *
+ * Applied to a FIXPOINT rather than in one pass. The single pass removed a trailing "*" before it
+ * removed a trailing "(required)", so a label carrying both came out still wearing the asterisk:
+ * personio's "available from* (required)" tidied to "available from*". Each replacement only ever
+ * shortens the string, so the loop terminates.
+ */
 export function tidyLabel(value: string): string {
-  return value
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[\s*:]+$/g, '') // trailing "*", ":" and the space before them
-    .replace(/^[\s*]+/, '')
-    .replace(/\s*\(required\)$/i, '')
-    .trim();
+  let label = value.replace(/\s+/g, ' ').trim();
+  let previous = '';
+  while (label !== previous) {
+    previous = label;
+    label = label
+      .replace(/\s*\(required\)$/i, '')
+      /* A BARE "required" ONLY BEHIND THE EMPLOYER'S OWN ASTERISK. Teamtailor renders the marker as
+       * "Cover letter* Required", and the asterisk is the evidence that the word is a chip rather
+       * than prose. Without that evidence the word stays: "is a visa required" is a question. */
+      .replace(/\*\s*required[\s.:]*$/i, '')
+      .replace(/[\s*:]+$/g, '') // trailing "*", ":" and the space before them
+      .trim();
+  }
+  return label.replace(/^[\s*]+/, '').trim();
 }
 
 /**
@@ -98,7 +245,11 @@ export function tidyLabel(value: string): string {
 export function humanFieldLabel(candidates: readonly (string | null | undefined)[]): string | null {
   for (const candidate of candidates) {
     if (typeof candidate !== 'string') continue;
-    const tidy = tidyLabel(candidate);
+    /* The blocker sentence and the stored question have to name the control the same way, or the
+     * dashboard shows '"available from* (required) available_from field-available_from" is required
+     * and is still empty' beside a row it has already cleaned up to "Available from" and treats them
+     * as two different pieces of work. */
+    const tidy = tidyLabel(stripFormAttributeHandles(candidate));
     if (!tidy || isOpaqueIdentifier(tidy)) continue;
     return tidy.length > 120 ? `${tidy.slice(0, 117)}...` : tidy;
   }
