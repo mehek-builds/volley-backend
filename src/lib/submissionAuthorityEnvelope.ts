@@ -492,28 +492,39 @@ export type PacketSubmissionAuthorityUnavailable = {
 /**
  * A refusal, and - when a field shape is what caused it - which field and which shape.
  *
- * `reason` is unchanged and stays the ONLY thing that reaches the wire. `rejected` is present
- * exactly when a shape check refused the card, and absent when the reason is already the whole
- * story (`projection_read_failed`, `revision_not_canonical`, `boundary_authorized`,
+ * `reason` is unchanged and stays the ONLY thing the board's own marker carries. `rejected` is
+ * present exactly when a shape check refused the card, and absent when the reason is already the
+ * whole story (`projection_read_failed`, `revision_not_canonical`, `boundary_authorized`,
  * `inconsistent_retry_evidence`). An optional member is right here where it is wrong on the wire
- * marker: a log reader branching on "did a field fail" is reading the answer, while a client
+ * marker: a diagnostic reader branching on "did a field fail" is reading the answer, while a client
  * branching on which keys arrived is guessing at authority.
  *
- * WHY THIS IS STILL NOT A NEW REASON, AND STILL NOT A KEY ON THE MARKER.
- * `SubmissionAuthorityUnavailableReason` is a closed vocabulary a deployed dashboard parses. The
- * checkout of role-quick-website on this machine was re-read on 2026-09-03 and carries no reader for
- * `submission_authority`, `submission_authority_unavailable` or `retry_safety` anywhere, and its
+ * WHY THIS IS STILL NOT A NEW REASON, AND STILL NOT A KEY ON THE MARKER. #894 declined to widen the
+ * wire because the role-quick-website checkout on this machine carried no reader for
+ * `submission_authority` at all. That was the right call on better evidence than it knew: the
+ * checkout is a shallow clone whose main tree is effectively its 2026-08-26 clone state, and its
  * BoardCard type (features/applications/infrastructure/applications-api.ts:177) does not even name
- * `run_revision`, a field this backend has been sending for weeks. That clone is behind the
- * dashboard that shipped the check (role-quick-website #466, 2026-08-31, named in this file's own
- * comments), so it can neither confirm nor deny how strictly the DEPLOYED reader parses the marker.
- * Widening a contract on the strength of a clone that does not contain it is how a card stops
- * rendering, and a quarantined card cannot be sent, which is the exact failure being diagnosed.
+ * `run_revision`, a field this backend has been sending for weeks. The readers are on this machine,
+ * in a sibling worktree of the same repo, and they were read on 2026-09-03 (rq-counter, branch
+ * fix/home-sent-count-survives-a-failed-inventory, 2026-09-02):
+ *
+ *   - `exactKeys` is applied to the ENVELOPE, its projection and its receipt
+ *     (domain/submission-authority-envelope.ts:174) and to nothing else. Neither the card nor the
+ *     response root is key-checked, and infrastructure/response-shape.ts:184 spreads unknown
+ *     top-level keys straight through;
+ *   - a card with no envelope is ABSENT rather than corrupt, and the collection check skips it
+ *     (domain/board-submission-authority.ts:29 and :58), so one unpublishable card no longer takes
+ *     the whole board down;
+ *   - `submission_authority_unavailable` appears ZERO times in that tree. The marker below is read
+ *     by nothing.
+ *
+ * So an additive key on the marker would very likely have been inert too. "Very likely", against a
+ * worktree that may not be the deployed commit, is not the standard this contract is held to, and a
+ * quarantined card cannot be sent, which is the exact failure being diagnosed.
  *
  * So the rejection reaches its reader by a route that publishes no card at all - see
  * `submissionAuthorityRefusalForWire` and GET /applications/board/authority-rejections. A surface
- * that no existing parser reads cannot quarantine anything, whatever the deployed reader turns out
- * to do.
+ * that publishes no card cannot quarantine one, whatever the deployed reader turns out to do.
  */
 export type SubmissionAuthorityPublication =
   | { published: true; envelope: PacketSubmissionAuthorityEnvelope }
@@ -616,7 +627,7 @@ export function submissionAuthorityRefusalTallies(
         : {}),
       packets: 0,
     };
-    const key = [cell.reason, cell.branch ?? '', cell.field ?? '', cell.shape ?? ''].join(' ');
+    const key = [cell.reason, cell.branch ?? '', cell.field ?? '', cell.shape ?? ''].join('|');
     const existing = byKey.get(key);
     if (existing) existing.packets += 1;
     else byKey.set(key, { ...cell, packets: 1 });
