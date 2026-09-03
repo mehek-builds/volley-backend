@@ -2194,6 +2194,26 @@ function comparableAnswer(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * THE ANSWER CARRIES A REVIEW SHE MADE IN THIS ROUND - the only signal in this file that a human
+ * has actually attended to a question, rather than a value the product computed for her.
+ *
+ * The round check is what makes it hard to launder. Pinning answer_reviewed_at to the packet's own
+ * questions_reviewed_at stops a review recorded in an earlier round from standing in for one in
+ * this round, so a refresh cannot carry a stale claim of attention forward across a re-fill.
+ */
+export function answerCarriesCurrentApplicantReview(
+  question: { answer?: string | null; answer_source?: unknown; answer_reviewed_at?: unknown },
+  questionsReviewedAt: string | undefined,
+): boolean {
+  return Boolean(
+    question.answer?.trim()
+    && question.answer_source === 'applicant_review'
+    && typeof question.answer_reviewed_at === 'string'
+    && question.answer_reviewed_at === questionsReviewedAt,
+  );
+}
+
 export function sensitiveQuestionRequiresAttention(
   label: string,
   answer: string,
@@ -2202,11 +2222,34 @@ export function sensitiveQuestionRequiresAttention(
   jdText: string | undefined,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* DID SHE ANSWER THIS ONE HERSELF, IN THIS ROUND. Defaults to false, which is exactly the
+   * behaviour every caller had before this parameter existed. */
+  applicantReviewed: boolean = false,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
   const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
-  return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+  if (known && 'value' in known) {
+    return comparableAnswer(known.value) !== comparableAnswer(answer);
+  }
+  /* THE RESOLVER DECLINED, AND UNTIL NOW THAT MADE THE QUESTION UNSENDABLE BY ANY ANSWER.
+   *
+   * Measured live on 2026-09-03, Exa packet 73768339 (ashby), on the label "do you require visa
+   * sponsorship to work in your selected location? if so, which one? and when does your visa
+   * expire?". resolveKnownAnswer returns skipReason "work-eligibility question left for you", so
+   * there is no value to compare and the old expression returned true for EVERY answer - her own
+   * reviewed paragraph, and a bare "Yes", both measured true. The dashboard offers no control that
+   * clears this, because no answer could: the send was refused permanently.
+   *
+   * A declined resolve means R-004 will not let the PRODUCT declare her work eligibility. It does
+   * not mean she may not declare it herself - "left for you" is precisely an instruction to her.
+   * So her own current-round review is the attention this gate asks for, and nothing else is: an
+   * answer the product computed still refuses, exactly as before.
+   *
+   * NEVER_FILL_PATTERNS is deliberately above this and stays absolute. An SSN, a licence number, a
+   * captcha or a recording consent is never cleared by a review.
+   */
+  return !applicantReviewed;
 }
 
 export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
@@ -2411,11 +2454,11 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       consent_permission_version?: unknown;
       consent_permission_granted_at?: unknown;
     };
-    const applicantReviewedCurrentAnswer = Boolean(
-      question.answer.trim()
-      && withProvenance.answer_source === 'applicant_review'
-      && typeof withProvenance.answer_reviewed_at === 'string'
-      && withProvenance.answer_reviewed_at === questionsReviewedAt,
+    /* Shared with the sensitive-question gate, so the refresh and the gate cannot disagree about
+     * what counts as her own current-round answer. */
+    const applicantReviewedCurrentAnswer = answerCarriesCurrentApplicantReview(
+      withProvenance,
+      questionsReviewedAt,
     );
     const derivedFrom = typeof withProvenance.answer_option_source === 'string'
       ? withProvenance.answer_option_source
