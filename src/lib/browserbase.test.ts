@@ -450,6 +450,7 @@ test('a prepare-path fill widens its scan deadline to cover the provider run bud
       [{ type: 'fill', selector: '#first_name', text: 'Mehek' }],
       MANAGED_PREPARE_SCAN_OPTIONS,
     );
+    const after = Date.now();
     const body = sentBody as unknown as { allowSubmit?: unknown; providerDeadlineAt?: string };
     assert.equal(body.allowSubmit, false, 'a prepare fill must never release a submission');
     /* THE TWO CLOCKS STRATUS DERIVES FROM THIS ONE VALUE, and why 280s is a ceiling rather than a
@@ -458,8 +459,24 @@ test('a prepare-path fill widens its scan deadline to cover the provider run bud
      * past the host's wait, so a fill finishing in that band has already touched the employer form
      * and gets discarded as RUN_TIMED_OUT. At exactly 280s the sandbox window equals stratus's own
      * 270s run budget, which is the largest window that can actually produce a result. */
-    const remainingMs = Date.parse(body.providerDeadlineAt!) - before;
-    assert.ok(remainingMs > 275_000 && remainingMs <= 280_000, `deadline out of bounds: ${remainingMs}ms`);
+    /* MEASURED AGAINST BOTH ENDPOINTS, because the deadline's own clock reading happens inside the
+     * call, at some t with before <= t <= after. Comparing it to `before` alone made the ceiling
+     * hold only when those two readings landed in the same millisecond, so scheduling jitter alone
+     * failed the run: CI 33733628538 reported `280001ms`, and a re-run with no code change passed.
+     * Each half below is compared against the endpoint that can only absorb jitter, never manufacture
+     * it, so neither can red on a slow runner. That leaves each half loose by the jitter rather than
+     * exact -- a deviation of a millisecond or two is invisible here -- which is why the literal
+     * `assert.equal` on the constant below stays: THAT is the exact pin on 280s, and these two prove
+     * the value actually sent on the wire is the one derived from it. */
+    const deadlineAtMs = Date.parse(body.providerDeadlineAt!);
+    assert.ok(
+      deadlineAtMs - after <= 280_000,
+      `deadline above the 280s ceiling: ${deadlineAtMs - after}ms past the post-call clock`,
+    );
+    assert.ok(
+      deadlineAtMs - before >= 280_000,
+      `deadline short of the 280s budget: ${deadlineAtMs - before}ms past the pre-call clock`,
+    );
     assert.equal(MANAGED_PREPARE_FILL_DEADLINE_MS, 280_000);
     assert.ok(
       MANAGED_PREPARE_FILL_DEADLINE_MS - 10_000 <= 270_000,
