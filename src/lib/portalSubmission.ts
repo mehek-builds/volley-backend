@@ -12557,11 +12557,17 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
        * '"CV or resume" is required and is still empty'. The gate already knew how to judge this
        * field and could not find it.
        *
-       * That is what sent DSI Innovations (packet a34e5ce2) to Recruitee on 2026-09-02 with an
-       * empty required "CV or resume": filled_fields recorded the resume because setInputFiles
-       * returned cleanly, no readiness blocker was raised, the run pressed submit, and the form
-       * had nothing to accept - which arrives as no_confirmation_state and an unverified
-       * submission nobody can resolve without opening the employer's portal.
+       * FOUND WHILE READING THE DSI INNOVATIONS FAILURE, and worth stating exactly what that run
+       * does and does not establish. Packet a34e5ce2 went to Recruitee on 2026-09-02, came back
+       * no_confirmation_state, and its post-run screenshot shows every text field filled and the
+       * required "CV or resume" empty. That screenshot is taken AFTER the submit press, and a
+       * browser never repopulates a file input across a rejected submit, so it does NOT prove the
+       * control was empty when the gate ran - the run's upload action verified the file into the
+       * input by name, size and sha256 before it. What the run does establish is that this gate
+       * had nothing to say about that field either way, on a form where it was the one required
+       * thing that could go missing. The hole is real and provable on its own terms, above; which
+       * of the two stories DSI took is not settled here and should be read off a run that carries
+       * this arm.
        *
        * LAST in the chain, after the widget fallback, so this adds an arm exactly where the value
        * was null and changes the target on no path that already had one - the class arm keeps
