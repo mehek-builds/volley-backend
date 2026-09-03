@@ -255,8 +255,14 @@ const GENDER_FIELD = {
   maxLength: null,
 } as never;
 
-/** submissionRunner.ts's own composition for the persisted question list, byte for byte. */
-const fillRunWriteback = async (stored: ApplicationReviewQuestion) => {
+/** submissionRunner.ts's own composition for the persisted question list, byte for byte.
+ *
+ * BOTH HALVES ARE RETURNED, and the resolved row is the one to assert on for this rule.
+ * mergeDiscoveredPortalQuestions puts a current-round applicant answer FIRST and
+ * normalizeApplicationReviewQuestions is first-wins, so on a row she still owns the stored record
+ * wins the collision and the resolved row never reaches the packet. Asserting only on `persisted`
+ * would leave the branch under test unobserved on exactly the shape that keeps her claim. */
+const fillRun = async (stored: ApplicationReviewQuestion) => {
   const current = {
     questions: [stored],
     questions_reviewed_at: ROUND,
@@ -272,7 +278,7 @@ const fillRunWriteback = async (stored: ApplicationReviewQuestion) => {
     false,
     'greenhouse',
   );
-  return reopenUnfitClosedChoiceQuestions(resolveApplicantClosedChoiceFallbacks(
+  const persisted = reopenUnfitClosedChoiceQuestions(resolveApplicantClosedChoiceFallbacks(
     [GENDER_FIELD],
     mergeDiscoveredPortalQuestions(
       discovery.questions,
@@ -284,6 +290,7 @@ const fillRunWriteback = async (stored: ApplicationReviewQuestion) => {
     undefined,
     undefined,
   ));
+  return { resolved: discovery.questions, persisted };
 };
 
 test('a fill that replaces the answer drops the override note the old answer was made against', async () => {
@@ -292,18 +299,33 @@ test('a fill that replaces the answer drops the override note the old answer was
    * machine value; answer_override_of was the one claim about the old string that rode across. It
    * is not inert - refreshKnownQuestionAnswers reads it to decide whether to KEEP an answer - and a
    * machine value has nothing to be an override OF. */
-  const [persisted] = await fillRunWriteback(question({
+  const [persisted] = (await fillRun(question({
     answer: '',
     answer_draft: 'Female',
     answer_source: 'applicant_review',
     answer_reviewed_at: ROUND,
     answer_override_of: 'Female',
-  } as Partial<ApplicationReviewQuestion>));
+  } as Partial<ApplicationReviewQuestion>))).persisted;
 
   assert.equal(persisted.answer, 'Woman', 'the fill really did replace the answer');
   assert.equal(persisted.answer_override_of, undefined, 'so the override note goes with the old one');
   assert.equal(persisted.answer_source, undefined, 'as the source and the round already did');
   assert.equal(persisted.answer_option_source, 'Female', 'the derivation record is about the NEW value and stays');
+});
+
+test('a replaced answer sheds its override even when nothing on the row was ever hers', async () => {
+  /* THE SHAPE THE OLD CODE ITSELF PRODUCES, which is why the strip is keyed on the answer changing
+   * and not on answer_source. The runner has always dropped answer_source on a replacement while
+   * leaving answer_override_of, so the row this run meets is routinely a plain machine record still
+   * carrying an override note - measured on origin/main as
+   * {answer:"Woman", answer_override_of:"Female", answer_option_source:"Female"}. Keyed on the
+   * source, this exact record is the one case the strip would keep missing, and it is the common
+   * one. */
+  const { resolved } = await fillRun(question({ answer_override_of: 'Female' }));
+
+  assert.equal(resolved[0].answer, 'Woman', 'the resolver replaced her stored "Female"');
+  assert.equal(resolved[0].answer_source, undefined, 'nothing here was ever an applicant claim');
+  assert.equal(resolved[0].answer_override_of, undefined, 'and the override note still goes');
 });
 
 test('both merge call sites on the save paths are wired to the machine lookup', () => {
@@ -335,15 +357,20 @@ test('both merge call sites on the save paths are wired to the machine lookup', 
 test('a fill that recomputes the same answer keeps every claim standing', async () => {
   /* The converse, and the reason the strip is keyed on the answer changing rather than on the
    * source. Nothing is being replaced here, so nothing on the record has gone stale. */
-  const [persisted] = await fillRunWriteback(question({
+  /* Asserted on the RESOLVED row as well as the persisted one. The stored record wins the writeback
+   * collision on a row she still owns, so `persisted` alone would be green whatever this branch did
+   * to the resolved copy - and that copy is what a later run inherits. */
+  const { resolved, persisted } = await fillRun(question({
     answer: 'Woman',
     answer_source: 'applicant_review',
     answer_reviewed_at: ROUND,
     answer_override_of: 'Female',
   }));
 
-  assert.equal(persisted.answer, 'Woman');
-  assert.equal(persisted.answer_override_of, 'Female', 'her override survives an unchanged answer');
-  assert.equal(persisted.answer_source, 'applicant_review');
-  assert.equal(persisted.answer_reviewed_at, ROUND);
+  assert.equal(resolved[0].answer, 'Woman', 'the resolver recomputed the same value');
+  assert.equal(resolved[0].answer_override_of, 'Female', 'so her override is still about this string');
+  assert.equal(resolved[0].answer_source, 'applicant_review', 'and the claim itself stands');
+  assert.equal(persisted[0].answer, 'Woman');
+  assert.equal(persisted[0].answer_override_of, 'Female', 'her override survives an unchanged answer');
+  assert.equal(persisted[0].answer_reviewed_at, ROUND);
 });
