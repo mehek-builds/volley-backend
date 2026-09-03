@@ -71,8 +71,8 @@ import {
   submitRequestDisposition,
 } from '../lib/submissionSafety';
 import {
-  attemptNeverReachedEmployerIsReleasable,
   expiredAttendedHandoffClaimIsReleasable,
+  neverReachedEmployerReleaseIsAdmissible,
   releaseAttemptThatNeverReachedEmployer,
   releaseExpiredAttendedHandoffClaim,
 } from '../lib/expiredHandoffClaimRelease';
@@ -689,9 +689,14 @@ async function repairExpiredAttendedHandoffClaim(
      * be refused by duplicateApplicationVerdict, which reads the ledger and not the row; a fact
      * written without the release would leave the packet locked. See
      * attemptNeverReachedEmployerIsReleasable for what this refuses. */
-    if (claimEvents.length > 0
-      && attemptNeverReachedEmployer(claimEvents)
-      && attemptNeverReachedEmployerIsReleasable(current)) {
+    /* TWO ARMS, ONE LEDGER PROOF. attemptNeverReachedEmployer is required by both and is what
+     * actually proves this attempt never crossed the employer boundary; the predicates beside it
+     * only decide whether the ROW is in a state whose claim may be lifted. The first covers the
+     * parked needs_attention wedge (PR #861). The second covers a `submitting` row whose run
+     * stopped without saying so, measured on a clock because a live pre-boundary send and a dead
+     * one carry identical evidence. See stalledSubmittingClaimIsReleasable for the derivation of
+     * the bound and for why the clock read is databaseNow rather than a stamp taken earlier. */
+    if (neverReachedEmployerReleaseIsAdmissible(current, claimEvents, databaseNow.getTime())) {
       const opening = claimEvents.find((event) => event.event_kind === 'attempt_opened')!;
       const released = releaseAttemptThatNeverReachedEmployer(
         current,
