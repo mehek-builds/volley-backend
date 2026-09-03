@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { groundedBulletsForEntry, RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+import { groundedBulletsForEntry, resumeBulletKey, RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 import { enforceExperienceBulletFloor } from './resumePolicy';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { ExperienceBankEntry } from '../db/schema';
@@ -43,8 +43,12 @@ test('the floor prints exactly what this function returns, entry by entry', () =
   const page = new Set<string>();
   const replay = [alpha, beta].map((source) => {
     const bullets = groundedBulletsForEntry([shared], source.bullet_variants, page);
+    /* resumeBulletKey, NOT a hand-copy of it. A replay that normalizes with its own regex stops
+       replaying the floor the moment that key changes, and this file exists to keep exactly one
+       definition of these things. */
     for (const bullet of bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry)) {
-      page.add(bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+      const key = resumeBulletKey(bullet);
+      if (key) page.add(key);
     }
     return bullets;
   });
@@ -58,11 +62,9 @@ test('the floor prints exactly what this function returns, entry by entry', () =
 test('a sentence an earlier entry already printed is not one this entry can still print', () => {
   const shared = 'Coordinated a weekly investor update across the entire deal team';
   const own = 'Drafted diligence memos for three portfolio companies every quarter';
-  const key = (bullet: string) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-
   assert.equal(groundedBulletsForEntry([], [shared, own]).length, 2, 'on an empty page the row holds two');
   assert.equal(
-    groundedBulletsForEntry([], [shared, own], new Set([key(shared)])).length,
+    groundedBulletsForEntry([], [shared, own], new Set([resumeBulletKey(shared)])).length,
     1,
     'a spent sentence must not be counted as still available',
   );
