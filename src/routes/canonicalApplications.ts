@@ -341,7 +341,11 @@ function mostAdvancedLifecycle(values: string[]): string {
     (lifecycleRanks[value] ?? 0) > (lifecycleRanks[best] ?? 0) ? value : best, values[0] ?? 'not_started');
 }
 
-function canonicalIdentityMatches(
+/* Exported so POST /resume/generate matches on exactly this definition rather than a second copy.
+   The cascade is EXCLUSIVE on purpose - a jobId or a portalUrl that names no row means "a posting I
+   do not have", which is an insert, never a fall-through to company+role that would adopt a
+   different posting at the same employer. One definition, so the two call sites cannot drift. */
+export function canonicalIdentityMatches(
   row: typeof applications.$inferSelect,
   input: { jobId?: string; portalUrl: string | null; companyScopeKey: string; companyName: string; role: string },
 ): boolean {
@@ -357,7 +361,11 @@ function canonicalIdentityMatches(
   return roleMatches && (row.company_scope_key === input.companyScopeKey || companyMatches);
 }
 
-function canonicalAliasMatches(
+/* Exported for the same reason canonicalIdentityMatches is: POST /resume/generate adopts through
+   this file's definitions rather than a second reading of them. This is the upsert's THIRD arm and
+   the one with no fingerprint restriction - it reaches a row carrying a canonical `application:` or
+   `job:` fingerprint that is not the one being computed now, which the other two arms cannot. */
+export function canonicalAliasMatches(
   row: typeof applications.$inferSelect,
   input: { jobId?: string; portalUrl: string | null; companyName: string; role: string },
 ): boolean {

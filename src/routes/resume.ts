@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
+import { eq, desc, and, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
@@ -94,6 +94,13 @@ import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
+import {
+  canonicalAliasMatches,
+  canonicalApplicationFingerprint,
+  canonicalIdentityMatches,
+  canonicalPortalUrl,
+} from './canonicalApplications';
+import { isAppliedOrLaterTrackerState, preparedSendLifecycle } from '../lib/canonicalApplicationLifecycle';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
@@ -1556,9 +1563,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           spec: storedSpec,
           resume_object_key: objectKey,
         });
-        canonicalApplicationId = body.application_id ?? randomUUID();
         canonicalArtifactId = randomUUID();
-        if (!body.application_id) {
+        if (body.application_id) {
+          canonicalApplicationId = body.application_id;
+        } else if (!body.application) {
+          /* A bare resume tailoring carries no portal, no questions and status 'resume_ready'.
+             It must never adopt a prepared application: repointing a ready_to_submit packet at a
+             resume-only one would strip the portal binding and the answered questions from a row
+             the student had already prepared. This path keeps its own row. */
+          canonicalApplicationId = randomUUID();
           await tx.insert(applications).values({
             id: canonicalApplicationId,
             user_id: userId,
@@ -1574,6 +1587,168 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             selected_resume_artifact_id: null,
             application_fingerprint: `legacy:${resumeId}`,
           });
+        } else {
+          /* TAILORING THE SAME POSTING TWICE MUST NOT FORK THE TRACKER.
+             This path used to insert unconditionally with a `legacy:${resumeId}` fingerprint. Because
+             resumeId is fresh per generation, that fingerprint was unique per generation, so the
+             unique index on (user_id, application_fingerprint) never collided and every re-tailor of
+             a posting the student already had produced ANOTHER application row.
+
+             THE MATCH IS canonicalIdentityMatches ITSELF, not a second reading of it. A first cut
+             wrote its own three-rung ladder with `??`, which is a FALL-THROUGH: a portal URL naming
+             no row dropped to company-scope + role and adopted a DIFFERENT posting at the same
+             employer, rewriting its portal_url and destroying its prepared packet. The shared
+             predicate is an exclusive cascade - jobId, else portalUrl, else company + role - so a
+             posting this account does not have is an insert, which is the whole point. It also
+             normalizes both sides (safeStoredPortalUrl, NFKC + case folding) where the hand-written
+             version compared raw strings and silently missed rows canonical intake had written.
+
+             THE LOCK IS THE SAME LOCK canonical intake takes, on this transaction, because the read
+             and the write below must not interleave with a concurrent generation for this user -
+             which is exactly how duplicates were produced in the first place. */
+          const companyScopeKey = canonicalCompanyScope({ companyName: body.company });
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${userId}`}, 0::bigint))`);
+          const ownedLive = await tx.select().from(applications).where(and(
+            eq(applications.user_id, userId),
+            isNull(applications.removed_at),
+          )).orderBy(applications.created_at, applications.id);
+          /* NORMALIZED ONCE, AND ON BOTH SIDES.
+             canonicalIdentityMatches normalizes only the STORED side - it compares
+             safeStoredPortalUrl(row.portal_url) against input.portalUrl verbatim - and
+             canonicalApplicationFingerprint hashes whatever it is handed. Passing the request's URL
+             raw therefore compares a normalized value against an unnormalized one, so a posting
+             fails to match ITSELF whenever the stored row differs only by a trailing slash, a #hash
+             or a utm_/ref/source parameter: the dedupe this exists to perform silently does not
+             fire. upsertCanonicalApplicationForUser avoids that by normalizing before it does either,
+             and this now does the same, from the same function.
+             Guarded because the request schema admits http:// while canonicalPortalUrl requires
+             https outside tests. Intake calls it unguarded and lets it throw, but that is a 400 on a
+             small write; here it would abort a generation that succeeds today. An unusable URL
+             therefore carries no portal identity rather than failing the request - the cascade falls
+             to the job row if there is one, and otherwise to company and role. */
+          let normalizedPortalUrl: string | null = null;
+          let portalIdentityUnusable = false;
+          try {
+            normalizedPortalUrl = canonicalPortalUrl(canonicalApplicationPortalUrl ?? undefined);
+          } catch {
+            /* FAILING TO NORMALIZE IS NOT THE SAME AS HAVING NO PORTAL, and conflating the two is how
+               the first cut's worst bug comes back. Leaving normalizedPortalUrl null while a URL was
+               in fact supplied drops the exclusive cascade onto the company + role rung, which is
+               precisely the arm that can adopt a DIFFERENT posting at the same employer. A URL Litos
+               cannot canonicalize means the identity is unknown, and an unknown identity must adopt
+               nothing at all. */
+            normalizedPortalUrl = null;
+            portalIdentityUnusable = Boolean(canonicalApplicationPortalUrl);
+          }
+          const identity = {
+            jobId: effectiveJobId,
+            portalUrl: normalizedPortalUrl,
+            companyScopeKey,
+            companyName: body.company,
+            role: body.role,
+          };
+          /* THE ROW SET IS canonical intake's ROW SET, not merely its predicate.
+             upsertCanonicalApplicationForUser matches a canonically fingerprinted row by EXACT
+             fingerprint and reserves identity matching for rows still stamped `legacy:`. Applying the
+             predicate to every live row instead would adopt rows written by the extension and the
+             website - which canonical intake would only ever have matched exactly - so the two would
+             agree on the predicate and disagree on what it is allowed to touch. */
+          const fingerprint = canonicalApplicationFingerprint({
+            jobId: effectiveJobId,
+            portalUrl: normalizedPortalUrl,
+            companyScopeKey,
+            role: body.role,
+          });
+          /* A ROW THAT REACHED THE EMPLOYER IS NEVER ADOPTED, AND THIS IS THE ONLY PLACE THAT CAN SAY SO.
+             linkGeneratedPacketToCanonicalApplication sets legacy_generated_resume_id and
+             selected_resume_artifact_id UNCONDITIONALLY - only the three lifecycle columns sit inside
+             its terminalLifecycle CASE - and it then deselects the application_artifacts row that was
+             actually attached. On a submitted row that repoints the Tracker at a resume the employer
+             never received, and authoritativeSubmissionProjection compares exactly those two columns,
+             so the packet that really was sent starts reporting document_tuple_incomplete.
+             The helper cannot be narrowed instead: managedPrepare is its other caller and depends on
+             the current behaviour for a row the caller named explicitly. Implicit adoption is what
+             brings a submitted row into its reach, so the guard belongs here, and it excludes rather
+             than adopts - a posting already with the employer gets its own row and the send path
+             refuses the duplicate on its own terms. */
+          /* A PREPARED PACKET IS OFF LIMITS TOO, and that is a decision rather than an omission.
+             `ready_for_final_approval` is a filled employer form with a preview screenshot waiting on
+             her Send press. linkGeneratedPacketToCanonicalApplication deliberately releases that hold
+             on a re-tailor - correct when she NAMED this application - but implicit adoption would do
+             it silently, repointing selected_resume_artifact_id and deselecting the application_artifacts
+             row that was actually filled into the form, leaving her prepared form referencing a resume
+             it was not filled with. The employer has not received it, so this is recoverable; it is
+             excluded anyway, because "explicit re-tailor may disturb it, implicit adoption may not" is
+             the line that keeps the surprise out. */
+          const alreadyWithEmployer = (row: typeof applications.$inferSelect) =>
+            row.submission_state === 'submitted'
+            || row.submission_state === preparedSendLifecycle.submissionState
+            || isAppliedOrLaterTrackerState(row.tracker_state);
+          /* ALL THREE OF THE UPSERT'S ARMS, not two. A first cut copied the exact-fingerprint and
+             `legacy:` arms and dropped canonicalAliasMatches, which has NO fingerprint restriction and
+             is the only arm that reaches a row carrying a canonical fingerprint other than the one
+             being computed now. Two ordinary paths fork without it: a row created by POST /applications
+             with a job_id (fingerprint `job:J`) is invisible to a later generation that carries the
+             portal URL but no job_id; and the upsert itself manufactures the mirror image, because it
+             rewrites application_fingerprint while PRESERVING a job_id it merged in, leaving a row with
+             job_id J under an `application:` fingerprint that a later generation carrying J cannot see.
+             Both are exactly the duplicate fork this branch exists to close. */
+          const canonicalRow = ownedLive.find((row) => row.application_fingerprint === fingerprint);
+          const adoptable = ownedLive.filter((row) => row.application_fingerprint.startsWith('legacy:')
+            && canonicalIdentityMatches(row, identity));
+          const aliases = ownedLive.filter((row) => canonicalAliasMatches(row, {
+            jobId: effectiveJobId,
+            portalUrl: normalizedPortalUrl,
+            companyName: body.company,
+            role: body.role,
+          }));
+          /* A ROW WITH NO PORTAL OF ITS OWN IS NOT THIS POSTING, when this packet has one.
+             The alias arm can reach such a row on a job_id match alone. Adopting it would leave a
+             ready_to_submit packet on a row whose portal_url is still null - and since the identity
+             the fingerprint was derived from is deliberately not rewritten here, that row can never
+             acquire one, so every send attempt against it 409s for good. Excluding it costs an extra
+             Tracker row that canonical intake will merge later; adopting it costs a dead application. */
+          const matches = (portalIdentityUnusable ? [] : [canonicalRow, ...adoptable, ...aliases])
+            .filter((row): row is typeof applications.$inferSelect => Boolean(row))
+            .filter((row, index, all) => all.findIndex((other) => other.id === row.id) === index)
+            .filter((row) => !alreadyWithEmployer(row))
+            .filter((row) => !normalizedPortalUrl || Boolean(row.portal_url));
+          /* Deterministic, and ranked the way upsertCanonicalApplicationForUser ranks: a row that
+             already carries a packet outranks an empty one, and the ordered select breaks the
+             remaining tie. Left to `.find` over an unordered select, which row a re-tailor adopted
+             was decided by the query plan - in precisely the duplicated state this exists to end. */
+          const existing = matches.find((row) => Boolean(row.legacy_generated_resume_id)) ?? matches[0];
+          if (existing) {
+            /* NOTHING IS WRITTEN TO THE ROW HERE, DELIBERATELY.
+               linkGeneratedPacketToCanonicalApplication runs below on this same id and already does
+               the repoint correctly, including the part a hand-rolled update got wrong: its
+               terminalLifecycle arm keeps `applied`/`submitted` rows on their existing state instead
+               of resetting them, and it moves application_artifacts.selected with the pointer. An
+               update here could only duplicate it or contradict it, and the first cut did both -
+               it cleared submission_state and the resume pointers on a row whose prepared hold the
+               link helper then had to reconcile. job_id and portal_url are likewise NOT rewritten:
+               they are two of the three inputs application_fingerprint is derived from, and moving
+               them without re-deriving the fingerprint leaves a row whose stored identity names a
+               posting it no longer points at. A matched row already agrees on that identity. */
+            canonicalApplicationId = existing.id;
+          } else {
+            canonicalApplicationId = randomUUID();
+            await tx.insert(applications).values({
+              id: canonicalApplicationId,
+              user_id: userId,
+              legacy_generated_resume_id: resumeId,
+              job_id: effectiveJobId,
+              company_scope_key: companyScopeKey,
+              company_name: body.company,
+              role: body.role,
+              portal_url: canonicalApplicationPortalUrl,
+              source_surface: 'dashboard',
+              tracker_state: 'applying',
+              review_state: 'ready',
+              selected_resume_artifact_id: null,
+              application_fingerprint: `legacy:${resumeId}`,
+            });
+          }
         }
         await tx.insert(artifacts).values({
           id: canonicalArtifactId,
