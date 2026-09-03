@@ -14,6 +14,7 @@ import {
   type ApplicationProfileLike,
 } from './questionDiscovery';
 import { resolveProfileField } from './profileFieldResolution';
+import { resolveKnownAnswer } from './questionDiscovery';
 import {
   discoverAndResolveQuestions,
   mergeDiscoveredPortalQuestions,
@@ -54,7 +55,7 @@ const AS_OF = new Date('2026-09-03T15:19:57.000Z');
 
 const HER_PROFILE = {
   eeo_prefs: {
-    gender: 'Female', race: 'South Asian', veteran_status: 'No', hispanic: 'No',
+    gender: 'Female', race: 'South Asian', veteran_status: 'No', disability_status: 'No', hispanic: 'No',
   },
 } as unknown as ApplicationProfileLike;
 
@@ -92,8 +93,19 @@ test('the two resolutions really do disagree on this control, which is the whole
   /* Without this, every assertion below could pass for the wrong reason. resolveKnownAnswer says
    * what the answer IS from the profile; resolveProfileField says how that same answer is WRITTEN
    * into this control. The fill, the runner and the packet audit all resolve through the second,
-   * so the review screen renders the second - and the mint gate asked only the first. */
-  assert.equal(resolverAnswerFor(question()), 'Female', 'the resolver answers her profile wording');
+   * so the review screen renders the second - and the mint gate asked only the first.
+   *
+   * ASSERTED AGAINST resolveKnownAnswer RATHER THAN knownAnswerLookup, and the difference matters.
+   * The contrast this branch is built on is between the two RESOLUTION LAYERS, and the lower one is
+   * resolveKnownAnswer. knownAnswerLookup is a wrapper over it whose own contract is "what will the
+   * refresh serve", so pinning the mechanism to the wrapper would make this test a statement about
+   * the refresh instead - and PR #897 changes exactly that wrapper. See the #897 section of the PR
+   * body: naming the wrong layer here is what made this test look like a conflict. */
+  assert.equal(
+    (resolveKnownAnswer(GENDER_LABEL, 'text', HER_PROFILE, undefined, undefined, undefined, undefined, AS_OF) as { value: string }).value,
+    'Female',
+    'the resolver answers her profile wording',
+  );
   assert.equal(
     resolveProfileField(
       { label: GENDER_LABEL, inputType: 'select-one', options: HRT_GENDER_OPTIONS },
@@ -178,6 +190,89 @@ test('a self-identification she genuinely changes is still recorded as hers', ()
     answer_reviewed_at: ROUND,
     answer_override_of: 'Female',
   });
+});
+
+/* ── Refusing the claim must not destroy the answer ────────────────────────────────────────────
+ *
+ * THE DEFECT THE FIRST VERSION OF THIS BRANCH SHIPPED, and it is the reason these tests run the
+ * COMPOSED path rather than the merge alone. `submittedIsMachineValue` is only reachable while
+ * `bodyChangedTheAnswer` is true, so the gate's entire firing domain is saves that REPLACE the
+ * answer - which means `answerUnchanged` is false, which means the strip has already dropped
+ * `answer_option_source`. Refusing the claim and leaving it dropped handed the refresh a bare
+ * string with no provenance: every keep branch missed, the answer recomputed to the un-snapped
+ * profile wording, and reopenUnfitClosedChoiceQuestions blanked it on a strict closed control.
+ *
+ * Measured on the HRT round before the fix: "Man" -> "Woman" came back as "", the re-opened row
+ * came back as "", and the veteran and disability controls came back holding "No", which is on no
+ * option either employer offers. That is the ANSWERED-with-nothing-selected divergence.
+ *
+ * A test on the merge alone cannot see any of it. Neither can one that picks "Non-binary": that is
+ * the one gender option the gate does not fire on, so it proves nothing about the gate's own
+ * domain. Every case below is a value the gate DOES refuse. */
+const composedSave = (stored: ApplicationReviewQuestion, body: string) => resolveSubmittedApplicationAnswers({
+  current: { questions: [stored], questions_reviewed_at: ROUND, jd_text: undefined } as unknown as ApplicationReviewState,
+  submitted: [{ ...stored, answer: body }],
+  profile: HER_PROFILE,
+  asOf: AS_OF,
+  now: () => '2026-09-03T15:19:57.000Z',
+}).questions[0];
+
+const VETERAN_OPTIONS = [
+  'I identify as one or more of the classifications of a protected veteran',
+  'I am not a protected veteran',
+  'I do not wish to answer',
+];
+const DISABILITY_OPTIONS = [
+  'Yes, I have a disability, or have had one in the past',
+  'No, I do not have a disability and have not had one in the past',
+  'I do not want to answer',
+];
+
+const REFUSED_BUT_KEPT: ReadonlyArray<{
+  name: string; stored: Partial<ApplicationReviewQuestion>; body: string; preSnap: string;
+}> = [
+  { name: 'she switches gender from Man to the option Litos would also pick',
+    stored: { answer: 'Man' }, body: 'Woman', preSnap: 'Female' },
+  { name: 'the re-opened HRT row itself, answered from the Your-turn control',
+    stored: { answer: '', answer_draft: 'Female' } as Partial<ApplicationReviewQuestion>,
+    body: 'Woman', preSnap: 'Female' },
+  { name: 'the veteran control, in the employer\'s own sentence',
+    stored: { question: 'Veteran status', answer: 'No', options: [...VETERAN_OPTIONS] },
+    body: 'I am not a protected veteran', preSnap: 'No' },
+  { name: 'the disability control, in the employer\'s own sentence',
+    stored: { question: 'Disability status', answer: 'No', options: [...DISABILITY_OPTIONS] },
+    body: 'No, I do not have a disability and have not had one in the past', preSnap: 'No' },
+  { name: 'a row whose control type was never measured',
+    stored: { answer: 'Man', portal_input_type: undefined }, body: 'Woman', preSnap: 'Female' },
+];
+
+for (const { name, stored, body, preSnap } of REFUSED_BUT_KEPT) {
+  test(`the answer survives the refused claim: ${name}`, () => {
+    const saved = composedSave(question(stored), body);
+
+    assert.equal(saved.answer, body, 'the employer\'s own spelling is still on the row');
+    assert.equal(saved.answer_source, undefined, 'and nothing claims she chose it');
+    assert.equal(saved.answer_reviewed_at, undefined);
+    /* THE RECORD THAT REPLACES THE CLAIM. Not silence: the OTHER provenance. This says the value is
+     * a machine snap and names the pre-snap string, which is exactly what the refresh recomputes to
+     * decide the snap is still current - the same field and the same string optionSnapClaim writes
+     * on the fill path. */
+    assert.equal(saved.answer_option_source, preSnap, 'the machine records that it snapped this');
+    assert.equal((saved as Record<string, unknown>).answer_draft, undefined,
+      'nothing was re-opened, so the row is not back in her queue');
+  });
+}
+
+test('every refused-claim row is a value the gate genuinely refuses, not one that dodges it', () => {
+  /* The negative control for the block above. If any of those bodies were NOT the machine's own
+   * value for its control, the test would be passing on the ordinary mint path and proving nothing
+   * about the gate. "Non-binary" is exactly such a value, and it is asserted here as the contrast. */
+  for (const { stored, body } of REFUSED_BUT_KEPT) {
+    assert.equal(machineAnswerFor(question(stored)), body,
+      `${body} is the string Litos would put in this control`);
+  }
+  assert.notEqual(machineAnswerFor(question()), 'Non-binary',
+    'and the option used elsewhere in this file is not, which is why it mints');
 });
 
 test('an explicit per-question confirmation still claims a machine value, which is the escape hatch', () => {

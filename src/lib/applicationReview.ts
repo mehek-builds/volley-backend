@@ -743,6 +743,39 @@ export function mergeSubmittedApplicationReviewQuestions(
       /* Beside the claim and never without it, because it is only meaningful as the other half of
        * that claim. See overriddenResolverValue. */
       ...(overriddenResolverValue ? { answer_override_of: overriddenResolverValue } : {}),
+      /* AND WHEN THE GATE ABOVE REFUSED THE CLAIM, THE MACHINE'S OWN RECORD TAKES ITS PLACE.
+       *
+       * REFUSING A CLAIM IS NOT A NO-OP, and that is the whole of this clause. `submittedIsMachineValue`
+       * can only be true while `bodyChangedTheAnswer` is true, so every save it fires on is one where
+       * the answer on the row is being REPLACED - which means `answerUnchanged` is false, which means
+       * the strip above has already dropped `answer_option_source` with the rest of the answer-claims.
+       * Leaving it dropped hands refreshKnownQuestionAnswers a bare string with no provenance at all:
+       * every keep branch misses, the answer is recomputed to the UN-SNAPPED profile wording, and on a
+       * strict closed control reopenUnfitClosedChoiceQuestions then blanks it. Measured end to end on
+       * the HRT round with `eeo_prefs.gender = "Female"`, before this clause existed:
+       *
+       *   stored "Man",  body "Woman"                        ->  ""    (draft "Female")
+       *   stored "",     body "Woman"  (the re-opened row)   ->  ""
+       *   veteran, body "I am not a protected veteran"       ->  "No"  (on no option the control offers)
+       *   disability, body "No, I do not have a disability"  ->  "No"  (same)
+       *
+       * So declining to say SHE chose it was destroying the answer or rewriting it to a string the
+       * employer's control does not offer, which is the ANSWERED-with-nothing-selected divergence the
+       * self-identification keep branch exists to prevent.
+       *
+       * The honest record is not silence, it is the OTHER provenance: this value is a machine snap, and
+       * `answer_option_source` is the field that says so. The value written is `resolverAnswer`, the
+       * pre-snap string, because that is precisely what refreshKnownQuestionAnswers recomputes to test
+       * whether the snap is still current - the same rule, the same string and the same reason as
+       * optionSnapClaim on the fill path, which records `profileKnown.value` beside the snapped answer.
+       * With it, the employer's own spelling stands on the row and the packet says truthfully that
+       * Litos put it there.
+       *
+       * ONLY WHEN A PRE-SNAP STRING EXISTS. Without one there is nothing the refresh could recompute
+       * against, and a derivation record that cannot be checked is the kind of claim this file exists
+       * to keep off a packet. Written last so it wins over anything carriedForward brought along, and
+       * never on a branch that minted an applicant claim: the two are alternatives, not neighbours. */
+      ...(submittedIsMachineValue && resolverAnswer ? { answer_option_source: resolverAnswer } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));

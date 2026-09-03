@@ -78,6 +78,9 @@ export function machineAnswerLookup(
   jdText?: string,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* THE SAME MOMENT knownAnswerLookup IS BUILT WITH, or the two resolutions this gate compares can
+     disagree for no reason but the wall clock. */
+  asOf?: Date,
 ): (question: ApplicationReviewQuestion) => string | undefined {
   return (question) => {
     const resolved = resolveProfileField(
@@ -90,6 +93,7 @@ export function machineAnswerLookup(
       jdText,
       postingCountry,
       postingCountryCode,
+      asOf,
     );
     return resolved?.matchedOption ? resolved.value : undefined;
   };
@@ -144,7 +148,7 @@ export function resolveSubmittedApplicationAnswers(options: {
     /* And what that same resolution SNAPS TO on this employer's own control, because the screen the
      * body came from was rendered from the snapped value and the gate above only knows the unsnapped
      * one. See machineAnswerLookup for the measured HRT record. */
-    machineAnswerLookup(profile, current.jd_text, postingCountry, postingCountryCode),
+    machineAnswerLookup(profile, current.jd_text, postingCountry, postingCountryCode, asOf),
   );
   /* The re-open pass rides the same fixpoint the refresh does, so a save cannot store an answer a
    * strict closed control has no way to express: it settles as a blank question carrying the exact
