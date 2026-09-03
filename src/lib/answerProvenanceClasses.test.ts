@@ -95,6 +95,9 @@ describe('answer-claims are keyed on the answer', () => {
       [storedQuestion()],
       [submitted('I do not agree')],
       REVIEWED_AT,
+      undefined,
+      // She refused at the moment the epoch opened: this packet's first review.
+      REVIEWED_AT,
     ) as ApplicationReviewQuestion[];
     assert.equal(merged.consent_permission_version, undefined);
     assert.equal(merged.consent_permission_granted_at, undefined);

@@ -2674,7 +2674,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * applyApplicantReviewedAnswers stays where it is for applyApplicationReviewEdit. Its blanket
        * stamp over an edit's own questions is shipped behaviour with its own tests, and narrowing it
        * is not this route's to do. */
-      const reviewedAt = current.questions_reviewed_at ?? new Date().toISOString();
+      /* THE EPOCH AND THE CLOCK, WHICH ARE NOT THE SAME TIMESTAMP AND USED TO BE THE SAME STRING.
+       *
+       * `reviewedAt` is the packet's review EPOCH: frozen at the first review, because advancing it
+       * invalidates every standing claim on the packet at once and re-stamping the survivors to a
+       * new round is the blanket stamp the paragraph above exists to refuse. `reviewedNowAt` is when
+       * SHE IS REVIEWING, and it is what a freshly minted claim is stamped with. Collapsing the two
+       * back-dated every claim this route minted to the packet's first save - measured on packet
+       * 4a79eec1, where a 2026-09-03 edit was recorded as reviewed on 2026-09-01. */
+      const reviewedNowAt = new Date().toISOString();
+      const reviewedAt = current.questions_reviewed_at ?? reviewedNowAt;
       /* WHAT THE SCREEN WAS ACTUALLY SHOWING, which is not what this row holds.
        *
        * GET /applications/:id/submission serves refreshKnownQuestionAnswers' output and persists
@@ -2705,6 +2714,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         parsed.data.questions as SubmittedApplicationReviewQuestion[],
         reviewedAt,
         resolverAnswerFor,
+        reviewedNowAt,
       );
       const next: ApplicationReviewState = {
         ...current,

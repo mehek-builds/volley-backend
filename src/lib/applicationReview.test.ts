@@ -681,11 +681,15 @@ test('submit merge preserves provenance only for an exact current reviewed ident
   }];
   const unchanged = mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0] }], reviewedAt);
   assert.equal(unchanged[0].answer_source, 'applicant_review');
-  assert.equal(unchanged[0].answer_reviewed_at, reviewedAt);
+  assert.equal(unchanged[0].answer_reviewed_at, reviewedAt,
+    'carried forward untouched, so it still reads as the moment she actually reviewed');
 
   const changed = mergeSubmittedApplicationReviewQuestions(
     stored,
     [{ ...stored[0], answer: 'No' }],
+    reviewedAt,
+    undefined,
+    // The edit happens as the epoch opens, so the MINTED stamp is this same instant.
     reviewedAt,
   );
   assert.equal(changed[0].answer, 'No');
@@ -1012,7 +1016,7 @@ test('an applicant answer filling a held question survives the send-path refresh
   );
 
   const sent = (answer: string) => refreshKnownQuestionAnswers(
-    mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0], answer }], reviewedAt),
+    mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0], answer }], reviewedAt, undefined, reviewedAt),
     profile,
     jdText,
     reviewedAt,

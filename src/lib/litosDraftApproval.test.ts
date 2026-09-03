@@ -79,6 +79,9 @@ describe('approving a draft makes it her answer, and nothing else does', () => {
       [drafted()],
       [{ ...drafted(), confirmed: true }],
       reviewedAt,
+      undefined,
+      // She approved at the moment the epoch opened: this packet's first review.
+      reviewedAt,
     );
     assert.equal(merged.answer_source, 'applicant_review');
     assert.equal(merged.answer_reviewed_at, reviewedAt);

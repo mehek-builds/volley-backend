@@ -12,6 +12,7 @@ import {
   type AutofillApplicantSnapshot,
   type SubmissionPacket,
 } from './portalSubmission';
+import { applicantReviewIsCurrent, mintedApplicantReviewAt } from './applicantAnswer';
 
 export type ApplicationReviewQuestion = {
   id: string;
@@ -158,7 +159,11 @@ type AnswerProvenanceField =
   | 'consent_permission_granted_at'
   | 'consent_permission_version';
 
-/** Keyed on RECORD IDENTITY. Falsified by a rename or a stale review round. */
+/** Keyed on RECORD IDENTITY. Falsified by a rename or by a SUPERSEDED review epoch.
+ *
+ * "Superseded", not "different": answer_reviewed_at is the clock reading when she reviewed the
+ * answer and questions_reviewed_at is the epoch that reading is measured against, so the two are
+ * equal only on a claim minted in the packet's first review. See applicantReviewIsCurrent. */
 export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as const;
 /** Keyed on THE ANSWER. Falsified only by replacing the answer. */
 export const ANSWER_CLAIM_FIELDS = [
@@ -388,7 +393,22 @@ export function mergeSubmittedApplicationReviewQuestions(
    * profile to build it from and it stamps every non-empty answer itself anyway.
    */
   resolverAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
+  /**
+   * WHEN THIS REVIEW IS HAPPENING, which is not the same fact as `questionsReviewedAt` above.
+   *
+   * The round is the packet's review EPOCH and is deliberately frozen at the first review the
+   * packet ever had; this is the clock reading for the claim being minted right now. Splitting them
+   * is the fix for a record that back-dated every later claim to the first save - measured on packet
+   * 4a79eec1, where answers edited on 2026-09-03 were stamped 2026-09-01T21:28:12.934Z because the
+   * mint wrote the round. See applicantReviewIsCurrent.
+   *
+   * DEFAULTED TO THE CLOCK RATHER THAN TO THE ROUND, so a caller that has not thought about this
+   * records the honest thing. Clamped to the round by mintedApplicantReviewAt, so the claim it mints
+   * is always one the readers accept.
+   */
+  reviewedNowAt: string = new Date().toISOString(),
 ): ApplicationReviewQuestion[] {
+  const mintedReviewedAt = mintedApplicantReviewAt(reviewedNowAt, questionsReviewedAt);
   const submittedByQuestion = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number }>();
   const submittedByUniqueId = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number } | undefined>();
   for (const [index, question] of submitted.entries()) {
@@ -431,9 +451,12 @@ export function mergeSubmittedApplicationReviewQuestions(
     const portalSelector = preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector);
     const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
     const atsApiField = question.ats_api_field;
+    /* AT OR AFTER THE ROUND, NOT EQUAL TO IT. See applicantReviewIsCurrent: the round is the
+     * packet's review epoch, and a claim carrying a LATER honest timestamp is a claim she made after
+     * that epoch opened, not a stale one. Equality was only ever how the frozen round spelled this. */
     const provenanceMatchesCurrentReview = question.answer_source === 'applicant_review'
       && typeof question.answer_reviewed_at === 'string'
-      && question.answer_reviewed_at === questionsReviewedAt;
+      && applicantReviewIsCurrent(question.answer_reviewed_at, questionsReviewedAt);
     const exactReviewedIdentityUnchanged = provenanceMatchesCurrentReview
       && submittedQuestion.id === question.id
       && submittedQuestion.question === question.question
@@ -670,7 +693,10 @@ export function mergeSubmittedApplicationReviewQuestions(
       // and applicantConfirmedAnswer: an edit and an explicit confirmation mint the same claim,
       // because they are the same assertion made through two different controls.
       ...(applicantSuppliedAnswer || applicantConfirmedAnswer
-        ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
+        /* THE CLOCK, NOT THE ROUND. `questionsReviewedAt` here would say she reviewed this answer
+         * when the packet's FIRST review happened, which on a packet reviewed more than once is a
+         * date she was provably not looking at it. */
+        ? { answer_source: 'applicant_review' as const, answer_reviewed_at: mintedReviewedAt }
         /* AND OTHERWISE THE DRAFT MARKER SURVIVES THE SAVE, byte for byte, exactly as long as the
          * paragraph does. This is the laundering door for the drafting feature and it is the same
          * door the 802-answer incident came through: the review screen posts back the whole list it
@@ -1683,7 +1709,11 @@ export function applyApplicationReviewEdit(
   const mergedQuestions = mergeSubmittedApplicationReviewQuestions(
     current.questions,
     edit.questions,
+    /* The OLD epoch, deliberately: the merge reads standing claims against the round they were made
+     * under, and applyApplicantReviewedAnswers below is what moves the packet to the new one. */
     current.questions_reviewed_at,
+    undefined,
+    reviewedAt,
   );
   return {
     /* The MERGED list, not the edit's own. #533 put the merge in front of this stamp so an edit

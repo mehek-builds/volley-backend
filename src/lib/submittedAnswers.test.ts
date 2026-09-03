@@ -22,6 +22,7 @@ import { test } from 'node:test';
 import type { ApplicationReviewQuestion, ApplicationReviewState } from './applicationReview';
 import { frozenJobEmployerContext, resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
 import { resolveSubmittedApplicationAnswers } from './submittedAnswers';
+import { applicantReviewIsCurrent } from './applicantAnswer';
 
 /* The live IMC prior-application question, and a profile that declares nothing about it. Together
  * they are what makes the resolver hold this label, which is the precondition every case below
@@ -139,7 +140,15 @@ test('editing an existing held answer is the applicant\'s answer and survives th
 });
 
 /* THE 4 PACKETS THAT ALREADY WORKED, PROVED TO STILL WORK THE SAME WAY. Where a round is stored,
- * that is the round used, and nothing about this packet's behaviour moved. */
+ * that is the round used, and nothing about this packet's behaviour moved.
+ *
+ * AND THE PER-ANSWER STAMP IS THE CLOCK, NOT THAT ROUND, which is where this test used to assert the
+ * defect. The two lines below are different facts and this case is the one that separates them: the
+ * packet's review EPOCH stays frozen at 2026-08-11 so every standing claim on it survives, and the
+ * answer she supplies during THIS submit is recorded as reviewed when she supplied it. Asserting the
+ * stored round on both is what let a claim minted on 2026-09-03 be written to the record as
+ * 2026-09-01 - measured on packet 4a79eec1, where the frozen round was stamped onto answers that did
+ * not exist when it was minted. See applicantReviewIsCurrent. */
 test('a packet that has been reviewed before keeps its stored round rather than minting a new one', () => {
   const storedRound = '2026-08-11T12:00:00.000Z';
   const { questions, questionsReviewedAt } = submit(
@@ -149,7 +158,10 @@ test('a packet that has been reviewed before keeps its stored round rather than 
 
   assert.equal(questionsReviewedAt, storedRound, 'the stored round is not replaced by a fresh one');
   assert.equal(questions[0].answer, 'No');
-  assert.equal(questions[0].answer_reviewed_at, storedRound);
+  assert.equal(questions[0].answer_reviewed_at, MINTED_ROUND,
+    'and her answer is recorded as reviewed WHEN SHE SUPPLIED IT, two days after the epoch opened');
+  assert.ok(applicantReviewIsCurrent(questions[0].answer_reviewed_at, questionsReviewedAt),
+    'which is still a claim the readers honour, because the round is a boundary and not a key');
 });
 
 /* A claim from an EARLIER round is not carried by the new one. The stored round is what a stored
