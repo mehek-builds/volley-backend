@@ -771,9 +771,15 @@ export function mergeSubmittedApplicationReviewQuestions(
        * With it, the employer's own spelling stands on the row and the packet says truthfully that
        * Litos put it there.
        *
-       * ONLY WHEN A PRE-SNAP STRING EXISTS. Without one there is nothing the refresh could recompute
-       * against, and a derivation record that cannot be checked is the kind of claim this file exists
-       * to keep off a packet. Written last so it wins over anything carriedForward brought along, and
+       * ONLY WHEN A PRE-SNAP STRING EXISTS, and refusing without writing one is safe there rather than
+       * a second version of the bug. `resolveProfileField` returns null unless `resolveKnownAnswer`
+       * gave it a value, and `knownAnswerLookup` asks that same resolver, so a row with no
+       * `resolverAnswer` is one the refresh also has no value for - and the refresh leaves such a row
+       * exactly as it stands. Measured: a "rate your C++ skill level" select resolves to nothing on
+       * both lookups, the refresh returns it untouched, and an edit of it still mints her claim. No
+       * resolver value means nothing recomputes, so there is nothing for a derivation record to
+       * protect, and a derivation that cannot be checked is the kind of claim this file exists to
+       * keep off a packet. Written last so it wins over anything carriedForward brought along, and
        * never on a branch that minted an applicant claim: the two are alternatives, not neighbours. */
       ...(submittedIsMachineValue && resolverAnswer ? { answer_option_source: resolverAnswer } : {}),
     };
