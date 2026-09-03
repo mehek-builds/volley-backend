@@ -176,18 +176,8 @@ test('the scope is read off HER skills list, never parsed out of the sentence', 
 });
 
 const EVIDENCED: ExperiencePeriod[] = [
-  {
-    start: 'September 2025',
-    end: 'Present',
-    title: 'Software Engineer Intern',
-    description: 'Built Python data pipelines and a React dashboard.',
-  },
-  {
-    start: 'June 2024',
-    end: 'August 2024',
-    title: 'Data Research Assistant',
-    description: 'Wrote SQL queries against a Postgres warehouse.',
-  },
+  { start: 'September 2025', end: 'Present', description: 'Built Python data pipelines and a React dashboard.' },
+  { start: 'June 2024', end: 'August 2024', description: 'Wrote SQL queries against a Postgres warehouse.' },
 ];
 const scopedAsOf = new Date('2026-09-03T00:00:00Z');
 
@@ -197,8 +187,22 @@ test('skill-scoped months are the SAME arithmetic on a selected subset of roles'
   // Jun -> Aug 2024 exclusive: 2 months, and NOT the 14 the whole resume would give.
   assert.equal(skillScopedExperienceMonths(EVIDENCED, 'SQL', scopedAsOf), 2);
   assert.notEqual(skillScopedExperienceMonths(EVIDENCED, 'SQL', scopedAsOf), totalExperienceMonths(EVIDENCED, scopedAsOf));
-  // A title is evidence as well as a bullet.
-  assert.equal(skillScopedExperienceMonths(EVIDENCED, 'Data Research', scopedAsOf), 2);
+  /* THE ROLE TITLE IS NOT EVIDENCE. It was, and it produced false claims: titles are Title Case by
+   * convention, so a case-based signal is inverted on that field and "Head of Go To Market" wrote
+   * years of Go while "Go To Market Lead" refused, on nothing but word order. The field is gone
+   * from ExperiencePeriod entirely, so a title cannot be smuggled back in through the description. */
+  /* THE TITLE HERE WOULD PASS THE CONSTRUCTION TEST IF IT WERE READ, which is the only way to pin
+   * this. "Go services engineer" puts a tool noun straight after the token, so a resolver that read
+   * titles would answer; the assertion is that it does not, because the field is not read at all.
+   * A title of "Head of Go To Market" proves nothing here: the construction test refuses that on its
+   * own, so the assertion would hold whether titles were read or not. */
+  const titled = { start: 'Jan 2024', end: 'Present', description: 'Reported weekly.', title: 'Go services engineer' };
+  assert.equal(skillScopedExperienceMonths([titled as ExperiencePeriod], 'Go', scopedAsOf), null);
+  // Same role, same dates, with the tool named in the BULLETS: now it counts.
+  assert.equal(
+    skillScopedExperienceMonths([{ ...titled, description: 'Owned Go services.' } as ExperiencePeriod], 'Go', scopedAsOf),
+    32,
+  );
 
   /* NO EVIDENCE IS NULL, AND NULL IS NOT ZERO. "No role of hers mentions LangChain" is Litos having
    * no dated evidence either way; answering zero years would be a claim about her that her own
@@ -260,37 +264,72 @@ test('prose that merely contains a skill\'s letters is not evidence she used it'
   }
   assert.equal(skillNamedIn('go-to-market plan', 'Go'), false, 'the hyphen boundary alone kills this one');
 
-  // The true cases still read as evidence: a proper noun in the middle of her own sentence.
+  // The true cases still read as evidence: a tool introduced the way a resume bullet introduces one.
   assert.equal(skillEvidencedIn('Built a Python backtester.', 'Python'), true);
   assert.equal(skillEvidencedIn('Owned Go services end to end.', 'Go'), true);
   assert.equal(skillEvidencedIn('Rebuilt the dashboard in React.', 'React'), true);
+  assert.equal(skillEvidencedIn('Built an Excel model for pricing.', 'Excel'), true);
+  assert.equal(skillEvidencedIn('Shipped the Swift client.', 'Swift'), true);
 
-  /* A CAPITAL EXPLAINED BY POSITION IS NOT A PROPER NOUN. "Swift turnarounds delivered." opens a
-   * sentence, so its capital says nothing about any tool. Costs a real mention that happens to open
-   * a sentence, which is a refusal, which is the safe direction. */
-  assert.equal(skillEvidencedIn('Swift turnarounds delivered.', 'Swift'), false);
-  assert.equal(skillEvidencedIn('Python powered the pipeline.', 'Python'), false);
-  assert.equal(skillEvidencedIn('Shipped features. Excel was never involved.', 'Excel'), false);
-  // ... but only for tokens ordinary English could produce. No casing of these is prose.
+  // Tokens ordinary English cannot produce skip the construction test entirely.
   assert.equal(skillEvidencedIn('SQL tuning across the warehouse.', 'SQL'), true);
   assert.equal(skillEvidencedIn('sql tuning across the warehouse.', 'SQL'), true);
   assert.equal(skillEvidencedIn('C++ firmware for the sensor.', 'C++'), true);
   assert.equal(skillEvidencedIn('TypeScript services on call.', 'TypeScript'), true);
   assert.equal(skillEvidencedIn('AI agents shipped to production.', 'AI agents'), true);
-  // A lower-cased real tool stops counting. Stated here so the cost is visible, not discovered.
-  assert.equal(skillEvidencedIn('built python data pipelines', 'Python'), false);
 
-  /* HOW SHE TYPED HER SKILLS LIST IS NOT THE TEST; how she wrote the ROLE is. Both directions, and
-   * both were wrong when the pattern itself carried the case: a lower-case list entry could never
-   * evidence anything, and an upper-case one silently accepted whatever the list said. */
+  /* CASING IS NOT THE TEST ANY MORE, IN EITHER DIRECTION. These four were all decided wrongly by the
+   * capitalisation rule: the first two are real mentions it refused for using the wrong shift key,
+   * and the last two are non-mentions it accepted for using the right one. */
+  assert.equal(skillEvidencedIn('built python data pipelines', 'Python'), true);
+  assert.equal(skillEvidencedIn('Modelled scenarios in excel', 'Excel'), true);
+  assert.equal(skillEvidencedIn('Coached the team to Excel under pressure.', 'Excel'), false);
+  assert.equal(skillEvidencedIn('Python powered the pipeline.', 'Python'), false);
+
+  // How she typed her skills list is not the test either; how she wrote the ROLE is.
   assert.equal(skillEvidencedIn('Owned Go services end to end.', 'go'), true);
   assert.equal(skillEvidencedIn('Helped the team go faster.', 'go'), false);
-  assert.equal(skillEvidencedIn('Helped the team go faster.', 'Go'), false);
   assert.equal(skillEvidencedIn('Rebuilt it in Python.', 'python'), true);
 
   /* THE LABEL IS JUDGED CASE-INSENSITIVELY AND MUST STAY THAT WAY. How an employer cases a question
    * is a fact about the employer: Apollo Research's real label writes "python" in lower case. */
   assert.equal(skillNamedIn('...experience do you have in python or a similar coding language?', 'Python'), true);
+});
+
+/* EVERY PROPER NOUN THAT IS NOT A TOOL, which is what the capitalisation rule could not tell apart.
+ * These eleven are the second review's measured cases, verbatim. Each one wrote a multi-year
+ * professional claim end to end before the construction test replaced the capital test. */
+test('a company, a person, a place, a season and a job title are not tools', () => {
+  const notTools: Array<[string, string]> = [
+    ['Supported the Head of Go To Market on EMEA pricing.', 'Go'],
+    ['Owned Go To Market Strategy for two launches.', 'Go'],
+    ['OWNED GO TO MARKET FOR EMEA', 'Go'],
+    ['Managed the Swift Transportation account.', 'Swift'],
+    ['Advised Spring Health on their onboarding funnel.', 'Spring'],
+    ['Launched the pilot in Spring 2026.', 'Spring'],
+    ['Presented at the Rust Belt Manufacturing Summit.', 'Rust'],
+    ['Grew the Ruby Tuesday account by 30%.', 'Ruby'],
+    ['Reported to Julia Chen, VP of Data.', 'Julia'],
+    ['Coached the team to Excel under pressure.', 'Excel'],
+    ['Head of Go To Market', 'Go'],
+  ];
+  for (const [prose, skill] of notTools) {
+    assert.equal(skillEvidencedIn(prose, skill), false, `${skill} in "${prose}"`);
+  }
+
+  /* THE TWO SHAPES DOING THE WORK, separated so a failure says which one broke. A continuing name is
+   * refused even when a build verb introduced it, because the verb cannot make "Go To Market" a
+   * language; and a construction is required even when nothing follows. */
+  assert.equal(skillEvidencedIn('Built Go To Market collateral.', 'Go'), false);
+  assert.equal(skillEvidencedIn('Built Go services.', 'Go'), true);
+  assert.equal(skillEvidencedIn('Attended Spring conference.', 'Spring'), false);
+  assert.equal(skillEvidencedIn('Wrote Spring services.', 'Spring'), true);
+
+  /* THE ACCEPTED COST, pinned so it is a decision rather than a discovery. All three are refusals of
+   * real mentions, and a refusal costs her one click on a list already in front of her. */
+  assert.equal(skillEvidencedIn('Built Python Pipelines', 'Python'), false, 'a Title Case bullet reads as a continuing name');
+  assert.equal(skillEvidencedIn('Used Python 3 throughout.', 'Python'), false, 'a version number reads like a date');
+  assert.equal(skillEvidencedIn('Migrated the platform to Python.', 'Python'), false, '"to" is not a tool introducer');
 });
 
 /* escapeForPattern, which had no test and whose absence is not a wrong answer but a 500.

@@ -72,7 +72,10 @@ function experienceBankType(value: string): 'job' | 'project' | 'leadership' | u
  * leadership row while keeping an untyped one. See isNonEmployment for why that asymmetry is
  * required rather than untidy. Undefined when nothing dated is on file, which the resolver refuses on.
  *
- * EACH ENTRY ALSO CARRIES ITS OWN TITLE AND BULLETS, and they are skill evidence, never dates.
+ * EACH ENTRY ALSO CARRIES ITS OWN BULLETS, and they are skill evidence, never dates. The role TITLE
+ * is deliberately NOT carried: it was, and reading it produced false claims, because titles are
+ * Title Case by convention and every case-based signal is inverted on that field. See
+ * experienceEvidencing.
  * skillScopedExperienceAnswer answers "how many years of hands on experience do you have with X"
  * by summing only the roles whose own words name X, so the span and the words it belongs to have to
  * arrive together. Nothing in the tenure arithmetic reads either field (see ExperiencePeriod), so
@@ -144,9 +147,8 @@ export function experiencePeriodsFromSources(
       const start = dateText(entry.start ?? entry.start_date ?? entry.startDate ?? entry.from);
       const end = dateText(entry.end ?? entry.end_date ?? entry.endDate ?? entry.to);
       const date_range = dateText(entry.date_range ?? entry.dates);
-      const title = dateText(entry.title ?? entry.role ?? entry.position);
       const description = evidenceText(entry);
-      if (start || end || date_range) periods.push({ start, end, date_range, title, description });
+      if (start || end || date_range) periods.push({ start, end, date_range, description });
     }
     return periods;
   };

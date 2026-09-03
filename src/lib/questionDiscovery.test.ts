@@ -5399,18 +5399,8 @@ const skilledAsOf = new Date('2026-09-03T00:00:00Z');
 const skilledProfile: ApplicationProfileLike = {
   skills: ['Python', 'TypeScript', 'JavaScript', 'React', 'SQL', 'LangChain', 'AI agents'],
   experience_periods: [
-    {
-      start: 'September 2025',
-      end: 'Present',
-      title: 'Software Engineer Intern',
-      description: 'Built Python data pipelines and a React dashboard.',
-    },
-    {
-      start: 'June 2024',
-      end: 'August 2024',
-      title: 'Data Research Assistant',
-      description: 'Wrote SQL queries against a Postgres warehouse.',
-    },
+    { start: 'September 2025', end: 'Present', description: 'Built Python data pipelines and a React dashboard.' },
+    { start: 'June 2024', end: 'August 2024', description: 'Wrote SQL queries against a Postgres warehouse.' },
   ],
 };
 const YEAR_BANDS = ['Less than 1 year', '1-2 years', '2-3 years', '3-5 years', '5+ years'];
@@ -5737,7 +5727,6 @@ test('prose that merely contains a skill\'s letters never becomes years of exper
     experience_periods: [{
       start: 'Jan 2024',
       end: 'Present',
-      title: 'Growth Associate',
       description: 'Owned go-to-market strategy. Helped the team excel at reporting. Delivered swift turnarounds.',
     }],
   };
@@ -5757,6 +5746,76 @@ test('prose that merely contains a skill\'s letters never becomes years of exper
   };
   assert.deepEqual(resolveSkilled('How many years of hands on experience do you have with Go?', YEAR_BANDS, real), { value: '2-3 years' });
   assert.deepEqual(resolveSkilled('How many years of hands on experience do you have with Python?', YEAR_BANDS, real), { value: '2-3 years' });
+});
+
+/* THE SAME DEFECT IN ITS SECOND VOCABULARY, end to end, because that is how it was measured.
+ *
+ * The first repair refused lower-case homographs ("excel at reporting") by demanding a capital. That
+ * modelled "capitalised implies tool", and a tool is only one kind of proper noun, so every company,
+ * person, place, season and job title walked straight through it and wrote a multi-year professional
+ * claim. "Go To Market" unhyphenated is the very phrase the first review measured: the hyphen went
+ * into the boundary class and the Title Case spelling did not.
+ */
+test('a growth manager gets no years of Go, Swift, Spring, Rust, Ruby or Julia', () => {
+  const skills = ['Go', 'Swift', 'Spring', 'Rust', 'Ruby', 'Julia', 'Excel', 'Python'];
+  const bullets = [
+    'Supported the Head of Go To Market on EMEA pricing.',
+    'Owned Go To Market Strategy for two launches.',
+    'Managed the Swift Transportation account.',
+    'Advised Spring Health on their onboarding funnel.',
+    'Launched the pilot in Spring 2026.',
+    'Presented at the Rust Belt Manufacturing Summit.',
+    'Grew the Ruby Tuesday account by 30%.',
+    'Reported to Julia Chen, VP of Data.',
+    'Coached the team to Excel under pressure.',
+  ].join(' ');
+  const ap: ApplicationProfileLike = {
+    skills,
+    experience_periods: [{ start: 'Jan 2024', end: 'Present', description: bullets }],
+  };
+  for (const skill of skills.filter((s) => s !== 'Python')) {
+    heldBecause(
+      `How many years of hands on experience do you have with ${skill}?`,
+      YEAR_BANDS,
+      /no dated role on your resume evidences it/,
+      ap,
+    );
+  }
+
+  // An ALL-CAPS bullet gives no case signal at all, and is refused by the same shape.
+  const shouty: ApplicationProfileLike = {
+    skills,
+    experience_periods: [{ start: 'Jan 2024', end: 'Present', description: 'OWNED GO TO MARKET FOR EMEA' }],
+  };
+  heldBecause('How many years of hands on experience do you have with Go?', YEAR_BANDS, /evidences it/, shouty);
+
+  /* AND THE ROLE TITLE IS NOT A BACK DOOR. "Head of Go To Market" is a job title, titles are Title
+   * Case by convention, and the field is no longer carried at all: whatever the title says, only the
+   * bullets are read. */
+  /* THE TITLE IS ONE THE CONSTRUCTION TEST WOULD ACCEPT if the field were read at all ("Go" followed
+   * by the tool noun "services"), so this pins the exclusion rather than re-testing the shape rule.
+   * A title of "Head of Go To Market" would prove nothing: it is refused on its own merits. */
+  const titled = { start: 'Jan 2024', end: 'Present', description: 'Reported weekly.', title: 'Go services engineer' };
+  heldBecause(
+    'How many years of hands on experience do you have with Go?',
+    YEAR_BANDS,
+    /evidences it/,
+    { skills, experience_periods: [titled as (typeof titled) & Record<string, never>] } as ApplicationProfileLike,
+  );
+
+  /* THE RULE STILL ANSWERS, on the same dates, when a bullet actually introduces the tool. Without
+   * this the test above would pass against a resolver that had simply stopped working. */
+  const real: ApplicationProfileLike = {
+    skills,
+    experience_periods: [{ start: 'Jan 2024', end: 'Present', description: 'Owned Go services and built a Python backtester.' }],
+  };
+  for (const skill of ['Go', 'Python']) {
+    assert.deepEqual(
+      resolveSkilled(`How many years of hands on experience do you have with ${skill}?`, YEAR_BANDS, real),
+      { value: '2-3 years' },
+      skill,
+    );
+  }
 });
 
 test('an unanswerable unit is reported as the unit, even when the scope is also unresolved', () => {

@@ -71,13 +71,13 @@ test('the dated roles reach the resolver from the parse, the base resume, and th
    * role with no prose evidences nothing instead of matching everything. A bank row contributes no
    * evidence text at all: it is an organisation, a title and a date range, with no bullets. */
   assert.deepEqual(experiencePeriodsFromSources(parsed, {}, bank), [
-    { start: 'Feb 2026', end: 'Present', date_range: undefined, title: 'AI Engineer', description: undefined },
-    { start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'PM Intern', description: undefined },
+    { start: 'Feb 2026', end: 'Present', date_range: undefined, description: undefined },
+    { start: 'Feb 2025', end: 'May 2025', date_range: undefined, description: undefined },
     { date_range: 'Sep 2025 - Present' },
   ]);
   // The base resume is read only when the parse carries no experience array at all.
   assert.deepEqual(experiencePeriodsFromSources({}, { experience: [{ start: '2024-01', end: '2024-06' }] }, []), [
-    { start: '2024-01', end: '2024-06', date_range: undefined, title: undefined, description: undefined },
+    { start: '2024-01', end: '2024-06', date_range: undefined, description: undefined },
   ]);
 
   /* THE EVIDENCE TEXT, from every shape the parse and the resume spec write prose in. The bullets
@@ -90,7 +90,7 @@ test('the dated roles reach the resolver from the parse, the base resume, and th
       {},
       [],
     ),
-    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'Backend Intern', description: 'Shipped a Python service Wrote SQL' }],
+    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, description: 'Shipped a Python service Wrote SQL' }],
   );
   // Nothing dated anywhere is undefined - "never on file" - and the resolver refuses on it.
   assert.equal(experiencePeriodsFromSources({}, {}, []), undefined);
@@ -98,6 +98,10 @@ test('the dated roles reach the resolver from the parse, the base resume, and th
 });
 
 /* A PROJECT IS NOT EMPLOYMENT, AND base_resume_json IS WHERE THAT BREAKS.
+ *
+ * The role TITLE is deliberately absent from every expected shape below: it used to be carried and
+ * read as skill evidence, and titles are Title Case by convention, so every case-based signal was
+ * inverted on that one field. See experienceEvidencing.
  *
  * `parsed_json.experience` holds employment only, with leadership in a separate top-level array, so
  * this path looked correct and was correct FOR THAT SOURCE. `base_resume_json` is a ResumeSpec, and
@@ -115,7 +119,7 @@ test('a ResumeSpec base resume contributes its jobs and NOT its projects or lead
     ],
   };
   assert.deepEqual(experiencePeriodsFromSources({}, base, []), [
-    { start: undefined, end: undefined, date_range: 'Jun 2026 - Aug 2026', title: 'Operations Intern', description: 'Scheduled shifts.' },
+    { start: undefined, end: undefined, date_range: 'Jun 2026 - Aug 2026', description: 'Scheduled shifts.' },
   ]);
 
   /* THE TEST IS NEGATIVE ON PURPOSE, and this half is what stops it being "fixed" into a positive
@@ -124,7 +128,7 @@ test('a ResumeSpec base resume contributes its jobs and NOT its projects or lead
    * untyped row is employment, exactly as it always was. */
   assert.deepEqual(
     experiencePeriodsFromSources({ experience: [{ title: 'SWE Intern', start: 'Feb 2025', end: 'May 2025' }] }, {}, []),
-    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'SWE Intern', description: undefined }],
+    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, description: undefined }],
   );
   // An explicit job row is kept on the parse path too, and casing is not a way past the filter.
   assert.deepEqual(
@@ -132,7 +136,7 @@ test('a ResumeSpec base resume contributes its jobs and NOT its projects or lead
       { type: 'job', title: 'SWE Intern', start: 'Feb 2025', end: 'May 2025' },
       { type: ' Project ', title: 'Side thing', start: 'Feb 2020', end: 'May 2024' },
     ] }, {}, []),
-    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'SWE Intern', description: undefined }],
+    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, description: undefined }],
   );
   // A base resume of nothing but projects and leadership is "no dated role on file", not a total.
   assert.equal(experiencePeriodsFromSources({}, { experience: [base.experience[1], base.experience[2]] }, []), undefined);

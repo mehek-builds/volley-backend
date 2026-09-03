@@ -35,15 +35,20 @@ export type ExperiencePeriod = {
   /** The bank's single "Feb 2026 - Present" column, read only when start/end are absent. */
   date_range?: string | null;
   /**
-   * The role's own title, and the role's bullets or summary joined into one string.
+   * The role's own bullets or summary, joined into one string.
    *
    * READ BY EXACTLY ONE THING, experienceEvidencing, and only to decide whether a dated role is
-   * evidence for a NAMED SKILL. Neither field is a date and neither may ever reach the arithmetic:
-   * totalExperienceMonths does not look at them, so adding them cannot move any total that exists
-   * today. They are on this type rather than in a second parallel array because the skill and the
-   * span have to travel together, and splitting them is how the two would drift out of alignment.
+   * evidence for a NAMED SKILL. It is not a date and may never reach the arithmetic:
+   * totalExperienceMonths does not look at it, so adding it cannot move any total that exists
+   * today. It is on this type rather than in a second parallel array because the skill and the span
+   * have to travel together, and splitting them is how the two would drift out of alignment.
+   *
+   * THE ROLE TITLE IS DELIBERATELY NOT HERE. It was, it was read as evidence, and it produced false
+   * professional claims for the reason experienceEvidencing gives: titles are Title Case by
+   * convention, so every case-based signal is inverted on that one field. It is removed rather than
+   * kept and ignored, because a populated field that nothing reads is an invitation to wire it back
+   * in and rediscover the defect.
    */
-  title?: string | null;
   description?: string | null;
 };
 
@@ -188,23 +193,38 @@ export function totalExperienceMonths(
  * guarantee here, because it is literally the same code. Nothing about the counting is re-decided.
  *
  * WHAT COUNTS AS EVIDENCE, and this is the one judgement in the file. A dated role evidences a
- * skill when the role's own title or its own bullets NAME that skill. That is the applicant's
+ * skill when the role's own BULLETS name that skill in a tool construction. That is the applicant's
  * writing about that role, so it is her claim that she worked with the thing during it, and it is
  * the same reading a human gives a resume. The alternative readings were both rejected:
  *   - the skills LIST alone is not evidence. It carries no dates, so it can place a skill on the
  *     profile and can never place it in time. A question about duration cannot be answered from it.
  *   - the whole tenure, filtered by nothing, is not evidence. See the paragraph above.
+ *
+ * THE ROLE TITLE IS NOT EVIDENCE EITHER, and it used to be. Two reasons, and the second is fatal on
+ * its own. A title almost never names a tool, which this comment already said while reading titles
+ * anyway. And titles are Title Case BY CONVENTION, so every case-based signal is inverted on
+ * exactly that field: "Head of Go To Market" wrote 2-3 years of Go, while "Go To Market Lead"
+ * refused, and the only difference between them was whether the homograph happened to be the first
+ * word. A rule whose output turns on that is not a rule. Under the construction test below a title
+ * would refuse almost every time anyway ("Python Developer" and "Go Engineer" are both continuing
+ * names), so reading it was pure downside and it is gone.
  * THE RESIDUAL RISK, stated exactly, because a first cut of this comment stated it too broadly and
  * a real defect hid inside the slack. It is a bullet that names a skill IN PASSING ("migrated a
  * Python service to Go"), which counts that role's whole span. That is accepted knowingly: she did
  * use the tool, the answer is a coarse band, every step of the arithmetic underneath rounds down,
  * and the alternative is refusing every question in this family.
  *
- * IT IS NOT, AND NEVER WAS, A LICENCE FOR PROSE THAT MERELY CONTAINS THE LETTERS. "Owned
- * go-to-market strategy" beside a skills list holding "Go" is not a tool named in passing, it is no
- * mention of the tool at all, and the mitigation above does not reach it: rounding down from a span
- * she never spent is still a fabricated span. That family is refused outright by skillEvidencedIn,
- * which is where the line between the two is drawn and defended.
+ * IT IS NOT A LICENCE FOR PROSE THAT MERELY CONTAINS THE LETTERS, in either of the two vocabularies
+ * that defect has now been measured in. "Owned go-to-market strategy" and "Supported the Head of Go
+ * To Market on EMEA pricing" are both no mention of the tool at all, and the mitigation above
+ * reaches neither: rounding down from a span she never spent is still a fabricated span. Both are
+ * refused by skillEvidencedIn, which is where the line is drawn and defended.
+ *
+ * THE CLAIM IN THIS PARAGRAPH IS EXACTLY AS BROAD AS THE CODE, and it has twice been broader. The
+ * first version claimed the whole homograph family was handled when only capitals were tested; the
+ * second claimed "go-to-market" was refused when only the HYPHENATED spelling was. A comment that
+ * overstates a safety property is worse than no comment, because the next reader stops looking. If
+ * this paragraph and skillEvidencedIn ever disagree, the code is right and this is a bug.
  */
 
 /** Regex-escape, local because this file has no imports on purpose (see the header). */
@@ -295,50 +315,109 @@ export function skillNamedIn(text: string | null | undefined, skill: string): bo
  * design rules forbid. Title-only evidence was rejected too: a title almost never names a tool
  * ("Software Engineer Intern" does not say Python), so it refuses nearly everything.
  *
- * SO THE TEST IS ON THE OCCURRENCE, NOT ON THE TOKEN. A tool named in a resume bullet is written as
- * a proper noun, because that is what it is: "Built a Python backtester", "Owned Go services". The
- * same letters used as ordinary English are lower case in the middle of a sentence: "excel at
- * reporting", "swift turnarounds", "go-to-market". For a prose-ambiguous skill the occurrence must
- * therefore be capitalised, AND its capitalisation must not be explained by sentence position,
- * since "Swift turnarounds delivered." capitalises an adjective for reasons that say nothing about
- * any tool. Structurally unambiguous tokens skip both tests, because no casing of "SQL" or "C++" is
- * ordinary prose.
+ * CAPITALISATION WAS THE FIRST ANSWER AND IT WAS THE WRONG ONE. The rule used to be "capitalised in
+ * the middle of a sentence, therefore a tool". Capitals mark PROPER NOUNS, and a tool is only one
+ * kind of proper noun, so every company, person, place, season and product satisfied it. Measured on
+ * the second review, each of these wrote a multi-year professional claim: "Head of Go To Market" as
+ * a job title, "Supported the Head of Go To Market on EMEA pricing", "Managed the Swift
+ * Transportation account", "Advised Spring Health on their onboarding funnel", "Launched the pilot
+ * in Spring 2026", "Presented at the Rust Belt Manufacturing Summit", "Grew the Ruby Tuesday account
+ * by 30%", "Reported to Julia Chen, VP of Data". Note "Go To Market" unhyphenated: the hyphen went
+ * into the boundary class and the Title Case spelling of the same phrase walked straight past it.
  *
- * WHAT IT COSTS, stated plainly: a bullet that lower-cases a real tool ("built python pipelines")
- * stops counting, and so does a sentence that opens with one. Both are refusals, both are the safe
- * direction, and both are recoverable by her in one click. The alternative was continuing to write
- * years of experience with tools she has never opened.
+ * SO THE TEST IS ON THE CONSTRUCTION, NOT ON THE CASING. Two structural facts separate the families,
+ * and neither one is about capitals:
+ *
+ *   1. IN EVERY FALSE POSITIVE THE NAME CONTINUES. "Go To", "Swift Transportation", "Spring Health",
+ *      "Spring 2026", "Rust Belt", "Ruby Tuesday", "Julia Chen". The token is one word of a longer
+ *      name, or half of a date, and the giveaway is that the very next word is capitalised or is a
+ *      number. That is a shape, not a vocabulary, and it costs nothing to test.
+ *
+ *   2. IN EVERY TRUE POSITIVE THE TOOL SITS IN A TOOL CONSTRUCTION. A resume bullet is verb-initial
+ *      and introduces its tools: "Built a Python backtester", "Owned Go services", "Shipped the
+ *      Swift client", "Rebuilt the dashboard in React", "Modelled scenarios in excel". Either a
+ *      build verb or a tool preposition introduces it, or a lower-case technical noun follows it.
+ *
+ * WHY A POSITIVE VOCABULARY IS ALLOWED HERE WHEN A DENY-LIST WAS NOT, which is the obvious
+ * objection and the answer is not "this list is shorter". It is the DIRECTION OF FAILURE. A
+ * deny-list of homograph skills has to be COMPLETE to be safe: every name missing from it produces
+ * a false claim, and skill names are invented continuously, so it can never be complete. A list of
+ * tool constructions only has to be USEFUL: every construction missing from it produces a REFUSAL,
+ * which costs her one click on a list already in front of her. An incomplete deny-list ships
+ * fabrications; an incomplete positive list ships questions. That asymmetry is this module's
+ * standing rule, the one chooseClosestOption states as "leaving a field empty is recoverable;
+ * selecting the wrong legal answer on a real application is not".
+ *
+ * CASING IS NOW IGNORED ENTIRELY, which is a bonus rather than a concession: "built python
+ * pipelines" and "Modelled scenarios in excel" are real mentions that the old rule refused for
+ * having the wrong shift key, and they count again.
+ *
+ * WHAT IT STILL COSTS, stated plainly rather than discovered later. A Title Case bullet ("Built
+ * Python Pipelines") reads as a continuing name and refuses. A version suffix ("Used Python 3")
+ * reads as a date-like number and refuses. A construction outside the vocabulary ("Migrated the
+ * platform to Python") refuses. All three are refusals, all three are the safe direction, and none
+ * of them puts a year of experience she never had in front of an employer.
  */
 export function skillEvidencedIn(text: string | null | undefined, skill: string): boolean {
   const parts = matchable(text, skill);
   if (!parts) return false;
   const { haystack, needle } = parts;
+  // No casing of "SQL", "C++", "TypeScript" or "AI agents" is ordinary prose, so nothing more is asked.
   if (!skillIsProseAmbiguous(needle)) return new RegExp(skillPattern(needle), 'i').test(haystack);
-  /* MATCHED CASE-INSENSITIVELY SO THE CAPITAL TEST BELOW IS THE ONLY CASE AUTHORITY, which is a
-   * correction: with a case-SENSITIVE pattern here, the rule was really "her prose cases it the way
-   * her skills list cases it", and that is the wrong question twice over. An applicant who typed
-   * "go" in her skills list could never evidence Go however her bullets wrote it, and the explicit
-   * capital test below became unreachable dead weight that a mutation run duly showed surviving
-   * its own deletion. What matters is how SHE WROTE IT IN THE ROLE, not how she typed a list. */
   for (const match of haystack.matchAll(new RegExp(skillPattern(needle), 'gi'))) {
-    // Her prose has to write it as a proper noun, whatever casing her skills list happens to use.
-    if (!/^[A-Z]/.test(match[0])) continue;
-    /* And that capital has to mean something. A match at the start of the text, or straight after a
-     * sentence end or a bullet mark, is capitalised by position and carries no information. */
-    const before = haystack.slice(0, match.index).replace(/\s+$/, '');
-    if (before === '' || /[.!?;:\u2022\u2023\u25e6\u2043-]$/.test(before)) continue;
-    return true;
+    const after = haystack.slice(match.index + match[0].length);
+    // 1. The name continues, so this is one word of a longer name, or half of a date.
+    if (NAME_CONTINUES.test(after)) continue;
+    // 2. Something has to mark it as a tool: an introducer before it, or a technical noun after it.
+    const before = haystack.slice(0, match.index);
+    if (TOOL_INTRODUCER.test(before) || TOOL_NOUN.test(after.replace(/^\s+/, ''))) return true;
   }
   return false;
 }
 
-/** The dated roles whose own title or bullets EVIDENCE this skill. */
+/* The next word is capitalised or a number, so the name has not finished: "Go To", "Swift
+ * Transportation", "Spring 2026", "Ruby Tuesday". Only whitespace may sit between, so a sentence
+ * boundary ("... in React. Built ...") and a list comma ("Python, SQL") do not trip it. */
+const NAME_CONTINUES = /^[ \t]+[A-Z0-9]/;
+
+/* What introduces a tool in a verb-initial resume bullet, tested against the text BEFORE the
+ * mention. Up to two determiners may sit between the verb and the tool ("Built a Python
+ * backtester", "Shipped the Swift client"). "to" is deliberately absent: it would admit "Coached
+ * the team to Excel under pressure" for the sake of "Migrated the platform to Python", and the
+ * refusal is the cheaper of the two mistakes. */
+const TOOL_INTRODUCER = new RegExp(
+  String.raw`(?:\b(?:in|with|using|used|use|via)\s+`
+  + String.raw`|\b(?:built|build|building|wrote|writing|written|coded|coding|developed|developing`
+  + String.raw`|programmed|programming|implemented|implementing|shipped|shipping|owned|owning`
+  + String.raw`|maintained|maintaining|refactored|migrated|ported|automated|scripted|debugged`
+  + String.raw`|deployed|architected|engineered|created|prototyped|integrated|optimised|optimized`
+  + String.raw`|ran|running|managed|analysed|analyzed|queried|modelled|modeled)\s+`
+  + String.raw`(?:(?:a|an|the|our|its|their|my|new|custom|internal|several|two|three)\s+){0,2})$`,
+  'i',
+);
+
+/* What a tool is followed by when nothing introduced it, tested against the text AFTER the mention.
+ * Deliberately a short list of technical nouns rather than "any lower-case word", which would admit
+ * "Excel under pressure". Missing an entry refuses, which is why the list does not need to be
+ * exhaustive to be correct. */
+const TOOL_NOUN = new RegExp(
+  String.raw`^(?:service|script|api|pipeline|backend|frontend|client|server|app|application`
+  + String.raw`|codebase|code|library|libraries|module|component|dashboard|model|query|queries`
+  + String.raw`|job|cluster|test|migration|integration|endpoint|function|repo|repository|repositories`
+  + String.raw`|stack|framework|tooling|automation|notebook|package|sdk|cli|bot|microservice|worker`
+  + String.raw`|daemon|parser|scraper|crawler|tool|utility|utilities|wrapper|harness|suite|sheet`
+  + String.raw`|workbook|macro|formula|spreadsheet|infrastructure|deployment|environment|version`
+  + String.raw`|developer|engineer|engineering|development)s?\b`,
+  'i',
+);
+
+/** The dated roles whose own bullets EVIDENCE this skill. */
 export function experienceEvidencing(
   entries: readonly ExperiencePeriod[] | null | undefined,
   skill: string,
 ): ExperiencePeriod[] {
   if (!entries) return [];
-  return entries.filter((entry) => skillEvidencedIn(entry.title, skill) || skillEvidencedIn(entry.description, skill));
+  return entries.filter((entry) => skillEvidencedIn(entry.description, skill));
 }
 
 /**
