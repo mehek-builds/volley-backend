@@ -2,7 +2,6 @@ import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { career_page_sources, generated_resumes, monitored_jobs } from '../db/schema';
 import type { ApplicationReviewState } from './applicationReview';
-import { monitoredJdAgrees } from './monitoredPortalRepair';
 import {
   canonicalMonitoredPortalUrl,
   canonicalSupportedPortalUrl,
@@ -63,11 +62,16 @@ function withoutPortal(current: ApplicationReviewState): ApplicationReviewState 
  * URL keeps it whatever the monitored row says today. */
 function keepUsedPortal(current: ApplicationReviewState): ApplicationReviewState | null {
   if (!current.portal_url) return null;
+  /* submission_run_id is DELIBERATELY NOT a marker. freshSubmitRequestReview mints it when the
+   * submit is REQUESTED, before any browser opens, and nothing ever clears it, so one press of
+   * Apply would mark a packet used forever even if the run died before touching the URL. The three
+   * markers below are written only after a browser worked against this URL. */
   const used = (current.filled_fields?.length ?? 0) > 0
-    || Boolean(current.submission_run_id)
     || Boolean(current.preview_screenshot_url)
     || Boolean(current.submission_attempted_at);
-  return used ? current : null;
+  /* Re-derived, never inherited: withoutPortal always forced this false, and returning `current`
+   * verbatim would carry a stale true on a URL that is no longer supported. */
+  return used ? { ...current, portal_supported: isPortalSupported(current.portal_url) } : null;
 }
 
 function repairManualPortal(current: ApplicationReviewState): ApplicationReviewState {
@@ -104,16 +108,17 @@ export function repairHistoryReviewPortalFromMonitoredJob(
 ): ApplicationReviewState {
   const jobId = jobContextJobId(row);
   if (!jobId) return repairManualPortal(current);
+  /* THE SAME TWO RULES AS THE READ PATH ABOVE, and they have to be here as well as there: this is
+   * the variant GET /resume/history uses to project the packet LIST, and the list is where the
+   * stripped Hudson River Trading row rendered "This record has no employer form URL. Add the job
+   * again". Healing only the detail path would leave the two projections of one packet disagreeing. */
   const job = monitoredJobs.get(jobId);
-  if (!job) return withoutPortal(current);
+  if (!job) return keepUsedPortal(current) ?? withoutPortal(current);
   if (normalizedIdentity(job.company) !== normalizedIdentity(jobContextText(row, 'company'))) {
-    return withoutPortal(current);
+    return keepUsedPortal(current) ?? withoutPortal(current);
   }
   if (normalizedIdentity(job.role) !== normalizedIdentity(jobContextText(row, 'role'))) {
-    return withoutPortal(current);
-  }
-  if (!monitoredJdAgrees(jobContextText(row, 'jd_hash'), current.jd_text, job.description, job.jdHash)) {
-    return withoutPortal(current);
+    return keepUsedPortal(current) ?? withoutPortal(current);
   }
   try {
     return {
@@ -123,7 +128,7 @@ export function repairHistoryReviewPortalFromMonitoredJob(
       portal_supported: true,
     };
   } catch {
-    return withoutPortal(current);
+    return keepUsedPortal(current) ?? withoutPortal(current);
   }
 }
 
@@ -141,8 +146,9 @@ export async function repairReviewPortalFromMonitoredJob(
 
   const expectedCompany = jobContextText(row, 'company');
   const expectedRole = jobContextText(row, 'role');
-  const expectedJdHash = jobContextText(row, 'jd_hash');
-  if (!expectedCompany || !expectedRole || !expectedJdHash) return withoutPortal(current);
+  /* jd_hash is deliberately NOT read any more: the description is prose the board rewrites, and
+   * company plus title plus the source-owned job id are the identity. See the restore below. */
+  if (!expectedCompany || !expectedRole) return keepUsedPortal(current) ?? withoutPortal(current);
   const [job] = await db.select({
     external_id: monitored_jobs.external_id,
     apply_url: monitored_jobs.apply_url,
@@ -173,11 +179,9 @@ export async function repairReviewPortalFromMonitoredJob(
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return keepUsedPortal(current) ?? withoutPortal(current);
   /* THE POSTING'S PROSE IS NOT ITS IDENTITY. Company and title agree and the source owns a
    * canonical URL for this job id; a refreshed description changes the hash and nothing about where
-   * the application goes. The URL is restored (or kept), which is also what heals a row an earlier,
-   * stricter pass stripped. Only the JD text itself stays as the packet recorded it. */
-  if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description) && !current.portal_url) {
-    return { ...current, portal_url: applyUrl, ats_name: detectPortal(applyUrl), portal_supported: true };
-  }
+   * the application goes. The source-owned URL is RESTORED - always, never merely kept - so a
+   * wrong or stale current URL is replaced and a row an earlier, stricter pass stripped heals on
+   * its next read. Only the JD text itself stays as the packet recorded it. */
   return {
     ...current,
     portal_url: applyUrl,

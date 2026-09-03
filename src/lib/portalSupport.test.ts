@@ -489,7 +489,18 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(repairSource, /greenhousePortalUrlNeedsBoardToken\(current\.portal_url\)/);
   assert.match(repairSource, /monitored_jobs\.apply_url/);
   assert.match(repairSource, /canonicalMonitoredPortalUrl\([\s\S]{0,180}job\.external_id/);
-  assert.match(repairSource, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
+  /* CHANGED 2026-09-03. The repair used to require monitoredJdAgrees before it would keep a URL,
+   * and stripped portal_url and ats_name when the hash disagreed. A board rewriting a posting's
+   * prose changes that hash and nothing about where the application goes: measured on Hudson River
+   * Trading (packet 4a79eec1), a fill that had just completed 41 fields had its URL erased seconds
+   * later and the dashboard offered "Add the job again". The identity that binds a packet to a
+   * destination is company + title + the source-owned job id, so those are what is pinned now, and
+   * a used packet keeps its URL even when the row itself is unavailable. */
+  assert.doesNotMatch(repairSource, /monitoredJdAgrees/);
+  assert.match(repairSource, /normalizedIdentity\(job\.company_name\) !== normalizedIdentity\(expectedCompany\)/);
+  assert.match(repairSource, /normalizedIdentity\(job\.title\) !== normalizedIdentity\(expectedRole\)/);
+  assert.match(repairSource, /function keepUsedPortal/);
+  assert.match(repairSource, /keepUsedPortal\(current\) \?\? withoutPortal\(current\)/);
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
   assert.match(applicationsRoute, /\/applications\/:id\/submission\/channels/);
