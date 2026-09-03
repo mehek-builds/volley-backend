@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   applyBulletRepairs,
   BASE_RESUME_GENERATION_FALLBACK_MODEL,
@@ -336,14 +337,32 @@ describe('base resume priority selection', () => {
     assert.deepEqual(
       baseResumeSelectionIssues(specWithoutIt, [required], {
         requireFirst: false,
-        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
+        droppedByTheFloor: [{ sourceId: null, org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Analyst' }],
       }),
       [],
     );
     assert.equal(
       baseResumeSelectionIssues(specWithoutIt, [required], {
         requireFirst: false,
-        droppedAsAlreadyPrinted: [{ org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
+        droppedByTheFloor: [{ sourceId: null, org: 'Tri Coast Capital Manhattan Beach, CA', title: 'Managing Partner' }],
+      }).length,
+      1,
+    );
+    /* THE ID IS THE REAL KEY, and identity only the fallback behind it. The org and title on a
+     * drop are the MODEL'S strings, so a row stored as "Tri Coast Capital Manhattan Beach, CA"
+     * that the model wrote as "Tri Coast Capital" was reported under the short name and excused
+     * nothing - which is precisely the near-duplicate shape that caused the drop. */
+    assert.deepEqual(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedByTheFloor: [{ sourceId: required.id, org: 'Tri Coast Capital', title: 'Analyst' }],
+      }),
+      [],
+    );
+    assert.equal(
+      baseResumeSelectionIssues(specWithoutIt, [required], {
+        requireFirst: false,
+        droppedByTheFloor: [{ sourceId: 'a-different-row', org: 'Tri Coast Capital', title: 'Analyst' }],
       }).length,
       1,
     );
@@ -457,20 +476,40 @@ describe('base resume priority selection', () => {
   });
 
   test('/resume/generate computes what is mandatory rather than requiring the raw selection', () => {
-    /* Pinned against the source because the mechanism above cannot see the route, and the route
-     * is where this defect lived for both of its lives: the gate, the floor and the predicate were
-     * each individually correct while /resume/generate simply handed the gate a bank row nobody
-     * had checked. A test that only exercises the predicate goes green on the broken route.
+    /* Pinned against the source because the mechanism tests above cannot see the route, and the
+     * route is where this defect lived for both of its lives: the gate, the floor and the
+     * predicate were each individually correct while /resume/generate simply handed the gate a
+     * bank row nobody had checked. Every mechanism test here passes with the route fully
+     * reverted, so these assertions carry the whole load.
      *
-     * Both gates must be fed the CHECKED entry, and the floor and the model hint must be fed the
-     * selection - so what may be required and what may be kept can never disagree. */
-    const route = readFileSync('src/routes/resume.ts', 'utf8');
+     * Resolved from THIS file rather than the process cwd. `node --test` run from src/ made the
+     * old cwd-relative read throw ENOENT; CI happens to run from the repo root, so the failure
+     * mode was a green suite everywhere it mattered and a red one for whoever ran it locally. */
+    const route = readFileSync(path.join(__dirname, '../routes/resume.ts'), 'utf8');
     assert.match(route, /const priorityEntry = selectedEntry\s*\n\s*&& priorityEntryMayBeMandatory\(selectedEntry, \{ sparseSelectionConfirmed \}\)/);
     assert.doesNotMatch(route, /const priorityEntry = bank\.find/);
     assert.match(route, /priorityEntryId: selectedEntry\?\.id/);
-    /* The dedupe's excuse reaches the post-floor gate, the way routes/baseResume.ts feeds its
-     * own. Without it a survivable duplicate is mandatory, emptied, and refused forever. */
-    assert.match(route, /requireFirst: false, droppedAsAlreadyPrinted/);
+    /* BOTH gates take the checked entry. Swapping either back to the raw selection restores the
+     * original bug with every mechanism test still green, so the call sites are pinned, not just
+     * the binding they read from. */
+    const gateCalls = route.match(/baseResumeSelectionIssues\(spec, \[[a-zA-Z]+\]/g) ?? [];
+    assert.deepEqual(gateCalls, [
+      'baseResumeSelectionIssues(spec, [priorityEntry]',
+      'baseResumeSelectionIssues(spec, [priorityEntry]',
+    ]);
+    /* THE EXCUSE IS ACTUALLY POPULATED. Passing the array to the gate proves nothing if nothing
+     * ever pushes to it: delete the push and the array stays permanently empty, the duplicate
+     * dead-end returns, and a test that builds its own local array cannot see it. */
+    assert.match(route, /droppedByTheFloor\.push\(\{ sourceId, org, title \}\)/);
+    assert.match(route, /requireFirst: false, droppedByTheFloor/);
+  });
+
+  test('routes/baseResume.ts feeds its gate the same way', () => {
+    /* The two routes share the gate and the floor, so an excuse that is collected on one and not
+     * the other is how they drift back apart. Same two pins. */
+    const route = readFileSync(path.join(__dirname, '../routes/baseResume.ts'), 'utf8');
+    assert.match(route, /droppedByTheFloor\.push\(\{ sourceId, org, title \}\)/);
+    assert.match(route, /baseResumeSelectionIssues\(printed, priorityEntries, \{ droppedByTheFloor \}\)/);
   });
 
   test('the tailored gate excuses a required entry the cross-entry dedupe emptied', () => {
@@ -499,20 +538,106 @@ describe('base resume priority selection', () => {
         { type: 'job' as const, org: renamed.org, title: 'Analyst', date_range: '2024 - Present', bullets: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'] },
       ],
     };
-    const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+    const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
     const printed = enforceExperienceBulletFloor(generated, [original, renamed], {
-      onDropped: ({ org, title, reason }) => {
-        if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
-      },
+      onDropped: ({ org, title, sourceId }) => { droppedByTheFloor.push({ sourceId, org, title }); },
     });
     assert.ok(!printed.experience.some((entry) => entry.org === renamed.org));
-    assert.deepEqual(droppedAsAlreadyPrinted, [{ org: renamed.org, title: 'Analyst' }]);
+    assert.deepEqual(droppedByTheFloor, [{ sourceId: renamed.id, org: renamed.org, title: 'Analyst' }]);
 
     assert.equal(baseResumeSelectionIssues(printed, [renamed], { requireFirst: false }).length, 1);
     assert.deepEqual(
-      baseResumeSelectionIssues(printed, [renamed], { requireFirst: false, droppedAsAlreadyPrinted }),
+      baseResumeSelectionIssues(printed, [renamed], { requireFirst: false, droppedByTheFloor }),
       [],
     );
+  });
+
+  test('the dedupe also strands a survivable entry ONE bullet short, not only an emptied one', () => {
+    /* THE REASON THE EXCUSE COVERS EVERY DROP. The first fix filtered the excuse to
+     * `already_printed`, which is the exact-duplicate case. But the same cross-entry dedupe takes
+     * ONE shared sentence from a two-variant row and leaves it on a single bullet, which the
+     * floor reports as `below_floor` - unexcused, still mandatory, refused on every posting. It
+     * is the likelier shape, too: a re-upload that renames an org usually rewords a bullet as
+     * well, so the variant lists overlap partially rather than exactly.
+     *
+     * Deterministic, not luck: the floor tops the entry back up from its OWN variant list, and
+     * the shared sentence is already taken, so no wording the model chooses can rescue it. */
+    const alpha = bankEntry({
+      id: 'alpha', org: 'Alpha Corp', title: 'Analyst', date_range: '2024 - Present',
+      bullet_variants: ['Modeled grounded deal comparables', 'Wrote grounded diligence memos'],
+    });
+    const beta = bankEntry({
+      id: 'beta', org: 'Alpha Corp Manhattan Beach, CA', title: 'Analyst', date_range: '2024 - Present',
+      bullet_variants: ['Modeled grounded deal comparables', 'Led grounded market sizing work'],
+    });
+    assert.equal(priorityEntryMayBeMandatory(beta), true);
+
+    const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
+    const printed = enforceExperienceBulletFloor(
+      {
+        ...SPEC,
+        education_position: 'top' as const,
+        experience: [
+          { type: 'job' as const, org: alpha.org, title: 'Analyst', date_range: '2024 - Present', bullets: [...alpha.bullet_variants as string[]] },
+          { type: 'job' as const, org: beta.org, title: 'Analyst', date_range: '2024 - Present', bullets: [...beta.bullet_variants as string[]] },
+        ],
+      },
+      [alpha, beta],
+      { onDropped: ({ org, title, sourceId, reason }) => {
+        assert.equal(reason, 'below_floor');
+        droppedByTheFloor.push({ sourceId, org, title });
+      } },
+    );
+    assert.ok(!printed.experience.some((entry) => entry.org === beta.org));
+    assert.equal(baseResumeSelectionIssues(printed, [beta], { requireFirst: false }).length, 1);
+    assert.deepEqual(
+      baseResumeSelectionIssues(printed, [beta], { requireFirst: false, droppedByTheFloor }),
+      [],
+    );
+  });
+
+  test('survivability counts DISTINCT sentences, the way the floor counts them', () => {
+    /* No second bank row and no confirmation flag needed for this one. A re-upload that reparsed
+     * one bullet with a trailing period gives a row two variant STRINGS and one distinct
+     * sentence: the predicate called it survivable, the floor collapsed the pair on its
+     * normalized key and dropped the entry, and the gate refused every build. One normalizer,
+     * asked by both, is what keeps the two answers the same answer. */
+    const punctuationTwin = bankEntry({
+      id: 'twin', type: 'leadership', org: 'IISE UF Chapter', title: 'Treasurer', date_range: '2025 - Present',
+      bullet_variants: ['Managed the chapter budget', 'Managed the chapter budget.'],
+    });
+    assert.equal(priorityEntryMayBeMandatory(punctuationTwin), false);
+    assert.equal(
+      enforceExperienceBulletFloor(
+        { ...SPEC, education_position: 'top' as const, experience: [
+          { type: 'leadership' as const, org: punctuationTwin.org, title: 'Treasurer', date_range: '2025 - Present', bullets: ['Managed the chapter budget', 'Managed the chapter budget.'] },
+        ] },
+        [punctuationTwin],
+      ).experience.length,
+      0,
+    );
+    /* Two genuinely different sentences still survive, so this is not just a stricter count. */
+    assert.equal(priorityEntryMayBeMandatory(bankEntry({
+      id: 'real', bullet_variants: ['Managed the chapter budget', 'Ran the grounded speaker series'],
+    })), true);
+  });
+
+  test('an entry with no grounded evidence is never mandatory, confirmed or not', () => {
+    /* The confirmation arm asserted an allowance that cannot fire. The floor's zero-bullet drop
+     * runs AHEAD of every sparse allowance, and pruneUngroundedContent removes such an entry
+     * earlier still and silently, with no onDropped and so no omission - so the student would be
+     * refused for a missing required entry with nothing anywhere saying why.
+     * PUT /profile/recent-experience stores continue_with_found for whatever entry the body
+     * names, with no bullet-count precondition, so this arm has to carry its own floor. */
+    const empty = bankEntry({ id: 'empty', org: 'Campus Club', title: 'Member', bullet_variants: [] });
+    assert.equal(priorityEntryMayBeMandatory(empty), false);
+    assert.equal(priorityEntryMayBeMandatory(empty, { sparseSelectionConfirmed: true }), false);
+    const blank = bankEntry({ id: 'blank', org: 'Campus Club', title: 'Member', bullet_variants: ['   ', ''] });
+    assert.equal(priorityEntryMayBeMandatory(blank, { sparseSelectionConfirmed: true }), false);
+    /* One real sentence plus the confirmation is still mandatory: that is the case the
+     * continue-with-found flow exists for. */
+    const oneReal = bankEntry({ id: 'one', org: 'Campus Club', title: 'Treasurer', bullet_variants: ['Managed the chapter budget'] });
+    assert.equal(priorityEntryMayBeMandatory(oneReal, { sparseSelectionConfirmed: true }), true);
   });
 });
 

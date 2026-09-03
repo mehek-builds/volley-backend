@@ -1,6 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+import { RESUME_CONTENT_LIMITS, resumeBulletKey } from './resumeContentPolicy';
 import { startsWithStrongVerb } from './resumeValidate';
 
 export interface CandidateEducation {
@@ -477,6 +477,14 @@ export function enforceExperienceBulletFloor(
          required-entry gate keys on (org, title), and an org alone cannot excuse a dropped
          duplicate without also excusing a different role at the same organization. */
       title: string;
+      /* THE BANK ROW THIS ENTRY ACTUALLY IS, which the org and title above cannot be trusted to
+         identify. Those two strings are the MODEL'S, and matchingBankEntry exists precisely
+         because they routinely differ from the row's own: the model writes "Traeco" for a row
+         stored as "Traeco - AI Agent Cost Infrastructure". A caller excusing a dropped entry by
+         those strings therefore fails to excuse it exactly when a near-duplicate row made the
+         drop happen, which is the case the excuse was written for. Null only when nothing in the
+         bank matched, where identity strings are all a caller has. */
+      sourceId: string | null;
       bullets: number;
       reason: 'below_floor' | 'already_printed';
     }) => void;
@@ -505,8 +513,11 @@ export function enforceExperienceBulletFloor(
      KEEP-FIRST, so the surviving copy is the one the model ranked highest. `lead_alignment` cites
      the first entry by org and quotes one of its bullets as evidence, so promoting a later entry
      over an earlier one would leave that citation pointing at content no longer in position one. */
+  /* resumeBulletKey, not a local copy. Whatever decides that two sentences are the same one also
+     decides how many bullets an entry ends up with, so every rule that asks whether an entry can
+     survive this floor has to count with the same function. See resumeContentPolicy. */
   const printed = new Set<string>();
-  const bulletKey = (bullet: string) => bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const bulletKey = resumeBulletKey;
 
   const experience = spec.experience.flatMap((entry) => {
     const source = matchingBankEntry(entry, bank);
@@ -549,11 +560,11 @@ export function enforceExperienceBulletFloor(
      * whose every bullet was already printed under an earlier heading empties completely, and
      * `allowSparseAll` would otherwise have waved the empty shell through. */
     if (bullets.length === 0) {
-      options.onDropped?.({ org: entry.org, title: entry.title ?? '', bullets: 0, reason: 'already_printed' });
+      options.onDropped?.({ org: entry.org, title: entry.title ?? '', sourceId: source?.id ?? null, bullets: 0, reason: 'already_printed' });
       return [];
     }
     if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority && !options.allowSparseAll) {
-      options.onDropped?.({ org: entry.org, title: entry.title ?? '', bullets: bullets.length, reason: 'below_floor' });
+      options.onDropped?.({ org: entry.org, title: entry.title ?? '', sourceId: source?.id ?? null, bullets: bullets.length, reason: 'below_floor' });
       return [];
     }
     const kept = bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);

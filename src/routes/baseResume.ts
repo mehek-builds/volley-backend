@@ -655,10 +655,12 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          the one omission the student can act on, and the sentence says how - one more bullet. The
          two generators must not differ in whether they tell them. */
       const droppedForLength: string[] = [];
-      /* Fed to the required-entry gate below: an entry emptied because its every sentence already
-         prints under another heading is VISIBLE on the page, so the gate may not demand it - see
-         baseResumeSelectionIssues for the dead-end this closes. */
-      const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+      /* Fed to the required-entry gate below: nothing downstream re-runs the floor, so an entry
+         the floor removed cannot be put back by demanding it - see baseResumeSelectionIssues for
+         the dead-end this closes. EVERY drop, carrying the bank row id the floor matched: the
+         same dedupe that empties a duplicate can instead leave it one bullet short, reported as
+         `below_floor`, and the model's org and title are not a reliable key for the row. */
+      const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
       const spec = enforceExperienceBulletFloor(pruned.spec, bank, {
         priorityEntryId: selectedEntryId,
         allowSparsePriority: recentReview?.continue_with_found === true,
@@ -667,8 +669,8 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
            end for a duplicated one: an entry emptied by the dedupe has every bullet already on the
            page under another heading, so a fourth bullet changes nothing and the student would be
            sent round a loop. Say what actually happened instead. */
-        onDropped: ({ org, title, bullets, reason }) => {
-          if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
+        onDropped: ({ org, title, sourceId, bullets, reason }) => {
+          droppedByTheFloor.push({ sourceId, org, title });
           droppedForLength.push(
             reason === 'already_printed'
               ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
@@ -809,7 +811,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          * succeeded. */
         const issues = [
           ...finalValidation.issues.filter((issue) => !providerStyleIssues.includes(issue)),
-          ...baseResumeSelectionIssues(printed, priorityEntries, { droppedAsAlreadyPrinted }),
+          ...baseResumeSelectionIssues(printed, priorityEntries, { droppedByTheFloor }),
           ...layout.issues,
           ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
           ...findPdfTextFidelityIssues(parsedPdf.text, printed, contact),

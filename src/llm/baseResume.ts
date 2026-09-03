@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
-import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
+import { distinctGroundedVariants, RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 
 export const BASE_RESUME_MODEL_CALL_CAP_MS = 15_000;
 export const BASE_RESUME_REPAIR_CALL_CAP_MS = 8_000;
@@ -185,9 +185,19 @@ export function priorityEntryMayBeMandatory(
   entry: ExperienceBankEntry,
   options: { sparseSelectionConfirmed?: boolean } = {},
 ): boolean {
-  const groundedVariants = (Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
-    .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
-    .length;
+  /* DISTINCT sentences, counted with the floor's own key. Counting raw strings answered a
+     different question than the floor asks: a row holding "Managed the chapter budget" and
+     "Managed the chapter budget." counted as two, was called survivable and made mandatory, and
+     the floor then collapsed the pair to one and dropped it - the same permanent refusal, reached
+     without any second bank row or any confirmation flag being involved. */
+  const groundedVariants = distinctGroundedVariants(entry.bullet_variants);
+  /* NOTHING IS EVER MANDATORY WITH NO EVIDENCE, confirmation or not. The floor's zero-bullet drop
+     is documented as running ahead of every sparse allowance, and pruneUngroundedContent removes
+     an entry with no grounded bullets even earlier - silently, without an onDropped, so the
+     student would be refused for a missing entry with nothing on the page or in the omissions
+     saying why. PUT /profile/recent-experience stores continue_with_found for whatever entry the
+     body names, with no bullet-count precondition, so this arm has to carry its own floor. */
+  if (groundedVariants === 0) return false;
   return groundedVariants >= RESUME_CONTENT_LIMITS.minBulletsPerEntry
     || options.sparseSelectionConfirmed === true;
 }
@@ -306,24 +316,45 @@ export function baseResumeSelectionIssues(
   priorities: ExperienceBankEntry[],
   options: {
     requireFirst?: boolean;
-    /* Entries the bullet floor dropped because their every bullet already prints under another
-     * heading. This gate exists to keep the applicant's defining work VISIBLE on the page, and a
-     * duplicate emptied by the cross-entry dedupe is visible - the same sentences sit under the
-     * other copy's heading. Demanding it anyway recreated the nothing-saved dead-end one level
-     * deeper: a duplicate bank row with a slightly different identity (a re-upload that renamed
-     * "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA") was required by identity,
-     * emptied by the dedupe, and refused by this gate on every rebuild. Keyed on (org, title),
-     * not org alone, so excusing a dropped duplicate cannot excuse a different role at the same
-     * organization. */
-    droppedAsAlreadyPrinted?: Array<{ org: string; title?: string | null }>;
+    /* WHAT THE FLOOR ITSELF REMOVED, and therefore what this gate may not demand back.
+     *
+     * EVERY drop, not one reason of it. The excuse started as the already-printed case, because a
+     * duplicate emptied by the cross-entry dedupe is still VISIBLE - the same sentences sit under
+     * the other copy's heading - and demanding it recreated the nothing-saved dead-end (a
+     * re-upload that renamed "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA" was
+     * required by identity, emptied by the dedupe, refused on every rebuild). But the SAME dedupe
+     * reaches the other exit too: strip one shared sentence from a two-variant row and it lands on
+     * one bullet, which the floor reports as `below_floor` and the excuse did not cover. Nothing
+     * downstream re-runs the floor, so on both routes a re-demand is unsatisfiable whatever the
+     * reason: the model cannot write its way out of a dedupe against a sentence that is already on
+     * the page, and it is not asked to try. What protects the applicant here is that the drop is
+     * REPORTED - it rides the omissions channel naming the entry and the fix - which is strictly
+     * better than refusing to produce any resume at all.
+     *
+     * KEYED ON THE BANK ROW'S ID, not on (org, title). Those strings belong to the MODEL, and
+     * matchingBankEntry exists precisely because they differ from the row's own: the model writes
+     * "Traeco" for a row stored as "Traeco - AI Agent Cost Infrastructure". Excusing by identity
+     * therefore failed exactly when a near-duplicate row caused the drop, which is the case the
+     * excuse was written for. `sourceId` falls back to identity only when nothing in the bank
+     * matched, where the strings are all there is - and identity stays (org, title) rather than
+     * org alone, so a dropped duplicate cannot excuse a different role at the same organization. */
+    droppedByTheFloor?: Array<{ sourceId?: string | null; org: string; title?: string | null }>;
   } = {},
 ): string[] {
   const selected = new Set(spec.experience.map((entry) => entryIdentity(entry)));
-  const excused = new Set(
-    (options.droppedAsAlreadyPrinted ?? []).map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
+  const droppedByTheFloor = options.droppedByTheFloor ?? [];
+  const excusedIds = new Set(
+    droppedByTheFloor.map((entry) => entry.sourceId).filter((id): id is string => typeof id === 'string' && id.length > 0),
+  );
+  const excusedIdentities = new Set(
+    droppedByTheFloor
+      .filter((entry) => !entry.sourceId)
+      .map((entry) => entryIdentity({ org: entry.org, title: entry.title ?? null })),
   );
   const issues = priorities
-    .filter((entry) => !selected.has(entryIdentity(entry)) && !excused.has(entryIdentity(entry)))
+    .filter((entry) => !selected.has(entryIdentity(entry))
+      && !excusedIds.has(entry.id)
+      && !excusedIdentities.has(entryIdentity(entry)))
     .map((entry) => `required current or role-defining entry missing: ${entry.title ? `${entry.title} at ` : ''}${entry.org}`);
   const first = spec.experience[0];
   const priority = priorities[0];

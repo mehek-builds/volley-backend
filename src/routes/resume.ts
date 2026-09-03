@@ -1106,10 +1106,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        excuse that closes it. A duplicate bank row with a slightly different identity (a re-upload
        that renamed "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA") has two
        grounded variants, so it is survivable and therefore mandatory - and then the floor's
-       cross-entry dedupe empties it, because its every sentence already prints under the other
+       cross-entry dedupe takes its sentences away, because they already print under the other
        copy's heading. Demanding it anyway is the same deterministic refusal by another route.
-       Fed to the post-fit gate below exactly as routes/baseResume.ts feeds its own. */
-    const droppedAsAlreadyPrinted: Array<{ org: string; title?: string | null }> = [];
+
+       EVERY drop is collected, with the bank row id the floor matched. Filtering to the
+       already-printed reason missed the case where the dedupe strips one shared sentence and
+       leaves the entry on a single bullet, and keying the excuse on the model's org and title
+       missed it whenever those strings differed from the bank row's - which is exactly the
+       near-duplicate shape that causes the drop. Fed to the post-fit gate below. */
+    const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
     spec = enforceExperienceBulletFloor(spec, bank, {
       /* Keyed on the SELECTION and gated by the confirmation, so the entry the floor is allowed
          to keep is the same entry the gate above is allowed to require. */
@@ -1120,8 +1125,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
          end for a duplicated one: an entry emptied by the dedupe has every bullet already on the
          page under another heading, so a fourth bullet changes nothing and the student would be
          sent round a loop. Say what actually happened instead. */
-      onDropped: ({ org, title, bullets, reason }) => {
-        if (reason === 'already_printed') droppedAsAlreadyPrinted.push({ org, title });
+      onDropped: ({ org, title, sourceId, bullets, reason }) => {
+        droppedByTheFloor.push({ sourceId, org, title });
         droppedForLength.push(
           reason === 'already_printed'
             ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
@@ -1248,7 +1253,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       /* Post-floor, so this is the gate the dedupe can contradict - and the only one, since the
          in-loop check above runs before the floor has touched anything. */
       finalSpecValidation.issues.push(
-        ...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false, droppedAsAlreadyPrinted }),
+        ...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false, droppedByTheFloor }),
       );
     }
     /* The complete citation is re-checked after fitting. If the one-page pass removed the exact
