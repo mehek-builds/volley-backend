@@ -573,14 +573,15 @@ export function mergeSubmittedApplicationReviewQuestions(
      * stays deaf to both, so an explicit per-question confirmation still mints her claim over a
      * machine value, and the override branch still names the PRE-SNAP resolver value, which is the
      * only string its own currency check can recompute. */
-    const submittedIsMachineValue = (() => {
-      const machineAnswer = machineAnswerFor?.(question)?.trim() || undefined;
-      return machineAnswer !== undefined && submittedAnswer === machineAnswer;
-    })();
-    const applicantSuppliedAnswer = Boolean(
-      questionsReviewedAt && submittedAnswer && !answerUnchanged
-      && !submittedIsResolverValue && !submittedIsMachineValue,
+    const bodyChangedTheAnswer = Boolean(
+      questionsReviewedAt && submittedAnswer && !answerUnchanged && !submittedIsResolverValue,
     );
+    /* Asked LAST and only of a body that has already survived every cheaper test, because the
+     * lookup runs a full profile resolution per question and the overwhelming majority of rows in a
+     * save are untouched. Nothing about the order changes the verdict. */
+    const submittedIsMachineValue = bodyChangedTheAnswer
+      && submittedAnswer === (machineAnswerFor?.(question)?.trim() || undefined);
+    const applicantSuppliedAnswer = bodyChangedTheAnswer && !submittedIsMachineValue;
     /* HER EXPLICIT CONFIRMATION, WHICH NO DIFF CAN EXPRESS. The two tests above exist to stop an
      * untouched Save being read as a choice, and they are right - but a CONFIRMED question is not an
      * untouched Save. The client sets the flag only on a question she deliberately confirmed, so the
