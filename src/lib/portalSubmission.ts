@@ -2451,6 +2451,36 @@ function managedSpeculativeAliasFamily(label: string): string | undefined {
   const normalized = normalizedFailedFieldLabel(label);
   if (!normalized) return undefined;
   if (/\bgraduation date\b|\bdate of graduation\b/.test(normalized)) return 'education-graduation-date';
+  /* THE EMPLOYER'S GPA WORDING WITH ITS QUALIFIERS STACKED, WHICH THE FAILED MATCHER MUST NOT SEE.
+   *
+   * managedClosedFieldFamily allows exactly ONE qualifier before the gpa noun, so "what is your
+   * overall gpa" is the gpa field and "what is your overall college/university gpa" is no family at
+   * all. Measured live 2026-09-03 on Hudson River Trading packet 4a79eec1: that second form is the
+   * employer's real wording, it normalises to "what is your overall college university gpa", and
+   * with no family packetAnswerOutranksAliasGuess could not connect the speculative 'GPA' alias
+   * fill to the control the packet had already answered - her reviewed band "3.76 - 4.0", chosen
+   * from the thirteen the employer offers. So the alias fired anyway carrying the raw profile
+   * "3.89", resolved to a control whose menu the probe had not read, and the runner reported
+   * `no option matched "3.89" (the list offered: "No options")`. The run parked on that one field
+   * with all 26 of its answers bound.
+   *
+   * ADDED HERE AND NOT TO managedClosedFieldFamily, for the reason the doc comment above states:
+   * that one is the FAILED-control matcher, and widening it would also change which fills a failed
+   * option read suppresses - a different question with a different measurement behind it, and one
+   * this packet gives no evidence about. This is the same shape as the graduation-date rule above:
+   * the alias ladder learns one more wording, and the failed matcher is untouched.
+   *
+   * The trailing anchor and the policy exclusion are what keep it honest: the label must END in
+   * the gpa noun, so "minimum gpa requirement for scholarship" and "do you meet our GPA
+   * eligibility policy?" are refused, and "please select the corresponding gpa scale" - a
+   * DIFFERENT stored field - never matches because "the corresponding" is not a qualifier.
+   * Verified against all of those, plus "which university did you attend?" and "what is your
+   * degree?", on 2026-09-03. */
+  const unrelatedAcademicPolicy = /\b(?:scholarship|requirement|minimum|required|eligibility|qualif(?:y|ication)|policy|program)\b/.test(normalized);
+  if (!unrelatedAcademicPolicy
+    && /^(?:(?:please )?(?:indicate|provide|enter|report|select|choose) )?(?:(?:what is) )?(?:your )?(?:(?:overall|cumulative|current|undergraduate|undergrad|college|university|school|degree) )*(?:gpa|grade point average|grade average)(?: (?:range|band))?(?:(?: out of| on a) \d+(?: \d+)?(?: scale)?)?(?: if applicable)?$/.test(normalized)) {
+    return 'education-gpa';
+  }
   return managedClosedFieldFamily(label);
 }
 

@@ -9958,3 +9958,47 @@ test('an answer-loss line names its field even with no employer question in the 
   // And nothing falls back to the unnamed sentence when a name was recoverable.
   assert.equal(reasons.some((r) => r.startsWith('Litos could not leave an answer on the form:')), false);
 });
+
+/* THE EMPLOYER'S OWN GPA WORDING, WHICH STACKED TWO QUALIFIERS AND SO MATCHED NOTHING.
+ *
+ * Measured live 2026-09-03 on Hudson River Trading packet 4a79eec1 (greenhouse). Its GPA question
+ * is worded "What is your overall college/university GPA?", her reviewed answer is the band
+ * "3.76 - 4.0" chosen from the thirteen the employer offers, and the run still reported
+ * `no option matched "3.89" (the list offered: "No options")` and parked instead of reaching the
+ * send gate - on a packet where all 26 answers were bound.
+ *
+ * managedClosedFieldFamily allowed exactly ONE qualifier before the gpa noun, so "what is your
+ * overall gpa" was the gpa field and "what is your overall college university gpa" was no family at
+ * all. With no family, packetAnswerOutranksAliasGuess could not connect the speculative 'GPA' alias
+ * fill to the answered control, and the raw profile "3.89" went out at a menu nobody had read.
+ */
+test('a stacked-qualifier GPA label is the same field, so the raw profile GPA is not also fired', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    gpa: '3.89',
+    questions: [{
+      question: 'What is your overall college/university GPA?',
+      answer: '3.76 - 4.0',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_68000297',
+      portalInputType: 'combobox',
+    }],
+    fieldOptions: {
+      question_68000297: ['< 3.0', '3.01 - 3.25', '3.26 - 3.50', '3.51 - 3.75', '3.76 - 4.0'],
+    },
+  }));
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.value === '3.89'),
+    false,
+    "the speculative GPA alias must stand down once the employer's own GPA question is answered",
+  );
+});
+
+test('an unanswered GPA control still gets the speculative alias fill', () => {
+  // The other half: the stand-down is evidence-driven, so a packet with no answered GPA question
+  // keeps the ladder that is its only chance of filling a plain numeric GPA field.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({ gpa: '3.89', questions: [] }));
+  assert.ok(
+    actions.some((action) => action.type === 'fillByLabelText' && action.value === '3.89'),
+    'with nothing answered, the GPA alias fill must still be attempted',
+  );
+});
