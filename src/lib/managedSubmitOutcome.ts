@@ -24,6 +24,7 @@
  */
 import type { ApplicationReviewState } from './applicationReview';
 import type { Page } from 'playwright-core';
+import { receiptProof } from './receiptProof';
 import {
   exactFinalSubmitChooserPolicy,
   type FinalSubmitChooserPolicy,
@@ -365,6 +366,8 @@ export function managedSubmitVerdict(result: MaybeOutcome | null | undefined): M
 
 export type ManagedReceiptResult = MaybeOutcome & {
   url?: unknown;
+  /** The runner's rendered page text, read for the receipt proof on families without an exact ATS binding. */
+  text?: unknown;
   screenshot?: string | null;
   continuationOffered?: unknown;
   continuationToken?: unknown;
@@ -572,9 +575,58 @@ export function exactManagedSubmitVerdict(
 ): ManagedSubmitVerdict {
   const verdict = managedSubmitVerdict(result);
   if (verdict.kind !== 'confirmed') return verdict;
-  return result && exactManagedAtsReceipt({ result, expectedApplicationUrl })
-    ? verdict
-    : { kind: 'unverified', cause: 'no_confirmation_state' };
+  if (result && exactManagedAtsReceipt({ result, expectedApplicationUrl })) return verdict;
+  if (result && corroboratedFamilyReceipt(result, expectedApplicationUrl, verdict.confirmationText)) {
+    return { ...verdict, evidence: `${verdict.evidence}+receipt_proof` };
+  }
+  return { kind: 'unverified', cause: 'no_confirmation_state' };
+}
+
+/* THE SEVEN FAMILIES WITHOUT AN EXACT ATS BINDING CAN VERIFY TOO.
+ *
+ * managedAtsBinding knows three hosts (Ashby, Greenhouse, Workable), and until this arm existed a
+ * runner-confirmed press on any other family - Lever, Teamtailor, Crelate, Pinpoint, Personio,
+ * Recruitee, Breezy - fell to `unverified` by construction, whatever the receipt page said. The
+ * family-aware proof the direct path has always used (receiptProof: Crelate's applythanks route and
+ * sentence, the receipt phrases everywhere else) is applied to the runner's rendered page text, and
+ * only when the runner landed on the employer's own site: the same host as the application URL, or
+ * the same registrable domain (a tenant receipt under the tenant's own subdomain). A redirect to
+ * some other site confirms nothing. The runner's own counter-witness gates - the form gone, no doubt
+ * cue - have already run; this is the second, independent reading of the same page. */
+function corroboratedFamilyReceipt(
+  result: ManagedReceiptResult,
+  expectedApplicationUrl: string,
+  confirmationText: string,
+): boolean {
+  if (managedAtsBinding({ url: expectedApplicationUrl })) return false;
+  if (typeof result.url !== 'string') return false;
+  let expected: URL;
+  let landed: URL;
+  try {
+    expected = new URL(expectedApplicationUrl);
+    landed = new URL(result.url);
+  } catch {
+    return false;
+  }
+  if (landed.protocol !== 'https:' || landed.username || landed.password) return false;
+  if (!sameRegistrableSite(expected.hostname, landed.hostname)) return false;
+  const rendered = typeof result.text === 'string' && result.text.trim() ? result.text : confirmationText;
+  const body = rendered.replace(/\s+/g, ' ').trim();
+  return Boolean(body) && receiptProof(body, result.url).proven;
+}
+
+const SECOND_LEVEL_PUBLIC = new Set(['co', 'com', 'org', 'net', 'ac', 'gov', 'edu']);
+function registrableDomain(hostname: string): string {
+  const labels = hostname.toLowerCase().split('.').filter(Boolean);
+  if (labels.length <= 2) return labels.join('.');
+  const [sld, tld] = labels.slice(-2);
+  const take = tld.length === 2 && SECOND_LEVEL_PUBLIC.has(sld) ? 3 : 2;
+  return labels.slice(-take).join('.');
+}
+export function sameRegistrableSite(a: string, b: string): boolean {
+  const left = a.toLowerCase();
+  const right = b.toLowerCase();
+  return left === right || registrableDomain(left) === registrableDomain(right);
 }
 
 export type ExactManagedPageReceipt = {
@@ -1049,6 +1101,8 @@ export function unverifiedSubmissionReason(input: {
    * employer's own host (Lever re-parses the resume at submit), so the requests-only predicate
    * rightly withdrew and the applicant was promised a re-send that would hit the same wall. */
   challengeOnScreen?: boolean;
+  /** What the runner saw on the page after the press, when it saw anything. Shown, never judged. */
+  observedPageText?: string | null;
 }): string {
   /* ASKED FIRST, ahead of every cause arm, because no cause can outrank it. The causes below are
    * all descriptions of how a press ended; if the ledger says no press was made, none of them
@@ -1081,7 +1135,9 @@ export function unverifiedSubmissionReason(input: {
         + 'so it does not know whether this application went through.'
       : 'Litos pressed Send and the page never showed a confirmation it could read, so it does not '
         + 'know whether this application went through.';
-  return `${what} ${where} ${looksLike} Then tell Litos which you found: if it is there, Litos will `
+  const observed = input.observedPageText?.replace(/\s+/g, ' ').trim();
+  const said = observed ? ` The page Litos saw said: “${observed.slice(0, 300)}”.` : '';
+  return `${what}${said} ${where} ${looksLike} Then tell Litos which you found: if it is there, Litos will `
     + 'record it as sent and will not apply again; if it is not, Litos will send this one for you. '
     + 'Do not submit it by hand in the meantime, because two applications to the same posting count '
     + 'against you and cannot be taken back.';

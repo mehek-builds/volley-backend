@@ -1229,6 +1229,11 @@ export type ApplicationReviewState = {
     /* The runner reported a rendered CAPTCHA still standing after the press. Evidence for the
      * person resolving this record, and what selects the human-check sentence. */
     challenge_on_screen?: true;
+    /* What the runner saw on the page after the press (its rendered text, bounded) and where it
+     * landed. Evidence for the person resolving the record - the one line the page did show is
+     * usually the whole answer. Never used to decide anything automatically. */
+    observed_page_text?: string;
+    final_url?: string;
     resolution?: 'sent' | 'not_sent';
     resolved_at?: string;
   };

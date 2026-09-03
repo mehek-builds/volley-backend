@@ -17,6 +17,7 @@ import {
   readManagedFinalSubmitNoClick,
   readManagedSubmitOutcome,
   unverifiedSubmissionReason,
+  exactManagedSubmitVerdict,
 } from './managedSubmitOutcome';
 import {
   FINAL_SUBMIT_CHOOSER_POLICY_V3,
@@ -1652,4 +1653,62 @@ describe('the client-validation refusal', () => {
     } });
     assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
   });
+});
+
+/* THE SEVEN FAMILIES WITHOUT AN EXACT ATS BINDING. See corroboratedFamilyReceipt: a runner-confirmed
+ * press on Lever, Teamtailor, Crelate, Pinpoint, Personio, Recruitee or Breezy used to fall to
+ * `unverified` by construction because managedAtsBinding knows three hosts. */
+test('a runner-confirmed press on a Lever receipt page verifies through the receipt proof', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://jobs.lever.co/apollo-research/b83479c0/thanks',
+    text: 'Thank you',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body_bare_receipt', message: 'Thank you', formStillPresent: false },
+  }, 'https://jobs.lever.co/apollo-research/b83479c0/apply');
+  assert.equal(verdict.kind, 'confirmed');
+  assert.match((verdict as { evidence: string }).evidence, /receipt_proof$/);
+});
+
+test('a receipt that landed on some other site confirms nothing', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://example.com/thanks',
+    text: 'Thank you',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: 'Thank you', formStillPresent: false },
+  }, 'https://jobs.lever.co/apollo-research/b83479c0/apply');
+  assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+});
+
+test('a runner-confirmed press whose page carries no receipt phrase stays unverified', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://tixtrack.teamtailor.com/jobs/8287889/applications/new',
+    text: 'Complete your profile to stand out',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'live_region', evidence: 'status', message: 'Complete your profile to stand out', formStillPresent: false },
+  }, 'https://tixtrack.teamtailor.com/jobs/8287889-sr-software-engineer-ii-remote-us');
+  assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+});
+
+test('crelate verifies only on its applythanks route with the sentence', () => {
+  const apply = 'https://jobs.crelate.com/portal/themavengroup/job/apply/wtmao1bfqg9te5b5jo5jknskxo';
+  const confirmed = (url: string, text: string) => exactManagedSubmitVerdict({
+    url, text,
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: text, formStillPresent: false },
+  }, apply);
+  assert.equal(confirmed('https://jobs.crelate.com/portal/themavengroup/job/applythanks/wtmao1bfqg9te5b5jo5jknskxo?applicationId=abcdEFGH1234', 'Thank you for applying to Cyber Test Engineer at The Maven Group').kind, 'confirmed');
+  assert.equal(confirmed(apply, 'Thank you for applying to this position.').kind, 'unverified', 'still on the apply route');
+});
+
+test('an exact-binding family is untouched by the corroboration arm', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083',
+    text: 'Thank you for applying',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: 'Thank you for applying', formStillPresent: false },
+  }, 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083');
+  assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' }, 'greenhouse still needs its confirmation route');
+});
+
+test('the unverified sentence shows what the page said', () => {
+  const reason = unverifiedSubmissionReason({
+    atsName: 'lever', portalUrl: 'https://jobs.lever.co/x/y', cause: 'no_confirmation_state',
+    observedPageText: '  Thanks!   We will be in touch. ',
+  });
+  assert.match(reason, /The page Litos saw said: “Thanks! We will be in touch\.”/);
 });

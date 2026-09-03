@@ -1316,6 +1316,8 @@ type ManagedAuthorizedUnverifiedInput = {
   previewUrl?: string;
   network?: NonNullable<ApplicationReviewState['unverified_submission']>['network'];
   challengeOnScreen?: boolean;
+  observedPageText?: string;
+  finalUrl?: string;
   requireContinuationResumed?: boolean;
   allowInvalidContinuationBinding?: boolean;
   cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
@@ -1370,6 +1372,8 @@ export async function recordManagedAuthorizedAttemptUnverified(
         ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
         ...(input.network ? { network: input.network } : {}),
         ...(input.challengeOnScreen ? { challengeOnScreen: true } : {}),
+        ...(input.observedPageText ? { observedPageText: input.observedPageText } : {}),
+        ...(input.finalUrl ? { finalUrl: input.finalUrl } : {}),
       }),
       ...(mergedSecurityCode ? { security_code: mergedSecurityCode } : {}),
       ...(mergedVerification ? { verification: mergedVerification } : {}),
@@ -11299,6 +11303,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const unverifiedSecurityCode = enteredCode
         ? recordEnteredCodeOutcome(unverifiedCodeOutcome, capturedAt)
         : undefined;
+      const observedPageText = rawOutcome?.message ?? undefined;
+      const landedUrl = typeof receiptResult.url === 'string' ? receiptResult.url : undefined;
       await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
         message: 'Managed submission result did not contain a confirmation state',
         attentionReason: unverifiedSubmissionReason({
@@ -11307,12 +11313,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           cause: 'no_confirmation_state',
           network: pressNetwork ?? null,
           challengeOnScreen: pressChallengeOnScreen,
+          observedPageText: observedPageText ?? null,
         }),
         attentionCategories: ['unverified_submission'],
         ...(unverifiedSecurityCode ? { securityCode: unverifiedSecurityCode } : {}),
         previewUrl: blob.url,
         network: pressNetwork,
         challengeOnScreen: pressChallengeOnScreen,
+        ...(observedPageText ? { observedPageText } : {}),
+        ...(landedUrl ? { finalUrl: landedUrl } : {}),
         cleanupMarkers: managedCleanupMarkers(),
       });
       await acknowledgeManagedCleanupMarkers();
@@ -11929,6 +11938,9 @@ function unverifiedSubmissionPatch(
     /* The runner's own CAPTCHA blocker was standing when the run ended: a rendered challenge over
      * the pressed form. Selects the human-check sentence and travels on the record. */
     challengeOnScreen?: boolean;
+    /* The runner's rendered page text after the press and where it landed; see the record's fields. */
+    observedPageText?: string;
+    finalUrl?: string;
   },
 ): Partial<ApplicationReviewState> {
   return {
@@ -11942,6 +11954,8 @@ function unverifiedSubmissionPatch(
       ...(review.submission_run_id ? { submission_run_id: review.submission_run_id } : {}),
       ...(input.network && input.network.length > 0 ? { network: input.network } : {}),
       ...(input.challengeOnScreen ? { challenge_on_screen: true as const } : {}),
+      ...(input.observedPageText ? { observed_page_text: input.observedPageText.replace(/\s+/g, ' ').trim().slice(0, 600) } : {}),
+      ...(input.finalUrl ? { final_url: input.finalUrl.slice(0, 2000) } : {}),
     },
     attention_reason: unverifiedSubmissionReason({
       atsName: review.ats_name,
@@ -11949,6 +11963,7 @@ function unverifiedSubmissionPatch(
       cause: input.cause,
       network: input.network ?? null,
       challengeOnScreen: input.challengeOnScreen,
+      observedPageText: input.observedPageText ?? null,
     }),
     attention_categories: ['unverified_submission'],
   };
