@@ -926,8 +926,9 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
    *   - domain/board-submission-authority.ts:29 treats a card with no `submission_authority` as
    *     ABSENT rather than corrupt, and the collection check at :58 skips it, so one unpublishable
    *     card no longer takes the board down.
-   *   - `submission_authority_unavailable` appears ZERO times in that tree. The marker the board has
-   *     been publishing since #866 is read by nothing.
+   *   - `submission_authority_unavailable` appears ZERO times in that tree. The marker the board
+   *     has published per card since 56ab02a ("One unverifiable card is one card, not the whole
+   *     board") is read by nothing.
    * So an additive key on the marker would very likely have been inert too. "Very likely" against a
    * worktree that may not be the deployed commit is not the standard this contract is held to, and a
    * quarantined card is exactly the failure being diagnosed, so the diagnosis goes where it cannot
