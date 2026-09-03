@@ -14,6 +14,9 @@ import {
   type PortalFamily,
 } from './portalSubmission';
 import { DISCOVER_QUESTIONS_SCRIPT, refreshKnownQuestionAnswers } from './questionDiscovery';
+import { SINGLE_CHOICE_EXACT_OPTION_TYPE } from './questionDiscovery';
+import { discoveredQuestionNeedsExactOptionsBeforeResolution, optionsSurvivingAnUnreadMenu } from './questionMetadata';
+import { discoverAndResolveQuestions } from '../routes/submissionRunner';
 import { postingQuestionInventoryFromDiscovered } from './postingQuestions';
 
 /* A REQUIRED CHOICE QUESTION WITH NO CAPTURED OPTIONS IS UNANSWERABLE BY CONSTRUCTION.
@@ -216,4 +219,139 @@ test('none of this starts judging a stored answer against an option list that is
   const discovered = [reactSelect('question_4102', 'Overall GPA')];
   assert.equal(attachManagedFieldOptions(discovered, {})[0]!.options, null);
   assert.deepEqual(managedOptionProbeTargets('lever', discovered, {}, true), ['question_4102']);
+});
+
+/* ── THE FIFTH CAUSE: A LIST THAT WAS CAPTURED, AND THEN OVERWRITTEN WITH NOTHING ──────────────
+ *
+ * The four causes above are failures to CAPTURE. This one is a failure to KEEP. The two
+ * existing-record writes in discoverAndResolveQuestions spread `...existing` and then set `options`
+ * from the CURRENT run's read, so a run whose option probe returned nothing replaced a list an
+ * earlier run had really measured. The comment at the second site calls it refreshing the
+ * display-only choices; on an empty read it is a deletion, and an empty read is ordinary - the menu
+ * is opened by a probe that can be skipped, batched away, or time out.
+ *
+ * MEASURED on origin/main at the deployed revision (107e1ae7), driving the real
+ * discoverAndResolveQuestions twice over one Greenhouse gender combobox `[id="245"]`:
+ *   run 1, menu read  : options ["Woman","Man","Non-binary","I don't wish to answer"], answer "Woman"
+ *   run 2, menu unread: options null,                                                 answer "Female"
+ */
+
+test('the retention gate keeps a measured menu only where nothing can blank an answer against it', () => {
+  const menu = ['Woman', 'Man', 'Non-binary', "I don't wish to answer"];
+  const stored = { options: menu, portal_selector: '[id="245"]' };
+
+  // A fresh read always wins; retention is only ever about an EMPTY one.
+  assert.deepEqual(
+    optionsSurvivingAnUnreadMenu({ freshOptions: ['A', 'B'], controlType: 'combobox', selector: '[id="245"]', existing: stored }),
+    ['A', 'B'],
+  );
+  // The case the measurement found: same control, menu unread, list kept.
+  assert.deepEqual(
+    optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType: 'combobox', selector: '[id="245"]', existing: stored }),
+    menu,
+  );
+
+  /* THE SAFETY SCOPE. storedAnswerMatchesNoExactOption blanks a stored answer matching none of the
+   * recorded options, gated on SINGLE_CHOICE_EXACT_OPTION_TYPE. Handing a retained list to one of
+   * those types could let a menu read on an earlier render RE-OPEN a correct answer, which destroys
+   * data to close a display gap. Retention therefore stops exactly where that gate starts, written
+   * as the set difference rather than a `combobox` literal so the two stay coupled. */
+  for (const controlType of ['select', 'select-one', 'radio', 'listbox']) {
+    assert.ok(SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType), `${controlType} is blankable`);
+    assert.equal(
+      optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType, selector: '[id="245"]', existing: stored }),
+      null,
+      `${controlType} must not carry a stale list into the re-open gate`,
+    );
+  }
+
+  // A list is evidence about ONE control, so a different binding keeps nothing.
+  assert.equal(optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType: 'combobox', selector: '[id="999"]', existing: stored }), null);
+  assert.equal(optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType: 'combobox', selector: null, existing: stored }), null);
+  // Nothing stored, a placeholder-only list, and a control that is no longer a menu keep nothing.
+  assert.equal(optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType: 'combobox', selector: '[id="245"]', existing: undefined }), null);
+  assert.equal(optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType: 'combobox', selector: '[id="245"]', existing: { options: ['Select...'], portal_selector: '[id="245"]' } }), null);
+  assert.equal(optionsSurvivingAnUnreadMenu({ freshOptions: null, controlType: 'text', selector: '[id="245"]', existing: stored }), null);
+});
+
+test('a blankable control never even reaches the retention site with an unread menu', () => {
+  /* WHY THE SCOPE ABOVE IS BELT AND BRACES RATHER THAN THE ONLY GUARD, which is what makes the
+   * wider case safe to reason about at all.
+   *
+   * A zero-option read on a type that needs exact options before resolution raises
+   * `missing_exact_options` at the top of the loop, and that branch ends in `continue`: the record
+   * is either preserved WHOLESALE under its own current-round same-selector proof, or invalidated.
+   * Either way control never reaches the two writes this change touches. So the types
+   * storedAnswerMatchesNoExactOption is allowed to blank cannot be handed a retained list by this
+   * change even if the gate above were removed - the set that needs exact options is a SUPERSET of
+   * the set that can be blanked. */
+  const asField = (controlType: string) => ({
+    label: 'what is your gender?', selector: '[id="245"]', durableSelector: '[id="245"]',
+    inputType: controlType === 'combobox' ? 'text' : controlType,
+    role: controlType === 'combobox' ? 'combobox' : null,
+    options: null, required: true,
+  }) as never;
+  for (const controlType of ['select', 'select-one', 'radio', 'listbox']) {
+    assert.ok(SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType));
+    assert.equal(discoveredQuestionNeedsExactOptionsBeforeResolution(asField(controlType)), true,
+      `${controlType} is intercepted before the retention site`);
+  }
+  // Combobox is the exempt one, which is exactly why it falls through to the write this change fixes.
+  assert.equal(SINGLE_CHOICE_EXACT_OPTION_TYPE.test('combobox'), false);
+  assert.equal(discoveredQuestionNeedsExactOptionsBeforeResolution(asField('combobox')), false);
+});
+
+const GENDER_MENU = ['Woman', 'Man', 'Non-binary', "I don't wish to answer"];
+const REVIEWED_ROUND = '2026-09-03T11:00:00.000Z';
+
+async function twoRunsOverAGenderCombobox() {
+  const field = (options: string[] | null) => ({
+    label: 'what is your gender? 245', selector: '[data-litos-discovered-3]', durableSelector: '[id="245"]',
+    inputType: 'text', role: 'combobox', maxLength: null, options,
+    ...(options ? { optionsComplete: true } : {}), required: true,
+  });
+  const state = (questions: unknown[]) => ({
+    jd_text: 'Build C++ services.', role: 'Software Engineering Internship',
+    portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=wehrtyou&token=8052083',
+    ats_name: 'greenhouse', status: 'ready_to_submit', edited_terms: [], questions,
+    skipped_reasons: [], questions_reviewed_at: REVIEWED_ROUND, updated_at: REVIEWED_ROUND,
+  }) as never;
+  const profile = { school: 'USC', eeo_prefs: { gender: 'Female' } } as never;
+  const row = { user_id: 'user-1' } as never;
+
+  const first = await discoverAndResolveQuestions([field(GENDER_MENU)] as never, row, state([]), profile, true, 'greenhouse');
+  // Stored the way the dashboard stores HER pick of an employer option, in the current review round.
+  const hers = first.questions.map((question) => ({
+    ...question, answer: 'Woman', answer_source: 'applicant_review', answer_reviewed_at: REVIEWED_ROUND,
+  }));
+  const second = await discoverAndResolveQuestions([field(null)] as never, row, state(hers), profile, true, 'greenhouse');
+  return { first: first.questions[0]!, second: second.questions[0] };
+}
+
+test('a combobox menu measured by an earlier run survives a run whose probe read nothing', async () => {
+  const { first, second } = await twoRunsOverAGenderCombobox();
+  assert.deepEqual(first.options, GENDER_MENU, 'run 1 captured the menu');
+  assert.ok(second, 'the question is still returned');
+  // The regression: this was `null` on origin/main, so the dashboard rendered the employer's
+  // combobox as a bare text box and neither Litos nor the applicant could pick from it.
+  assert.deepEqual(second.options, GENDER_MENU, 'run 2 must not replace a measured menu with nothing');
+});
+
+test('the answer beside it still reverts, which is the LARGER half and is NOT fixed here', async () => {
+  /* SEPARATE DEFECT, PINNED SO IT IS NOT MISTAKEN FOR THIS ONE and so the follow-up has a home.
+   *
+   * `reviewedAnswerStillFits` computes `reviewedOption` against `usableOptions(field.options)` - the
+   * FRESH read - not against the list the record carries. On an unread menu that set is empty, so
+   * her reviewed "Woman" is on no offered option as far as the gate can see, the gate returns false,
+   * and the resolver's profile value replaces it. The stored answer becomes "Female", which the
+   * control does not offer: the question then reads ANSWERED with nothing selected, which is the
+   * loop reviewedComboboxOptionKept.test.ts was written for, reached through a different door.
+   *
+   * Retaining the list at the WRITE site cannot fix this, as this test proves: the gate never
+   * consults the retained list. The fix is to give that gate the same effective-options notion this
+   * change gives the write, and it is deliberately not made here - that gate decides whether her
+   * answer or the profile wins, and widening it is its own measured change. */
+  const { second } = await twoRunsOverAGenderCombobox();
+  assert.equal(second!.answer, 'Female', 'still reverts today - update this test when the gate is fixed');
+  assert.ok(!GENDER_MENU.includes(second!.answer), 'and the value it reverts to is unfillable');
 });

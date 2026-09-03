@@ -296,6 +296,7 @@ import {
   questionMetadataBlockersForOptionProbeFailures,
   questionMetadataBlockerReason,
   questionLabelIsGenericAnswerControl,
+  optionsSurvivingAnUnreadMenu,
   reopenUnfitClosedChoiceQuestions,
   type QuestionMetadataBlocker,
 } from '../lib/questionMetadata';
@@ -6589,7 +6590,14 @@ export async function discoverAndResolveQuestions(
           /* The answer can come from the profile while the choices come from this live employer
            * control. Preserve both. Otherwise an already-known answer keeps its text but the
            * dashboard has no option list and renders the employer's select as a text box. */
-          options: usableOptions(field.options).length > 0 ? usableOptions(field.options) : null,
+          /* An empty read is not proof the menu is gone: keep the list the last read measured,
+           * on this same control, where nothing downstream can blank an answer against it. */
+          options: optionsSurvivingAnUnreadMenu({
+            freshOptions: field.options,
+            controlType,
+            selector: portalSelectorForField(field),
+            existing,
+          }),
           // Last, so a re-run over a packet whose provenance was stripped by a review merge stamps
           // the acceptance back on rather than inheriting a blank.
           ...consentTrail,
@@ -6614,8 +6622,18 @@ export async function discoverAndResolveQuestions(
           /* A stored answer predates this live form read, but the employer's menu does not. Keep
            * the applicant's answer and refresh the display-only choices beside it. Without this,
            * every already-answered Greenhouse select was returned to the dashboard as a free-text
-           * field even though the option probe had just read the exact allowed values. */
-          options: usableOptions(field.options).length > 0 ? usableOptions(field.options) : null,
+           * field even though the option probe had just read the exact allowed values.
+           *
+           * A REFRESH, NEVER A DELETION: this read can come back empty because the probe was
+           * skipped, batched away or timed out, and that is not evidence the employer's menu is
+           * gone. Writing the emptiness over a list an earlier run measured produced exactly the
+           * free-text box this comment says it exists to prevent. */
+          options: optionsSurvivingAnUnreadMenu({
+            freshOptions: field.options,
+            controlType,
+            selector: portalSelectorForField(field),
+            existing,
+          }),
         });
       } else {
         surfaceUnansweredQuestion(field, reviewLabel, existing, true, fieldIsRequired);
