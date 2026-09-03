@@ -1661,8 +1661,8 @@ describe('the client-validation refusal', () => {
 test('a runner-confirmed press on a Lever receipt page verifies through the receipt proof', () => {
   const verdict = exactManagedSubmitVerdict({
     url: 'https://jobs.lever.co/apollo-research/b83479c0/thanks',
-    text: 'Thank you',
-    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body_bare_receipt', message: 'Thank you', formStillPresent: false },
+    text: 'Thanks for applying',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: 'Thanks for applying', formStillPresent: false },
   }, 'https://jobs.lever.co/apollo-research/b83479c0/apply');
   assert.equal(verdict.kind, 'confirmed');
   assert.match((verdict as { evidence: string }).evidence, /receipt_proof$/);
@@ -1705,10 +1705,40 @@ test('an exact-binding family is untouched by the corroboration arm', () => {
   assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' }, 'greenhouse still needs its confirmation route');
 });
 
-test('the unverified sentence shows what the page said', () => {
+test('the observed page text stays off the sentence, so an error page cannot flip it into "try again"', () => {
   const reason = unverifiedSubmissionReason({
     atsName: 'lever', portalUrl: 'https://jobs.lever.co/x/y', cause: 'no_confirmation_state',
-    observedPageText: '  Thanks!   We will be in touch. ',
+    observedPageText: 'Internal Server Error',
   });
-  assert.match(reason, /The page Litos saw said: “Thanks! We will be in touch\.”/);
+  assert.doesNotMatch(reason, /Internal Server Error/);
+  assert.match(reason, /Do not submit it by hand/);
+});
+
+const confirmedOn = (url: string, text: string, expected: string, source: string = 'page_text') => exactManagedSubmitVerdict({
+  url, text,
+  submitOutcome: { pressed: true, state: 'confirmed', source, evidence: 'body', message: text, formStillPresent: false },
+}, expected);
+
+test('a receipt on another tenant of the same ATS confirms nothing', () => {
+  assert.equal(confirmedOn('https://bar.breezy.hr/p/abc/thanks', 'Thank you for applying!', 'https://foo.breezy.hr/p/abc').kind, 'unverified');
+  assert.equal(confirmedOn('https://www.teamtailor.com/thank-you', 'Thanks for applying We have received your application', 'https://acme.teamtailor.com/jobs/1/applications/new').kind, 'unverified');
+  assert.equal(confirmedOn('https://jobs.lever.co/other-org/deadbeef/thanks', 'Thanks for applying', 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'unverified');
+  assert.equal(confirmedOn('https://app.crelate.com/portal/x/job/applythanks/wtmao1bfqg9te5b5jo5jknskxo?applicationId=abcdEFGH1234', 'Thank you for applying to this position.', 'https://jobs.crelate.com/portal/x/job/apply/wtmao1bfqg9te5b5jo5jknskxo').kind, 'unverified');
+});
+
+test('a thank-you that is a closure, a not-found or a cookie screen confirms nothing', () => {
+  for (const text of ['Page not found. Thank you for visiting Apollo Careers.', 'Thank you for your interest, but this position has been filled.',
+    'Your application has been withdrawn. Thank you.', 'Thank you for accepting cookies. Engineering at Acme.', 'Thank you']) {
+    assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', text, 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'unverified', text);
+  }
+});
+
+test('the measured Teamtailor and Lever receipts verify', () => {
+  assert.equal(confirmedOn('https://fully.teamtailor.com/jobs/6360832-internship/applications/new', 'Thanks for applying We have received your application', 'https://fully.teamtailor.com/jobs/6360832-internship').kind, 'confirmed');
+  assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', 'Thanks for applying', 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'confirmed');
+  assert.equal(confirmedOn('https://acme.com/careers/thanks', 'Your application has been submitted', 'https://www.acme.com/careers/apply').kind, 'confirmed', 'www may come or go on a bare employer domain');
+});
+
+test('an ATS-container verdict on a non-exact family is not corroborated', () => {
+  assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', 'Success', 'https://jobs.lever.co/apollo/b83479c0/apply', 'ats_state').kind, 'unverified');
 });

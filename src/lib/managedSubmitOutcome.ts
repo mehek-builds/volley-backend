@@ -24,7 +24,7 @@
  */
 import type { ApplicationReviewState } from './applicationReview';
 import type { Page } from 'playwright-core';
-import { receiptProof } from './receiptProof';
+import { isCrelateHostUrl, receiptProof } from './receiptProof';
 import {
   exactFinalSubmitChooserPolicy,
   type FinalSubmitChooserPolicy,
@@ -576,7 +576,7 @@ export function exactManagedSubmitVerdict(
   const verdict = managedSubmitVerdict(result);
   if (verdict.kind !== 'confirmed') return verdict;
   if (result && exactManagedAtsReceipt({ result, expectedApplicationUrl })) return verdict;
-  if (result && corroboratedFamilyReceipt(result, expectedApplicationUrl, verdict.confirmationText)) {
+  if (result && corroboratedFamilyReceipt(result, expectedApplicationUrl, verdict.confirmationText, readManagedSubmitOutcome(result)?.source ?? null)) {
     return { ...verdict, evidence: `${verdict.evidence}+receipt_proof` };
   }
   return { kind: 'unverified', cause: 'no_confirmation_state' };
@@ -597,8 +597,13 @@ function corroboratedFamilyReceipt(
   result: ManagedReceiptResult,
   expectedApplicationUrl: string,
   confirmationText: string,
+  source: string | null,
 ): boolean {
   if (managedAtsBinding({ url: expectedApplicationUrl })) return false;
+  /* Only a TEXT reading is corroborated here. An ATS container or route verdict belongs to the
+   * exact-binding families that own those hooks; one reported on any other host is a foreign or
+   * forged container, not a receipt (review of PR #881, finding 4). */
+  if (source !== 'page_text' && source !== 'live_region') return false;
   if (typeof result.url !== 'string') return false;
   let expected: URL;
   let landed: URL;
@@ -609,10 +614,45 @@ function corroboratedFamilyReceipt(
     return false;
   }
   if (landed.protocol !== 'https:' || landed.username || landed.password) return false;
-  if (!sameRegistrableSite(expected.hostname, landed.hostname)) return false;
-  const rendered = typeof result.text === 'string' && result.text.trim() ? result.text : confirmationText;
-  const body = rendered.replace(/\s+/g, ' ').trim();
-  return Boolean(body) && receiptProof(body, result.url).proven;
+  if (!landedOnTheEmployersOwnPage(expected, landed)) return false;
+  /* The RUNNER'S SENTENCE WINDOW, never the 50 KB body: the runner already cut the receipt line
+   * out of the page, and the whole body is where a footer "thank you" or a job title lives. */
+  const body = confirmationText.replace(/\s+/g, ' ').trim();
+  if (!body) return false;
+  if (RECEIPT_CLOSURE_CUE.test(body)) return false;
+  if (isCrelateHostUrl(result.url)) return receiptProof(body, result.url).proven;
+  return RECEIPT_APPLICATION_PHRASE.test(body);
+}
+
+/* The receipt has to NAME THE APPLICATION. A bare "thank you" or "success" is what a closed posting,
+ * a cookie screen and a not-found page say too (review of PR #881, finding 1). */
+const RECEIPT_APPLICATION_PHRASE = /\bthank(?:s| you) for (?:submitting|applying|your application)\b|\b(?:your )?application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)\b|\bwe(?: have|'ve)? received your application\b|\bsuccessfully (?:submitted|applied)\b/i;
+const RECEIPT_CLOSURE_CUE = /\b(?:no longer|has been filled|filled|withdrawn|not found|closed|cancell?ed|expired|declined|denied|unfortunately|already applied|not (?:be )?(?:submitted|accepted|processed)|complete (?:the|your)|check your (?:email|inbox)|confirm your|talent (?:network|community|pool)|draft)\b/i;
+
+/* THE EMPLOYER'S OWN PAGE. On every family this arm serves the tenant IS the subdomain
+ * (foo.breezy.hr, x.recruitee.com, acme.teamtailor.com, xolife.jobs.personio.com) or the first
+ * path segment (jobs.lever.co/<org>, jobs.crelate.com/portal/<org>), so "same registrable domain"
+ * is the wrong unit: another tenant's thank-you would confirm this application (review of PR #881,
+ * finding 2). The host must match exactly; the one relaxation is a www prefix coming or going when
+ * the expected host is itself the bare registrable domain (an employer's own careers site). On the
+ * two shared hosts the landing path must sit under the expected tenant prefix as well. */
+export function landedOnTheEmployersOwnPage(expected: URL, landed: URL): boolean {
+  const expectedHost = expected.hostname.toLowerCase();
+  const landedHost = landed.hostname.toLowerCase();
+  const stripWww = (host: string) => host.replace(/^www\./, '');
+  const hostAgrees = expectedHost === landedHost
+    || (stripWww(expectedHost) === registrableDomain(expectedHost) && stripWww(landedHost) === registrableDomain(expectedHost));
+  if (!hostAgrees) return false;
+  const tenantPrefix = expectedHost === 'jobs.lever.co'
+    ? expected.pathname.split('/').filter(Boolean).slice(0, 2)
+    : expectedHost === 'jobs.crelate.com'
+      ? expected.pathname.split('/').filter(Boolean).slice(0, 2)
+      : null;
+  if (tenantPrefix && tenantPrefix.length === 2) {
+    const landedSegments = landed.pathname.split('/').filter(Boolean);
+    if (landedSegments[0] !== tenantPrefix[0] || landedSegments[1] !== tenantPrefix[1]) return false;
+  }
+  return true;
 }
 
 const SECOND_LEVEL_PUBLIC = new Set(['co', 'com', 'org', 'net', 'ac', 'gov', 'edu']);
@@ -622,11 +662,6 @@ function registrableDomain(hostname: string): string {
   const [sld, tld] = labels.slice(-2);
   const take = tld.length === 2 && SECOND_LEVEL_PUBLIC.has(sld) ? 3 : 2;
   return labels.slice(-take).join('.');
-}
-export function sameRegistrableSite(a: string, b: string): boolean {
-  const left = a.toLowerCase();
-  const right = b.toLowerCase();
-  return left === right || registrableDomain(left) === registrableDomain(right);
 }
 
 export type ExactManagedPageReceipt = {
@@ -1135,9 +1170,11 @@ export function unverifiedSubmissionReason(input: {
         + 'so it does not know whether this application went through.'
       : 'Litos pressed Send and the page never showed a confirmation it could read, so it does not '
         + 'know whether this application went through.';
-  const observed = input.observedPageText?.replace(/\s+/g, ' ').trim();
-  const said = observed ? ` The page Litos saw said: “${observed.slice(0, 300)}”.` : '';
-  return `${what}${said} ${where} ${looksLike} Then tell Litos which you found: if it is there, Litos will `
+  /* What the page said travels on the record (unverified_submission.observed_page_text), never
+   * inside this sentence: the dashboard passes attention_reason through its technical-error
+   * filter, and an observed "Internal Server Error" or "HTTP 502" replaced the whole warning with
+   * "Try again in a minute" - the opposite instruction (review of PR #881, finding 3). */
+  return `${what} ${where} ${looksLike} Then tell Litos which you found: if it is there, Litos will `
     + 'record it as sent and will not apply again; if it is not, Litos will send this one for you. '
     + 'Do not submit it by hand in the meantime, because two applications to the same posting count '
     + 'against you and cannot be taken back.';
