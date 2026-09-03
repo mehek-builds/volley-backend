@@ -319,7 +319,12 @@ describe('targeting schema', () => {
 
   test('role_types is a closed set', () => {
     assert.equal(targetingBodySchema.safeParse({ role_types: ['internship'] }).success, true);
-    assert.equal(targetingBodySchema.safeParse({ role_types: ['contract'] }).success, false);
+    // The four stages added on 2026-08-19. Asserted here rather than only in jobPreferences.test
+    // because this schema is the gate the web app's Stage chips actually hit: the enum is built
+    // from ROLE_TYPES, so a chip the backend has not deployed yet is a 400 on the save, which is
+    // why the backend ships first.
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['part-time', 'contract', 'apprenticeship', 'fellowship'] }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['volunteer'] }).success, false);
   });
 
   test('null clears a field; omission leaves it alone', () => {
@@ -348,7 +353,7 @@ describe('targeting schema', () => {
 
   test('the closed lists still reject junk', () => {
     assert.equal(targetingBodySchema.safeParse({ categories: ['everything'] }).success, false);
-    assert.equal(targetingBodySchema.safeParse({ role_types: ['contract'] }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ role_types: ['volunteer'] }).success, false);
   });
 
   test('clearing still works', () => {

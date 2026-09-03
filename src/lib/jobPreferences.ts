@@ -1,4 +1,26 @@
-export const ROLE_TYPES = ['internship', 'co-op', 'new-grad', 'full-time'] as const;
+/* The stages a student can say they are hunting.
+ *
+ * Closed, and mirrored in the web app's lib/periods.ts ROLE_TYPES and lib/api.ts RoleType. Adding
+ * one means adding it in both repos, BACKEND FIRST: the web app writes these strings through
+ * PUT /profile/targeting, whose zod enum is built from this array, so a value the deployed backend
+ * does not know is a 400 on the onboarding screen that saves it.
+ *
+ * The four added on 2026-08-19 (part-time, contract, apprenticeship, fellowship) are stages a
+ * student was previously forced to describe as "full-time" or not at all. Each carries its own
+ * evidence in `matchingRoleType` and `roleTypePattern` below; none of them changes what
+ * `full-time` means, because a saved full-time preference predates all of them and must keep
+ * returning the same feed.
+ */
+export const ROLE_TYPES = [
+  'internship',
+  'co-op',
+  'new-grad',
+  'full-time',
+  'part-time',
+  'contract',
+  'apprenticeship',
+  'fellowship',
+] as const;
 export type RoleType = (typeof ROLE_TYPES)[number];
 
 /* The one recruiting period that is not a season and year: "I can start now."
@@ -174,9 +196,42 @@ export function roleTypePattern(roleTypes: readonly RoleType[]): string | null {
     if (roleType === 'internship') return ['intern', 'internship', 'trainee'];
     if (roleType === 'co-op') return ['co-op', 'co op', 'coop'];
     if (roleType === 'new-grad') return ['new grad', 'new graduate', 'graduate', 'entry level', 'early career', 'university grad'];
+    if (roleType === 'apprenticeship') return ['apprentice', 'apprenticeship'];
+    if (roleType === 'fellowship') return ['fellow', 'fellowship'];
+    if (roleType === 'part-time') return ['part time', 'part-time'];
+    // 'contractor' is listed beside 'contract' because the boundary this pattern wraps every term
+    // in is ([^a-z]|$): "Contractor" does not match a bare 'contract'. Same reason 'internship'
+    // sits beside 'intern' above.
+    if (roleType === 'contract') return ['contract', 'contractor', 'temporary', 'freelance'];
     return [];
   });
   return patterns.length ? `(^|[^a-z])(${patterns.map(regexEscape).join('|')})([^a-z]|$)` : null;
+}
+
+/**
+ * The employment_type regex for the stages an employer states in that column rather than in the
+ * title, or null when none of the chosen stages is one.
+ *
+ * Part-time and contract are the two that need it. A posting titled "Marketing Associate" with
+ * employment_type "Contract" is a contract role and its title says nothing; matching on the title
+ * alone would return it to nobody who asked for contract work. The other six stages are title
+ * facts - no board writes "Internship" into employment_type and omits it from the title - so they
+ * contribute nothing here and keep `roleTypePattern` as their only reading.
+ *
+ * Kept apart from roleTypePattern rather than merged into it because the two run against different
+ * columns and one of them is nullable: the caller ORs them, and a merged pattern would have to be
+ * applied to both columns, which would let the word "contract" inside a job TITLE satisfy a
+ * part-time preference through the wrong branch.
+ */
+export function roleTypeEmploymentPattern(roleTypes: readonly RoleType[]): string | null {
+  const patterns = roleTypes.flatMap((roleType) => {
+    if (roleType === 'part-time') return ['part.?time'];
+    if (roleType === 'contract') return ['contract', 'temporary', 'freelance'];
+    return [];
+  });
+  // Not regexEscape'd: 'part.?time' IS a pattern, matching both "part time" and "part-time" as the
+  // full-time clause in jobMonitor's board conditions already does against the same column.
+  return patterns.length ? `(${patterns.join('|')})` : null;
 }
 
 export function preferenceFit(job: PreferenceJob, targeting: JobTargeting): { score: number; reasons: string[] } {
@@ -236,6 +291,19 @@ export function matchingRoleType(job: PreferenceJob, roleTypes: readonly RoleTyp
   const isInternship = /(^|\W)(intern|internship|trainee)(\W|$)/i.test(title);
   const isCoop = /(^|\W)(co-op|co op|coop)(\W|$)/i.test(title);
   const isNewGrad = /(^|\W)(new grad|new graduate|graduate|entry level|early career|university grad)(\W|$)/i.test(title);
+  const isApprenticeship = /(^|\W)(apprentice|apprenticeship)(\W|$)/i.test(title);
+  const isFellowship = /(^|\W)(fellow|fellowship)(\W|$)/i.test(title);
+  const isPartTime = /(^|\W)(part.?time)(\W|$)/i.test(title) || /part.?time/i.test(employment);
+  const isContract = /(^|\W)(contract|contractor|temporary|freelance)(\W|$)/i.test(title)
+    || /contract|temporary|freelance/i.test(employment);
+  /* UNCHANGED, deliberately. The four stages added in 2026-08-19 are not subtracted from
+     full-time: an "AI Residency Fellow" or a "Software Apprentice" is a full-time job, and a
+     student whose only saved stage is full-time has been getting those rows since before either
+     chip existed. Narrowing this would silently shrink a feed nobody asked to shrink. Part-time
+     and contract were already excluded here and stay excluded, which is why isNonFullTime keeps
+     its own reading rather than being expressed as isPartTime || isContract - those two now also
+     read employment_type on their own account, and folding them together would change what
+     full-time means for a posting whose TITLE is clean but whose employment_type says contract. */
   const isNonFullTime = /(^|\W)(part.?time|contract|temporary|freelance)(\W|$)/i.test(title)
     || /part.?time|contract|temporary|freelance/i.test(employment);
 
@@ -243,6 +311,10 @@ export function matchingRoleType(job: PreferenceJob, roleTypes: readonly RoleTyp
     if (roleType === 'internship' && isInternship) return roleType;
     if (roleType === 'co-op' && isCoop) return roleType;
     if (roleType === 'new-grad' && isNewGrad) return roleType;
+    if (roleType === 'apprenticeship' && isApprenticeship) return roleType;
+    if (roleType === 'fellowship' && isFellowship) return roleType;
+    if (roleType === 'part-time' && isPartTime) return roleType;
+    if (roleType === 'contract' && isContract) return roleType;
     if (roleType === 'full-time' && !isInternship && !isCoop && !isNonFullTime && (/full.?time/i.test(employment) || !employment)) return roleType;
   }
   return null;
