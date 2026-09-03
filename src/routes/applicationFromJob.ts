@@ -1,9 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { and, desc, eq, or } from 'drizzle-orm';
+import { and, desc, eq, isNull, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db';
-import { applications, career_page_sources, monitored_jobs, profiles } from '../db/schema';
+import { applications, career_page_sources, generated_resumes, monitored_jobs, profiles, users } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { accountRequiresSponsor, boardConditions } from './jobMonitor';
 import { canonicalApplicationFingerprint } from './canonicalApplications';
 import { RESUME_REQUEST_LIMITS } from './resumeRequestSchema';
@@ -73,7 +74,171 @@ async function existingApplicationForJob(userId: string, jobId: string) {
   return row;
 }
 
+/* The account's own application for a posting, as a READ - the same posting-identity keys the
+ * POST above dedupes on, minus the rows a student has already taken off their tracker.
+ *
+ * REMOVED ROWS ARE EXCLUDED HERE AND NOT IN existingApplicationForJob, and the difference is
+ * deliberate. The POST's dedupe answers "does this account already have a record for this
+ * posting", where a removed row is still the account's record and returning it is what keeps a
+ * second one from being created. This read answers a different question - "is there a packet to
+ * carry on with" - and a removed application is exactly the case where the honest answer is no:
+ * resuming into a row the student has already discarded would put them back on an application
+ * they closed. A caller that gets null here builds a fresh one, which is correct.
+ */
+async function resumableApplicationForJob(userId: string, jobId: string) {
+  const fingerprint = canonicalApplicationFingerprint({ jobId, companyScopeKey: '', role: '' });
+  const [row] = await db
+    .select({
+      id: applications.id,
+      job_id: applications.job_id,
+      legacy_generated_resume_id: applications.legacy_generated_resume_id,
+    })
+    .from(applications)
+    .where(and(
+      eq(applications.user_id, userId),
+      isNull(applications.removed_at),
+      or(eq(applications.job_id, jobId), eq(applications.application_fingerprint, fingerprint)),
+    ))
+    .orderBy(desc(applications.updated_at))
+    .limit(1);
+  return row;
+}
+
+/* The application an account still IN SETUP is in the middle of, with no posting named.
+ *
+ * "Most recently touched, not removed" is the whole rule, and it is enough because of where this
+ * is asked from: an account that has not finished onboarding has at most the one or two
+ * applications its own /start flow built. There is no ambiguity to resolve between a dozen rows
+ * because a locked, mid-setup account cannot have made a dozen - every other creation path
+ * (the dashboard, the extension, /applications) is walled off by THE CARD GATE.
+ *
+ * Restricted to onboarding_completed_at IS NULL for the same reason the build grant is: this
+ * route exists to let a student rejoin the sequence they were in, and a finished account is not
+ * in one. Its own applications are read through /applications and the dashboard, which are the
+ * routes for that and which say so.
+ */
+async function inProgressOnboardingApplication(userId: string) {
+  const [row] = await db
+    .select({
+      id: applications.id,
+      job_id: applications.job_id,
+      legacy_generated_resume_id: applications.legacy_generated_resume_id,
+    })
+    .from(applications)
+    .innerJoin(users, eq(users.id, applications.user_id))
+    .where(and(
+      eq(applications.user_id, userId),
+      isNull(applications.removed_at),
+      isNull(users.onboarding_completed_at),
+    ))
+    .orderBy(desc(applications.updated_at))
+    .limit(1);
+  return row;
+}
+
+/* The packet the application carries, read through the id the application itself names.
+ *
+ * legacy_generated_resume_id, NOT a newest-row-for-this-job search. The canonical application and
+ * the generated_resumes packet are parallel rows and the column is the link between them
+ * (routes/resume.ts writes it in the same transaction), so reading through it is the only way to
+ * be sure the spec returned belongs to the application returned beside it. Scoped to the caller's
+ * user_id as well as the id, so a column that somehow named another account's row reads as absent
+ * rather than as a packet.
+ *
+ * Null is an ordinary answer, not a failure: an application can exist with no packet (a row
+ * created by a path that does not generate one), and the caller's correct response is to build.
+ */
+async function packetForApplication(userId: string, packetId: string | null) {
+  if (!packetId) return null;
+  const [row] = await db
+    .select({ id: generated_resumes.id, spec: generated_resumes.spec })
+    .from(generated_resumes)
+    .where(and(eq(generated_resumes.id, packetId), eq(generated_resumes.user_id, userId)))
+    .limit(1);
+  return row ?? null;
+}
+
+const onboardingPacketQuerySchema = z.object({ job_id: z.string().uuid().optional() });
+
 export async function applicationFromJobRoutes(fastify: FastifyInstance) {
+  /* REJOINING A BUILD INSTEAD OF PAYING FOR IT AGAIN.
+   *
+   * WHAT THIS FIXES. /start keeps its built packet in memory for the sitting only (app/start/
+   * page.tsx: "A reload mid-sequence therefore lands the student back on the step the LEDGER says
+   * they are on with nothing carried over"). So every reload between the build screen and the send
+   * screen dropped the packet, returned the student to the build step, and spent ANOTHER free
+   * onboarding build on the SAME posting. The allowance is two (lib/onboardingBuildGrant.ts), so
+   * two reloads exhausted it and the account was stuck with no way forward and no way into the
+   * dashboard: the build needs an entitlement it no longer has, and THE CARD GATE holds the
+   * dashboard shut until setup completes. Measured on production 2026-09-03 on a real account:
+   * onboarding_builds_used 2, onboarding_completed_at NULL.
+   *
+   * The limit was already raised from one to two on 2026-09-01 for this same symptom. That moved
+   * the ceiling and left the cause alone, which is why this route is a READ: the packet the student
+   * already paid a build for still exists on disk, so the reload has something to carry on with and
+   * nothing to buy. THE GRANT LOGIC IS UNTOUCHED BY THIS ROUTE, deliberately - no exemption, no
+   * second way to reach /resume/generate without a claim.
+   *
+   * WHY NOT AN EXEMPTION IN /resume/generate INSTEAD, which is the shorter change. Because job_id
+   * does not pin what gets tailored. With no application_id the request's company, role and jd_text
+   * are unvalidated against the posting (routes/resume.ts validates them only inside
+   * `if (body.application_id)`), and resolveJdText (routes/jdMatch.ts) returns the CALLER'S text
+   * whenever it is 2000 characters or longer. Any per-job exemption therefore turns one granted
+   * posting into an unmetered tailoring endpoint for arbitrary text, at whatever the rate limiter
+   * allows. A read of an already-built packet cannot generate anything, so it has no such shape.
+   *
+   * TWO QUESTIONS, ONE ROUTE, because they are the same question asked with and without a posting
+   * in hand, and both are asked by the same screen sequence:
+   *   - with `job_id`: "is there already a packet for THIS posting" - the build step's check before
+   *     it spends, so choosing a posting it has already built costs nothing.
+   *   - without: "which application is this account in the middle of" - the reload's own rejoin,
+   *     which is what puts the student back on the posting they were building rather than on the
+   *     match list with no memory of it.
+   *
+   * ON TIER B2 (lib/cardGate.ts), with the rest of the one free application: it belongs to the
+   * sequence a locked account is allowed to finish, and it closes when that sequence does. It is
+   * not TIER A or B1 - those stay open for the account's whole locked lifetime, and a route that
+   * serves tailored resume content should not outlive the application it was built for.
+   */
+  fastify.get('/applications/onboarding-packet', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = onboardingPacketQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: 'A valid job_id is required' });
+    const userId = request.jwtPayload!.userId;
+    const jobId = parsed.data.job_id;
+
+    const application = jobId
+      ? await resumableApplicationForJob(userId, jobId)
+      : await inProgressOnboardingApplication(userId);
+    /* An account with nothing to rejoin is not an error, and answering 404 would make it one: the
+     * caller asks this BEFORE it knows whether there is anything, on every arrival at the build
+     * step and on every reload. `null` is the ordinary answer for a first build. */
+    if (!application) {
+      return reply.header('Cache-Control', 'private, no-store').status(200).send({ application: null });
+    }
+
+    const packet = await packetForApplication(userId, application.legacy_generated_resume_id);
+    return reply.header('Cache-Control', 'private, no-store').status(200).send({
+      application: {
+        application_id: application.id,
+        job_id: application.job_id,
+        /* THE PACKET ID IS generated_resumes.id AND IT IS NOT application_id, which is the
+         * canonical row's id. Getting this the wrong way round is a 404 on the send: POST
+         * /applications/:id/submit-request resolves its row through ownedResume, which reads
+         * generated_resumes alone (measured live 2026-09-01, when the canonical id was handed to
+         * the review screen and every onboarding send answered "Application not found"). Both ids
+         * are on the wire here under names that say which is which, so a caller cannot pick the
+         * wrong one by accident. */
+        packet: packet
+          /* Through the stripper, like every other stored spec that goes on the wire
+           * (lib/documentStore.ts, and see the same call in routes/resume.ts and routes/account.ts):
+           * a spec read back off disk can carry document pointers, and this one is genuinely old
+           * enough to have them. */
+          ? { id: packet.id, spec: specWithoutDocumentPointers(packet.spec) }
+          : null,
+      },
+    });
+  });
+
   fastify.post('/applications/from-job', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const parsed = fromJobBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'A valid job_id is required' });
