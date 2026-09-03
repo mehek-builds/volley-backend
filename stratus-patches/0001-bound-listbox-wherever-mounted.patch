@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude Opus 5 <noreply@anthropic.com>
+Date: Thu, 3 Sep 2026 00:00:00 +0400
+Subject: [PATCH] A bound listbox is the control's own wherever the widget mounted it
+
+optionsOf, the ONLY place in this runner that enumerates an option list for
+reporting, was narrower than the chooser in the same file in three ways, and
+each one turns a menu that is fully present in the DOM into "this employer
+offers no choices" - which downstream is a required question that can never be
+answered, because the product must send one of the control's own exact option
+strings and it has none to send.
+
+Measured on mehekmandal05@gmail.com 2026-09-03: of 179 unanswered REQUIRED
+choice questions across the packet queue, 160 carry a completely EMPTY option
+list, and 19 packets are blocked on nothing else.
+
+  1. SIBLING-ONLY. listbox.parentElement === el.parentElement meant a menu
+     portalled to <body> was never this opener's - which is where downshift,
+     React Select with menuPortalTarget, Radix, MUI and Headless UI all put it.
+     This is the exact defect measured on cbsconsulting.recruitee.com 2026-08-28
+     and already fixed for the CHOOSER (readOpenerPortalListbox, and the three
+     assertions in test/recruitee-listbox-portal-scope-dom.test.js). So the two
+     layers disagreed about which listbox is a control's own: the chooser could
+     commit an option the reader was unable to report.
+  2. aria-owns WAS NEVER READ, though it is the ARIA 1.0 spelling of the same
+     forward statement and Select2 and jQuery UI still write it. The chooser
+     reads aria-controls then aria-owns; this read only the first.
+  3. THE REFERENCE HAD TO LAND ON THE LISTBOX ITSELF, so the common spelling
+     where aria-controls names the popup CONTAINER and the list sits one node
+     inside it was refused outright.
+
+Plus the row vocabulary: only [role="option"] counted, so a <ul role="listbox">
+whose rows are plain <li> - Select2's results list, every hand-rolled downshift
+menu - read as zero rows off a menu that was entirely present.
+
+The discipline that bounds this is unchanged and does all the work: exactly ONE
+bound candidate or nothing is inferred, and a candidate must hold at least one
+option row, so an empty popup shell can become neither a vocabulary nor an
+ambiguity.
+
+VERIFIED against seven stub DOMs (stratus-patches/verify-bound-listbox.mjs in
+the volley-backend branch fix/choice-options-never-captured). Five return an
+empty list before this patch and the correct list after; the two safety shapes -
+two listboxes naming one opener, and a portal listbox that does not name the
+opener - are refused identically before and after.
+
+NOTE ON PROVENANCE: produced by an agent that had no git access to this repo, so
+it is delivered as a patch rather than as a commit. Apply with:
+  git checkout -b fix/choice-options-never-captured origin/main
+  git am < 0001-bound-listbox-wherever-mounted.patch
+Then run: npm test (test/question-label-dom.test.js covers optionsOf directly)
+and npm run test:choice-parity.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/managed-browser.js | 68 ++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 60 insertions(+), 8 deletions(-)
+
+diff --git a/src/managed-browser.js b/src/managed-browser.js
+--- a/src/managed-browser.js
++++ b/src/managed-browser.js
+@@ -14955,33 +14955,85 @@
+               }
+               return { values, complete };
+             }
+-            /* A CLOSED CUSTOM LIST WHOSE POPUP NAMES THIS EXACT OPENER.
++            /* A CLOSED CUSTOM LIST WHOSE POPUP NAMES THIS EXACT OPENER, WHEREVER IT IS MOUNTED.
+              *
+-             * CBS Recruitee keeps the salutation rows in a sibling role=listbox while it is
+-             * closed. The opener has id input-candidate.salutation-2 and the listbox points back
+-             * with aria-labelledby. Reading the exact reverse ARIA relation costs no click and
+-             * lets the dashboard show Herr, Frau and Kein/e. One bound listbox is required. Two
+-             * are ambiguous and an unrelated page list is ignored. textContent is deliberate:
+-             * the bound popup may be display:none while closed, but its option nodes are still the
+-             * employer's declared closed vocabulary. */
++             * CBS Recruitee keeps the salutation rows in a role=listbox while it is closed. The
++             * opener has id input-candidate.salutation-2 and the listbox points back with
++             * aria-labelledby. Reading the exact reverse ARIA relation costs no click and lets the
++             * dashboard show Herr, Frau and Kein/e. One bound listbox is required. Two are
++             * ambiguous and an unrelated page list is ignored. textContent is deliberate: the bound
++             * popup may be display:none while closed, but its option nodes are still the employer's
++             * declared closed vocabulary.
++             *
++             * THREE NARROWINGS CAME OFF THIS READ ON 2026-09-03, EACH BECAUSE THE CHOOSER IN THIS
++             * SAME FILE ALREADY DISAGREED WITH IT. readOpenerPortalListbox resolves the opener's
++             * own menu for the fill; this resolves it for the report; and where they disagree the
++             * runner can commit an option it was unable to tell the backend about.
++             *
++             *   1. SIBLING-ONLY. listbox.parentElement === el.parentElement meant a menu portalled
++             *      to <body> was never this opener's - which is where downshift, React Select with
++             *      menuPortalTarget, Radix, MUI and Headless UI all put it. That is the exact defect
++             *      measured on cbsconsulting.recruitee.com 2026-08-28 and fixed for the chooser
++             *      (see readOpenerPortalListbox, and test/recruitee-listbox-portal-scope-dom.test.js,
++             *      whose own header says PR #118's replay passed only because its fixture nested the
++             *      listbox as a SIBLING, where a container search still reached it). The reverse
++             *      aria-labelledby binding is the widget author's explicit statement of ownership
++             *      and is durable in BOTH states; the sibling test threw it away.
++             *   2. aria-owns WAS NEVER READ. It is the ARIA 1.0 spelling of the same forward
++             *      statement, still written by Select2 and jQuery UI. The chooser reads
++             *      aria-controls then aria-owns; this read only the first.
++             *   3. THE REFERENCE HAD TO LAND ON THE LISTBOX ITSELF. Testing role === 'listbox' on
++             *      the referenced node refuses the common spelling where aria-controls names the
++             *      popup CONTAINER and the list sits one node inside it, so a fully-rendered menu
++             *      read as no options at all.
++             *
++             * The discipline that keeps this from widening is unchanged and is doing all the work:
++             * exactly ONE bound candidate, or nothing is inferred. A candidate must also hold at
++             * least one option row, which is what stops an empty popup shell from becoming either a
++             * vocabulary or an ambiguity. */
++            const optionRowsIn = (root) => {
++              if (!root || !root.querySelectorAll) return [];
++              const rows = [...root.querySelectorAll('[role="option"]')];
++              if (rows.length > 0) return rows;
++              /* A <ul role="listbox"> whose rows are plain <li> is the other real menu shape -
++               * Select2's results list and every hand-rolled downshift menu write it - and reading
++               * only role=option returned ZERO rows off a menu that was entirely present, which is
++               * indistinguishable downstream from "this employer offers nothing". Narrow on
++               * purpose: only when the root is a declared listbox, and only when no role=option row
++               * exists, so a properly spelled menu is never read twice. */
++              return root.getAttribute && root.getAttribute('role') === 'listbox'
++                ? [...root.querySelectorAll('li')]
++                : [];
++            };
++            const boundRootOf = (node) => {
++              if (!node || !node.querySelector) return null;
++              const listbox = node.getAttribute && node.getAttribute('role') === 'listbox'
++                ? node
++                : node.querySelector('[role="listbox"]');
++              const root = listbox || node;
++              return optionRowsIn(root).length > 0 ? root : null;
++            };
+             const customLists = [];
+             if (el.getAttribute('role') === 'listbox') customLists.push(el);
+             if (el.id && (el.getAttribute('role') === 'combobox'
+               || el.getAttribute('aria-haspopup') === 'listbox')) {
+-              customLists.push(
+-                ...[...document.querySelectorAll('[role="listbox"][aria-labelledby]')]
+-                  .filter((listbox) => listbox.parentElement === el.parentElement
+-                    && clean(listbox.getAttribute('aria-labelledby')).split(/\s+/).includes(el.id))
+-              );
++              for (const listbox of document.querySelectorAll('[role="listbox"][aria-labelledby]')) {
++                if (!clean(listbox.getAttribute('aria-labelledby')).split(/\s+/).includes(el.id)) continue;
++                const root = boundRootOf(listbox);
++                if (root) customLists.push(root);
++              }
+             }
+-            for (const id of clean(el.getAttribute('aria-controls')).split(/\s+/).filter(Boolean)) {
+-              const controlled = document.getElementById(id);
+-              if (controlled?.getAttribute('role') === 'listbox') customLists.push(controlled);
++            const referenced = clean(
++              el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || ''
++            ).split(/\s+/).filter(Boolean);
++            for (const id of referenced) {
++              const root = boundRootOf(document.getElementById(id));
++              if (root) customLists.push(root);
+             }
+             const bound = [...new Set(customLists)];
+             if (bound.length === 1) {
+               const listbox = bound[0];
+-              const options = [...listbox.querySelectorAll('[role="option"]')];
++              const options = optionRowsIn(listbox);
+               const evidenceNodes = [
+                 listbox,
+                 listbox.parentElement,
