@@ -4054,11 +4054,25 @@ test('direct discovery keeps a Recruitee button choice out of its section legend
       return [];
     },
   };
+  /* PORTALLED, which is where the live widget actually puts it.
+   *
+   * This stub used to hang the listbox off questionBlock and answer the query from THERE, which is
+   * the same-parent assumption the reader has now dropped: downshift positions this menu with a
+   * popper and appends it near <body>, so it is not the opener's sibling on the live page and the
+   * only durable binding is the reverse aria-labelledby it carries in both states. See the note on
+   * boundOptionListbox, and test/recruitee-listbox-portal-scope-dom.test.js in the runner repo,
+   * where the chooser one layer down was fixed for this exact markup on 2026-08-28.
+   *
+   * `role` is answered now because the reader asks for it: a reference may legitimately name a
+   * wrapper around the list, so the node has to be able to say it IS the list. */
   const listbox: any = {
-    parentElement: questionBlock,
-    getAttribute: (name: string) => name === 'aria-labelledby'
-      ? 'supporting-label input-candidate.salutation-2'
-      : null,
+    parentElement: null,
+    getAttribute: (name: string) => {
+      if (name === 'aria-labelledby') return 'supporting-label input-candidate.salutation-2';
+      if (name === 'role') return 'listbox';
+      return null;
+    },
+    querySelector: () => null,
     querySelectorAll: (selector: string) => selector === '[role="option"]' ? options : [],
   };
   listboxes.push(listbox);
@@ -4082,7 +4096,12 @@ test('direct discovery keeps a Recruitee button choice out of its section legend
     },
   };
   const fakeDocument: any = {
-    querySelectorAll: (selector: string) => selector.startsWith('label[for=') ? [label] : [opener],
+    querySelectorAll: (selector: string) => {
+      if (selector.startsWith('label[for=')) return [label];
+      // The portalled menu is reachable only from the document, which is the query the reader issues.
+      if (selector === '[role="listbox"][aria-labelledby]') return listboxes;
+      return [opener];
+    },
     querySelector: () => null,
     getElementById: () => null,
   };
