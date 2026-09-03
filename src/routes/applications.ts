@@ -57,7 +57,7 @@ import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication
   transportVerifiedBuiltPacket,
 } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
-import { applicationContextForQuestionResolution, knownAnswerLookup, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { answerCarriesCurrentApplicantReview, applicationContextForQuestionResolution, knownAnswerLookup, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -927,6 +927,10 @@ function sensitiveQuestionFor(
   jdText: string | undefined,
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
+  /* The packet's own review round, so a question she answered herself in THIS round can satisfy a
+   * gate that the resolver has declined to answer for her. Omitting it is fail-closed: every
+   * question then reads as unreviewed and the gate behaves exactly as it did before. */
+  questionsReviewedAt?: string,
 ): ApplicationReviewQuestion | undefined {
   return normalizeApplicationReviewQuestions(questions)
     /* An OPTIONAL sensitive question with no answer is an offer, not a blocker. R-096 now mints
@@ -938,6 +942,7 @@ function sensitiveQuestionFor(
     .filter((question) => question.required || question.answer.trim().length > 0)
     .find((question) => sensitiveQuestionRequiresAttention(
       question.question, question.answer, 'text', profile, jdText, postingCountry, postingCountryCode,
+      answerCarriesCurrentApplicantReview(question, questionsReviewedAt),
     ));
 }
 
@@ -1926,6 +1931,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           current.jd_text,
           packetCountry,
           packetCountryCode,
+          current.questions_reviewed_at,
         );
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
@@ -3068,6 +3074,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         canonicalSubmittedQuestions, sensitiveProfile, current.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
+        current.questions_reviewed_at,
       );
       // A supported portal needs the browser run to discover and surface the live form's
       // declarations. Blocking that run on the pre-run snapshot creates a deadlock: the question
@@ -4151,6 +4158,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         approvalReview.questions, sensitiveProfile, approvalReview.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
+        approvalReview.questions_reviewed_at,
       );
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);
