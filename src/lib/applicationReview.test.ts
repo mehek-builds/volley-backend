@@ -1066,6 +1066,7 @@ const everyQuestionField = {
   answer_override_of: 'Bachelor of Science in Computer Science',
   consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
   consent_permission_version: 'v1',
+  answer_confirmed_of: 'What is your gender/gender identity?',
   options: ['Female', 'Male', 'Decline To Self Identify'],
   answer_draft: 'Woman',
   answer_state: 'unanswered',

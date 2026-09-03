@@ -9,6 +9,7 @@ import {
   knownAnswerLookup,
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
+  reviewQuestionRequiresAttention,
   sensitiveQuestionRequiresAttention,
   type ApplicationProfileLike,
 } from './questionDiscovery';
@@ -602,13 +603,63 @@ describe('the gate, the lookup and the refresh cannot disagree', () => {
     const source = readFileSync('src/routes/applications.ts', 'utf8');
     assert.match(
       source,
-      /sensitiveQuestionRequiresAttention\(\s*\n\s*packetQuestions,/,
+      /reviewQuestionRequiresAttention\(\s*\n\s*packetQuestions,\s*\n\s*question,/,
       'the route must hand the whole packet to the sensitive-question gate',
     );
     assert.match(
       source,
       /const packetQuestions = normalizeApplicationReviewQuestions\(questions\);/,
       'and it must be the same normalized list the gate walks',
+    );
+  });
+});
+
+/* ---- and the other exit from the same gate, which shipped separately ----
+ *
+ * #906 landed the general escape hatch: for a sensitive question the resolver genuinely CANNOT
+ * answer, her explicit per-question confirmation mints answer_confirmed_of and clears the gate.
+ * This rule is the narrower case where the resolver CAN answer, because she already named the
+ * country. The two are complementary and the order between them is what makes them so.
+ */
+describe('this rule and her explicit confirmation are two exits, not two hurdles', () => {
+  const row = { question: SPONSORSHIP_LABEL, answer: 'Yes' };
+  const gate = (
+    packet: readonly { question: string; answer?: string }[],
+    question: { question: string; answer: string; answer_confirmed_of?: unknown },
+  ) => reviewQuestionRequiresAttention(
+    packet,
+    question,
+    APPLICANT,
+    undefined,
+    postingCountryFromJobContext(HRT_JOB_CONTEXT),
+    postingCountryCodeFromJobContext(HRT_JOB_CONTEXT),
+  );
+
+  /* THE ASSERTION THE TWO CHANGES HAVE TO SATISFY TOGETHER. The confirmation branch runs BEFORE the
+   * resolver, so the obvious worry is that it becomes a precondition and she is asked to confirm
+   * something her own office answers already settled. It does not: it is an early EXIT, so a
+   * question this rule can answer falls straight through it and is cleared by the resolver. */
+  test('a question this rule answers does not also demand a confirmation', () => {
+    assert.equal(gate(hrtPacket(), row), false, 'no redundant confirmation may be required');
+  });
+
+  test('#906 still carries every case this rule does not', () => {
+    // No office answers, so no indicated country: this rule refuses and hers is the only way out.
+    assert.equal(gate([row], row), true);
+    assert.equal(gate([row], { ...row, answer_confirmed_of: SPONSORSHIP_LABEL }), false);
+  });
+
+  test('she can still confirm her way past a genuinely ambiguous packet', () => {
+    const split = [
+      { question: TOP_OFFICE_LABEL, answer: 'New York' },
+      { question: SECOND_OFFICE_LABEL, answer: 'London' },
+      row,
+    ];
+    assert.equal(gate(split, row), true, 'two countries is a real ambiguity and this rule refuses it');
+    assert.equal(
+      gate(split, { ...row, answer_confirmed_of: SPONSORSHIP_LABEL }),
+      false,
+      'and her own confirmation is still the escape hatch, exactly as #906 shipped it',
     );
   });
 });

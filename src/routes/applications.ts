@@ -57,7 +57,7 @@ import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication
   transportVerifiedBuiltPacket,
 } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
-import { applicationContextForQuestionResolution, knownAnswerLookup, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, knownAnswerLookup, reviewQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -921,18 +921,30 @@ async function loadSensitiveQuestionProfile(userId: string): Promise<Application
   return loadApplicationProfileLike(userId);
 }
 
-function sensitiveQuestionFor(
+/**
+ * EVERY sensitive question still waiting on her, in packet order.
+ *
+ * sensitiveQuestionFor below is this list's head and the send gates keep using it, because a refusal
+ * names one thing to go and do. This full list exists for the surfaces that have to SHOW her the
+ * work: GET /applications/:id/submission returns it so the dashboard can mark the exact rows that
+ * need a confirmation, instead of the applicant discovering them one 422 at a time. Three sessions
+ * were spent on packet 4a79eec1 without anyone seeing which question was blocking, because the only
+ * place the answer existed was a paragraph of error text after pressing Send.
+ */
+function sensitiveQuestionsFor(
   questions: readonly ApplicationReviewQuestion[],
   profile: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
-): ApplicationReviewQuestion | undefined {
+): ApplicationReviewQuestion[] {
   /* NORMALIZED ONCE AND HANDED TO THE GATE WHOLE.
    *
    * The predicate reads the country she indicated on THIS form, so it needs every question on it,
    * not only the one being judged - and it must read the same normalized list the filter below
-   * walks, or the gate and the row it is deciding about would disagree about what the form says. */
+   * walks, or the gate and the row it is deciding about would disagree about what the form says.
+   * Note it is the list BEFORE the required/answered filter, because a question she answered is
+   * evidence about the form whether or not the employer marked it required. */
   const packetQuestions = normalizeApplicationReviewQuestions(questions);
   return packetQuestions
     /* An OPTIONAL sensitive question with no answer is an offer, not a blocker. R-096 now mints
@@ -942,10 +954,26 @@ function sensitiveQuestionFor(
        hold a complete application hostage to a section the employer itself marked optional. A
        REQUIRED sensitive question keeps the gate exactly as it stands, answered or not. */
     .filter((question) => question.required || question.answer.trim().length > 0)
-    .find((question) => sensitiveQuestionRequiresAttention(
+    /* THE RECORD FORM, so her own confirmation is an input to the gate that is asking about her,
+     * and so that it cannot stop being one by accident. The label-and-answer form takes the record
+     * as a trailing optional argument, and deleting that argument here is a one-token change with
+     * no type error and no failing test that silently reverts the whole fix. The packet beside it
+     * is required for the same reason and carries the other exit, the country she indicated. See
+     * reviewQuestionRequiresAttention. */
+    .filter((question) => reviewQuestionRequiresAttention(
       packetQuestions,
-      question.question, question.answer, 'text', profile, jdText, postingCountry, postingCountryCode,
+      question, profile, jdText, postingCountry, postingCountryCode,
     ));
+}
+
+function sensitiveQuestionFor(
+  questions: readonly ApplicationReviewQuestion[],
+  profile: ApplicationProfileLike,
+  jdText: string | undefined,
+  postingCountry: JobCountry | undefined,
+  postingCountryCode?: string,
+): ApplicationReviewQuestion | undefined {
+  return sensitiveQuestionsFor(questions, profile, jdText, postingCountry, postingCountryCode)[0];
 }
 
 /* THE DUPLICATE GATE as the routes see it.
@@ -2078,7 +2106,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'reject') return reply.status(409).send({ error: 'This application cannot be submitted again from its current state' });
       if (result.kind === 'education_drift') return reply.status(422).send(educationDriftResponse(result.issues));
       if (result.kind === 'sensitive_question') {
-        return reply.status(422).send({ error: `Sensitive question requires your attention: ${result.question.slice(0, 120)}` });
+        /* THE CODE AND THE LABEL, so the client can put her in front of the right row instead of
+         * printing a paragraph. Beside the sentence and never instead of it: the prose is what a
+         * person reads, the code is what the dashboard branches on, and every other refusal in this
+         * file that a client has to act on carries both. `questions` is an array of one to match the
+         * shape the required-answer and optional-decision refusals already use, so one client
+         * handler reads all three. The full label, not the truncated sentence, because the client
+         * matches it against the question rows it is holding. */
+        return reply.status(422).send({
+          error: `Sensitive question requires your attention: ${result.question.slice(0, 120)}`,
+          code: 'SENSITIVE_QUESTION_CONFIRMATION_REQUIRED',
+          questions: [result.question],
+        });
       }
       if (result.kind === 'question_metadata_incomplete') {
         return reply.status(422).send({
@@ -3084,7 +3123,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // remains a send gate here. Final approval and direct browser submission retain their own
       // post-discovery gates.
       if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
-        return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
+        // Same envelope as the submit-request refusal above, for the same client handler.
+        return reply.status(422).send({
+          error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`,
+          code: 'SENSITIVE_QUESTION_CONFIRMATION_REQUIRED',
+          questions: [sensitive.question],
+        });
       }
       const submitAudit = await currentAcknowledgedPacketAudit(row, {
         questions: canonicalSubmittedQuestions,
@@ -3571,6 +3615,31 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         documents: storedDocuments(row),
         handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
+        /* THE QUESTIONS ONLY SHE CAN CLEAR, NAMED BEFORE SHE PRESSES SEND.
+         *
+         * Every send gate in this file refuses on these already, and until now that refusal existed
+         * nowhere else: it was a sentence in a 422 body, after the press, naming one question and
+         * offering no action. Packet 4a79eec1 sat blocked through three sessions on a question that
+         * was answered, because nothing in the product ever said which question needed her or what
+         * "needs you" meant for it.
+         *
+         * WHAT THE DASHBOARD MUST DO WITH IT. Each label here is a row on the answers screen that
+         * must render as needing her, and its resolution is one request: PUT
+         * /applications/:id/review/answers with that question carrying `confirmed: true` beside the
+         * answer she is affirming. That flag is the only thing that clears this list, which is the
+         * whole point - it is her word, not a value round-tripping through a save. A row already
+         * carrying an answer needs the answer left as it is and confirmed; a blank one needs an
+         * answer typed and confirmed in the same save.
+         *
+         * LABELS, NOT RECORDS. The full question objects are already in `review.questions` above;
+         * repeating them would give the client two copies to disagree about. This says which. */
+        sensitive_questions_requiring_confirmation: sensitiveQuestionsFor(
+          review.questions,
+          profile,
+          review.jd_text,
+          postingCountryFromJobContext(row.job_context),
+          postingCountryCodeFromJobContext(row.job_context),
+        ).map((question) => question.question),
         ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, review.status, request.log)),
       });
     },
