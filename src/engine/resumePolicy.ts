@@ -1,6 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { RESUME_CONTENT_LIMITS, resumeBulletKey } from './resumeContentPolicy';
+import { groundedBulletsForEntry, RESUME_CONTENT_LIMITS, resumeBulletKey } from './resumeContentPolicy';
 import { startsWithStrongVerb } from './resumeValidate';
 
 export interface CandidateEducation {
@@ -513,39 +513,20 @@ export function enforceExperienceBulletFloor(
      KEEP-FIRST, so the surviving copy is the one the model ranked highest. `lead_alignment` cites
      the first entry by org and quotes one of its bullets as evidence, so promoting a later entry
      over an earlier one would leave that citation pointing at content no longer in position one. */
-  /* resumeBulletKey, not a local copy. Whatever decides that two sentences are the same one also
-     decides how many bullets an entry ends up with, so every rule that asks whether an entry can
-     survive this floor has to count with the same function. See resumeContentPolicy. */
+  /* groundedBulletsForEntry, not a local copy of it. What this selection RETURNS is the number of
+     bullets an entry ends up with, which is the same number the survivability rule and the
+     validator have to reach independently - so the selection itself lives in resumeContentPolicy
+     and all three read it from there. See that function for what went wrong each time they did
+     not. */
   const printed = new Set<string>();
-  const bulletKey = resumeBulletKey;
 
   const experience = spec.experience.flatMap((entry) => {
     const source = matchingBankEntry(entry, bank);
-    const variants = (Array.isArray(source?.bullet_variants) ? source.bullet_variants : [])
-      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
-      .map((bullet) => bullet.trim());
-    /* Seeded from what earlier entries actually kept, and merged back only at the end. Recording
-       into `printed` as bullets are collected would reserve keys for bullets the maxBulletsPerEntry
-       slice below then throws away, and a later entry repeating one of those would be dropped for
-       colliding with a sentence no reader ever sees. */
-    const taken = new Set(printed);
-    const bullets: string[] = [];
-    for (const bullet of entry.bullets) {
-      const key = bulletKey(bullet);
-      /* An empty key is punctuation with no words in it. It cannot be "already printed" in any
-         meaningful sense and must not collapse two such bullets into one, so it is passed through
-         to the length checks below rather than tracked. */
-      if (key && taken.has(key)) continue;
-      if (key) taken.add(key);
-      bullets.push(bullet);
-    }
-    for (const variant of variants) {
-      if (bullets.length >= RESUME_CONTENT_LIMITS.minBulletsPerEntry) break;
-      const key = bulletKey(variant);
-      if (!key || taken.has(key)) continue;
-      taken.add(key);
-      bullets.push(variant);
-    }
+    /* `printed` is what earlier entries actually KEPT, and is merged back only at the end.
+       Recording into it as bullets are collected would reserve keys for bullets the
+       maxBulletsPerEntry slice below then throws away, and a later entry repeating one of those
+       would be dropped for colliding with a sentence no reader ever sees. */
+    const bullets = groundedBulletsForEntry(entry.bullets, source?.bullet_variants, printed);
     const sparsePriority = Boolean(
       options.allowSparsePriority && source?.id && source.id === options.priorityEntryId,
     );
@@ -569,7 +550,7 @@ export function enforceExperienceBulletFloor(
     }
     const kept = bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);
     for (const bullet of kept) {
-      const key = bulletKey(bullet);
+      const key = resumeBulletKey(bullet);
       if (key) printed.add(key);
     }
     return [{ ...entry, bullets: kept }];
