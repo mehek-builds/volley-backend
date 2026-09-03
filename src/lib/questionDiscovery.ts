@@ -7624,7 +7624,7 @@ function blocWorkPermitAnswer(
    * guards on the derived branch only and a record-backed Yes reached "EU work permit number" and
    * "Upload a copy of your work permit for Germany" for an EU-authorized applicant (review of PR
    * #879, round 2). They stand the whole rule down. */
-  if (/\bif\s+(?:yes|not|so)\b|\bnumber\b|\bupload\b|\bcopy\b|\battach\w*\b|\bwhich\b|\bexpir|\bvalid\s+(?:until|through|to|till)\b|\bissue\s+date\b|\bdetails?\b|\bcomments?\b|\bdescribe\b|\bexplain\b|\bspecify\b|\b(?:id|reference)\b/i.test(label)) return null;
+  if (/\bif\s+(?:yes|not|so)\b|\bnumber\b|\bupload\b|\bcopy\b|\battach\w*\b|\benclos\w*\b|\bscan\b|\bwhich\b|\bexpir|\bissu\w*|\bvalid\s+(?:until|through|to|till|from)\b|\b(?:start|end)\s+date\b|\btypes?\b|\bcategor\w*\b|\bstatus\b|\bduration\b|\bauthority\b|\bdetails?\b|\bcomments?\b|\bdescribe\b|\bexplain\b|\bspecify\b|\b(?:id|reference)\b/i.test(label)) return null;
   if ((label.match(/\?/g) || []).length > 1) return null;
   /* A FUTURE ask ("Will you have … by the start date?") asks about a permit she may yet obtain. */
   if (/\bwill\s+you\s+(?:have|hold)\b|\bby\s+(?:the\s+)?start\b|\bwhen\s+the\s+contract\b/i.test(label)) return null;
@@ -7815,9 +7815,9 @@ const YEARS_OF_EXPERIENCE_QUESTION =
  * alternative spans the words between them, so "relevant" inside that span was once removed with
  * the match and never seen. */
 const EXPERIENCE_UNSCOPED_VOCABULARY =
-  /\b(?:how\s+many|total|overall|years?|of|professional|work(?:ing)?|full[\s-]?time|prior|previous|experience|in\s+years|do\s+you\s+have|have\s+you|have|got|you|your|the|please|required|optional|enter|select|indicate|specify)\b/gi;
+  /\b(?:how\s+many|total|overall|years?|of|professional|work(?:ing)?|prior|previous|experience|in\s+years|do\s+you\s+have|have\s+you|have|got|you|your|the|please|required|optional|enter|select|indicate|specify)\b/gi;
 const EXPERIENCE_SCOPE_QUALIFIER =
-  /\b(?:post|pre)[- ]\w+|\b(?:full|part)[- ]time\b|\blead\w*\b|\bteams?\b|\([^)]*\)|\b[A-Z]{2,}\b|\b(?:in|with|using|as|on|at|for|related|relevant|hands|specific|industry|field|domain|role|position|technolog\w*|tools?|languages?|frameworks?|platforms?|leadership|manag\w*|coding|programming|software|engineering|develop\w*|design|sales|marketing|research|data|similar|comparable|equivalent|intern\w*|since|after|post|team|customer|client)\b/i;
+  /\b(?:post|pre)[- ]\w+|\b(?:full|part)[\s-]?time\b|\blead\w*\b|\bteams?\b|\([^)]*\)|\b[A-Z]{2,}\b|\b(?:in|with|using|as|on|at|for|related|relevant|hands|specific|industry|field|domain|role|position|technolog\w*|tools?|languages?|frameworks?|platforms?|leadership|manag\w*|coding|programming|software|engineering|develop\w*|design|sales|marketing|research|data|similar|comparable|equivalent|intern\w*|since|after|post|team|customer|client)\b/i;
 
 /**
  * "Years of experience" as a band select, answered by arithmetic on the resume's dated roles.

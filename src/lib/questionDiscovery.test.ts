@@ -5443,9 +5443,30 @@ test('a permit DETAIL ask never takes a record-backed Yes either', () => {
   for (const label of ['EU work permit number', 'Please upload a copy of your EU work permit', 'If yes, which EU work permit do you hold?',
     'Do you have an EU work permit? If yes, which one?', 'EU work permit issue date', 'Work permit for Germany: expiry', 'Work permit for Germany - number',
     'Upload a copy of your work permit for Germany', 'Comments on your EU work permit', 'Will you have a valid EU work permit by the start date?',
-    'EU work permit (please attach)', 'Valid until (EU work permit)', 'Do you have a valid EU work permit? Please specify']) {
+    'EU work permit (please attach)', 'Valid until (EU work permit)', 'Do you have a valid EU work permit? Please specify',
+    'EU work permit (enclose)', 'Please enclose your EU work permit', 'EU work permit date of issue', 'Work permit for Germany date of issue',
+    'Work permit for Germany type', 'EU work permit category', 'EU work permit (provide scan)', 'Please provide a scan of your EU work permit',
+    'EU work permit valid from', 'EU work permit start date', 'EU work permit end date', 'EU work permit status', 'EU work permit duration',
+    'EU work permit issuing authority', 'EU work permit country of issue']) {
     const r = resolveKnownAnswer(label, 'text', german, 'DE');
     assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
   }
   assert.deepEqual(resolveKnownAnswer('Work permit for Germany', 'select', german, 'DE', undefined, undefined, ['Yes', 'No']), { value: 'Yes' });
+});
+
+test('a scoped years-of-experience ask stands the tenure band down, with dated roles on file', () => {
+  /* The fixture MUST carry dated roles: without them the rule refuses for a different reason and
+   * the guard is untested (round-4 verification caught exactly that). */
+  const ap = { experience_periods: [{ start: 'Feb 2022', end: 'Present' }] } as unknown as ApplicationProfileLike;
+  const bands = ['0-1 years', '1-3 years', '3-5 years', '5+ years'];
+  const asOf = new Date(Date.UTC(2026, 8, 2));
+  const ask = (label: string) => resolveKnownAnswer(label, 'select', ap, undefined, undefined, undefined, bands, asOf);
+  // Unscoped: total professional tenure is the honest answer.
+  assert.deepEqual(ask('Years of experience'), { value: '3-5 years' });
+  // Scoped: the resume cannot separate full-time from the rest, so these are hers.
+  for (const label of ['Years of full-time experience', 'Years of full time experience',
+    'Total years of full-time work experience', 'How many years of full-time experience do you have?']) {
+    const r = ask(label);
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
 });
