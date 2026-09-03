@@ -1753,3 +1753,26 @@ test('the EU Lever host carries the tenant prefix rule too, and a doubt sentence
   // An exact-binding host never takes the text route, whatever the URL shape.
   assert.equal(confirmedOn('https://jobs.ashbyhq.com/cartesia/abc', 'Thanks for applying', 'https://jobs.ashbyhq.com/cartesia/abc').kind, 'unverified');
 });
+
+test('the closure vocabulary is the union of the runner\'s own doubt list', () => {
+  const lever = (text: string) => confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', text, 'https://jobs.lever.co/apollo/b83479c0/apply').kind;
+  for (const text of [
+    'Thanks for applying. There was a problem submitting your application.',
+    'Thanks for applying, submitting...',
+    'Thanks for applying. Processing your application...',
+    'Thanks for applying. Your application has been saved.',
+    'Thanks for applying. Please continue to the next page.',
+    'Thanks for applying. 404.',
+    'Thanks for applying. Redirecting you to our partner site.',
+    'Thanks for applying. Forbidden.',
+    'Thanks for applying. Please wait while we finish your application.',
+    'Thanks for applying. You do not meet the minimum requirements.',
+    'Thanks for applying. Apply through our partner instead.',
+  ]) assert.equal(lever(text), 'unverified', text);
+  // ...and the two carve-outs stay genuine receipts.
+  assert.equal(lever('Thanks for applying. Your application is pending review.'), 'confirmed');
+  assert.equal(lever('Thanks for applying! No further action is required.'), 'confirmed');
+  // ...while the bare words still refuse.
+  assert.equal(lever('Thanks for applying. Your application is pending.'), 'unverified');
+  assert.equal(lever('Thanks for applying. A cover letter is required.'), 'unverified');
+});

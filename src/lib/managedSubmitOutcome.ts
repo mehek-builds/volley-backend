@@ -638,9 +638,16 @@ function corroboratedFamilyReceipt(
 const RECEIPT_APPLICATION_PHRASE = /\bthank(?:s| you) for (?:submitting|applying|your application)\b|\b(?:your )?application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)\b|\bwe(?: have|'ve)? received your application\b|\bsuccessfully (?:submitted|applied)\b/i;
 /* The runner's 400-char window can carry a doubt sentence after the receipt phrase ("Thanks for
  * applying! Verify your email address to finish."), and the runner's own phrase arm is not
- * doubt-gated, so this vocabulary is the only guard on the seven families: it carries every cue the
- * runner's bare arm refuses on. */
-const RECEIPT_CLOSURE_CUE = /\b(?:no longer|has been filled|filled|withdrawn|not found|closed|cancell?ed|expired|declined|denied|unfortunately|already applied|not (?:be )?(?:submitted|accepted|processed)|cannot be accepted|complete (?:the|your)|check your (?:email|inbox)|confirm your|verify|talent (?:network|community|pool)|draft|error|went wrong|try again|fail(?:ed|ure)?|unable|could ?n[o']?t|can ?not|can't|sign(?:ed)? in|log(?:ged)? in|timed? out|not currently|not hiring|on hold|questionnaire|assessment|next step|incomplete|pending|required|invalid|captcha|robot)\b/i;
+ * doubt-gated, so this vocabulary is the only guard on the seven families. It is the UNION of the
+ * runner's own BARE_RECEIPT_DOUBT list with the closure words this side needs, checked alternation
+ * by alternation (round-3 verification found 24 of the runner's cues missing here, and 22 doubt
+ * sentences confirming through the text route because of it).
+ *
+ * Two carve-outs, both measured as genuine receipt lines rather than doubt: "pending review" and
+ * "pending our review" (bare "pending" still refuses, and "under review" already confirmed, so
+ * refusing only the review phrasing was arbitrary), and "no further action is required" (the bare
+ * word must keep refusing: "a cover letter is required" is exactly what this guard is for). */
+const RECEIPT_CLOSURE_CUE = /\b(?:no longer|has been filled|filled|withdrawn|not found|closed|cancell?ed|expired|declined|denied|unfortunately|already applied|not (?:be )?(?:submitted|sent|received|processed|accepted|eligible|found|available)|cannot be accepted|complete (?:the|your)|check your (?:email|inbox)|confirm your|verify|talent (?:network|community|pool)|draft|error|went wrong|try again|fail(?:ed|ure)?|unable|could ?n[o']?t|can ?not|can't|sign(?:ed)? in|log(?:ged)? in|timed? out|not currently|not hiring|on hold|questionnaire|assessment|next step|incomplete|pending(?! (?:our )?review)|invalid|captcha|robot|problem|forbidden|finish(?:ing)? your|continue|saved|redirect(?:ed|ing)?|partner|newsletter|subscribe|cookies?|page not found|404|maintenance|too many|please wait|one moment|submitting|processing|loading|uploading|do(?:es)? not meet|minimum requirements|apply (?:through|via|on))\b|\brequired\b(?<!no further action is required)/i;
 
 /* THE EMPLOYER'S OWN PAGE. On every family this arm serves the tenant IS the subdomain
  * (foo.breezy.hr, x.recruitee.com, acme.teamtailor.com, xolife.jobs.personio.com) or the first
