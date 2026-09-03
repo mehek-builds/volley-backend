@@ -36,8 +36,9 @@ import {
   type AvailabilityWindowFacts,
 } from './availabilityWindow';
 import type { CountryWorkEligibility } from './workEligibility';
-import { eligibilityForCountry, namedCountryCodes } from './workEligibility';
+import { eligibilityForCountry, isIsoCountryCode, namedCountryCodes } from './workEligibility';
 import { paylocityCanonicalFieldLabel } from './paylocityFields';
+import { chooseExperienceBand, totalExperienceMonths, type ExperiencePeriod } from './experienceTenure';
 
 // R-055 fix: the dashboard-driven submission flow used to never discover a posting's custom
 // questions (GPA, sponsorship, GitHub, essays, ...) - only the Chrome extension did, client-side.
@@ -97,6 +98,15 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
    * cannot prove a negative from absence.
    */
   experience_bank?: { type?: 'job' | 'project' | 'leadership'; org: string; title?: string }[];
+  /**
+   * THE DATED ROLES, for arithmetic and nothing else: every employment entry the parsed resume
+   * carries (`parsed_json.experience`, falling back to the base resume) plus every `job` row of the
+   * experience bank that has a date range. Read by exactly one rule, yearsOfExperienceAnswer, which
+   * sums them (see lib/experienceTenure.ts for how, and for why every choice there rounds DOWN).
+   * Projects and leadership rows are never in this list - they are not employment. undefined is
+   * "no dated role on file", and the rule refuses on it rather than answering zero.
+   */
+  experience_periods?: ExperiencePeriod[];
   school?: string;
   degree?: string;
   /**
@@ -7494,6 +7504,309 @@ export function otherLinkAnswer(
   return null;
 }
 
+/* =====================================================================================================
+ * THREE PROFILE-BACKED ANSWERS MEASURED MISSING ON PERSONIO.
+ *
+ * xolife (personio), packet 29c73b37, run 211e35fe, 2026-09-02: after the fill the dashboard handed
+ * the applicant four questions whose answers were already on file, each stored with the welded
+ * label + control name the extension produces. Traced against this resolver on origin/main
+ * (7dce462), three of the four returned null from every rule - nothing recognised them:
+ *
+ *   "do you have a valid eu work permit? custom_attribute_42..."      -> null
+ *   "language skills: english custom_attribute_4230717 field-..."     -> null
+ *   "years of experience years_of_experience field-years_of_..."      -> null
+ *   "available from* (required) available_from field-availab..."      -> availability_date (see below)
+ *
+ * The fourth is NOT a classifier miss: START_DATE_QUESTION's `availab` stem already classifies it and
+ * the availability_date arm answers it whenever the posting names its cycle. xolife's four postings
+ * are remote, full-time, permanent and name no season, so availabilityWindowForPosting refuses by
+ * its own stated design ("THE POSTING HAS TO NAME ITS CYCLE"). That refusal is a product decision
+ * about non-cyclical postings and is left where it is; it is pinned in the tests beside these rules
+ * so the two behaviours cannot drift apart unnoticed.
+ *
+ * The three rules below are self-contained on purpose (their own patterns, their own vocabulary,
+ * one call each in resolveKnownAnswer) so a concurrent edit elsewhere in this file merges cleanly.
+ * ===================================================================================================== */
+
+/* ---- 1. A work permit / right to work in the EU, the EEA, Schengen, Europe, or one of their countries ---- */
+
+/* The countries whose citizens and residents Litos can NOT prove are outside Europe's free-movement
+ * area. EU-27, the three EEA states, and Switzerland; Great Britain is added to the superset used
+ * for the "is she provably outside" test because a UK citizen or resident may hold rights in some
+ * of these questions' scopes (Ireland, "Europe") that this rule has no column to check. Fail closed
+ * on every one of them: a person from inside the area gets the question back, never a "No". */
+const EU_MEMBER_CODES = new Set([
+  'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'HU', 'IE', 'IT', 'LV',
+  'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE',
+]);
+const FREE_MOVEMENT_CODES = new Set([...EU_MEMBER_CODES, 'IS', 'LI', 'NO', 'CH']);
+const EUROPE_SUPERSET_CODES = new Set([...FREE_MOVEMENT_CODES, 'GB']);
+
+/* The permission-to-work nouns. "work permit" and "residence permit" are the ones
+ * WORK_AUTHORIZATION_QUESTION does not carry, and they are how Personio, Recruitee and Workable
+ * forms in Europe phrase the question; the rest are here so the same scope logic answers "right to
+ * work in the EU" the way it answers "EU work permit". */
+const BLOC_WORK_PERMIT_QUESTION =
+  /\b(?:work(?:ing)?\s+permit|residence\s+permit|permit\s+to\s+work|right\s+to\s+work|work\s+authori[sz]ation|(?:authori[sz]ed|eligible|permitted|allowed|entitled)\s+to\s+(?:legally\s+)?work|work\s+visa)\b/i;
+/* The bloc words. "eu" as a bare token is safe on a job form (it is not an English word), and each
+ * alternative is anchored on both sides so "european" cannot match inside "europeans". */
+const EU_BLOC_SCOPE =
+  /\b(?:eu|e\.u\.|european\s+union|eea|european\s+economic\s+area|schengen(?:\s+area)?|europe)\b/i;
+
+/** The ISO code a free-text profile country or nationality names, or undefined when it names none exactly. */
+function profileCountryCode(value: string | undefined): string | undefined {
+  const text = value?.trim();
+  if (!text) return undefined;
+  // Tested on a copy: isIsoCountryCode is a type predicate, and narrowing `text` on it would leave
+  // the fall-through branch typed never.
+  const asIsoCode = text.toUpperCase();
+  if (isIsoCountryCode(asIsoCode)) return asIsoCode;
+  const asNationality = NATIONALITY_TO_COUNTRY[text.toLowerCase()];
+  const codes = namedCountryCodes(asNationality ?? text);
+  return codes.length === 1 ? codes[0] : undefined;
+}
+
+/**
+ * Whether the profile PROVES the applicant is outside Europe's free-movement area: a declared
+ * citizenship that maps to one country outside it, a declared country of residence that maps to
+ * one country outside it, and a work-eligibility declaration list that exists and is non-empty (so
+ * "she declared nothing for any European country" is a statement about a list she actually
+ * filled in, not about a column that was never asked). Anything less is not proof.
+ */
+function provablyOutsideEuropeanFreeMovement(ap: ApplicationProfileLike): boolean {
+  if (!Array.isArray(ap.work_eligibility_by_country) || ap.work_eligibility_by_country.length === 0) return false;
+  const citizenship = profileCountryCode(ap.citizenship);
+  const residence = profileCountryCode(ap.address_country);
+  if (!citizenship || !residence) return false;
+  return !EUROPE_SUPERSET_CODES.has(citizenship) && !EUROPE_SUPERSET_CODES.has(residence);
+}
+
+/**
+ * "Do you have a valid EU work permit?", "Right to work in the EU", "Work permit for Germany".
+ *
+ * THE HONEST "NO", AND WHEN IT IS NOT ONE. A non-European citizen living outside Europe who has
+ * declared no work eligibility for any European country has no valid European work permit - that
+ * is what the profile says, in three columns she filled in herself, and the vault's job-search
+ * canon states the same fact in words ("everywhere else - Germany, UK, NL: no right to work"). The
+ * answer is derived from those columns and refused the moment any one of them is missing, maps to
+ * more than one country, or places her inside the area. A declared record FOR the country in
+ * question outranks the derivation in both directions.
+ *
+ * Returns null - leaving the label to workEligibilityAnswer and everything after it - for every
+ * label that is not a permit / right-to-work question in a European scope, for a sponsorship ask,
+ * for a type / expiry / detail ask, for a label naming two countries, for the compound
+ * "located in ... or ..." shape, and for a label the existing per-country rule can already answer
+ * from a stored record. Nothing that resolved before this rule existed resolves differently.
+ */
+function blocWorkPermitAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  postingCountryCode: string | undefined,
+): { value: string } | { skipReason: string } | null {
+  if (!BLOC_WORK_PERMIT_QUESTION.test(label)) return null;
+  if (SPONSORSHIP_QUESTION.test(label)) return null;
+  if (AUTHORIZATION_TYPE_QUESTION.test(label) || AUTHORIZATION_EXPIRY_QUESTION.test(label)
+    || WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) return null;
+  if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) return null;
+  /* THE UNITED STATES IS NOT A NAMED COUNTRY TO namedCountryCodes when it arrives as the bare
+   * "us" (see US_ABBREVIATION_SCOPE for why that token needs its own patterns). Apollo's "right to
+   * work in the UK or US" therefore reads as one named country, Great Britain, and this rule
+   * would answer the compound "No" for an applicant who holds US authorization - measured on the
+   * first draft of this function. The US patterns do not catch it either: they want "in the US"
+   * contiguous, and "in the UK or US" is not that. So two guards. Any US mention, and any
+   * "or"-joined scope at all, hand the label to workEligibilityAnswer, which refuses a
+   * two-country compound exactly as it did before this rule existed. A compound is never one
+   * scope's permit question, so nothing this rule should answer is lost to the second guard. */
+  if (US_WORK_SCOPE.test(label) || US_ABBREVIATION_SCOPE.test(label) || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label)) return null;
+  if (/\bor\b|\/|\band\b/i.test(label)) return null;
+
+  const named = namedCountryCodes(label);
+  if (named.length > 1) return null;
+  const namedEuropean = named.length === 1 && EUROPE_SUPERSET_CODES.has(named[0]) ? named[0] : undefined;
+  if (named.length === 1 && !namedEuropean) return null;
+  const blocScope = named.length === 0 && EU_BLOC_SCOPE.test(label);
+  if (!namedEuropean && !blocScope) return null;
+  const scopeCodes = namedEuropean
+    ? new Set([namedEuropean])
+    : /\beurope\b/i.test(label) ? EUROPE_SUPERSET_CODES : FREE_MOVEMENT_CODES;
+
+  const list = ap.work_eligibility_by_country;
+  if (namedEuropean) {
+    const record = eligibilityForCountry(list, namedEuropean);
+    if (record) {
+      // The per-country rule already owns this label when its own vocabulary matches; it carries
+      // the unrestricted / compound guards and must keep deciding it.
+      if (WORK_AUTHORIZATION_QUESTION.test(label)) return null;
+      return { value: record.authorized_now ? 'Yes' : 'No' };
+    }
+  } else {
+    const postingRecord = postingCountryCode && scopeCodes.has(postingCountryCode.toUpperCase())
+      ? eligibilityForCountry(list, postingCountryCode)
+      : undefined;
+    if (postingRecord?.authorized_now) return { value: 'Yes' };
+    /* A permit for one member state is not a permit for the bloc, and the question did not name
+     * the state. Any declared European authorization makes the bloc question hers. */
+    const anyEuropeanAuthorization = (list ?? []).some((row) => scopeCodes.has(row.country_code) && row.authorized_now);
+    if (anyEuropeanAuthorization) return { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (provablyOutsideEuropeanFreeMovement(ap)) return { value: 'No' };
+  return { skipReason: workEligibilitySkipReason(label) };
+}
+
+/* ---- 2. The LEVEL of one spoken language, from the declared fluency list and the control's own scale ---- */
+
+const LANGUAGE_LEVEL_WORD =
+  String.raw`(?:language\s+skills?|skills?\s+level|skills?|level|proficiency|fluency|command|knowledge|competenc\w*|rate|rating)`;
+const SPOKEN_LANGUAGE_TOKEN = `(?:${Object.keys(SPOKEN_LANGUAGE_ALIASES).join('|')})`;
+/* One named spoken language within forty characters of a level word, either order: "language
+ * skills: english", "english proficiency", "level of english", "how would you rate your english".
+ * The gap stops at a question mark so a second sentence cannot supply the level word. */
+const LANGUAGE_PROFICIENCY_QUESTION = new RegExp(
+  String.raw`\b${SPOKEN_LANGUAGE_TOKEN}\b[^?]{0,40}\b${LANGUAGE_LEVEL_WORD}\b|\b${LANGUAGE_LEVEL_WORD}\b[^?]{0,40}\b${SPOKEN_LANGUAGE_TOKEN}\b`,
+  'i',
+);
+/* Labels that name a language for some OTHER reason: a coding-language ask, an education level
+ * with an instruction to answer in English, a document to be written in English. */
+const LANGUAGE_PROFICIENCY_NOT_THIS = new RegExp(
+  String.raw`\bprogramming\b|\bcoding\b|\bcomputer\b|\bscript|\beducation\b|\bdegree\b|\bqualification`
+  + String.raw`|\b(?:answer|respond|reply|write|written|fill|complete|submit|cv|resume|cover\s+letter|document|application|form)\b[^?]{0,30}\bin\s+${SPOKEN_LANGUAGE_TOKEN}\b`,
+  'i',
+);
+/* THE LADDER, highest tier first, and what is deliberately NOT on it.
+ *
+ * application_profile.languages is the applicant's declaration that she is FLUENT at professional
+ * working level in each listed language (schema.ts; job-search canon 2026-07-17). That is the fact
+ * on file, so the top tier is every wording of "fluent": fluent, C2, full professional, mastery,
+ * proficient. When the control stops at C1 / advanced / professional working, that tier is the
+ * highest honest reading of the same declaration. Nothing below it is ever chosen for a declared
+ * language, and "native" / "mother tongue" / "bilingual" are never chosen at all: the column
+ * records fluency, not birth, and a native claim made from a fluency list would be invented for
+ * every applicant whose second language is on it. */
+const LANGUAGE_LEVEL_TIERS: readonly RegExp[] = [
+  /\bfluent\b|\bc2\b|\bfull\s+professional\b|\bmastery\b|\bproficient\b|\bexpert\b|\bexcellent\b/i,
+  /\bc1\b|\badvanced\b|\bprofessional\s+working\b|\bbusiness\b|\bnegotiat|\bvery\s+good\b/i,
+];
+/* An option that names a lower level or negates the tier word is not that tier: "not fluent",
+ * "limited working proficiency", "B2 - upper intermediate", "elementary proficiency". */
+const LANGUAGE_LEVEL_NOT_A_TIER =
+  /\b(?:not|no|non|limited|basic|little|elementary|beginner|intermediate|conversational|some)\b|\b(?:a1|a2|b1|b2)\b/i;
+
+/** The highest-tier option the control offers, verbatim, or null when it offers none. */
+function highestDeclaredLanguageLevel(options: readonly string[]): string | null {
+  for (const tier of LANGUAGE_LEVEL_TIERS) {
+    for (const raw of options) {
+      if (typeof raw !== 'string') continue;
+      const option = raw.trim();
+      if (!option || LANGUAGE_LEVEL_NOT_A_TIER.test(option)) continue;
+      if (tier.test(option)) return option;
+    }
+  }
+  return null;
+}
+
+/**
+ * "Language skills: English", "English proficiency", "Level of English": a scale, not a yes/no.
+ *
+ * languageAnswer already answers "do you speak English?" with Yes/No and "which languages" with the
+ * list; a LEVEL control offers neither of those and was answered with nothing. This rule answers it
+ * from the same declared list: the language must be on it (fail closed otherwise - a level for a
+ * language she never declared is not derivable, and the canon's rule for an undeclared language is
+ * a flagged No, never a guess), and the value is chosen from the CONTROL'S OWN options through the
+ * ladder above, so the fill is an exact option and never a string the list does not carry.
+ *
+ * HOLDS WITHOUT A LIST, deliberately. The refresh path resolves every question as text and hands
+ * the stored answer back as a one-element list (see refreshKnownQuestionAnswers), so a free-text
+ * answer chosen here with no list would be recomputed differently from the run's - the packet_stale
+ * flip documented at PHONE_NUMBER_FIELD_QUESTION. With a list on both sides the two agree: the run
+ * picks "C2" from the scale and the refresh picks "C2" from ["C2"].
+ */
+function languageProficiencyAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  options: readonly string[] | undefined,
+): { value: string } | { skipReason: string } | null {
+  if (!LANGUAGE_PROFICIENCY_QUESTION.test(label)) return null;
+  if (LANGUAGE_PROFICIENCY_NOT_THIS.test(label)) return null;
+  if (isPolarQuestion(label)) return null;
+  const named: string[] = [...new Set(
+    Object.entries(SPOKEN_LANGUAGE_ALIASES)
+      .filter(([token]) => new RegExp(`\\b${token}\\b`, 'i').test(label))
+      .map(([, canonical]) => canonical),
+  )];
+  // Exactly one language: "language skills: english, german" is two controls' worth of question.
+  const language: string | undefined = named.length === 1 ? named[0] : undefined;
+  if (!language) return null;
+  const declared = normalizedStoredLanguages(ap).some((stored) => stored.toLowerCase() === language.toLowerCase());
+  if (!declared) {
+    return { skipReason: `${language} proficiency left for you (not on your declared languages): "${label.slice(0, 60)}"` };
+  }
+  if (!options || options.length === 0) {
+    return { skipReason: `${language} proficiency left for you (this control offered no scale to choose from): "${label.slice(0, 60)}"` };
+  }
+  const level = highestDeclaredLanguageLevel(options);
+  return level
+    ? { value: level }
+    : { skipReason: `${language} proficiency left for you (no fluent or advanced option on this control): "${label.slice(0, 60)}"` };
+}
+
+/* ---- 3. Total years of experience, from the dated roles and the control's own bands ---- */
+
+/* The UNSCOPED ask only: "years of experience", "total years of professional experience", "how
+ * many years of work experience do you have". The optional middle words are the ones that still
+ * mean "all of it"; "relevant", "hands on", "similar" and every domain word are absent on purpose,
+ * so a scoped ask fails to match here and is refused below by the qualifier test as well. */
+const YEARS_OF_EXPERIENCE_QUESTION =
+  /\b(?:how\s+many\s+)?(?:total\s+|overall\s+)?years?\s+of\s+(?:(?:total|overall|professional|work(?:ing)?|full[\s-]?time|prior|previous)\s+){0,2}experience\b|\b(?:work|professional)\s+experience\s*(?:\(\s*(?:in\s+)?years\s*\)|in\s+years)|\bexperience\s*\(\s*(?:in\s+)?years\s*\)|\bhow\s+many\s+years\b[^?]{0,20}\b(?:worked|been\s+working|experience)\b/i;
+/* Anything left in the label, once the control name and the unscoped vocabulary are removed, that
+ * narrows the ask to a field, a tool, a role or a relation. "How many years of hands on
+ * experience with Confluence" is not total tenure and is not answered from it. Tested on the whole
+ * label rather than on what the regex above left behind: its "how many years ... experience"
+ * alternative spans the words between them, so "relevant" inside that span was once removed with
+ * the match and never seen. */
+const EXPERIENCE_UNSCOPED_VOCABULARY =
+  /\b(?:how\s+many|total|overall|years?|of|professional|work(?:ing)?|full[\s-]?time|prior|previous|experience|in\s+years|do\s+you\s+have|have\s+you|have|got|you|your|the|please|required|optional|enter|select|indicate|specify)\b/gi;
+const EXPERIENCE_SCOPE_QUALIFIER =
+  /\b(?:in|with|using|as|on|at|for|related|relevant|hands|specific|industry|field|domain|role|position|technolog\w*|tools?|languages?|frameworks?|platforms?|leadership|manag\w*|coding|programming|software|engineering|develop\w*|design|sales|marketing|research|data|similar|comparable|equivalent|intern\w*|since|after|post|team|customer|client)\b/i;
+
+/**
+ * "Years of experience" as a band select, answered by arithmetic on the resume's dated roles.
+ *
+ * The figure is computed by lib/experienceTenure.ts (merged, exclusive, month-granular, every
+ * rounding downward) and snapped onto the control's own bands by the same module; the value
+ * returned is the option verbatim. Refuses - never answers zero - when no dated role is on file,
+ * when a dated role cannot be read, when the control offers no bands, and when no band contains
+ * the total. Holds without a list for exactly the reason languageProficiencyAnswer holds: the run
+ * and the refresh must compute the same string, and only the band gives them one to agree on.
+ * Returns null for a polar question ("do you have 5+ years?") and for a scoped one, so both keep
+ * whatever behaviour they have today.
+ */
+function yearsOfExperienceAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  options: readonly string[] | undefined,
+  asOf: Date,
+): { value: string } | { skipReason: string } | null {
+  if (!YEARS_OF_EXPERIENCE_QUESTION.test(label)) return null;
+  if (isPolarQuestion(label)) return null;
+  const remainder = label
+    .replace(/\S*[_-]\S*/g, ' ')
+    .replace(/[*:?.,;()]/g, ' ')
+    .replace(EXPERIENCE_UNSCOPED_VOCABULARY, ' ');
+  if (EXPERIENCE_SCOPE_QUALIFIER.test(remainder)) return null;
+
+  const months = totalExperienceMonths(ap.experience_periods, asOf);
+  if (months === null) {
+    return { skipReason: `years of experience left for you (no dated roles on your resume): "${label.slice(0, 60)}"` };
+  }
+  if (!options || options.length === 0) {
+    return { skipReason: `years of experience left for you (this control offered no bands to choose from): "${label.slice(0, 60)}"` };
+  }
+  const band = chooseExperienceBand(options, months);
+  return band
+    ? { value: band }
+    : { skipReason: `years of experience left for you (none of the offered bands holds your ${months} months): "${label.slice(0, 60)}"` };
+}
+
 export function resolveKnownAnswer(
   label: string,
   inputType: string,
@@ -7750,6 +8063,12 @@ export function resolveKnownAnswer(
   // declaration. The unconditional "No" that used to sit here was a statement about the student's
   // live job search that nothing on file supported.
 
+  /* AHEAD of workEligibilityAnswer, which refuses "right to work in the EU" for naming no ISO
+   * country and never sees "work permit" at all. Returns null for every label that rule already
+   * decides, so nothing it answered before resolves differently. See blocWorkPermitAnswer. */
+  const blocWorkPermit = blocWorkPermitAnswer(label, ap, postingCountryCode);
+  if (blocWorkPermit) return blocWorkPermit;
+
   const earlyWorkEligibility = workEligibilityAnswer(label, ap, postingCountry, postingCountryCode);
   if (earlyWorkEligibility) return earlyWorkEligibility;
 
@@ -7818,6 +8137,17 @@ export function resolveKnownAnswer(
 
   const programmingLanguage = programmingLanguageAnswer(label, ap);
   if (programmingLanguage) return programmingLanguage;
+
+  /* AFTER the programming-language rules, so "programming languages ... proficient" keeps its
+   * skills answer, and BEFORE classifyField, whose LANGUAGE_QUESTION would answer a level control
+   * with a comma-joined list. See languageProficiencyAnswer. */
+  const languageProficiency = languageProficiencyAnswer(label, ap, options);
+  if (languageProficiency) return languageProficiency;
+
+  /* The one other answer in this file made from arithmetic on stored facts (the age attestation is
+   * the first). Null for a polar or a scoped ask, so those keep today's behaviour. */
+  const yearsOfExperience = yearsOfExperienceAnswer(label, ap, options, asOf);
+  if (yearsOfExperience) return yearsOfExperience;
 
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;

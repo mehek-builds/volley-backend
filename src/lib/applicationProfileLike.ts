@@ -4,6 +4,7 @@ import { application_profile, profiles, users } from '../db/schema';
 import { decryptRow } from '../routes/applicationProfile';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ApplicationProfileLike } from './questionDiscovery';
+import type { ExperiencePeriod } from './experienceTenure';
 import {
   selectApplicationProfileRow,
   factBoolean,
@@ -60,6 +61,42 @@ export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
 
 function experienceBankType(value: string): 'job' | 'project' | 'leadership' | undefined {
   return value === 'job' || value === 'project' || value === 'leadership' ? value : undefined;
+}
+
+/**
+ * The dated employment entries the resolver may do arithmetic on: the parsed resume's `experience`
+ * array (the base resume's when the parse has none), plus every `job` row of the experience bank
+ * that carries a date range. Projects and leadership are excluded on both sources - they are not
+ * employment. Undefined when nothing dated is on file, which the resolver refuses on.
+ *
+ * Pure, and exported for the loader test: loadApplicationProfileLike itself needs a database.
+ */
+export function experiencePeriodsFromSources(
+  parsed: Record<string, unknown>,
+  base: Record<string, unknown>,
+  bankRows: readonly { type?: string | null; date_range?: string | null }[],
+): ExperiencePeriod[] | undefined {
+  const dateText = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const fromResume = (source: Record<string, unknown>): ExperiencePeriod[] | undefined => {
+    const experience = source.experience;
+    if (!Array.isArray(experience)) return undefined;
+    const periods: ExperiencePeriod[] = [];
+    for (const item of experience) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const entry = item as Record<string, unknown>;
+      const start = dateText(entry.start ?? entry.start_date ?? entry.startDate ?? entry.from);
+      const end = dateText(entry.end ?? entry.end_date ?? entry.endDate ?? entry.to);
+      const date_range = dateText(entry.date_range ?? entry.dates);
+      if (start || end || date_range) periods.push({ start, end, date_range });
+    }
+    return periods;
+  };
+  const resumePeriods = fromResume(parsed) ?? fromResume(base) ?? [];
+  const bankPeriods = bankRows
+    .filter((row) => row.type === 'job' && dateText(row.date_range))
+    .map((row) => ({ date_range: dateText(row.date_range) }));
+  const periods = [...resumePeriods, ...bankPeriods];
+  return periods.length > 0 ? periods : undefined;
 }
 
 /* The user row this resolver reads: the sponsorship declaration, and the standing permission to
@@ -292,6 +329,8 @@ export async function loadApplicationProfileLike(
         title: entry.title?.trim() || undefined,
       }))
       .filter((entry) => entry.org),
+    // The dated roles behind "years of experience"; see experiencePeriodsFromSources.
+    experience_periods: experiencePeriodsFromSources(parsed, base, bankRows),
     /* THE SAME FUNCTION THAT PRODUCES `_contact.email`, called on the same row, so the resolver and
      * the packet cannot disagree about the applicant's address of record. resumeEmailOfRecord reads
      * `profiles.parsed_json.resume_email` and validates the shape; it returns undefined when there
