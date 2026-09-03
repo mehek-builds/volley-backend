@@ -61,6 +61,13 @@ import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
 import { applicationEmailHealth } from './lib/applicationEmail';
 import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
+import { readBoardFreshness } from './lib/boardFreshness';
+import {
+  DEFAULT_MONITOR_INTERVAL_MS,
+  DEFAULT_THRESHOLD_MS,
+  getIngestionStallMonitor,
+  millisecondsFromEnv,
+} from './lib/ingestionStallMonitor';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
 import { objectStorageRoutes } from './routes/objectStorage';
@@ -525,6 +532,24 @@ async function start() {
      * does not pay for the DNS and Resend lookups. Never awaited and never fatal: a warm that
      * fails simply leaves the cache empty and the first real caller measures it instead. */
     warmApplicationAliasDeliverability();
+
+    /* IS THE BOARD STILL BEING FED? Sampled here, on a real interval, because GitHub's is not one.
+     * ingestion-stall-alert.yml declared every 30 minutes and was delivered roughly every 3.5
+     * hours; from 2026-08-27 every cron in the repository degraded to the same five-to-eight runs
+     * a day whatever it declared, so the workflow can no longer be the thing that notices - only
+     * the thing that reports. Started here rather than in buildApp so tests and the serverless
+     * entrypoint never spawn a timer, and deliberately NOT in the job-monitor worker, which is the
+     * component that wedged on 2026-09-01 and would have taken its own alarm down with it. */
+    const stallMonitor = getIngestionStallMonitor({
+      read: readBoardFreshness,
+      intervalMs: millisecondsFromEnv(process.env.INGESTION_STALL_CHECK_INTERVAL_MS, DEFAULT_MONITOR_INTERVAL_MS),
+      thresholdMs: millisecondsFromEnv(process.env.INGESTION_STALL_THRESHOLD_MS, DEFAULT_THRESHOLD_MS),
+    });
+    stallMonitor.start();
+    /* Sample once at boot so a process that has just restarted answers from evidence rather than
+     * from an empty record for its first interval. Never awaited and never fatal. */
+    void stallMonitor.check();
+
     app.log.info(`Student outreach backend running on http://${host}:${port}`);
   } catch (err) {
     app.log.error(err);

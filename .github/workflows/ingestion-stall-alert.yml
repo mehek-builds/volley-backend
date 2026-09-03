@@ -11,6 +11,46 @@
 # is, which stays true no matter which component is at fault or how healthy that component believes
 # itself to be.
 #
+# THIS WORKFLOW NO LONGER DOES THE DETECTING, and the reason is measured, not assumed. It declared
+# `*/30` and GitHub delivered it every 3.5 hours. That is not a cron this file can fix: across
+# 2026-08-27..2026-09-02 EVERY scheduled workflow in this repository collapsed to the same five to
+# eight deliveries a day - the 15-minute ones, the two-hourly one, the three-hourly one - with
+# median gaps of 221 to 314 minutes, and they arrive interleaved in the same handful of bursts.
+# The two-hourly workflow had been landing within a minute or two of schedule until 2026-08-26,
+# which is the part that settles it: the throttling is account-wide and blind to the declared
+# interval, so widening this cron would buy nothing (the three-hourly reconciler is in fact the
+# WORST absolute performer here, at a 314-minute median), and piggybacking on it would be a
+# downgrade. GitHub's scheduler is best-effort on public repositories and it is currently not
+# keeping any promise this file could make.
+#
+# SO DETECTION MOVED INTO THE API PROCESS, which Railway keeps alive and probes at /health, and
+# which is deliberately NOT the job-monitor worker - the worker is the component that wedged, and
+# an alarm hosted inside it would have been wedged by the same loop. It samples the board every
+# INGESTION_STALL_CHECK_INTERVAL_MS (10 minutes by default) and keeps what it saw for 24 hours -
+# longer than the worst GitHub delivery gap measured here (808 minutes), so a recorded stall
+# cannot expire before the run that would have reported it.
+# This job reads that record.
+#
+# WHAT THAT BUYS. Reading a REMEMBERED record instead of taking an instantaneous sample is the
+# whole point: a sparse reader now arrives late rather than blind. Under the old design a stall
+# that began and ended between two GitHub deliveries left no trace at all and was reported never.
+#
+# WHAT THE RECORD DOES NOT SURVIVE, stated plainly because this file trades on being trusted. The
+# monitor's memory is in-process, so an API redeploy or restart clears it. An ONGOING stall is
+# unaffected - the next sample re-observes it within 10 minutes - but a stall that ended before a
+# redeploy, and whose GitHub read had not landed yet, is forgotten here and survives only in the
+# API's `ingestion_stall_alert` log lines. Durable observations would need a table; that was judged
+# out of scope for a cadence fix and is the one gap this design knowingly leaves. If the API ever
+# runs more than one replica, each keeps its own record and a read reaches only one of them.
+#
+# HONEST LATENCY, because the file's own principle is that a red run here means exactly one thing.
+#   - Detection:    ~10 minutes  (the in-process monitor; this is the number that improved)
+#   - Notification: 3.5-5 hours  (whenever GitHub delivers this job; MEASURED, not declared)
+# The half-hourly cron below is kept only because a tighter declaration rides marginally more of
+# GitHub's bursts at no cost - it is NOT a promise of half-hourly notification, and nothing here
+# should be read as one. If sub-hour notification is ever actually required, it has to come from
+# something that is not GitHub Actions cron; this file cannot deliver it.
+#
 # THE FAILURE IS THE ALERT, which is the same mechanism strong-match-notifications.yml relies on.
 # Worth being honest about its limit: job-monitor.yml failed on every scheduled run for days in
 # August and nobody noticed, so a red workflow is only an alert if someone reads it. This job is
@@ -20,8 +60,8 @@ name: ingestion-stall-alert
 
 on:
   schedule:
-    # Every 30 minutes. The check is a single indexed aggregate, so the cost is negligible, and a
-    # tighter cadence keeps the gap between "the board died" and "someone can know" under an hour.
+    # Read the monitor's record. See the latency note above: this is a NOTIFICATION cadence that
+    # GitHub honours at roughly 3.5-5 hours, not a detection cadence.
     - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
@@ -90,9 +130,65 @@ jobs:
           minutes=$(jq -r '.staleness_minutes // "unknown"' "${response_file}")
           newest=$(jq -r '.newest_seen_at // "never"' "${response_file}")
 
+          # WHAT THE MONITOR SAW WHILE NOBODY WAS LOOKING. This is the half that survives GitHub's
+          # 3.5-to-5-hour delivery gap; `stalled` above is only true of this instant.
+          monitoring=$(jq -r '.observed.monitor_running // false' "${response_file}")
+          observations=$(jq -r '.observed.stall_observations // 0' "${response_file}")
+          # Never let a malformed answer become a silent pass: anything non-numeric is UNKNOWN.
+          case "${observations}" in
+            ''|*[!0-9]*)
+              echo "::error::Could not read stall_observations from the monitor (got '${observations}'). The board's recent history is UNKNOWN, which is not the same as healthy."
+              exit 1
+              ;;
+          esac
+          worst=$(jq -r '.observed.worst_staleness_minutes // "unknown"' "${response_file}")
+          worst_at=$(jq -r '.observed.worst_observed_at // "unknown"' "${response_file}")
+          window=$(jq -r '.observed.retention_hours // "unknown"' "${response_file}")
+          last_healthy=$(jq -r '.observed.last_healthy_at // "never"' "${response_file}")
+          interval=$(jq -r '.observed.monitor_interval_minutes // 10' "${response_file}")
+          since_observation=$(jq -r '.observed.minutes_since_last_observation // -1' "${response_file}")
+          since_started=$(jq -r '.observed.minutes_since_started // -1' "${response_file}")
+          failures=$(jq -r '.observed.read_failures // 0' "${response_file}")
+
+          # FAIL CLOSED WHEN NOBODY IS SAMPLING. An API process that never started the monitor is
+          # not evidence of a healthy board - it is the absence of any evidence at all, which is
+          # precisely the condition that let the 2026-09-01 stall run for seven and a half hours.
+          if [ "${monitoring}" != "true" ]; then
+            echo "::error::The in-process ingestion stall monitor is NOT RUNNING on the API, so nothing is watching the board between these runs. Detection is currently only as good as this workflow's 3.5-5 hour delivery. Check the API boot logs for 'ingestion_stall_alert' wiring."
+            exit 1
+          fi
+
+          # FAIL CLOSED WHEN NOTHING HAS ACTUALLY BEEN OBSERVED. `stall_observations: 0` means
+          # "no stall was seen", which is only good news if somebody was looking. A monitor whose
+          # every read times out reports exactly the same zero as a healthy board, and reading that
+          # as health is the same bug that let the 2026-09-01 stall run for seven and a half hours.
+          # Three intervals of grace, so a process that has only just restarted is not called dead.
+          grace=$(( interval * 3 ))
+          if [ "${since_observation}" -lt 0 ]; then
+            if [ "${since_started}" -gt "${grace}" ]; then
+              echo "::error::The ingestion stall monitor is running but has NEVER completed a check in the ${since_started} minutes since it started (${failures} read failures). Nothing is observing the board, so the zero below is an absence of evidence, not evidence of health."
+              exit 1
+            fi
+            echo "::notice::The monitor started ${since_started} minutes ago and has not completed its first check yet. Reporting the live reading only."
+            since_observation_text="never (first check pending)"
+          elif [ "${since_observation}" -gt "${grace}" ]; then
+            echo "::error::The ingestion stall monitor last completed a check ${since_observation} minutes ago, more than ${grace} minutes (three intervals), with ${failures} read failures. Its record is stale, so any stall since then went unobserved."
+            exit 1
+          fi
+
+          : "${since_observation_text:=${since_observation} minutes ago}"
+
           if [ "${stalled}" != "false" ]; then
             echo "::error::JOB INGESTION HAS STALLED. Newest posting seen ${minutes} minutes ago (${newest}), threshold ${threshold} minutes. The board is not being fed. Check the litos-job-worker logs: the 2026-09-01 cause was a logo queue that could not drain holding the poll cycle open."
             exit 1
           fi
 
+          # The board is fresh NOW, but it was not always. Reporting this is the entire reason the
+          # monitor keeps a record: without it this run would go green and the stall would be lost.
+          if [ "${observations}" -gt 0 ]; then
+            echo "::error::JOB INGESTION STALLED EARLIER and has since recovered. ${observations} stalled sample(s) in the last ${window}h, worst ${worst} minutes behind at ${worst_at}. The board is fed again as of ${newest}, so this is a post-mortem, not an outage - but the worker did stop, and the 2026-09-01 cause was a logo queue that could not drain holding the poll cycle open. This clears itself once the observation ages out of the monitor's window."
+            exit 1
+          fi
+
           echo "Ingestion healthy: newest posting seen ${minutes} minutes ago (${newest}), threshold ${threshold} minutes."
+          echo "Monitor: sampling every ${interval} minutes, $(jq -r '.observed.checks' "${response_file}") completed checks and ${failures} read failures in the ${since_started} minutes since it started, last observation ${since_observation_text}, no stall observed in the last ${window}h, last proven healthy ${last_healthy}."
