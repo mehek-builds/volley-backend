@@ -19,6 +19,7 @@ import {
   isPolarQuestion,
   isProviderHandleOnly,
   isRefusedQuestion,
+  knownAnswerLookup,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
@@ -26,6 +27,7 @@ import {
   PROVIDER_HANDLE_ONLY_SCRIPT,
   questionRequiresHumanAttention,
   refreshKnownQuestionAnswers,
+  refreshResolutionInputType,
   reviewedAnswerIsAnOfferedOption,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
@@ -5115,4 +5117,210 @@ test('a skip on a blank answer survives the refresh that fills the blank in', ()
     false,
     'a skip taken against a different value is shed with it, key omitted rather than undefined',
   );
+});
+
+// THE DESIRED-SALARY ARM ANSWERS THROUGH THE COMPENSATION STANDARD, AND NOTHING ELSE.
+//
+// Measured 2026-09-02 (session log blocker 45): src/engine/compensation.ts implements Mehek's rule
+// (stated range -> median in the posting's own unit and currency; no range -> refuse, never guess),
+// but resolveKnownAnswer's desired_salary arm called the ad-hoc salary.ts, discarded its result,
+// and refused unconditionally - so a posting stating $130k-$150k still asked the applicant. These
+// pin the arm to the standard so it cannot be silently orphaned again, and pin the one property the
+// ad-hoc module was refuted on twice: the currency binds to the parsed range, not to the label.
+test('desired salary is answered from the posting range through the compensation standard', () => {
+  // A stated USD annual range -> its median, in the posting's own unit and currency.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'What are your salary expectations for this position?',
+      'text',
+      {},
+      'Compensation: $130,000 - $150,000 per year. Great team, remote US.',
+    ),
+    { value: 'USD 140,000 per year' },
+  );
+  // A numeric-only field takes the bare median, no unit or currency decoration.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Expected base salary',
+      'number',
+      {},
+      'Salary range $130,000-$150,000 per year',
+    ),
+    { value: '140000' },
+  );
+});
+
+test('desired salary binds currency to the parsed range, not to the label', () => {
+  // The refutation that sank PR #846: a GBP posting must never receive a USD figure. The standard
+  // parses the range and carries GBP with it, so this is answered in GBP.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Desired salary',
+      'text',
+      {},
+      'Salary: £57,800 - £75,000 per year',
+    ),
+    { value: 'GBP 66,400 per year' },
+  );
+});
+
+test('desired salary with no stated range is left for the applicant, never guessed', () => {
+  const r = resolveKnownAnswer(
+    'What are your compensation expectations?',
+    'text',
+    {},
+    'A wonderful opportunity with lots of growth. No pay figure anywhere.',
+  );
+  assert.ok(r && 'skipReason' in r, 'a posting with no range must refuse, not fabricate a figure');
+  assert.match(r.skipReason, /salary question left for you/);
+});
+
+test('a pay-history question is never answered with the posting median', () => {
+  // "Current/previous salary" asks what she EARNED, not what she expects. The posting median is a
+  // fabrication as an answer to that, so it is refused even when the JD states a range.
+  for (const label of [
+    'What is your current salary?',
+    'Previous salary',
+    'Most recent annual compensation',
+    'Salary history',
+    'What was your last drawn salary?',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, 'Compensation: $130,000 - $150,000 per year');
+    assert.ok(r && 'skipReason' in r, `pay history must refuse, not answer: "${label}"`);
+  }
+  // ...while the desired forms still answer through the standard.
+  assert.deepEqual(
+    resolveKnownAnswer('Expected salary', 'text', {}, 'Compensation: $130,000 - $150,000 per year'),
+    { value: 'USD 140,000 per year' },
+  );
+});
+
+test('pay-history phrasings leak in neither word order, and expectations override', () => {
+  const JD = 'Compensation: $130,000 - $150,000 per year. Great team, remote US.';
+  // Pay-word-first history phrasings (the round-1 review leaks): still her own to answer.
+  for (const label of [
+    'Base salary at your previous employer',
+    'Annual compensation at your last company',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, JD);
+    assert.ok(r && 'skipReason' in r, `pay history must refuse in this word order too: "${label}"`);
+  }
+  // An expectation word marks the question as desired compensation, whatever else it carries.
+  assert.deepEqual(
+    resolveKnownAnswer('What are your current salary expectations?', 'text', {}, JD),
+    { value: 'USD 140,000 per year' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Current expected salary', 'text', {}, JD),
+    { value: 'USD 140,000 per year' },
+  );
+});
+
+test('a currency question never receives an amount', () => {
+  const JD = 'Compensation: $130,000 - $150,000 per year';
+  for (const label of [
+    'Preferred currency for compensation',
+    'In what currency would you like your salary paid?',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, JD);
+    assert.ok(r && 'skipReason' in r, `a currency question takes no figure: "${label}"`);
+  }
+});
+
+test('a unit named by the salary label binds the answer', () => {
+  // An hourly-labelled field against an annual posting refuses rather than converting.
+  const r = resolveKnownAnswer('Desired salary (hourly)', 'number', {}, 'Salary: $130,000 - $150,000 per year');
+  assert.ok(r && 'skipReason' in r);
+});
+
+test('the refresh keeps a numeric salary control numeric, in lockstep with its lookup', () => {
+  // The run resolves a number control to a bare figure. The refresh used to resolve everything as
+  // 'text' and overwrote the run's own number with "USD 140,000 per year" - a string a number
+  // input cannot take, the 2026-08-11 prepare-versus-submit divergence for the numeric family.
+  const JD = 'Compensation: $130,000 - $150,000 per year';
+  const stored = [{ question: 'Expected base salary', answer: '140000', portal_input_type: 'number' }];
+  const refreshed = refreshKnownQuestionAnswers(stored as never, {}, JD);
+  assert.equal((refreshed[0] as { answer: string }).answer, '140000');
+  // And a text control still gets the formatted answer.
+  const storedText = [{ question: 'Expected base salary', answer: '', portal_input_type: 'text' }];
+  const refreshedText = refreshKnownQuestionAnswers(storedText as never, {}, JD);
+  assert.equal((refreshedText[0] as { answer: string }).answer, 'USD 140,000 per year');
+});
+
+/* THE 2026-09-02 ROUND-3 ATTACKS on the desired-salary arm (PR #866), pinned with the exact
+ * strings the adversarial verifier executed. Under-answering is always safe; a wrong figure never
+ * is, so each must refuse, keep, or answer the RIGHT figure. */
+
+test('B3: pay history in the last period, or asked in the past tense, is never the median', () => {
+  const JD = 'Compensation: $130,000 - $150,000 per year';
+  for (const label of [
+    'What was your salary last year?',
+    'What was your total compensation last year?',
+    'Expected salary at your previous employer',
+    'What was your salary in the previous 12 months?',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', {}, JD);
+    assert.ok(r && 'skipReason' in r, `pay history must refuse, not answer: "${label}"`);
+    assert.match(r.skipReason, /pay history/);
+  }
+  // ...and the number-control shape refuses the same way, since that is where a bare figure lands.
+  const r = resolveKnownAnswer('What was your salary last year?', 'number', {}, JD);
+  assert.ok(r && 'skipReason' in r);
+  // Expectation forms wearing a temporal word still answer.
+  assert.deepEqual(
+    resolveKnownAnswer('What are your current salary expectations?', 'text', {}, JD),
+    { value: 'USD 140,000 per year' },
+  );
+  assert.deepEqual(resolveKnownAnswer('Current expected salary', 'text', {}, JD), { value: 'USD 140,000 per year' });
+});
+
+test('B4: a salary label naming a currency the posting does not state refuses', () => {
+  const JD = 'Salary: $130,000 - $150,000 per year';
+  const r = resolveKnownAnswer('Expected salary in EUR', 'number', {}, JD);
+  assert.ok(r && 'skipReason' in r, 'a USD median must never be typed into a EUR-labelled field');
+  assert.deepEqual(resolveKnownAnswer('Expected salary (USD)', 'number', {}, JD), { value: '140000' });
+  assert.deepEqual(
+    resolveKnownAnswer('Salary in £', 'text', {}, 'Salary: £57,800 - £75,000 per year'),
+    { value: 'GBP 66,400 per year' },
+  );
+});
+
+test('H1: a stored salary answer is kept by the refresh, and its lookup says nothing', () => {
+  const JD = 'Compensation: $130,000 - $150,000 per year';
+  const reviewedAt = '2026-09-02T10:00:00.000Z';
+  // Her own 155000 on a number control survives the first refresh instead of becoming the median.
+  const typed = [{
+    question: 'Expected base salary',
+    answer: '155000',
+    portal_input_type: 'number',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  }];
+  const refreshed = refreshKnownQuestionAnswers(typed as never, {}, JD, reviewedAt);
+  assert.equal((refreshed[0] as { answer: string }).answer, '155000');
+  assert.deepEqual(refreshed[0], typed[0], 'the record is returned untouched, provenance included');
+  // A machine figure with no provenance is kept on the same rule: the profile holds no salary fact
+  // that could make it stale.
+  const bare = [{ question: 'Expected base salary', answer: '155000', portal_input_type: 'number' }];
+  assert.equal((refreshKnownQuestionAnswers(bare as never, {}, JD)[0] as { answer: string }).answer, '155000');
+  // The unanswered control is the standard's job, and it fills.
+  const empty = [{ question: 'Expected base salary', answer: '', portal_input_type: 'number' }];
+  assert.equal((refreshKnownQuestionAnswers(empty as never, {}, JD)[0] as { answer: string }).answer, '140000');
+  // The lookup mirrors the refresh exactly: no opinion on a stored figure, the median on a blank.
+  const lookup = knownAnswerLookup({}, JD);
+  assert.equal(lookup({ question: 'Expected base salary', answer: '155000', portal_input_type: 'number' }), undefined);
+  assert.equal(lookup({ question: 'Expected base salary', answer: '', portal_input_type: 'number' }), '140000');
+  assert.equal(lookup({ question: 'Expected base salary', portal_input_type: 'number' }), '140000');
+});
+
+test('H2: the lockstep input type reads the packet camelCase key as well as the stored one', () => {
+  assert.equal(refreshResolutionInputType({ portal_input_type: 'number' }), 'number');
+  assert.equal(refreshResolutionInputType({ portalInputType: 'number' }), 'number');
+  assert.equal(refreshResolutionInputType({ portal_input_type: 'text' }), 'text');
+  assert.equal(refreshResolutionInputType({ portalInputType: 'select' }), 'text');
+  assert.equal(refreshResolutionInputType({}), 'text');
+  // Through the lookup, a packet-shaped number control gets the bare figure, not the formatted one.
+  const lookup = knownAnswerLookup({}, 'Compensation: $130,000 - $150,000 per year');
+  assert.equal(lookup({ question: 'Expected base salary', answer: '', portalInputType: 'number' }), '140000');
+  assert.equal(lookup({ question: 'Expected base salary', answer: '' }), 'USD 140,000 per year');
 });

@@ -15,9 +15,8 @@ import {
   storedOptionAnswerIsCurrent,
 } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
+import { answerCompensation } from '../engine/compensation';
 import {
-  resolveSalary,
-  storedSalaryOf,
   type StoredSalaryProfile,
 } from './salary';
 import {
@@ -2229,24 +2228,33 @@ export function knownAnswerLookup(
   postingCountry?: JobCountry,
   postingCountryCode?: string,
   asOf: Date = new Date(),
-): (question: { question: string; answer?: string }) => string | undefined {
+): (question: {
+  question: string;
+  answer?: string;
+  portal_input_type?: unknown;
+  portalInputType?: unknown;
+}) => string | undefined {
   return (question) => {
     const label = normalizeReviewQuestionLabel(question.question ?? '');
     if (!label) return undefined;
+    // Mirrors the refresh's own keep, see storedSalaryAnswerIsKept.
+    if (storedSalaryAnswerIsKept(label, question.answer)) return undefined;
     /* EVERY ARGUMENT BELOW MATCHES THE REFRESH'S OWN CALL, and that is the entire contract of this
      * function rather than a detail of it. The point is to answer "what will the refresh serve", so a
      * lookup that resolves with different inputs is worse than no lookup: it reports a value the
      * refresh will not produce, and the merge then either refuses a real edit or claims a fake one.
      *
-     * 'text' IS HARDCODED THERE, so it is hardcoded here. Passing the control's own portal_input_type
-     * looked more faithful and measured differently on the first run of these tests - a 'select' degree
-     * control resolved to something the refresh never returns, which is precisely the disagreement this
-     * comment exists to prevent. The stored answer is offered back as a one-element candidate list for
-     * the same reason; see the storedAsCandidate comment in refreshKnownQuestionAnswers. */
+     * THE INPUT TYPE IS DERIVED IDENTICALLY THERE, so it is derived identically here (see
+     * refreshResolutionInputType): 'number' for a stored numeric control, 'text' for everything
+     * else. Passing the control's own portal_input_type wholesale looked more faithful and measured
+     * differently on the first run of these tests - a 'select' degree control resolved to something
+     * the refresh never returns, which is precisely the disagreement this comment exists to
+     * prevent. The stored answer is offered back as a one-element candidate list for the same
+     * reason; see the storedAsCandidate comment in refreshKnownQuestionAnswers. */
     const storedAsCandidate = question.answer?.trim() ? [question.answer.trim()] : undefined;
     const known = resolveKnownAnswer(
       label,
-      'text',
+      refreshResolutionInputType(question),
       ap,
       jdText,
       postingCountry,
@@ -2256,6 +2264,37 @@ export function knownAnswerLookup(
     );
     return known && 'value' in known ? known.value : undefined;
   };
+}
+
+/* The one input type the refresh and its lookup resolve with. 'text' for everything except a
+ * stored NUMERIC control, whose value the run resolves numerically (a salary control gets a bare
+ * figure, never "USD 140,000 per year"): resolving it as 'text' here made the refresh overwrite
+ * the run's own number with a formatted string a number input cannot take - the prepare-versus-
+ * submit divergence this file's 2026-08-11 comment documents, reintroduced for the numeric family.
+ * Derived in one place so the lookup and the refresh cannot disagree. */
+export function refreshResolutionInputType(
+  question: { portal_input_type?: unknown; portalInputType?: unknown },
+): string {
+  /* Both spellings, because both reach here: the stored review question carries
+   * portal_input_type, and the packet question packetQuestionsForFill builds in
+   * src/routes/submissionRunner.ts carries portalInputType. Reading only the snake_case key made
+   * a packet-shaped salary number control resolve as 'text' - the exact lockstep this helper
+   * exists to guarantee, broken for the one caller that hands it camelCase (round 3, H2). */
+  const stored = question.portal_input_type ?? question.portalInputType;
+  return stored === 'number' ? 'number' : 'text';
+}
+
+/* A SALARY ANSWER ALREADY ON THE RECORD IS KEPT, in the refresh and in its lookup alike.
+ *
+ * The compensation standard's job is to answer the UNANSWERED salary control. The profile holds no
+ * salary fact - the median comes from the posting, the applicant's own figure from her - so there
+ * is nothing that could make a stored figure stale, and there is nothing to recompute it against
+ * except the very median it was allowed to differ from. Before this, a hand-typed 155000 on a
+ * number control was overwritten by the posting median on the first refresh (round 3, H1). The
+ * refresh returns the question unchanged and the lookup returns undefined, so the merge sees "no
+ * resolver opinion" on both sides rather than a claim the refresh would not honour. */
+function storedSalaryAnswerIsKept(label: string, answer: string | undefined): boolean {
+  return Boolean(answer?.trim()) && classifyField(label) === 'desired_salary';
 }
 
 /**
@@ -2305,6 +2344,8 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
+    // Mirrors the lookup's own keep, see storedSalaryAnswerIsKept.
+    if (label && storedSalaryAnswerIsKept(label, question.answer)) return question;
     /* THE STORED ANSWER IS OFFERED BACK AS THE CANDIDATE LIST, and that is not a trick.
      *
      * THE DEFECT THIS CLOSES, measured on the real two-step production sequence:
@@ -2337,8 +2378,20 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * Read by standardizedTestAnswer and nothing else, so no other rule changes.
      */
     const storedAsCandidate = question.answer.trim() ? [question.answer.trim()] : undefined;
+    /* The input type is derived through refreshResolutionInputType, the same derivation the
+     * lookup uses, so the two cannot disagree; see its comment for why a stored numeric control
+     * resolves as 'number' and everything else stays 'text'. */
     const known = label
-      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate, asOf)
+      ? resolveKnownAnswer(
+        label,
+        refreshResolutionInputType(question as { portal_input_type?: unknown; portalInputType?: unknown }),
+        ap,
+        jdText,
+        postingCountry,
+        postingCountryCode,
+        storedAsCandidate,
+        asOf,
+      )
       : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
@@ -2710,6 +2763,41 @@ const PROGRAMMING_LANGUAGE_PROFICIENCY_QUESTION =
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
+/* A question about HER OWN pay history, not the compensation she expects. "Current salary",
+ * "previous/last/most recent salary", "salary history": the compensation standard answers the
+ * posting's median, which is the right answer to "what do you expect" and a fabrication as an
+ * answer to "what did you earn". These stay refused (left for her), the behaviour before the
+ * standard was wired in. The desired forms ("salary expectations", "expected/desired compensation")
+ * carry none of these words, so this never blocks them. */
+const SALARY_PAY_WORD = String.raw`\b(?:salar(?:y|ies)|compensat\w*|pay|wages?|remunerat\w*|earn\w*)\b`;
+const SALARY_TEMPORAL_WORD = String.raw`\b(?:current|present|previous|prior|last|latest|most\s+recent|existing|former)\b`;
+/* STRONG history: the label is unambiguously about pay she has ALREADY drawn, and no expectation
+ * word can turn it into a desired-compensation question. Four shapes, each measured leaking the
+ * median in review rounds 1 and 3:
+ *   - pay-word ... temporal-word ... employer/company/role ("Expected salary at your previous
+ *     employer" is her previous pay, whatever "expected" is doing in that sentence);
+ *   - "salary/pay history";
+ *   - pay-word ... (last|past|previous|prior) period ("total compensation last year");
+ *   - "what was/were ... pay-word": past tense IS history. */
+const SALARY_HISTORY_STRONG = new RegExp(
+  [
+    String.raw`${SALARY_PAY_WORD}[^.?!]{0,50}${SALARY_TEMPORAL_WORD}[^.?!]{0,30}\b(?:employer|company|role|position|job)\b`,
+    String.raw`\b(?:salary|compensat|pay|wage)\w*\s+history\b`,
+    String.raw`${SALARY_PAY_WORD}[^.?!]{0,40}\b(?:last|past|previous|prior)\s+(?:(?:calendar|fiscal|financial)\s+)?(?:year|month|quarter|12\s+months)\b`,
+    String.raw`\bwhat\s+(?:was|were)\b[^.?!]{0,60}${SALARY_PAY_WORD}`,
+  ].join('|'),
+  'i',
+);
+/* WEAK history: a temporal word in front of a pay word ("current salary", "previous
+ * compensation"). Refused too - UNLESS an expectation word is present, because "What are your
+ * CURRENT salary EXPECTATIONS?" and "Current expected salary" are desired-compensation questions
+ * wearing a history word, and the posting median is their honest answer. */
+const SALARY_HISTORY_WEAK = new RegExp(String.raw`${SALARY_TEMPORAL_WORD}[^.?!]{0,40}${SALARY_PAY_WORD}`, 'i');
+const SALARY_EXPECTATION_MARK = /\b(expect\w*|desir\w*|seek\w*|target\w*|asking|ideal|requirement)\b/i;
+function isSalaryHistoryQuestion(label: string): boolean {
+  if (SALARY_HISTORY_STRONG.test(label)) return true;
+  return !SALARY_EXPECTATION_MARK.test(label) && SALARY_HISTORY_WEAK.test(label);
+}
 const DOB_QUESTION = /date of birth|birth\s*date|\bdob\b/i;
 const CITIZENSHIP_QUESTION = /citizen|nationalit/i;
 const ADVANCED_DEGREE_ENROLLMENT_QUESTION = /\bcurrently\s+enrolled\b[^?]{0,80}\b(?:masters?|master's|ph\.?d|doctorate)\b|\b(?:masters?|master's|ph\.?d|doctorate)\b[^?]{0,80}\bcurrently\s+enrolled\b/i;
@@ -7966,10 +8054,33 @@ export function resolveKnownAnswer(
         : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
     }
     case 'desired_salary': {
-      resolveSalary(
-        { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
-        storedSalaryOf(ap),
-      );
+      /* THE COMPENSATION STANDARD IS THE ANSWER PATH. src/engine/compensation.ts implements the
+       * rule Mehek set on 2026-07-23: a stated range answers its MEDIAN in the posting's own unit
+       * and currency; no range refuses rather than guesses. It binds unit and currency to the
+       * range it PARSED, which is exactly the property the ad-hoc salary.ts re-derivation from the
+       * label got wrong and was refuted on twice. Tier 2 (no stated range, no researched median
+       * supplied) returns null here, which becomes the honest "left for you" the applicant then
+       * answers - never a fabricated figure. A regression test pins that this arm keeps calling the
+       * standard, so it cannot be silently orphaned again.
+       *
+       * BUT the median answers "what do you expect", not "what did you earn". SALARY_QUESTION is
+       * broad enough to catch "current salary" and "salary history", and answering those with the
+       * posting's median would fabricate her pay history. Those stay refused, the pre-standard
+       * behaviour - in either word order ("current salary" and "salary at your previous employer")
+       * - unless an expectation word marks the question as being about what she wants. And a label
+       * asking for a CURRENCY is not asking for an amount; a figure typed into it is noise. */
+      if (/currenc/i.test(label)) {
+        return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
+      }
+      if (isSalaryHistoryQuestion(label)) {
+        return { skipReason: `your own pay history is yours to answer: "${label.slice(0, 60)}"` };
+      }
+      const compensation = answerCompensation({
+        jdText: jdText ?? '',
+        numericOnly: inputType === 'number',
+        fieldLabel: label,
+      });
+      if (compensation) return { value: compensation.value };
       return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
     }
     case 'date_of_birth':
