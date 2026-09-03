@@ -17,6 +17,7 @@ import {
   readManagedFinalSubmitNoClick,
   readManagedSubmitOutcome,
   unverifiedSubmissionReason,
+  exactManagedSubmitVerdict,
 } from './managedSubmitOutcome';
 import {
   FINAL_SUBMIT_CHOOSER_POLICY_V3,
@@ -1652,4 +1653,126 @@ describe('the client-validation refusal', () => {
     } });
     assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
   });
+});
+
+/* THE SEVEN FAMILIES WITHOUT AN EXACT ATS BINDING. See corroboratedFamilyReceipt: a runner-confirmed
+ * press on Lever, Teamtailor, Crelate, Pinpoint, Personio, Recruitee or Breezy used to fall to
+ * `unverified` by construction because managedAtsBinding knows three hosts. */
+test('a runner-confirmed press on a Lever receipt page verifies through the receipt proof', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://jobs.lever.co/apollo-research/b83479c0/thanks',
+    text: 'Thanks for applying',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: 'Thanks for applying', formStillPresent: false },
+  }, 'https://jobs.lever.co/apollo-research/b83479c0/apply');
+  assert.equal(verdict.kind, 'confirmed');
+  assert.match((verdict as { evidence: string }).evidence, /receipt_proof$/);
+});
+
+test('a receipt that landed on some other site confirms nothing', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://example.com/thanks',
+    text: 'Thank you',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: 'Thank you', formStillPresent: false },
+  }, 'https://jobs.lever.co/apollo-research/b83479c0/apply');
+  assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+});
+
+test('a runner-confirmed press whose page carries no receipt phrase stays unverified', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://tixtrack.teamtailor.com/jobs/8287889/applications/new',
+    text: 'Complete your profile to stand out',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'live_region', evidence: 'status', message: 'Complete your profile to stand out', formStillPresent: false },
+  }, 'https://tixtrack.teamtailor.com/jobs/8287889-sr-software-engineer-ii-remote-us');
+  assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+});
+
+test('crelate verifies only on its applythanks route with the sentence', () => {
+  const apply = 'https://jobs.crelate.com/portal/themavengroup/job/apply/wtmao1bfqg9te5b5jo5jknskxo';
+  const confirmed = (url: string, text: string) => exactManagedSubmitVerdict({
+    url, text,
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: text, formStillPresent: false },
+  }, apply);
+  assert.equal(confirmed('https://jobs.crelate.com/portal/themavengroup/job/applythanks/wtmao1bfqg9te5b5jo5jknskxo?applicationId=abcdEFGH1234', 'Thank you for applying to Cyber Test Engineer at The Maven Group').kind, 'confirmed');
+  assert.equal(confirmed(apply, 'Thank you for applying to this position.').kind, 'unverified', 'still on the apply route');
+});
+
+test('an exact-binding family is untouched by the corroboration arm', () => {
+  const verdict = exactManagedSubmitVerdict({
+    url: 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083',
+    text: 'Thank you for applying',
+    submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message: 'Thank you for applying', formStillPresent: false },
+  }, 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083');
+  assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' }, 'greenhouse still needs its confirmation route');
+});
+
+test('the observed page text stays off the sentence, so an error page cannot flip it into "try again"', () => {
+  const reason = unverifiedSubmissionReason({
+    atsName: 'lever', portalUrl: 'https://jobs.lever.co/x/y', cause: 'no_confirmation_state',
+    observedPageText: 'Internal Server Error',
+  });
+  assert.doesNotMatch(reason, /Internal Server Error/);
+  assert.match(reason, /Do not submit it by hand/);
+});
+
+const confirmedOn = (url: string, text: string, expected: string, source: string = 'page_text') => exactManagedSubmitVerdict({
+  url, text,
+  submitOutcome: { pressed: true, state: 'confirmed', source, evidence: 'body', message: text, formStillPresent: false },
+}, expected);
+
+test('a receipt on another tenant of the same ATS confirms nothing', () => {
+  assert.equal(confirmedOn('https://bar.breezy.hr/p/abc/thanks', 'Thank you for applying!', 'https://foo.breezy.hr/p/abc').kind, 'unverified');
+  assert.equal(confirmedOn('https://www.teamtailor.com/thank-you', 'Thanks for applying We have received your application', 'https://acme.teamtailor.com/jobs/1/applications/new').kind, 'unverified');
+  assert.equal(confirmedOn('https://jobs.lever.co/other-org/deadbeef/thanks', 'Thanks for applying', 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'unverified');
+  assert.equal(confirmedOn('https://app.crelate.com/portal/x/job/applythanks/wtmao1bfqg9te5b5jo5jknskxo?applicationId=abcdEFGH1234', 'Thank you for applying to this position.', 'https://jobs.crelate.com/portal/x/job/apply/wtmao1bfqg9te5b5jo5jknskxo').kind, 'unverified');
+});
+
+test('a thank-you that is a closure, a not-found or a cookie screen confirms nothing', () => {
+  for (const text of ['Page not found. Thank you for visiting Apollo Careers.', 'Thank you for your interest, but this position has been filled.',
+    'Your application has been withdrawn. Thank you.', 'Thank you for accepting cookies. Engineering at Acme.', 'Thank you']) {
+    assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', text, 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'unverified', text);
+  }
+});
+
+test('the measured Teamtailor and Lever receipts verify', () => {
+  assert.equal(confirmedOn('https://fully.teamtailor.com/jobs/6360832-internship/applications/new', 'Thanks for applying We have received your application', 'https://fully.teamtailor.com/jobs/6360832-internship').kind, 'confirmed');
+  assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', 'Thanks for applying', 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'confirmed');
+  assert.equal(confirmedOn('https://acme.com/careers/thanks', 'Your application has been submitted', 'https://www.acme.com/careers/apply').kind, 'confirmed', 'www may come or go on a bare employer domain');
+});
+
+test('an ATS-container verdict on a non-exact family is not corroborated', () => {
+  assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', 'Success', 'https://jobs.lever.co/apollo/b83479c0/apply', 'ats_state').kind, 'unverified');
+});
+
+test('the EU Lever host carries the tenant prefix rule too, and a doubt sentence in the window refuses', () => {
+  assert.equal(confirmedOn('https://jobs.eu.lever.co/other-org/deadbeef/thanks', 'Thanks for applying', 'https://jobs.eu.lever.co/apollo/b83479c0/apply').kind, 'unverified');
+  assert.equal(confirmedOn('https://jobs.eu.lever.co/apollo/b83479c0/thanks', 'Thanks for applying', 'https://jobs.eu.lever.co/apollo/b83479c0/apply').kind, 'confirmed');
+  for (const text of ['Thanks for applying! Verify your email address to finish.', 'Thanks for applying. An error occurred while saving your application.',
+    'Thanks for applying. Sign in to continue.', 'Your application has been received but is incomplete.', 'Thanks for applying. Please answer the screening questionnaire to continue.']) {
+    assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', text, 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'unverified', text);
+  }
+  // An exact-binding host never takes the text route, whatever the URL shape.
+  assert.equal(confirmedOn('https://jobs.ashbyhq.com/cartesia/abc', 'Thanks for applying', 'https://jobs.ashbyhq.com/cartesia/abc').kind, 'unverified');
+});
+
+test('the closure vocabulary is the union of the runner\'s own doubt list', () => {
+  const lever = (text: string) => confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', text, 'https://jobs.lever.co/apollo/b83479c0/apply').kind;
+  for (const text of [
+    'Thanks for applying. There was a problem submitting your application.',
+    'Thanks for applying, submitting...',
+    'Thanks for applying. Processing your application...',
+    'Thanks for applying. Your application has been saved.',
+    'Thanks for applying. Please continue to the next page.',
+    'Thanks for applying. 404.',
+    'Thanks for applying. Redirecting you to our partner site.',
+    'Thanks for applying. Forbidden.',
+    'Thanks for applying. Please wait while we finish your application.',
+    'Thanks for applying. You do not meet the minimum requirements.',
+    'Thanks for applying. Apply through our partner instead.',
+  ]) assert.equal(lever(text), 'unverified', text);
+  // ...and the two carve-outs stay genuine receipts.
+  assert.equal(lever('Thanks for applying. Your application is pending review.'), 'confirmed');
+  assert.equal(lever('Thanks for applying! No further action is required.'), 'confirmed');
+  // ...while the bare words still refuse.
+  assert.equal(lever('Thanks for applying. Your application is pending.'), 'unverified');
+  assert.equal(lever('Thanks for applying. A cover letter is required.'), 'unverified');
 });
