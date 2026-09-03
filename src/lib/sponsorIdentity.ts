@@ -371,6 +371,19 @@ export function portalNameAgrees(ourName: string, portalName: string | null | un
   // A cleared board is never reported as disagreeing, whatever the names say.
   if (PORTAL_NAME_CLEARED[ourName]) return true;
   if (!portalName || !portalName.trim()) return null;
+  /* THE SAME NAME IS THE SAME NAME, whatever its length.
+     Everything below drops words shorter than three letters, which is right for "AI" or "US"
+     sitting inside a longer name and wrong when the name IS two letters. Greenhouse published
+     "On" for greenhouse/onrunning and "2K" for greenhouse/2k, we call them On and 2K, and this
+     function still answered null on both: the word filter emptied each set, so 422 postings from
+     two correctly labelled boards were reported as `cannot-tell` in every CI run sampled between
+     2026-09-01 and 2026-09-03. The prose fallback cannot rescue them either, because "On" as a
+     whole word is in every posting ever written, and the brand match will not take it.
+     Checked live 2026-09-03: both boards publish a company_name identical to ours.
+     Identical names are the strongest agreement the portal can express, so they are answered
+     before any filtering. This can only turn null into true: a name identical to ours could never
+     have produced a mismatch below. */
+  if ([...wordSet(ourName)].join(' ') === [...wordSet(portalName)].join(' ')) return true;
   const ours = new Set([...wordSet(ourName)].filter((word) => word.length >= 3 && !NOISE.has(word)));
   const theirs = new Set([...wordSet(portalName)].filter((word) => word.length >= 3 && !NOISE.has(word)));
   if (ours.size === 0 || theirs.size === 0) return null;

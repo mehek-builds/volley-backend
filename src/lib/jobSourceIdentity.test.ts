@@ -46,6 +46,21 @@ test('and the ways a real name legitimately differs are accepted', () => {
   }
 });
 
+test('a company whose whole name is two letters is not an unanswerable board', () => {
+  /* greenhouse/onrunning and greenhouse/2k were the only two `cannot-tell` verdicts the check
+     produced, on 422 postings between them, and neither was ambiguous: Greenhouse published "On"
+     and "2K", which is exactly what we call them. The word filter below the match dropped every
+     word shorter than three letters, emptied both sets, and returned null. Identical names now
+     answer before any filtering, so the two boards report as verified rather than as work for a
+     human who would have found nothing wrong. */
+  assert.equal(portalNameAgrees('On', 'On'), true);
+  assert.equal(portalNameAgrees('2K', '2K'), true);
+  /* And the loosening stops exactly there. A two-letter name against a different company is still
+     not an agreement, and every historical mislabelling is still caught. */
+  assert.equal(portalNameAgrees('On', 'Acme Corp'), null);
+  assert.equal(portalNameAgrees('2K', 'Rockstar Games'), null);
+});
+
 test('the four mislabelled tokens are gone from the source list', () => {
   /* They were removed rather than relabelled because the companies somebody meant - SAS Institute,
      Boston Consulting Group, Tata Consultancy, Disney - publish on none of these three ATSs, which
@@ -82,7 +97,7 @@ test('Phase 2 keeps the verified employer catalog diverse across all seven polla
   // Was 580 Greenhouse until 2026-08-31, when source-identity CI found the Svetness Personal
   // Training board returned 404 and it was retired. Verified before removal: the Greenhouse API
   // answers 404 for that token where a live board answers 200.
-  assert.equal(JOB_SOURCES.length, 1_048, 'the reviewed catalog must not silently shrink or grow');
+  assert.equal(JOB_SOURCES.length, 1_047, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual(
     [...families].sort(),
@@ -145,7 +160,13 @@ test('a retired board is disabled by the catalog, not merely deleted from it', (
     assert.ok(source.career_url.startsWith('https://'), `${source.board_token} needs a real career_url`);
   }
   const retired = RETIRED_JOB_SOURCES.map((s) => `${s.ats_name}/${s.board_token}`);
-  for (const known of ['greenhouse/svetness', 'greenhouse/marqeta', 'greenhouse/clickhouse']) {
+  for (const known of [
+    'greenhouse/svetness', 'greenhouse/marqeta', 'greenhouse/clickhouse',
+    /* Solaris SE is winding down: the token 404s, no successor board exists, and it held the
+       source-identity check red on main for five hours on 2026-09-03 because a dead board was
+       fatal. Retiring it is the deliberate act that stops it being reported as news forever. */
+    'greenhouse/solarisbank',
+  ]) {
     assert.ok(retired.includes(known), `${known} was retired in the catalog and must stay retired`);
   }
 });

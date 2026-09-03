@@ -210,6 +210,14 @@ jobs:
   # Greenhouse publishes `company_name` on every posting, so the right answer was available on every
   # poll in between. This asks for it, on every source, at pull-request time. Like logo-coverage it
   # measures against the LIVE boards, because that is the only place the truth is.
+  #
+  # WHAT MAKES IT RED, since 2026-09-03: `named-mismatch`, a source THIS pull request added whose
+  # board does not resolve, and a bucket so far over its ceiling that the run measured nothing.
+  # A board that goes empty or 404 on its own is annotated on the pull request and does not fail
+  # it. It used to, and the price was that main spent whole days red over one third-party 404 -
+  # greenhouse/marqeta, greenhouse/clickhouse and greenhouse/solarisbank each held it red for
+  # hours - which taught everybody to disregard the one check that catches a job seeker being
+  # sent to the wrong employer. src/lib/sourceIdentityVerdict.ts carries the measurements.
   source-identity:
     needs: changes
     if: github.event_name != 'schedule' && needs.changes.outputs.code == 'true'
@@ -220,10 +228,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The base revision, so the verifier can tell a board this change ADDED and that does not
+          # resolve (a typo, ours, fatal) from one that died on its own (theirs, annotated). The
+          # default depth-1 checkout does not fetch the base object and the comparison is skipped.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
       - run: npm ci
       - name: Check every job source against the company its portal names
+        env:
+          SOURCE_IDENTITY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: npm run sources:verify
