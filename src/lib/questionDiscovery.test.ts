@@ -5116,3 +5116,357 @@ test('a skip on a blank answer survives the refresh that fills the blank in', ()
     'a skip taken against a different value is shed with it, key omitted rather than undefined',
   );
 });
+
+/* =====================================================================================================
+ * THE FOUR PERSONIO QUESTIONS, pinned with the labels exactly as the extension stored them.
+ *
+ * xolife (personio), packet 29c73b37, run 211e35fe, 2026-09-02. After the fill the dashboard asked the
+ * applicant for four facts already on file. Three of the four hit no rule at all on origin/main
+ * (7dce462) and resolved null; the fourth classified correctly and was refused by the availability
+ * window's cycle scope. Each block below pins the measured label plus its Recruitee / Workable /
+ * Personio siblings, the fail-closed cases, and the run-versus-refresh agreement that keeps a
+ * chosen option from flipping under the packet audit.
+ * ===================================================================================================== */
+
+/* The owner-shaped profile: Indian citizenship, resident in the United States, one declared
+ * eligibility record (US: authorized now, sponsorship later), four declared languages, and the
+ * canon's three dated roles. */
+const personioProfile: ApplicationProfileLike = {
+  // Her own declaration that she needs sponsorship: without it no permit answer is derived.
+  needs_sponsorship: true,
+  citizenship: 'Indian',
+  address_country: 'United States',
+  address_city: 'Los Angeles',
+  work_eligibility_by_country: [
+    { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: true },
+  ],
+  languages: ['English', 'Hindi', 'Arabic', 'French'],
+  experience_periods: [
+    { start: 'Feb 2025', end: 'May 2025' },
+    { start: 'Sep 2025', end: 'Present' },
+    { start: 'Feb 2026', end: 'Present' },
+  ],
+};
+const personioAsOf = new Date('2026-09-02T00:00:00Z');
+const YES_NO = ['Yes', 'No'];
+const resolvePersonio = (
+  label: string,
+  ap: ApplicationProfileLike,
+  options: readonly string[] | undefined,
+  postingCountryCode = 'DE',
+  jd = 'Remote, full-time, permanent. IT department, Munich.',
+) => resolveKnownAnswer(label, 'select', ap, jd, undefined, postingCountryCode, options, personioAsOf);
+
+test('a European work permit is answered No only when the profile proves she is outside the area', () => {
+  const measured = 'do you have a valid eu work permit? custom_attribute_4230716';
+  // The measured label and its siblings, from a profile that proves the answer.
+  for (const label of [
+    measured,
+    'Do you have the right to work in the EU?',
+    'Do you hold a valid residence permit for the EEA?',
+    'Are you eligible to work in the Schengen area?',
+    'do you have a valid work permit for the netherlands?',
+    'Do you have the right to work in the UK?',
+  ]) {
+    assert.deepEqual(resolvePersonio(label, personioProfile, YES_NO), { value: 'No' }, label);
+  }
+
+  // FAIL CLOSED: every missing or in-area column hands the question back.
+  const held = (ap: ApplicationProfileLike, why: string) => {
+    const resolved = resolvePersonio(measured, ap, YES_NO);
+    assert.ok(resolved && 'skipReason' in resolved, why);
+    assert.match(resolved.skipReason, /work-eligibility question left for you/, why);
+  };
+  held({ ...personioProfile, citizenship: undefined }, 'no citizenship');
+  held({ ...personioProfile, address_country: undefined }, 'no residence');
+  held({ ...personioProfile, citizenship: 'German' }, 'EU citizen');
+  held({ ...personioProfile, citizenship: 'Irish' }, 'EU citizen, another spelling');
+  held({ ...personioProfile, citizenship: 'British' }, 'UK citizen - not provably outside');
+  held({ ...personioProfile, address_country: 'Germany' }, 'EU resident');
+  held({ ...personioProfile, address_country: 'Switzerland' }, 'free-movement resident');
+  held({ ...personioProfile, citizenship: 'Martian' }, 'citizenship that maps to no country');
+  held({ ...personioProfile, work_eligibility_by_country: undefined }, 'eligibility never declared');
+  held({ ...personioProfile, work_eligibility_by_country: [] }, 'eligibility list empty (or malformed)');
+  // A declared authorization for ANY member state makes the bloc question hers: a French permit
+  // is not an EU permit, and the label did not say which state.
+  held({
+    ...personioProfile,
+    work_eligibility_by_country: [
+      ...personioProfile.work_eligibility_by_country!,
+      { country_code: 'FR', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false },
+    ],
+  }, 'authorized in a member state the posting is not in');
+
+  // A declared record FOR the country outranks the derivation, in both directions.
+  const withGermany = (authorized: boolean): ApplicationProfileLike => ({
+    ...personioProfile,
+    work_eligibility_by_country: [
+      ...personioProfile.work_eligibility_by_country!,
+      { country_code: 'DE', authorized_now: authorized, needs_sponsorship_now: !authorized, needs_sponsorship_future: !authorized },
+    ],
+  });
+  assert.deepEqual(resolvePersonio('Work permit for Germany', withGermany(true), YES_NO), { value: 'Yes' });
+  assert.deepEqual(resolvePersonio('Work permit for Germany', withGermany(false), YES_NO), { value: 'No' });
+  // The bloc question on a German posting is answered from the German record when it says yes.
+  assert.deepEqual(resolvePersonio(measured, withGermany(true), YES_NO, 'DE'), { value: 'Yes' });
+  // ...and is NOT answered "No" from a German "no": the bloc is larger than Germany, so the
+  // derivation decides, and here it still proves "outside".
+  assert.deepEqual(resolvePersonio(measured, withGermany(false), YES_NO, 'DE'), { value: 'No' });
+
+  // The refresh path (text control, the stored answer offered back as the list) agrees with the run.
+  assert.deepEqual(
+    resolveKnownAnswer(measured, 'text', personioProfile, undefined, undefined, 'DE', ['No'], personioAsOf),
+    { value: 'No' },
+  );
+});
+
+test('the European permit rule leaves every label the per-country rule already owns exactly as it was', () => {
+  // Apollo's compound "UK or US": the bare "us" is invisible to namedCountryCodes, so only Great
+  // Britain is named. The first draft of the rule answered this "No" for an applicant with US
+  // authorization. It is refused, as it was before the rule existed.
+  const compound = resolvePersonio('Do you have the right to work in the UK or US?', personioProfile, YES_NO);
+  assert.ok(compound && 'skipReason' in compound);
+  assert.match(compound.skipReason, /work-eligibility question left for you/);
+  // Two named countries, sponsorship, type, expiry, detail and the compound residence shape all
+  // fall through to the existing rules, which refuse them.
+  for (const label of [
+    'Do you have a work permit for Germany or France?',
+    'Will you need visa sponsorship to work in the EU?',
+    'What is your work permit type?',
+    'When does your work permit expire?',
+    'Are you currently located in the EU, or do you have an EU work permit?',
+  ]) {
+    const resolved = resolvePersonio(label, personioProfile, YES_NO);
+    assert.ok(resolved === null || 'skipReason' in resolved, label);
+  }
+  // A non-European country is not this rule's business: Canada gets whatever it got before (a
+  // refusal from the per-country rule for "right to work", nothing at all for "work permit").
+  const canada = resolvePersonio('Do you have the right to work in Canada?', personioProfile, YES_NO, 'CA');
+  assert.ok(canada && 'skipReason' in canada);
+  assert.equal(resolvePersonio('Work permit for Canada', personioProfile, YES_NO, 'CA'), null);
+  // The US question is untouched.
+  assert.deepEqual(
+    resolvePersonio('Are you legally authorized to work in the United States?', personioProfile, YES_NO, 'US'),
+    { value: 'Yes' },
+  );
+  // A German record with the per-country rule's own vocabulary is still decided by that rule.
+  const germanRecord: ApplicationProfileLike = {
+    ...personioProfile,
+    work_eligibility_by_country: [
+      { country_code: 'DE', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+    ],
+  };
+  assert.deepEqual(resolvePersonio('Are you legally authorized to work in Germany?', germanRecord, YES_NO), { value: 'No' });
+});
+
+test('the level of a declared language is the highest fluent-or-advanced option the control offers', () => {
+  const measured = 'language skills: english custom_attribute_4230717 field-custom_attribute_4230717';
+  const cefr = ['None', 'A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+  assert.deepEqual(resolvePersonio(measured, personioProfile, cefr), { value: 'C2' });
+  // C1 when the scale stops there; the tier word is read inside a longer option text.
+  assert.deepEqual(resolvePersonio(measured, personioProfile, ['A1', 'B2', 'C1']), { value: 'C1' });
+  assert.deepEqual(resolvePersonio(measured, personioProfile, ['B2 - Upper intermediate', 'C1 - Advanced', 'C2 - Proficient']), { value: 'C2 - Proficient' });
+  // The siblings.
+  for (const [label, options, expected] of [
+    ['English proficiency', ['Basic', 'Intermediate', 'Advanced', 'Fluent'], 'Fluent'],
+    ['Level of English', ['Beginner', 'Conversational', 'Fluent', 'Native'], 'Fluent'],
+    ['English language skills', ['Elementary proficiency', 'Limited working proficiency', 'Professional working proficiency', 'Full professional proficiency'], 'Full professional proficiency'],
+    ['How would you rate your English?', ['Poor', 'Good', 'Very good', 'Excellent'], 'Excellent'],
+    ['What is your level of French?', ['A2', 'B1', 'C1'], 'C1'],
+  ] as const) {
+    assert.deepEqual(resolvePersonio(label, personioProfile, [...options]), { value: expected }, label);
+  }
+  // "Native" is never chosen: the column records fluency, not birth. The next honest tier is.
+  assert.deepEqual(resolvePersonio('English proficiency', personioProfile, ['Basic', 'Intermediate', 'Advanced', 'Native']), { value: 'Advanced' });
+  assert.deepEqual(resolvePersonio('English proficiency', personioProfile, ['Limited', 'Native or bilingual proficiency', 'Professional working proficiency']), { value: 'Professional working proficiency' });
+  // A negated or lower-level option never satisfies a tier, whatever words it also contains.
+  const heldOnScale = resolvePersonio('English proficiency', personioProfile, ['Not fluent', 'Some English', 'Basic']);
+  assert.ok(heldOnScale && 'skipReason' in heldOnScale);
+  assert.match(heldOnScale.skipReason, /no fluent or advanced option/);
+
+  // FAIL CLOSED: a language she never declared, and a control with no scale to choose from.
+  const undeclared = resolvePersonio('language skills: german', personioProfile, cefr);
+  assert.ok(undeclared && 'skipReason' in undeclared);
+  assert.match(undeclared.skipReason, /German proficiency left for you \(not on your declared languages\)/);
+  const noList = resolveKnownAnswer(measured, 'text', personioProfile, undefined, undefined, 'DE', undefined, personioAsOf);
+  assert.ok(noList && 'skipReason' in noList);
+  assert.match(noList.skipReason, /no scale to choose from/);
+  const noLanguages = resolvePersonio(measured, { ...personioProfile, languages: undefined }, cefr);
+  assert.ok(noLanguages && 'skipReason' in noLanguages);
+
+  // Run and refresh agree: the refresh offers the stored option back and gets it back.
+  assert.deepEqual(
+    resolveKnownAnswer(measured, 'text', personioProfile, undefined, undefined, 'DE', ['C2'], personioAsOf),
+    { value: 'C2' },
+  );
+
+  // Two languages in one label is not one control's question; a coding-language or an
+  // "answer in English" instruction is not a level question at all.
+  assert.equal(resolvePersonio('language skills: english, german', personioProfile, cefr), null);
+  for (const notThis of [
+    'Please indicate which of the following programming languages you are proficient in (select all that apply)',
+    'What is your preferred coding language for the interview? (English or Python)',
+    'Education level (please answer in English)',
+    'Cover letter (written in English)',
+  ]) {
+    const resolved = resolvePersonio(notThis, personioProfile, cefr);
+    assert.equal(Boolean(resolved && 'value' in resolved && cefr.includes(resolved.value)), false, notThis);
+  }
+  // The yes/no and list shapes keep their existing answers.
+  assert.deepEqual(resolveKnownAnswer('Do you speak English fluently?', 'select', personioProfile, undefined), { value: 'Yes' });
+  assert.deepEqual(
+    resolveKnownAnswer('What languages are you fluent in?', 'text', personioProfile, undefined),
+    { value: 'English, Hindi, Arabic, French' },
+  );
+});
+
+test('years of experience is arithmetic on the dated roles, snapped to the control\'s own band', () => {
+  const measured = 'years of experience years_of_experience field-years_of_experience';
+  const personioBands = ['Less than 1 year', '1-2 years', '3-5 years', '5-10 years', '10+ years'];
+  // Feb->May 2025 (3 months) plus Sep 2025->Sep 2026 (12 months, the Feb 2026 role inside it): 15.
+  assert.deepEqual(resolvePersonio(measured, personioProfile, personioBands), { value: '1-2 years' });
+  for (const label of [
+    'Total years of professional experience',
+    'How many years of work experience do you have?',
+    'Years of experience (required)',
+    'Work experience (in years)',
+  ]) {
+    assert.deepEqual(resolvePersonio(label, personioProfile, personioBands), { value: '1-2 years' }, label);
+  }
+  // The band follows the list: a contiguous list hands the same 15 months to its lowest holder.
+  assert.deepEqual(resolvePersonio(measured, personioProfile, ['0-1 years', '2-5 years', '5+ years']), { value: '0-1 years' });
+  assert.deepEqual(resolvePersonio(measured, personioProfile, ['Less than 6 months', '6-12 months', '1-3 years', '3+ years']), { value: '1-3 years' });
+
+  // FAIL CLOSED: no dated role, an unreadable one, no bands, no band that holds the figure.
+  const noRoles = resolvePersonio(measured, { ...personioProfile, experience_periods: undefined }, personioBands);
+  assert.ok(noRoles && 'skipReason' in noRoles);
+  assert.match(noRoles.skipReason, /no dated roles on your resume/);
+  const unreadable = resolvePersonio(measured, { ...personioProfile, experience_periods: [{ start: 'Summer 2025', end: 'Present' }] }, personioBands);
+  assert.ok(unreadable && 'skipReason' in unreadable);
+  const noBands = resolveKnownAnswer(measured, 'text', personioProfile, undefined, undefined, 'DE', undefined, personioAsOf);
+  assert.ok(noBands && 'skipReason' in noBands);
+  assert.match(noBands.skipReason, /no bands to choose from/);
+  const noHolder = resolvePersonio(measured, personioProfile, ['5+ years', '10+ years']);
+  assert.ok(noHolder && 'skipReason' in noHolder);
+  assert.match(noHolder.skipReason, /none of the offered bands holds your 15 months/);
+
+  // Run and refresh agree.
+  assert.deepEqual(
+    resolveKnownAnswer(measured, 'text', personioProfile, undefined, undefined, 'DE', ['1-2 years'], personioAsOf),
+    { value: '1-2 years' },
+  );
+
+  // NOT total tenure: a scoped ask (the Confluence shape), and a polar one. Both stay as they were.
+  for (const scoped of [
+    'How many years of hands on experience with Confluence do you have?',
+    'Years of experience in software engineering',
+    'How many years of relevant experience do you have?',
+    'Years of experience with Python',
+    'How many years of experience do you have as a product manager?',
+  ]) {
+    assert.equal(resolvePersonio(scoped, personioProfile, personioBands), null, scoped);
+  }
+  const polar = resolvePersonio('Do you have at least 5 years of experience?', personioProfile, YES_NO);
+  assert.equal(Boolean(polar && 'value' in polar), false);
+});
+
+test('"available from" already classifies as the start date and is held only by the cycle scope', () => {
+  /* The fourth Personio question. START_DATE_QUESTION's `availab` stem classifies it, and the
+   * availability_date arm answers it identically to its siblings whenever the posting names the
+   * cycle the stored window is about. xolife's postings are remote, full-time and permanent and
+   * name no season, so the window's own rule ("the posting has to name its cycle") refuses. That
+   * refusal is pinned here, next to the answer, so the two cannot drift apart: changing it is a
+   * product decision about non-cyclical postings, not a classifier fix. */
+  const measured = 'available from* (required) available_from field-available_from';
+  assert.equal(classifyField(measured), 'availability_date');
+  const windowed: ApplicationProfileLike = {
+    ...personioProfile,
+    availability_window_start: '2026-10-01',
+    availability_window_end: '2027-03-31',
+    availability_cycle: 'Fall 2026',
+    availability_valid_through: '2027-01-15',
+  };
+  for (const label of [measured, 'When can you start?', 'Earliest possible start date', 'Available from']) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', windowed, 'Fall 2026 working student, Munich', undefined, 'DE', undefined, personioAsOf),
+      { value: 'October 1, 2026' },
+      label,
+    );
+    const heldByScope = resolveKnownAnswer(label, 'text', windowed, 'Remote, full-time, permanent. IT department, Munich.', undefined, 'DE', undefined, personioAsOf);
+    assert.ok(heldByScope && 'skipReason' in heldByScope, label);
+    assert.match(heldByScope.skipReason, /availability date left for you/, label);
+  }
+});
+
+/* REVIEW OF PR #879: the five wrong-fact classes the adversarial pass executed, pinned. */
+test('a permit question about NEEDING, HISTORY, or a non-polar shape stands the bloc rule down', () => {
+  const ap = { needs_sponsorship: true, citizenship: 'United States', address_country: 'United States',
+    work_eligibility_by_country: [{ country_code: 'US', authorized_now: false }] } as unknown as ApplicationProfileLike;
+  for (const label of [
+    'Do you need a work visa to work in Germany?',
+    'Will you require a work permit for the Netherlands?',
+    'Do you need a work permit to work in the EU?',
+    'Have you ever been refused a work permit for an EU country?',
+    'Have you previously held a work permit in the EU?',
+    'If yes, which EU work permit do you hold?',
+    'EU work permit number',
+    'Please upload a copy of your EU work permit',
+    'Do you have a valid EU work permit? If not, which visa would you need?',
+    'Work permit for Germany',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', ap, undefined);
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+  // ...while the measured xolife ask still answers, from her declared need for sponsorship.
+  assert.deepEqual(resolveKnownAnswer('do you have a valid eu work permit? custom_attribute_42', 'select', ap, undefined), { value: 'No' });
+  // ...and never without that declaration on record.
+  const undeclared = { ...ap, needs_sponsorship: undefined } as unknown as ApplicationProfileLike;
+  const r = resolveKnownAnswer('do you have a valid eu work permit? custom_attribute_42', 'select', undeclared, undefined);
+  assert.ok(!r || !('value' in r));
+});
+
+test('a language used as an adjective on something else is not a proficiency ask', () => {
+  const ap = { languages: ['English', 'French', 'Arabic'] } as unknown as ApplicationProfileLike;
+  const scale = ['None', 'Basic', 'Advanced', 'Expert'];
+  for (const label of ['Knowledge of French law', 'Level of knowledge of French GAAP', 'Skills: French cuisine',
+    'Arabic calligraphy skills', 'Experience level with English-speaking clients']) {
+    const r = resolveKnownAnswer(label, 'select', ap, undefined, undefined, undefined, scale);
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(resolveKnownAnswer('language skills: english custom_attribute_4230717 field-language', 'select', ap, undefined, undefined, undefined, ['None', 'A1', 'A2', 'B1', 'B2', 'C1']), { value: 'C1' });
+  assert.deepEqual(resolveKnownAnswer('English proficiency', 'select', ap, undefined, undefined, undefined, scale), { value: 'Expert' });
+});
+
+test('a permit DETAIL ask never takes a record-backed Yes either', () => {
+  const german = { needs_sponsorship: false, citizenship: 'German', address_country: 'Germany',
+    work_eligibility_by_country: [{ country_code: 'DE', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false }] } as unknown as ApplicationProfileLike;
+  for (const label of ['EU work permit number', 'Please upload a copy of your EU work permit', 'If yes, which EU work permit do you hold?',
+    'Do you have an EU work permit? If yes, which one?', 'EU work permit issue date', 'Work permit for Germany: expiry', 'Work permit for Germany - number',
+    'Upload a copy of your work permit for Germany', 'Comments on your EU work permit', 'Will you have a valid EU work permit by the start date?',
+    'EU work permit (please attach)', 'Valid until (EU work permit)', 'Do you have a valid EU work permit? Please specify',
+    'EU work permit (enclose)', 'Please enclose your EU work permit', 'EU work permit date of issue', 'Work permit for Germany date of issue',
+    'Work permit for Germany type', 'EU work permit category', 'EU work permit (provide scan)', 'Please provide a scan of your EU work permit',
+    'EU work permit valid from', 'EU work permit start date', 'EU work permit end date', 'EU work permit status', 'EU work permit duration',
+    'EU work permit issuing authority', 'EU work permit country of issue']) {
+    const r = resolveKnownAnswer(label, 'text', german, 'DE');
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(resolveKnownAnswer('Work permit for Germany', 'select', german, 'DE', undefined, undefined, ['Yes', 'No']), { value: 'Yes' });
+});
+
+test('a scoped years-of-experience ask stands the tenure band down, with dated roles on file', () => {
+  /* The fixture MUST carry dated roles: without them the rule refuses for a different reason and
+   * the guard is untested (round-4 verification caught exactly that). */
+  const ap = { experience_periods: [{ start: 'Feb 2022', end: 'Present' }] } as unknown as ApplicationProfileLike;
+  const bands = ['0-1 years', '1-3 years', '3-5 years', '5+ years'];
+  const asOf = new Date(Date.UTC(2026, 8, 2));
+  const ask = (label: string) => resolveKnownAnswer(label, 'select', ap, undefined, undefined, undefined, bands, asOf);
+  // Unscoped: total professional tenure is the honest answer.
+  assert.deepEqual(ask('Years of experience'), { value: '3-5 years' });
+  // Scoped: the resume cannot separate full-time from the rest, so these are hers.
+  for (const label of ['Years of full-time experience', 'Years of full time experience',
+    'Total years of full-time work experience', 'How many years of full-time experience do you have?']) {
+    const r = ask(label);
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+});
