@@ -12545,7 +12545,31 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
       // first-control fallback for zero or multiple marked descendants.
       || (explicitlyRequired.length === 1 ? explicitlyRequired[0] : null)
       || controls[0]
-      || (widgetFallback ? widget : null);
+      || (widgetFallback ? widget : null)
+      /* A STARRED BLOCK WHOSE ONLY CONTROL IS THE UPLOAD STILL HAS TO BE JUDGED.
+       *
+       * Excluding the file input from the controls list picks a better target when the block holds
+       * one, and that much is right. But when the upload is the ONLY control, it left target null
+       * on the asterisk arm, which passes no widget fallback - so the field was not reported empty,
+       * it was never looked at. Measured 2026-09-03 against the live readiness script: a Recruitee
+       * shaped block, a starred "CV or resume" label over a bare file input, returned zero
+       * blockers, while the same field carrying a for= attribute returned the correct
+       * '"CV or resume" is required and is still empty'. The gate already knew how to judge this
+       * field and could not find it.
+       *
+       * That is what sent DSI Innovations (packet a34e5ce2) to Recruitee on 2026-09-02 with an
+       * empty required "CV or resume": filled_fields recorded the resume because setInputFiles
+       * returned cleanly, no readiness blocker was raised, the run pressed submit, and the form
+       * had nothing to accept - which arrives as no_confirmation_state and an unverified
+       * submission nobody can resolve without opening the employer's portal.
+       *
+       * LAST in the chain, after the widget fallback, so this adds an arm exactly where the value
+       * was null and changes the target on no path that already had one - the class arm keeps
+       * resolving to its widget. Both routes reach note() with the same widget and dedupe key, and
+       * note() asks widgetHasAnswer, which reads uploads on their own terms: a file in the input,
+       * or the block's rendered filename. So an uploader that consumes the file and resets its own
+       * input stays silent, and so does an optional upload, which carries no mark to find. */
+      || widget.querySelector('input[type="file"]:not([disabled])');
     if (!target || target.disabled) return;
     note(widget, target);
   };
