@@ -2283,6 +2283,55 @@ export function knownAnswerLookup(
 export const SINGLE_CHOICE_EXACT_OPTION_TYPE = /^(?:select(?:-one)?|radio|listbox)$/i;
 
 /**
+ * The controls on which KEEPING a reviewed answer is safe: the strict set above, plus combobox.
+ *
+ * THE TWO DIRECTIONS ARE NOT SYMMETRIC, AND TREATING THEM AS ONE SET COST HER EVERY GREENHOUSE
+ * SELF-ID ANSWER SHE PICKED.
+ *
+ * Measured live on 2026-09-03, Hudson River Trading packet 4a79eec1, greenhouse. Her profile
+ * stores gender "Female"; the control offers Woman / Man / Non-binary / I don't wish to answer.
+ * chooseEeoOption resolves that pair correctly - measured, it returns "Woman" - and picking Woman
+ * in the dashboard genuinely stored it. The next refresh put "Female" back, so the question
+ * rendered ANSWERED with nothing selected and was asked again. Select, save, reverted, re-asked,
+ * with no way out: she could not finish that application by any route.
+ *
+ * Re-measured through refreshKnownQuestionAnswers with the full stored shape - options present,
+ * answer_source applicant_review, answer_reviewed_at matching:
+ *
+ *   portal_input_type radio     -> "Woman" kept
+ *   portal_input_type select    -> "Woman" kept
+ *   portal_input_type combobox  -> "Female"      <- reverted
+ *
+ * combobox is what Greenhouse reports for these controls on this account, confirmed on Verkada
+ * packet f1b2df5a where "when do you graduate?" and "what is your gpa?" both arrive
+ * `portal_input_type: 'combobox'` with their full option lists captured. HRT's own gender control
+ * type was not read directly; the revert observed in production proves the gate rejected it, which
+ * excludes radio, select and listbox. The same revert was measured on the sentence forms PR #895
+ * exists to produce - "I am not a protected veteran" and "No, I do not have a disability and have
+ * not had one in the past" both went back to "No" - so that fix was reaching the resolver and being
+ * undone one step later on every Greenhouse packet.
+ *
+ * WHY THIS IS A SEPARATE CONSTANT rather than a wider SINGLE_CHOICE_EXACT_OPTION_TYPE. The strict
+ * set governs BOTH keeping a fit answer and RE-OPENING an unfit one, and questionMetadata.test.ts
+ * states the objection that makes them different: "a searchable combobox can land an answer its
+ * first-read menu never enumerated". That is decisive against re-opening - blanking an answer
+ * merely because a partially-read menu did not list it destroys a correct answer - and it is not an
+ * argument against keeping. An answer that IS among the captured options is verifiably fillable
+ * whether or not the menu was complete, so keeping it can only ever preserve a fit answer.
+ *
+ * The invariant the strict set was written for therefore still holds for combobox, by both arms
+ * doing nothing harmful: a FIT reviewed combobox answer is kept here and, since combobox stays out
+ * of the strict set, is never re-opened; an UNFIT one is not kept (it is on no captured option) and
+ * is not re-opened either, which is exactly today's behaviour and the deliberate protection for
+ * searchable menus.
+ *
+ * ZERO-OPTION COMBOBOXES ARE UNTOUCHED. reviewedAnswerIsAnOfferedOption tests membership of
+ * `question.options`, so an empty list can never satisfy it. The 160 required choice questions
+ * measured across this account with no captured options behave exactly as before.
+ */
+export const REVIEWED_PICK_EXACT_OPTION_TYPE = /^(?:select(?:-one)?|radio|listbox|combobox)$/i;
+
+/**
  * True when this strict single-choice control offers the stored answer verbatim, under the fill
  * path's own equivalence (trimmed, case-insensitive; the same test reopenUnfitClosedChoiceQuestions
  * and reviewedAnswerStillFits use). This is the exact CONVERSE of storedAnswerMatchesNoExactOption:
@@ -2300,7 +2349,7 @@ export function reviewedAnswerIsAnOfferedOption(question: {
   options?: readonly string[] | null;
 }): boolean {
   const controlType = question.portal_input_type?.trim().toLowerCase() ?? '';
-  if (!SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType)) return false;
+  if (!REVIEWED_PICK_EXACT_OPTION_TYPE.test(controlType)) return false;
   const answer = question.answer.trim();
   if (!answer) return false;
   return (question.options ?? []).some(

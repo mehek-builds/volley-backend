@@ -4700,9 +4700,19 @@ test('reviewedAnswerIsAnOfferedOption uses the fill path trim/case equivalence a
   // On no option.
   assert.equal(reviewedAnswerIsAnOfferedOption(
     { answer: 'GPA 3.4', portal_input_type: 'select', options }), false);
-  // A searchable combobox can find options never enumerated, so it is not a strict gate - not judged.
+  /* A COMBOBOX IS JUDGED HERE, AND ONLY HERE. This used to assert false, on the grounds that a
+   * searchable combobox can land an answer its first-read menu never enumerated. That objection is
+   * decisive for the RE-OPEN direction, which still excludes combobox
+   * (questionMetadata.test.ts pins it), and it is not an argument against KEEPING: an answer that
+   * is already among the captured options is verifiably fillable whether or not the menu was read
+   * in full. Rejecting it here reverted every Greenhouse self-identification option she picked -
+   * measured 2026-09-03 on HRT packet 4a79eec1, where "Woman" went back to "Female" on every
+   * refresh and the question could never be completed. */
   assert.equal(reviewedAnswerIsAnOfferedOption(
-    { answer: 'GPA 3.5-3.8', portal_input_type: 'combobox', options }), false);
+    { answer: 'GPA 3.5-3.8', portal_input_type: 'combobox', options }), true);
+  // Still on no option, on the control type this fix widened to.
+  assert.equal(reviewedAnswerIsAnOfferedOption(
+    { answer: 'GPA 3.4', portal_input_type: 'combobox', options }), false);
   // No control type and no options: an open text control is never judged.
   assert.equal(reviewedAnswerIsAnOfferedOption({ answer: 'GPA 3.5-3.8' }), false);
   assert.equal(reviewedAnswerIsAnOfferedOption(
