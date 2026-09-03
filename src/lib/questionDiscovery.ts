@@ -3,6 +3,7 @@ import {
   referralAnswer as referrerDeclarationAnswer,
   graduationWindowAnswer as graduationWindowDeclarationAnswer,
 } from './heldAnswerQuestions';
+import { applicantIndicatedWorkCountry } from './applicantIndicatedCountry';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -430,17 +431,44 @@ function selectedEligibilityCountry(
   label: string,
   postingCountry: JobCountry | undefined,
   postingCountryCode: string | undefined,
-): string | undefined {
+  applicantIndicatedCountryCode?: string,
+): { code: string; fromApplicantIndication: boolean } | undefined {
+  const posting = (code: string) => ({ code, fromApplicantIndication: false });
   const named = namedCountryCodes(label);
-  if (named.length === 1) return named[0];
+  if (named.length === 1) return posting(named[0]);
   if (named.length > 1) return undefined;
   if (US_WORK_SCOPE.test(label) || US_ABBREVIATION_SCOPE.test(label) || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label)) {
-    return 'US';
+    return posting('US');
   }
-  if (postingCountryCode) return postingCountryCode;
+  /* THE POSTING SPEAKS FIRST, AND WHERE IT IS DETERMINATE IT IS THE WHOLE ANSWER.
+   *
+   * A single-country posting is the employer's own statement about the role, so nothing she chose
+   * on the form can move it. The applicant-indicated country below exists only for the case this
+   * one cannot decide: a posting published for several countries at once.
+   *
+   * WHEN BOTH ARE DETERMINATE AND THEY DISAGREE, NEITHER WINS. A posting the classifier pinned to
+   * Ireland beside an office preference of New York is not a question with a safe answer; it means
+   * one of the two readings is wrong, and picking either would be a guess dressed as evidence. */
+  if (postingCountryCode) {
+    if (applicantIndicatedCountryCode && applicantIndicatedCountryCode !== postingCountryCode) return undefined;
+    return posting(postingCountryCode);
+  }
   // Compatibility for callers already carrying the legal-scope classifier. It can prove US
   // exactly, but `non_us` cannot say which country and is therefore never enough.
-  if (postingCountry === 'us') return 'US';
+  if (postingCountry === 'us') {
+    if (applicantIndicatedCountryCode && applicantIndicatedCountryCode !== 'US') return undefined;
+    return posting('US');
+  }
+  /* SHE TOLD US, ON THIS FORM, WHICH COUNTRY THIS APPLICATION IS FOR.
+   *
+   * Reached only when the posting itself could not name one country - which for Hudson River
+   * Trading is the whole problem, since it lists Austin, Chicago, New York, London and Singapore.
+   * The value is unanimous across every work-location question she ANSWERED here and is undefined
+   * the moment those answers disagree, so this line can never pick one country out of several on
+   * her behalf. See applicantIndicatedWorkCountry for what is and is not accepted as evidence. */
+  if (applicantIndicatedCountryCode) {
+    return { code: applicantIndicatedCountryCode, fromApplicantIndication: true };
+  }
   return undefined;
 }
 
@@ -449,6 +477,7 @@ function workEligibilityAnswer(
   ap: ApplicationProfileLike,
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
+  applicantIndicatedCountryCode?: string,
 ): { value: string } | { skipReason: string } | null {
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
@@ -464,13 +493,30 @@ function workEligibilityAnswer(
     return { skipReason: workEligibilitySkipReason(label) };
   }
 
-  const countryCode = selectedEligibilityCountry(label, postingCountry, postingCountryCode);
-  if (!countryCode) return { skipReason: workEligibilitySkipReason(label) };
+  const selected = selectedEligibilityCountry(label, postingCountry, postingCountryCode, applicantIndicatedCountryCode);
+  if (!selected) return { skipReason: workEligibilitySkipReason(label) };
+  const countryCode = selected.code;
 
   /* The scoped list is the authority. When it is absent, each legacy scalar may answer only the
    * exact US yes/no claim it actually stored. A true combined sponsorship bit cannot be split into
    * present versus future need. This bridge never answers another country or an unscoped role. */
   const scoped = eligibilityForCountry(ap.work_eligibility_by_country, countryCode);
+  /* AND THE BRIDGE IS CLOSED TO A COUNTRY SHE NAMED HERSELF, which is the one place it would be a
+   * lie rather than a compatibility shim.
+   *
+   * work_authorized and needs_sponsorship are COUNTRY-AGNOSTIC: one pair of booleans for the whole
+   * world, written before the scoped list existed. Reading them is only defensible where the
+   * country was never in doubt, which is what the `=== 'US'` test above meant when the only way to
+   * reach it was a posting or a label that said the United States outright.
+   *
+   * A country reached through HER indication is a different claim. The question this module exists
+   * for - a posting spanning three countries - is precisely the one where a single global boolean
+   * cannot be true of every country it covers, and flattening it onto the one she picked is how a
+   * needs_sponsorship bit meant for anywhere becomes a legal declaration about somewhere. So when
+   * the country came from her, the scoped record is required and its absence is a refusal. */
+  if (!scoped && selected.fromApplicantIndication) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
   if (!scoped && ap.work_eligibility_by_country === undefined && countryCode === 'US') {
     if (asksDetail) return { skipReason: workEligibilitySkipReason(label) };
     if (ap.work_authorized === false && ap.needs_sponsorship === false) {
@@ -2194,7 +2240,15 @@ function comparableAnswer(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/* THE PACKET'S OWN QUESTIONS ARE THE FIRST ARGUMENT, AND THEY ARE REQUIRED, on purpose.
+ *
+ * This gate decides whether a legal declaration may be sent, and since it now reads the country she
+ * indicated on the form, it needs the form. Making the list an OPTIONAL trailing parameter was the
+ * obvious shape and is a trap: dropping it at the one call site is a single token, it type-checks,
+ * and it silently restores the old refusal with nothing red to say so. Required and first means
+ * dropping it is a compile error - an array where a string belongs - rather than a regression. */
 export function sensitiveQuestionRequiresAttention(
+  packetQuestions: readonly { question: string; answer?: string }[],
   label: string,
   answer: string,
   inputType: string,
@@ -2205,7 +2259,18 @@ export function sensitiveQuestionRequiresAttention(
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
-  const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
+  const known = resolveKnownAnswer(
+    label,
+    inputType,
+    ap,
+    jdText,
+    postingCountry,
+    postingCountryCode,
+    undefined,
+    undefined,
+    undefined,
+    applicantIndicatedWorkCountry(packetQuestions)?.code,
+  );
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
 }
 
@@ -2238,12 +2303,17 @@ export function questionRequiresHumanAttention(question: { question: string; ans
  * every held question and every essay, and undefined is read by both callers as "no resolver opinion".
  */
 export function knownAnswerLookup(
+  /* THE WHOLE PACKET, not just the question being looked up, and required for the same reason it is
+   * required on the gate above: the country she indicated is a property of the FORM, and a lookup
+   * that cannot see the form would answer differently from the refresh that can. */
+  packetQuestions: readonly { question: string; answer?: string }[],
   ap: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
   asOf: Date = new Date(),
 ): (question: { question: string; answer?: string }) => string | undefined {
+  const applicantIndicatedCountryCode = applicantIndicatedWorkCountry(packetQuestions)?.code;
   return (question) => {
     const label = normalizeReviewQuestionLabel(question.question ?? '');
     if (!label) return undefined;
@@ -2267,6 +2337,8 @@ export function knownAnswerLookup(
       postingCountryCode,
       storedAsCandidate,
       asOf,
+      undefined,
+      applicantIndicatedCountryCode,
     );
     return known && 'value' in known ? known.value : undefined;
   };
@@ -2366,6 +2438,15 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   postingCountryCode?: string,
   asOf: Date = new Date(),
 ): T[] {
+  /* DERIVED FROM THIS FUNCTION'S OWN `questions`, WITH NO NEW PARAMETER, and that is the point.
+   *
+   * The refusal branch at the bottom of this map BLANKS any answer to a question the resolver
+   * holds. So if the send gate learned that she indicated New York while this refresh did not, the
+   * gate would clear the packet and the very next save would delete the sponsorship answer it
+   * cleared - "she answered it and the refresh deleted it", the deadlock this file already carries
+   * scars from. Taking the list that is already in hand rather than accepting a country from the
+   * caller means the two cannot be handed different views of the same form. */
+  const applicantIndicatedCountryCode = applicantIndicatedWorkCountry(questions)?.code;
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
     /* THE STORED ANSWER IS OFFERED BACK AS THE CANDIDATE LIST, and that is not a trick.
@@ -2401,7 +2482,18 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      */
     const storedAsCandidate = question.answer.trim() ? [question.answer.trim()] : undefined;
     const known = label
-      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate, asOf)
+      ? resolveKnownAnswer(
+        label,
+        'text',
+        ap,
+        jdText,
+        postingCountry,
+        postingCountryCode,
+        storedAsCandidate,
+        asOf,
+        undefined,
+        applicantIndicatedCountryCode,
+      )
       : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
@@ -8104,6 +8196,20 @@ export function resolveKnownAnswer(
    * packet_stale deadlock documented at PHONE_NUMBER_FIELD_QUESTION. Thread it only when both
    * sides of that flip can see the same controls. */
   siblingLabels?: readonly string[],
+  /* THE COUNTRY SHE INDICATED FOR THIS APPLICATION on the packet's own answered questions, and
+   * undefined is fail-closed exactly as postingCountryCode above is.
+   *
+   * Read by exactly one rule, workEligibilityAnswer, and only when the POSTING could not name a
+   * single country - a role published for Austin, Chicago, New York, London and Singapore at once.
+   * Computed by applicantIndicatedWorkCountry from her answers alone; see that function for what
+   * counts as evidence and why each kind is safe.
+   *
+   * CALLERS DO NOT BUILD THIS BY HAND. The three functions that own a packet's question list -
+   * refreshKnownQuestionAnswers, knownAnswerLookup and sensitiveQuestionRequiresAttention - each
+   * derive it from that list themselves, so the gate, the refresh and the lookup cannot disagree
+   * about what she indicated. A caller that only has one label in isolation omits it and gets
+   * exactly the behaviour it has today, which is a held question. */
+  applicantIndicatedCountryCode?: string,
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -8329,7 +8435,7 @@ export function resolveKnownAnswer(
   const blocWorkPermit = blocWorkPermitAnswer(label, ap, postingCountryCode);
   if (blocWorkPermit) return blocWorkPermit;
 
-  const earlyWorkEligibility = workEligibilityAnswer(label, ap, postingCountry, postingCountryCode);
+  const earlyWorkEligibility = workEligibilityAnswer(label, ap, postingCountry, postingCountryCode, applicantIndicatedCountryCode);
   if (earlyWorkEligibility) return earlyWorkEligibility;
 
   if (OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION.test(label)) {

@@ -928,7 +928,13 @@ function sensitiveQuestionFor(
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
 ): ApplicationReviewQuestion | undefined {
-  return normalizeApplicationReviewQuestions(questions)
+  /* NORMALIZED ONCE AND HANDED TO THE GATE WHOLE.
+   *
+   * The predicate reads the country she indicated on THIS form, so it needs every question on it,
+   * not only the one being judged - and it must read the same normalized list the filter below
+   * walks, or the gate and the row it is deciding about would disagree about what the form says. */
+  const packetQuestions = normalizeApplicationReviewQuestions(questions);
+  return packetQuestions
     /* An OPTIONAL sensitive question with no answer is an offer, not a blocker. R-096 now mints
        answerless records for refused questions the employer left voluntary (the normal case for
        an EEO section) so she can answer them in the product; an empty answer generates no fill
@@ -937,6 +943,7 @@ function sensitiveQuestionFor(
        REQUIRED sensitive question keeps the gate exactly as it stands, answered or not. */
     .filter((question) => question.required || question.answer.trim().length > 0)
     .find((question) => sensitiveQuestionRequiresAttention(
+      packetQuestions,
       question.question, question.answer, 'text', profile, jdText, postingCountry, postingCountryCode,
     ));
 }
@@ -2685,6 +2692,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * The same lookup also names the value an override was made against. See the merge's
        * resolverAnswerFor parameter. */
       const resolverAnswerFor = knownAnswerLookup(
+        current.questions,
         await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
         current.jd_text,
         postingCountryFromJobContext(row.job_context),

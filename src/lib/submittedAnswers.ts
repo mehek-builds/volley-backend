@@ -44,7 +44,22 @@ export function resolveSubmittedApplicationAnswers(options: {
    * answer is her choice or a round trip of the resolver's own value, and which value an override was
    * made against - and building it once here is what stops the two halves of this function
    * disagreeing about that, the same reason the round is computed once. */
-  const resolverAnswerFor = knownAnswerLookup(profile, current.jd_text, postingCountry, postingCountryCode, asOf);
+  /* THE QUESTIONS AS THEY STAND BEFORE THIS SAVE, deliberately, not the merged list.
+   *
+   * This lookup answers "what did the screen she is posting back have been shown", and the screen
+   * was rendered from current.questions. If she is answering the office-location question and the
+   * sponsorship question in the SAME save, the pre-merge list does not yet carry the location, the
+   * resolver still refuses the sponsorship label, and her answer is therefore recorded as HER claim
+   * rather than as a round trip of a value the machine produced. The refresh below then runs on the
+   * merged list, sees both answers, and resolves - which is the right order for both jobs. */
+  const resolverAnswerFor = knownAnswerLookup(
+    current.questions,
+    profile,
+    current.jd_text,
+    postingCountry,
+    postingCountryCode,
+    asOf,
+  );
   const merged = mergeSubmittedApplicationReviewQuestions(
     current.questions,
     submitted,

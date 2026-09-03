@@ -429,6 +429,7 @@ test('send-time sensitive guard allows stored work and EEO answers while blockin
 test('profile-aware submit gate accepts exact stored work answers only', () => {
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'Are you currently eligible to work in the United States of America?',
       'Yes',
       'text',
@@ -439,6 +440,7 @@ test('profile-aware submit gate accepts exact stored work answers only', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
       'Yes',
       'text',
@@ -449,6 +451,7 @@ test('profile-aware submit gate accepts exact stored work answers only', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'Do you now or in the future require visa sponsorship/work authorization to continue working in the United States?',
       'No',
       'text',
@@ -459,6 +462,7 @@ test('profile-aware submit gate accepts exact stored work answers only', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you authorized to work in the US without sponsorship?',
       'Yes',
       'text',
@@ -469,6 +473,7 @@ test('profile-aware submit gate accepts exact stored work answers only', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'Do you now or in the future require visa sponsorship/work authorization to continue working in Canada?',
       'Yes',
       'text',
@@ -478,7 +483,7 @@ test('profile-aware submit gate accepts exact stored work answers only', () => {
     true,
   );
   assert.equal(
-    sensitiveQuestionRequiresAttention('social security number', '123', 'text', { work_authorized: true }, undefined),
+    sensitiveQuestionRequiresAttention([], 'social security number', '123', 'text', { work_authorized: true }, undefined),
     true,
   );
 });
@@ -749,6 +754,7 @@ test('the shapes Litos actually stores still answer the 18+ attestation', () => 
 test('sensitive gates allow only exact stored work eligibility answers', () => {
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you legally authorized to work in the United States?',
       'Yes',
       'text',
@@ -759,6 +765,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'will you now or in the future require sponsorship for employment visa status in the United States?',
       'Yes',
       'text',
@@ -769,6 +776,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you legally authorized to work in the United States?',
       'No',
       'text',
@@ -779,6 +787,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you legally authorized to work in the United States?',
       'Yes',
       'text',
@@ -789,6 +798,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you legally authorized to work in Canada?',
       'Yes',
       'text',
@@ -799,6 +809,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you authorized to work in the US without sponsorship?',
       'Yes',
       'text',
@@ -807,10 +818,11 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
     ),
     true,
   );
-  assert.equal(sensitiveQuestionRequiresAttention('social security number', '123-45-6789', 'text', {}, undefined), true);
-  assert.equal(sensitiveQuestionRequiresAttention('what is your gender?', 'Female', 'text', {}, undefined), true);
+  assert.equal(sensitiveQuestionRequiresAttention([], 'social security number', '123-45-6789', 'text', {}, undefined), true);
+  assert.equal(sensitiveQuestionRequiresAttention([], 'what is your gender?', 'Female', 'text', {}, undefined), true);
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you a person of transgender experience? * 431',
       'Decline to self-identify',
       'text',
@@ -821,6 +833,7 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(
     sensitiveQuestionRequiresAttention(
+      [],
       'are you a person of transgender experience? * 431',
       "I don't think that's relevant to my qualifications for this role.",
       'text',

@@ -271,7 +271,7 @@ describe('stored application facts reach the control on the real employer questi
     assert.equal(questionRequiresHumanAttention({ question: IMC_PRIOR_APPLICATION_LABEL, answer: '' }), false);
     assert.equal(questionRequiresHumanAttention({ question: IMC_PRIOR_APPLICATION_LABEL, answer: 'No' }), false);
     assert.equal(
-      sensitiveQuestionRequiresAttention(IMC_PRIOR_APPLICATION_LABEL, 'No', 'text', nothingSent, imc),
+      sensitiveQuestionRequiresAttention([], IMC_PRIOR_APPLICATION_LABEL, 'No', 'text', nothingSent, imc),
       false,
     );
 

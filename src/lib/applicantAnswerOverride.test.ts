@@ -76,7 +76,7 @@ function saveThenRead(
     stored,
     submitted,
     round,
-    knownAnswerLookup(profile, undefined),
+    knownAnswerLookup([], profile, undefined),
   ) as ApplicationReviewQuestion[];
   const read = refreshKnownQuestionAnswers(merged, readProfile, undefined, readRound);
   return { merged, read };
@@ -217,7 +217,7 @@ test('an override of a snapped band answer records the resolver value, not the b
   };
 
   const merged = mergeSubmittedApplicationReviewQuestions(
-    [snapped], [sent], ROUND, knownAnswerLookup(gradProfile, undefined),
+    [snapped], [sent], ROUND, knownAnswerLookup([], gradProfile, undefined),
   ) as ApplicationReviewQuestion[];
   assert.equal(merged[0].answer_override_of, 'May 2028',
     'the value the profile actually produces, or currency can never be proved');
@@ -244,7 +244,7 @@ test('an unedited save of a value the refresh corrected is not her claim', () =>
     [stale],
     [{ id: 'gender', question: 'Gender', answer: displayed, kind: 'required', required: false }],
     ROUND,
-    knownAnswerLookup(eeoProfile, undefined),
+    knownAnswerLookup([], eeoProfile, undefined),
   ) as ApplicationReviewQuestion[];
 
   assert.equal(merged[0].answer_source, undefined,
@@ -263,7 +263,7 @@ test('editing an essay records her claim but no override value', () => {
     [essay],
     [{ ...essay, answer: 'A better draft.' }],
     ROUND,
-    knownAnswerLookup(profileWith(PROFILE_DEGREE), undefined),
+    knownAnswerLookup([], profileWith(PROFILE_DEGREE), undefined),
   ) as ApplicationReviewQuestion[];
 
   assert.equal(merged[0].answer, 'A better draft.');
