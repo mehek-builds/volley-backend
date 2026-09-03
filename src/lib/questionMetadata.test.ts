@@ -4,9 +4,11 @@ import {
   discoveredQuestionsForExactOptionProbe,
   questionMetadataBlockerForDiscovered,
   reopenUnfitClosedChoiceQuestions,
+  snapStoredAnswersToOfferedOptions,
   storedAnswerMatchesNoExactOption,
 } from './questionMetadata';
 import { blankRequiredQuestionLabels } from './submissionSafety';
+import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
 import type { ApplicationReviewQuestion } from './applicationReview';
 
 /* THE PRODUCTION SHAPE, byte for byte. Measured live on the Mytos Lever packet (application
@@ -198,4 +200,133 @@ test('a partial discovered option list is a blocker and is never treated as an e
   assert.equal(blocker?.portal_input_type, field.inputType);
   assert.equal(discoveredQuestionsForExactOptionProbe([field])[0]?.options, null,
     'the next probe must re-read the control instead of resolving against a partial list');
+});
+
+/* ── The Hudson River Trading gender control, byte for byte ─────────────────────────────────────
+ *
+ * Measured live 2026-09-03 (packet 4a79eec1, greenhouse job-boards). The form asks "What is your
+ * gender?" and offers Woman / Man / Non-binary / I don't wish to answer. Her stored
+ * `eeo_prefs.gender` is "Female", so the stored row held answer "Female", which is on none of those
+ * options: reopenUnfitClosedChoiceQuestions blanked it, the dashboard reported "1 answer needs
+ * you", and the send was gated on a question her profile answers. PR #888 taught eeoAnswerLadder
+ * the Female/Woman equivalence and fixed the FILL, but refreshKnownQuestionAnswers resolves through
+ * resolveKnownAnswer, which by design never consults an option list, so the STORED row refreshed to
+ * "Female" forever and the gate never cleared. These pin the composed packet-shaping pass - refresh,
+ * snap, re-open - that the three call sites run, not just the snap in isolation. */
+const HRT_GENDER_OPTIONS = ['Woman', 'Man', 'Non-binary', "I don't wish to answer"];
+const HRT_VETERAN_OPTIONS = ['Yes', 'No', "I don't wish to answer"];
+const HRT_RACE_OPTIONS = ['South Asian', 'East Asian', 'White', "I don't wish to answer"];
+const HRT_ROUND = '2026-09-03T09:14:00.000Z';
+
+const HER_PROFILE: ApplicationProfileLike = {
+  eeo_prefs: { gender: 'Female', race: 'South Asian', veteran_status: 'No', hispanic: 'No' },
+};
+
+const hrtQuestion = (overrides: Partial<ApplicationReviewQuestion> = {}): ApplicationReviewQuestion => ({
+  id: 'gender',
+  question: 'What is your gender?',
+  answer: 'Female',
+  kind: 'required',
+  required: true,
+  portal_input_type: 'select-one',
+  options: [...HRT_GENDER_OPTIONS],
+  ...overrides,
+});
+
+/** The three passes the packet-shaping call sites compose, in their production order. */
+const shapePacket = (
+  questions: readonly ApplicationReviewQuestion[],
+  profile: ApplicationProfileLike = HER_PROFILE,
+) => reopenUnfitClosedChoiceQuestions(snapStoredAnswersToOfferedOptions(
+  refreshKnownQuestionAnswers(questions, profile, undefined, HRT_ROUND),
+));
+
+test('the HRT gender answer reaches the employer in the employer\'s own spelling instead of blocking the send', () => {
+  const [shaped] = shapePacket([hrtQuestion()]);
+
+  assert.equal(shaped.answer, 'Woman', '"Female" snaps onto the option the control actually offers');
+  assert.deepEqual(shaped.options, HRT_GENDER_OPTIONS, 'the employer\'s list is untouched');
+  assert.deepEqual(
+    blankRequiredQuestionLabels([shaped]),
+    [],
+    'the pre-send gate clears: this is no longer "1 answer needs you"',
+  );
+  assert.equal('answer_draft' in shaped, false, 'nothing was re-opened, so no draft is minted');
+});
+
+test('the other three HRT self-identification rows are already in the form\'s vocabulary and are left alone', () => {
+  const veteran = hrtQuestion({
+    id: 'veteran',
+    question: 'Are you a protected veteran?',
+    answer: 'No',
+    options: [...HRT_VETERAN_OPTIONS],
+  });
+  const race = hrtQuestion({
+    id: 'race',
+    question: 'What is your race/ethnicity?',
+    answer: 'South Asian',
+    options: [...HRT_RACE_OPTIONS],
+  });
+
+  assert.equal(shapePacket([veteran])[0].answer, 'No');
+  assert.equal(shapePacket([race])[0].answer, 'South Asian',
+    'a stored value the list already carries is never widened to a coarser federal category');
+});
+
+test('an answer no option and no alias can hold is left exactly as it stands', () => {
+  const selfDescribed = hrtQuestion({ answer: 'Trans woman' });
+  const [snapped] = snapStoredAnswersToOfferedOptions([selfDescribed]);
+
+  assert.deepEqual(snapped, selfDescribed,
+    'nothing is invented and no decline is substituted; the re-open still handles it as before');
+  assert.equal(reopenUnfitClosedChoiceQuestions([snapped])[0].answer, '');
+});
+
+test('an answer the applicant reviewed and picked from the control\'s own list is not rewritten', () => {
+  const reviewed = hrtQuestion({
+    answer: 'Man',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: HRT_ROUND,
+  });
+  const [shaped] = shapePacket([reviewed]);
+
+  assert.equal(shaped.answer, 'Man',
+    'the refresh\'s reviewed-answer guard wins, and the snap refuses an answer the list already offers');
+  assert.equal(shaped.answer_source, 'applicant_review', 'her provenance rides along untouched');
+});
+
+test('a control with no options is a no-op, which is every free-text question', () => {
+  const essay = hrtQuestion({
+    id: 'essay',
+    question: 'Describe a project you are proud of',
+    answer: 'Female',
+    kind: 'essay',
+    required: false,
+    portal_input_type: 'textarea',
+    options: null,
+  });
+  assert.deepEqual(snapStoredAnswersToOfferedOptions([essay]), [essay]);
+});
+
+test('the snap is a fixed point of the refresh/snap chain, so it composes inside packetQuestionFixpoint', () => {
+  const first = snapStoredAnswersToOfferedOptions(
+    refreshKnownQuestionAnswers([hrtQuestion()], HER_PROFILE, undefined, HRT_ROUND),
+  );
+  const second = snapStoredAnswersToOfferedOptions(
+    refreshKnownQuestionAnswers(first, HER_PROFILE, undefined, HRT_ROUND),
+  );
+  assert.equal(first[0].answer, 'Woman');
+  assert.deepEqual(second, first, 'the chain settles instead of flipping Woman/Female forever');
+});
+
+test('the equivalence runs in both directions, for the boards that spell it Female/Male', () => {
+  const storedWoman = hrtQuestion({
+    answer: 'Woman',
+    options: ['Female', 'Male', 'Decline To Self Identify'],
+  });
+  assert.equal(
+    snapStoredAnswersToOfferedOptions([storedWoman])[0].answer,
+    'Female',
+    'a stored "Woman" reaches an older Greenhouse list written in the other vocabulary',
+  );
 });

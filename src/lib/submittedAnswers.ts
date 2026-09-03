@@ -2,7 +2,7 @@ import { mergeSubmittedApplicationReviewQuestions, type ApplicationReviewQuestio
 import type { JobCountry } from './jobLocation';
 import { knownAnswerLookup, refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
 import { packetQuestionFixpoint } from './packetQuestionIdentity';
-import { reopenUnfitClosedChoiceQuestions } from './questionMetadata';
+import { reopenUnfitClosedChoiceQuestions, snapStoredAnswersToOfferedOptions } from './questionMetadata';
 
 /**
  * The answers POST /submit-request will fill the employer's form from, and the review round they are
@@ -59,7 +59,12 @@ export function resolveSubmittedApplicationAnswers(options: {
    * so no sent record is ever rewritten here. */
   const questions = packetQuestionFixpoint(
     merged,
-    (candidate) => reopenUnfitClosedChoiceQuestions(refreshKnownQuestionAnswers(
+    /* The snap runs between the two for the reason written on snapStoredAnswersToOfferedOptions:
+     * the refresh decides the answer without ever seeing the control's list, and the re-open blanks
+     * whatever the list cannot hold, so the pass that writes the answer in the employer's own
+     * spelling has to sit between them or a snappable answer is destroyed before anything can snap
+     * it. */
+    (candidate) => reopenUnfitClosedChoiceQuestions(snapStoredAnswersToOfferedOptions(refreshKnownQuestionAnswers(
       candidate,
       profile,
       current.jd_text,
@@ -67,7 +72,7 @@ export function resolveSubmittedApplicationAnswers(options: {
       postingCountry,
       postingCountryCode,
       asOf,
-    )),
+    ))),
   );
   return { questions, questionsReviewedAt };
 }

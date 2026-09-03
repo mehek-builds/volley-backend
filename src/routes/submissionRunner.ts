@@ -297,6 +297,7 @@ import {
   questionMetadataBlockerReason,
   questionLabelIsGenericAnswerControl,
   reopenUnfitClosedChoiceQuestions,
+  snapStoredAnswersToOfferedOptions,
   type QuestionMetadataBlocker,
 } from '../lib/questionMetadata';
 import {
@@ -9024,7 +9025,15 @@ export function resolvePacketAuditQuestionFixpoint(
         postingCountryCode,
         asOf,
       );
-      return normalize(packetMayBeWithEmployer ? refreshed : reopenUnfitClosedChoiceQuestions(refreshed));
+      /* Snapped between the refresh and the re-open, per snapStoredAnswersToOfferedOptions:
+       * the refresh never sees the control's option list and the re-open blanks what that list
+       * cannot hold, so the pass that rewrites an answer into the employer's own spelling has
+       * to run between them. It rides the same not-yet-with-employer branch the re-open does,
+       * so a packet that may already be with the employer still keeps its stored answers
+       * verbatim as the record of what was sent. */
+      return normalize(packetMayBeWithEmployer
+        ? refreshed
+        : reopenUnfitClosedChoiceQuestions(snapStoredAnswersToOfferedOptions(refreshed)));
     },
   );
 }
