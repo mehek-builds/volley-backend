@@ -6,23 +6,26 @@ import {
   snapAnswerToOfferedOption,
   type ApplicationProfileLike,
 } from './questionDiscovery';
+import { resolveSubmittedApplicationAnswers } from './submittedAnswers';
 import { reopenUnfitClosedChoiceQuestions, storedAnswerMatchesNoExactOption } from './questionMetadata';
-import { packetQuestionFixpoint } from './packetQuestionIdentity';
 import { blankRequiredQuestionLabels } from './submissionSafety';
+import { isDeclineToState } from './selfIdentification';
 import type { ApplicationReviewQuestion } from './applicationReview';
 
 /* ── The Hudson River Trading gender control, byte for byte ────────────────────────────────────
  *
  * MEASURED IN PRODUCTION 2026-09-03 on packet 4a79eec1 (Hudson River Trading, greenhouse). The
  * required control asks "What is your gender?" and offers Woman / Man / Non-binary / I don't wish
- * to answer. Her stored eeo_prefs.gender is "Female". Pressing Save on the live dashboard returned
- * 200 with the answer still "Female"; reopenUnfitClosedChoiceQuestions then blanked it, the card
- * rendered with every radio unchecked, and the packet could not proceed.
+ * to answer. Her stored eeo_prefs.gender is "Female", which is on none of them, so the fill can
+ * select nothing and the packet cannot proceed. PR #888 shipped the Female/Woman equivalence into
+ * the FILL path and no save has ever reached it.
  *
- * Commit 7a3d1b2 (PR #888) had already shipped the Female/Woman equivalence and was measured on
- * this exact packet. It lives in the FILL path, and a save has never reached it, so it was correct,
- * deployed and unreachable. These tests exercise the composed save path, refresh then re-open, that
- * routes/applications.ts runs through resolveSubmittedApplicationAnswers, not the snap alone. */
+ * EVERY SAFETY CLAIM HERE IS TESTED THROUGH resolveSubmittedApplicationAnswers, the function
+ * routes/applications.ts calls on Save, and NOT through the leaf. That is deliberate and it is the
+ * whole lesson of the first round of this PR: the refresh inside that composition REPLACES a stored
+ * answer with the profile's value, so a leaf test hands the snap a string the real path never hands
+ * it, and four rewrites that a leaf test called safe were live in the composed path. Leaf tests
+ * below are confined to the matcher's own arithmetic and say so. */
 const HRT_GENDER_OPTIONS = ['Woman', 'Man', 'Non-binary', "I don't wish to answer"];
 const ROUND = '2026-09-03T09:14:00.000Z';
 const AS_OF = new Date('2026-09-03T09:14:00.000Z');
@@ -39,18 +42,29 @@ const question = (overrides: Partial<ApplicationReviewQuestion> = {}): Applicati
   answer: 'Female',
   kind: 'required',
   required: true,
-  portal_input_type: 'select-one',
+  portal_input_type: 'radio',
   options: [...HRT_GENDER_OPTIONS],
   ...overrides,
 });
 
-/** The save path's own composition: refresh, then re-open, driven to a fixpoint. */
+/**
+ * The real save path: merge, then refresh and re-open to a fixpoint. Not a stand-in for it.
+ *
+ * `submitted` is the stored list posted back unchanged, which is what an untouched Save actually
+ * sends: the client posts back the rows it was shown. Passing an EMPTY submitted list is not the
+ * same thing and quietly changes the answer under test, because the merge strips answer_source from
+ * a stored question with no counterpart in the review.
+ */
 const savePath = (
   questions: readonly ApplicationReviewQuestion[],
   profile: ApplicationProfileLike = HER_PROFILE,
-) => packetQuestionFixpoint(questions, (candidate) => reopenUnfitClosedChoiceQuestions(
-  refreshKnownQuestionAnswers(candidate, profile, undefined, ROUND, undefined, undefined, AS_OF),
-));
+) => resolveSubmittedApplicationAnswers({
+  current: { questions: [...questions], questions_reviewed_at: null, jd_text: undefined } as never,
+  submitted: questions.map((one) => ({ ...one })),
+  profile,
+  now: () => ROUND,
+  asOf: AS_OF,
+}).questions;
 
 test('the HRT gender answer reaches the employer in the employer\'s own spelling instead of blocking the send', () => {
   const [saved] = savePath([question()]);
@@ -65,31 +79,75 @@ test('the HRT gender answer reaches the employer in the employer\'s own spelling
   assert.equal('answer_draft' in saved, false, 'nothing was re-opened, so no draft is minted');
 });
 
-test('the equivalence runs both ways, for the boards that spell it Female and Male', () => {
-  assert.equal(
-    snapAnswerToOfferedOption(question({ answer: 'Woman', options: ['Female', 'Male', 'Decline To Self Identify'] })).answer,
-    'Female',
-    'a stored "Woman" reaches an older list written in the other vocabulary',
-  );
-  assert.equal(
-    snapAnswerToOfferedOption(question({ answer: 'Male', options: [...HRT_GENDER_OPTIONS] })).answer,
-    'Man',
-  );
+test('the repair reaches every control type that may hold a fit answer, combobox included', () => {
+  /* #896 infers that HRT's own gender control is a combobox, and on a combobox the re-open never
+   * fires, so the deadlock is at fill time rather than as a blanked card. Both shapes must clear,
+   * because the packet's own portal_input_type could not be read from here. */
+  for (const portal_input_type of ['radio', 'select', 'select-one', 'listbox', 'combobox']) {
+    assert.equal(
+      savePath([question({ portal_input_type })])[0].answer,
+      'Woman',
+      `${portal_input_type} is a control that may hold a fit answer`,
+    );
+  }
 });
 
-/* ── The four answers a machine must never answer for her ──────────────────────────────────────
+test('the equivalence runs both ways, for the boards that spell it Female and Male', () => {
+  const otherVocabulary = savePath(
+    [question({ answer: 'Woman', options: ['Female', 'Male', 'Decline To Self Identify'] })],
+    { eeo_prefs: { gender: 'Woman' } } as unknown as ApplicationProfileLike,
+  );
+  assert.equal(otherVocabulary[0].answer, 'Female', 'a stored "Woman" reaches a Female/Male list');
+
+  const male = savePath(
+    [question({ answer: 'Male' })],
+    { eeo_prefs: { gender: 'Male' } } as unknown as ApplicationProfileLike,
+  );
+  assert.equal(male[0].answer, 'Man');
+});
+
+/* ── The answer the refresh wrote over hers is NEVER the thing re-spelled ──────────────────────
  *
- * PR #892 attempted this repair through profileAnswerAliases, whose ladder ends in the decline
- * wordings, and chooseEeoOption, whose last resort is the sole option reading as a refusal.
- * Measured on that branch: "South Asian" became "Prefer not to say", "Middle Eastern" became
- * "I do not wish to answer", "Trans woman" became "I do not wish to answer", and an age of "20"
- * became "Prefer not to say". Each of those is a claim she never made, on the one question family
- * where the honest outcome of "no option fits" is to ask her.
+ * THE DEFECT THIS PINS, measured through resolveSubmittedApplicationAnswers on the first version of
+ * this PR, profile gender "Female", HRT list, radio:
  *
- * Every list below carries a decline, so a decline is always reachable and always the wrong answer.
- * The rule that forbids it is structural rather than a check: the only candidates are
- * selfIdentificationRespellings, which is her own wording plus the paired gender term, and the
- * decline wordings live one rung further down in eeoAnswerLadder, which this path does not call. */
+ *   stored "Trans woman"        ->  "Woman"   SENT as her self-identification
+ *   stored "Prefer not to say"  ->  "Woman"   a stored REFUSAL turned into an affirmative claim
+ *   stored "Genderqueer"        ->  "Woman"
+ *   stored "Intersex"           ->  "Woman"
+ *
+ * refreshKnownQuestionAnswers clobbers each stored answer with the profile value "Female", and
+ * re-spelling THAT made it fit the control, so reopenUnfitClosedChoiceQuestions stopped blanking it
+ * and blankRequiredQuestionLabels stopped gating the send. On main the clobber is self-defeating:
+ * the value is unpaintable, the row re-opens, and she answers. Measured on 0763733, every row below
+ * settles to "" there, which is what these assert. */
+const NEVER_HERS_TO_REWRITE: ReadonlyArray<{ label: string; answer: string }> = [
+  { label: 'What is your gender?', answer: 'Trans woman' },
+  { label: 'What is your gender?', answer: 'Prefer not to say' },
+  { label: 'What is your gender?', answer: 'Genderqueer' },
+  { label: 'What is your sex?', answer: 'Intersex' },
+];
+
+for (const { label, answer } of NEVER_HERS_TO_REWRITE) {
+  test(`a stored "${answer}" is re-opened for her, never re-spelled as the profile's gender`, () => {
+    const [saved] = savePath([question({ id: 'x', question: label, answer })]);
+
+    assert.equal(saved.answer, '', 'the row re-opens exactly as it does on main, and she picks');
+    assert.notEqual(saved.answer, 'Woman');
+    assert.deepEqual(
+      blankRequiredQuestionLabels([saved]),
+      [label],
+      'and the send stays gated on it, which is the system asking her',
+    );
+  });
+}
+
+/* ── Never a decline, through the composition ─────────────────────────────────────────────────
+ *
+ * PR #892 rewrote each of these to the control's own opt-out. Every list below carries exactly one
+ * decline, so the wrong answer is always reachable. Asserted against the OPTIONS rather than
+ * against a fixed string, because what must never happen is that the machine lands on the
+ * employer's own refusal. */
 const NEVER_A_DECLINE: ReadonlyArray<{ label: string; answer: string; options: string[] }> = [
   {
     label: 'What is your race/ethnicity?',
@@ -110,172 +168,85 @@ const NEVER_A_DECLINE: ReadonlyArray<{ label: string; answer: string; options: s
 ];
 
 for (const { label, answer, options } of NEVER_A_DECLINE) {
-  test(`"${answer}" is never rewritten to a decline, and is left for her to answer`, () => {
-    const stored = question({ id: 'x', question: label, answer, options: [...options] });
+  test(`"${answer}" never lands on the control's own decline, through the save path`, () => {
+    const [saved] = savePath([question({ id: 'x', question: label, answer, options: [...options] })]);
+    const declines = options.filter((option) => isDeclineToState(option));
 
-    /* THE ROW IS GENUINELY IN THE DANGEROUS STATE, which is what makes the refusal below mean
-     * something: this is the set the re-open is about to blank and the set PR #892 rewrote. */
-    assert.equal(storedAnswerMatchesNoExactOption(stored), true, 'no option holds this answer');
-    assert.deepEqual(snapAnswerToOfferedOption(stored), stored, 'the record is returned untouched');
-
-    const [reopened] = reopenUnfitClosedChoiceQuestions([snapAnswerToOfferedOption(stored)]);
-    assert.equal(reopened.answer, '', 'the question re-opens exactly as it does today');
-    assert.equal(reopened.answer_draft, answer, 'and her own words are kept for the dashboard');
+    assert.equal(declines.length, 1, 'the list really does offer a decline to land on');
+    assert.equal(
+      declines.includes(saved.answer.trim()), false,
+      `the save path answered ${JSON.stringify(saved.answer)}, which must not be the opt-out`,
+    );
+    assert.equal(
+      options.includes(saved.answer.trim()) && saved.answer.trim() !== answer, false,
+      'and it did not silently land on any other option of the employer\'s either',
+    );
   });
 }
 
-test('a refusal she gave is not re-spelled into the control\'s refusal either', () => {
-  /* eeoAnswerLadder does respell one refusal as another for a FILL, and the ladder argues that is a
-   * substitution of the same refusal for itself. This path still declines to do it: a refusal is
-   * not a stated answer, the only candidates here are her own wording and the paired gender term,
-   * and main leaves this row exactly as it stands. */
-  const stored = question({
-    id: 'hispanic',
-    question: 'Are you Hispanic or Latino?',
-    answer: 'Decline to self-identify',
-    options: ['Yes', 'No', 'Prefer not to say'],
-  });
-  assert.deepEqual(snapAnswerToOfferedOption(stored), stored);
-  assert.equal(
-    snapAnswerToOfferedOption(question({ answer: 'Female' })).answer,
-    'Woman',
-    'and the snap is live on the same shape of record: only the refusal is refused',
-  );
-});
-
-test('a widening is not a re-spelling: a coarser federal race category is never written here', () => {
-  /* selfIdentificationStatedForms offers "Asian" as the category that wholly contains "South
-   * Asian", and resolveProfileField takes it when it is CHOOSING what to put in an empty control.
-   * Rewriting an answer already in a packet is a different act: the alternative to widening is that
-   * she is asked, so this path takes only the symmetric rung. */
-  const stored = question({
+test('a widening is not a re-spelling: a coarser federal race category is never written', () => {
+  /* selfIdentificationStatedForms offers "Asian" as the category containing "South Asian", and
+   * resolveProfileField takes it when CHOOSING what to put in an empty control. Rewriting an answer
+   * already in a packet is a different act, so this path takes only the symmetric rung. */
+  const [saved] = savePath([question({
     id: 'race',
     question: 'What is your race/ethnicity?',
     answer: 'South Asian',
     options: ['Asian', 'White', 'Black or African American'],
-  });
-  assert.equal(storedAnswerMatchesNoExactOption(stored), true, 'no option holds "South Asian"');
-  assert.deepEqual(snapAnswerToOfferedOption(stored), stored);
+  })]);
+  assert.notEqual(saved.answer, 'Asian', 'the coarser category is never written for her');
+  assert.equal(saved.answer, '', 're-opened instead, byte for byte what 0763733 does');
 });
 
-test('a stored answer the control already offers is not re-spelled at all', () => {
-  /* THE GATE. Without it the loop reaches the paired term even when the list carries her own
-   * spelling, and rewrites "Female" to "Woman" on a control that would have accepted "Female",
-   * shedding her provenance for nothing. */
-  const bothSpellings = question({ answer: 'Female', options: ['Female', 'Woman', 'Non-binary'] });
-  assert.equal(storedAnswerMatchesNoExactOption(bothSpellings), false, 'the list already holds it');
-  assert.deepEqual(snapAnswerToOfferedOption(bothSpellings), bothSpellings);
-  assert.equal(
-    snapAnswerToOfferedOption(question({ answer: 'Female', options: ['Woman', 'Man'] })).answer,
-    'Woman',
-    'and drop "Female" from that list and the same record does snap',
-  );
+test('a skip cannot ride onto a machine-rewritten answer', () => {
+  /* submissionRunner's skipOutlivedItsAnswer rule: a skip means "the value is right, the portal's
+   * menu will not take it, leave the field alone", it is bound to a NON-EMPTY answer
+   * (applicationReview.ts), and carried onto a value the machine has since rewritten it silences
+   * the send gate for something she never saw. */
+  const skipped = question({ answer_state: 'skipped' } as Partial<ApplicationReviewQuestion>);
+  const snapped = snapAnswerToOfferedOption(skipped, 'Female') as Record<string, unknown>;
 
-  const foldedByPunctuation = question({
-    answer: "I don't wish to answer",
-    options: ['Woman', 'Man', 'I dont wish to answer'],
-  });
-  assert.deepEqual(snapAnswerToOfferedOption(foldedByPunctuation), foldedByPunctuation);
+  assert.equal(snapped.answer, 'Woman', 'the answer really did change');
+  assert.equal('answer_state' in snapped, false, 'so the skip taken against "Female" is gone');
 });
 
-test('"C#" against ["C", "C#", "Java", "Python"] is not rewritten to "C"', () => {
-  /* THE GATE AND THE MATCHER ARE ONE RELATION, and this is the case that proves it. comparableOption
-   * folds "C#" onto "c", which is also "C"'s key, so usableOptions de-duplicates the two. A gate
-   * asking the STRICTER question (lowercase byte equality) calls "C#" off-list, and the matcher then
-   * finds "C" and rewrites a language she named to a different language. That was PR #892's second
-   * critical, and it is not specific to EEO: it is what any two-relation rewrite does. */
-  const stored = question({
-    id: 'lang',
-    question: 'Primary programming language',
-    answer: 'C#',
-    options: ['C', 'C#', 'Java', 'Python'],
-  });
-  assert.equal(
-    storedAnswerMatchesNoExactOption(stored), true,
-    'usableOptions de-duplicates "C#" away and the strict gate calls the answer off-list: this is'
-    + ' exactly the state a second, looser matcher turns into a rewrite',
-  );
-  assert.deepEqual(snapAnswerToOfferedOption(stored), stored);
-  assert.equal(
-    refreshKnownQuestionAnswers([stored], HER_PROFILE, undefined, ROUND, undefined, undefined, AS_OF)[0].answer,
-    'C#',
-    'and the whole refresh leaves it alone too',
-  );
-});
-
-test('two options spelling the same re-spelling refuse rather than picking by DOM order', () => {
-  const stored = question({ answer: 'Female', options: ['Woman', 'woman', 'Man'] });
-  assert.equal(storedAnswerMatchesNoExactOption(stored), true);
-  assert.deepEqual(snapAnswerToOfferedOption(stored), stored);
-  assert.equal(
-    snapAnswerToOfferedOption(question({ answer: 'Female', options: ['Woman', 'Woman', 'Man'] })).answer,
-    'Woman',
-    'two rows spelling it identically are one option, and that one is adopted',
-  );
-});
-
-test('an open control is never snapped, whatever it happens to carry beside it', () => {
-  /* THE CONTROL-TYPE GATE. SINGLE_CHOICE_EXACT_OPTION_TYPE is the same constant
-   * reopenUnfitClosedChoiceQuestions gates on, so a control this path may rewrite is always one
-   * that path would otherwise blank. */
-  for (const portal_input_type of ['textarea', 'text', 'checkbox', 'select-multiple', 'combobox']) {
-    const stored = question({ answer: 'Female', portal_input_type });
-    assert.deepEqual(
-      snapAnswerToOfferedOption(stored),
-      stored,
-      `${portal_input_type} is not a strict single choice and is never rewritten`,
-    );
-  }
-});
-
-test('a control with no readable options cannot produce a rewrite', () => {
-  /* Nothing can be adopted that the employer did not put on the control, so "the list must be
-   * complete" arrives by construction rather than as a check. The positive control is the point of
-   * the test: the same record snaps the moment the list carries the word. */
-  for (const options of [null, undefined, [], ['   ']]) {
-    const stored = question({ options: options as string[] | null });
-    assert.deepEqual(snapAnswerToOfferedOption(stored), stored);
-  }
-  assert.equal(
-    snapAnswerToOfferedOption(question({ options: ['   ', 'Woman', 'Man'] })).answer,
-    'Woman',
-  );
-});
-
-test('a snapped answer is a machine value and sheds every claim made about the old one', () => {
-  /* THE PROVENANCE RULE. `answer_source: 'applicant_review'` beside a value she was never shown is
-   * the laundering applications.ts records a prior incident for, and it is self-sealing: the
-   * refresh keeps a reviewed answer that matches an offered option ahead of every recompute rule,
-   * so the rewritten value would be immune to later correction. Every field here is a claim about
-   * the OLD string. */
+test('a snapped answer sheds every claim made about the string it replaced', () => {
   const claimed = question({
-    answer: 'Female',
     answer_source: 'applicant_review',
     answer_reviewed_at: ROUND,
-    answer_option_source: 'Female',
     answer_override_of: 'Woman',
     consent_permission_version: 'v3',
     consent_permission_granted_at: ROUND,
   } as Partial<ApplicationReviewQuestion>);
 
-  const snapped = snapAnswerToOfferedOption(claimed) as Record<string, unknown>;
+  const snapped = snapAnswerToOfferedOption(claimed, 'Female') as Record<string, unknown>;
 
-  assert.equal(snapped.answer, 'Woman', 'the answer really did change, so the claims below are stale');
+  assert.equal(snapped.answer, 'Woman');
   for (const field of [
-    'answer_source',
-    'answer_reviewed_at',
-    'answer_option_source',
-    'answer_override_of',
-    'consent_permission_version',
-    'consent_permission_granted_at',
+    'answer_source', 'answer_reviewed_at', 'answer_override_of',
+    'consent_permission_version', 'consent_permission_granted_at',
   ]) {
     assert.equal(field in snapped, false, `${field} belongs to the answer it was made about`);
   }
+  assert.equal(
+    snapped.answer_option_source, 'Female',
+    'and the profile value it was snapped from is recorded, which is what that field is for',
+  );
+});
+
+test('the repair survives a second save instead of lasting exactly one round trip', () => {
+  /* answer_option_source is load-bearing here. Without it the self-identification currency branch
+   * cannot prove "Woman" still states "Female", the next save recomputes it back and re-opens the
+   * question, and the applicant sees the same ask again. */
+  const first = savePath([question()]);
+  assert.equal(first[0].answer, 'Woman');
+
+  const second = savePath(first);
+  assert.equal(second[0].answer, 'Woman', 'a second Save does not undo the first');
+  assert.deepEqual(savePath(second), second, 'and the record has settled');
 });
 
 test('an answer she reviewed and picked from the control\'s own list is still kept verbatim', () => {
-  /* The refresh's existing early return, unweakened: a reviewed answer that IS an offered option is
-   * returned before anything else runs, and the snap's gate refuses it a second time. */
   const [saved] = savePath([question({
     answer: 'Man',
     answer_source: 'applicant_review',
@@ -284,30 +255,83 @@ test('an answer she reviewed and picked from the control\'s own list is still ke
 
   assert.equal(saved.answer, 'Man');
   assert.equal(saved.answer_source, 'applicant_review', 'her provenance rides along untouched');
-  assert.equal(saved.answer_reviewed_at, ROUND);
 });
 
 test('the lookup answers what the refresh serves, so an untouched Save mints no applicant claim', () => {
   /* mergeSubmittedApplicationReviewQuestions asks whether the posted answer is the resolver's own
    * value, because GET /applications/:id/submission refreshes on read and the client posts back
-   * what it was shown. A lookup still answering "Female" while the screen shows "Woman" would read
-   * an untouched Save as an edit and stamp a gender she never selected. */
-  const stored = question();
-  const served = refreshKnownQuestionAnswers(
-    [stored], HER_PROFILE, undefined, ROUND, undefined, undefined, AS_OF,
-  )[0].answer;
+   * what it was shown. A lookup answering "Female" while the screen shows "Woman" would read an
+   * untouched Save as an edit and stamp a gender she never selected. It must also agree on the rows
+   * the snap refuses, which is why both are checked. */
+  for (const stored of [question(), question({ answer: 'Trans woman' })]) {
+    const served = refreshKnownQuestionAnswers(
+      [stored], HER_PROFILE, undefined, ROUND, undefined, undefined, AS_OF,
+    )[0].answer;
+    assert.equal(
+      knownAnswerLookup(HER_PROFILE, undefined, undefined, undefined, AS_OF)(stored),
+      served,
+      `lookup and refresh disagree for stored ${JSON.stringify(stored.answer)}`,
+    );
+  }
+});
 
+/* ── The matcher's own arithmetic ──────────────────────────────────────────────────────────────
+ *
+ * These call the leaf on purpose and pass the answer of record explicitly, because what they pin is
+ * the gate/matcher relation rather than any claim about the composed path. Every safety claim about
+ * what a save can do to a real packet is above, through resolveSubmittedApplicationAnswers. */
+
+test('a stored answer the control already offers is not re-spelled at all', () => {
+  const bothSpellings = question({ answer: 'Female', options: ['Female', 'Woman', 'Non-binary'] });
+  assert.equal(storedAnswerMatchesNoExactOption(bothSpellings), false, 'the list already holds it');
+  assert.deepEqual(snapAnswerToOfferedOption(bothSpellings, 'Female'), bothSpellings);
   assert.equal(
-    knownAnswerLookup(HER_PROFILE, undefined, undefined, undefined, AS_OF)(stored),
-    served,
-    'the lookup and the refresh cannot disagree about the value the screen displays',
+    snapAnswerToOfferedOption(question({ options: ['Woman', 'Man'] }), 'Female').answer,
+    'Woman',
+    'and drop "Female" from that list and the same record does snap',
   );
 });
 
-test('the save path settles, so packetQuestionFixpoint never sees an oscillating packet', () => {
-  /* Full-record deep equality with an 8-pass ceiling that THROWS, so a snap that fought the
-   * resolver every pass would take the whole save down rather than degrade. */
-  const settled = savePath([question()]);
-  assert.deepEqual(savePath(settled), settled);
-  assert.equal(settled[0].answer, 'Woman');
+test('"C#" against ["C", "C#", "Java", "Python"] is not rewritten to "C"', () => {
+  /* THE GATE AND THE MATCHER ARE ONE RELATION. comparableOption folds "C#" onto "c", which is also
+   * "C"'s key, so usableOptions de-duplicates the two and the strict gate calls the answer
+   * off-list. A matcher on a looser relation than its gate then finds "C" and rewrites a language
+   * she named to a different one. That was PR #892's second critical. */
+  const stored = question({
+    id: 'lang', question: 'Primary programming language', answer: 'C#',
+    options: ['C', 'C#', 'Java', 'Python'],
+  });
+  assert.equal(storedAnswerMatchesNoExactOption(stored), true, 'the strict gate calls it off-list');
+  assert.deepEqual(snapAnswerToOfferedOption(stored, 'C#'), stored);
+  const [saved] = savePath([stored]);
+  assert.notEqual(saved.answer, 'C', 'and the save path never turns her language into another one');
+  assert.equal(saved.answer, '', 're-opened instead, byte for byte what 0763733 does');
+});
+
+test('two options spelling the same re-spelling refuse rather than picking by DOM order', () => {
+  const ambiguous = question({ options: ['Woman', 'woman', 'Man'] });
+  assert.deepEqual(snapAnswerToOfferedOption(ambiguous, 'Female'), ambiguous);
+  assert.equal(
+    snapAnswerToOfferedOption(question({ options: ['Woman', 'Woman', 'Man'] }), 'Female').answer,
+    'Woman',
+    'two rows spelling it identically are one option, and that one is adopted',
+  );
+});
+
+test('an open control is never snapped, whatever it happens to carry beside it', () => {
+  for (const portal_input_type of ['textarea', 'text', 'checkbox', 'select-multiple']) {
+    const stored = question({ portal_input_type });
+    assert.deepEqual(snapAnswerToOfferedOption(stored, 'Female'), stored);
+  }
+});
+
+test('a control with no readable options cannot produce a rewrite', () => {
+  for (const options of [null, undefined, [], ['   ']]) {
+    const stored = question({ options: options as string[] | null });
+    assert.deepEqual(snapAnswerToOfferedOption(stored, 'Female'), stored);
+  }
+  assert.equal(
+    snapAnswerToOfferedOption(question({ options: ['   ', 'Woman', 'Man'] }), 'Female').answer,
+    'Woman',
+  );
 });
