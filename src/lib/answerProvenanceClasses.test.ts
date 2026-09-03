@@ -39,6 +39,11 @@ function storedQuestion(overrides: Partial<ApplicationReviewQuestion> = {}): App
     answer_override_of: 'Yes',
     consent_permission_version: 'privacy_and_terms@2026-08-12',
     consent_permission_granted_at: '2026-08-12T09:15:00.000Z',
+    /* Equal to `question` above, because that is the only shape the mint can produce: it writes the
+     * stored label of the question being confirmed. A fixture value that did not match would test a
+     * record no writer can create, and the reader of this field compares it against the current
+     * label, so it would also be testing an already-falsified claim. */
+    answer_confirmed_of: 'Privacy Statement',
     ...overrides,
   };
 }
