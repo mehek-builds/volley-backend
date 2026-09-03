@@ -60,7 +60,12 @@ const VISA_ANSWER =
   + 'authorization expires 05/2031.';
 
 function requiresAttention(answer: string, applicantReviewed: boolean, label = VISA_LABEL): boolean {
-  return sensitiveQuestionRequiresAttention(label, answer, 'text', PROFILE, undefined, undefined, 'US', applicantReviewed);
+  /* `undefined` for the confirmation record: PR 906 added it as the eighth argument and this file is
+   * about the ninth. A confirmation would clear the gate on its own, so passing one here would make
+   * every assertion below pass for the wrong reason. */
+  return sensitiveQuestionRequiresAttention(
+    label, answer, 'text', PROFILE, undefined, undefined, 'US', undefined, applicantReviewed,
+  );
 }
 
 test('the resolver declines the compound visa question, which is what makes the gate unsatisfiable', () => {
@@ -130,7 +135,7 @@ test('a reviewed work-authorization contradiction is still refused', () => {
   const known = resolveKnownAnswer(LABEL, 'text', UNAUTHORIZED, undefined, undefined, 'US');
   if (known && 'value' in known) {
     assert.equal(
-      sensitiveQuestionRequiresAttention(LABEL, 'Yes', 'text', UNAUTHORIZED, undefined, undefined, 'US', true),
+      sensitiveQuestionRequiresAttention(LABEL, 'Yes', 'text', UNAUTHORIZED, undefined, undefined, 'US', undefined, true),
       true,
       'a current-round review must not send a work-authorization claim the profile contradicts',
     );
@@ -138,7 +143,7 @@ test('a reviewed work-authorization contradiction is still refused', () => {
     // The resolver declined instead, so the escape hatch is reachable - that is the visa case, and
     // it is covered above. Either way this label must never pass unreviewed.
     assert.equal(
-      sensitiveQuestionRequiresAttention(LABEL, 'Yes', 'text', UNAUTHORIZED, undefined, undefined, 'US', false),
+      sensitiveQuestionRequiresAttention(LABEL, 'Yes', 'text', UNAUTHORIZED, undefined, undefined, 'US', undefined, false),
       true,
     );
   }
