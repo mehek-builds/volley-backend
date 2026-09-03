@@ -5,6 +5,7 @@ import {
   namedProfileSkill,
   readExperienceBand,
   readTenureMonth,
+  skillEvidencedIn,
   skillNamedIn,
   skillScopedExperienceMonths,
   totalExperienceMonths,
@@ -209,20 +210,20 @@ test('skill-scoped months are the SAME arithmetic on a selected subset of roles'
 
   // The poison rule is inherited whole: an unreadable date on a MATCHING role loses the total.
   assert.equal(
-    skillScopedExperienceMonths([{ start: 'Summer 2025', end: 'Present', description: 'Python' }], 'Python', scopedAsOf),
+    skillScopedExperienceMonths([{ start: 'Summer 2025', end: 'Present', description: 'Built Python services.' }], 'Python', scopedAsOf),
     null,
   );
   // An unreadable date on a role the skill does not match cannot poison a scope it is not in.
   assert.equal(
-    skillScopedExperienceMonths([...EVIDENCED, { start: 'Summer 2025', end: 'Present', description: 'Rust' }], 'Python', scopedAsOf),
+    skillScopedExperienceMonths([...EVIDENCED, { start: 'Summer 2025', end: 'Present', description: 'Wrote Rust services.' }], 'Python', scopedAsOf),
     12,
   );
   // Concurrent roles that both name the skill are one span of time, not two.
   assert.equal(
     skillScopedExperienceMonths(
       [
-        { start: 'Jan 2026', end: 'Jul 2026', description: 'Python' },
-        { start: 'Mar 2026', end: 'Jul 2026', description: 'Python' },
+        { start: 'Jan 2026', end: 'Jul 2026', description: 'Built Python tooling.' },
+        { start: 'Mar 2026', end: 'Jul 2026', description: 'Shipped Python jobs.' },
       ],
       'Python',
       scopedAsOf,
@@ -241,4 +242,84 @@ test('hours options are not bands, and no arithmetic here pretends otherwise', (
     assert.equal(readExperienceBand(option), null, option);
   }
   assert.equal(chooseExperienceBand(['<100 hours', '100-1000 hours', '>1000 hours'], 12), null);
+});
+
+/* THE HOMOGRAPH FAMILY, measured: this wrote years of experience with tools never opened.
+ *
+ * One role, Jan 2024 to present, bulleted "Owned go-to-market strategy. Helped the team excel at
+ * reporting. Delivered swift turnarounds.", beside a skills list holding Go, Excel and Swift,
+ * answered "how many years of hands on experience do you have with X" with 2-3 years for all three.
+ * A skills list is full of ordinary English words and prose is full of them too, so the separation
+ * cannot be made on the token. It is made on the OCCURRENCE: her prose has to write the thing as a
+ * proper noun, and that capital has to mean something more than sentence position.
+ */
+test('prose that merely contains a skill\'s letters is not evidence she used it', () => {
+  const bullets = 'Owned go-to-market strategy. Helped the team excel at reporting. Delivered swift turnarounds.';
+  for (const skill of ['Go', 'Excel', 'Swift']) {
+    assert.equal(skillEvidencedIn(bullets, skill), false, skill);
+  }
+  assert.equal(skillNamedIn('go-to-market plan', 'Go'), false, 'the hyphen boundary alone kills this one');
+
+  // The true cases still read as evidence: a proper noun in the middle of her own sentence.
+  assert.equal(skillEvidencedIn('Built a Python backtester.', 'Python'), true);
+  assert.equal(skillEvidencedIn('Owned Go services end to end.', 'Go'), true);
+  assert.equal(skillEvidencedIn('Rebuilt the dashboard in React.', 'React'), true);
+
+  /* A CAPITAL EXPLAINED BY POSITION IS NOT A PROPER NOUN. "Swift turnarounds delivered." opens a
+   * sentence, so its capital says nothing about any tool. Costs a real mention that happens to open
+   * a sentence, which is a refusal, which is the safe direction. */
+  assert.equal(skillEvidencedIn('Swift turnarounds delivered.', 'Swift'), false);
+  assert.equal(skillEvidencedIn('Python powered the pipeline.', 'Python'), false);
+  assert.equal(skillEvidencedIn('Shipped features. Excel was never involved.', 'Excel'), false);
+  // ... but only for tokens ordinary English could produce. No casing of these is prose.
+  assert.equal(skillEvidencedIn('SQL tuning across the warehouse.', 'SQL'), true);
+  assert.equal(skillEvidencedIn('sql tuning across the warehouse.', 'SQL'), true);
+  assert.equal(skillEvidencedIn('C++ firmware for the sensor.', 'C++'), true);
+  assert.equal(skillEvidencedIn('TypeScript services on call.', 'TypeScript'), true);
+  assert.equal(skillEvidencedIn('AI agents shipped to production.', 'AI agents'), true);
+  // A lower-cased real tool stops counting. Stated here so the cost is visible, not discovered.
+  assert.equal(skillEvidencedIn('built python data pipelines', 'Python'), false);
+
+  /* HOW SHE TYPED HER SKILLS LIST IS NOT THE TEST; how she wrote the ROLE is. Both directions, and
+   * both were wrong when the pattern itself carried the case: a lower-case list entry could never
+   * evidence anything, and an upper-case one silently accepted whatever the list said. */
+  assert.equal(skillEvidencedIn('Owned Go services end to end.', 'go'), true);
+  assert.equal(skillEvidencedIn('Helped the team go faster.', 'go'), false);
+  assert.equal(skillEvidencedIn('Helped the team go faster.', 'Go'), false);
+  assert.equal(skillEvidencedIn('Rebuilt it in Python.', 'python'), true);
+
+  /* THE LABEL IS JUDGED CASE-INSENSITIVELY AND MUST STAY THAT WAY. How an employer cases a question
+   * is a fact about the employer: Apollo Research's real label writes "python" in lower case. */
+  assert.equal(skillNamedIn('...experience do you have in python or a similar coding language?', 'Python'), true);
+});
+
+/* escapeForPattern, which had no test and whose absence is not a wrong answer but a 500.
+ * `new RegExp('(?<![A-Za-z0-9-])C++(?![A-Za-z0-9-])')` throws "Nothing to repeat", and it would throw
+ * inside resolveKnownAnswer, on the resolver hot path, for any applicant whose skills list says C++.
+ * Every entry point that builds a pattern is exercised here, so no caller can regress alone. */
+test('a skills entry made of regex metacharacters is matched, never executed', () => {
+  for (const skill of ['C++', 'C#', 'Node.js', '.NET', 'F#', 'Objective-C++']) {
+    assert.doesNotThrow(() => skillNamedIn('experience with things', skill), skill);
+    assert.doesNotThrow(() => skillEvidencedIn('Built things.', skill), skill);
+    assert.doesNotThrow(() => namedProfileSkill('Years of experience with things', [skill]), skill);
+  }
+  // And the metacharacters are matched as themselves rather than as syntax.
+  assert.equal(skillNamedIn('Wrote firmware in C++', 'C++'), true);
+  assert.equal(skillNamedIn('Wrote firmware in CCC', 'C++'), false);
+  // The escaped dot is a dot: "Node.js" must not match "NodeXjs" through a wildcard.
+  assert.equal(skillNamedIn('Services on NodeXjs', 'Node.js'), false);
+  assert.deepEqual(namedProfileSkill('Years of experience with C++', ['C++']), { skill: 'C++' });
+});
+
+/* The band chooser's own rule, pinned because its docstring used to overclaim it. "Lower wins"
+ * holds among bands SHARING a floor; across distinct floors the ceiling trim decides, and both
+ * outcomes are true statements because a band is only returned when the total reaches its floor. */
+test('the band choice is settled by the ceiling trim, and never by a floor she has not reached', () => {
+  // Shared floor: the narrower, smaller claim wins.
+  assert.equal(chooseExperienceBand(['1-5 years', '1-2 years'], 12), '1-2 years');
+  // Distinct floors with genuine overlap: the trim hands 30 months to the higher floor below it.
+  assert.equal(chooseExperienceBand(['1-3 years', '2-5 years'], 30), '2-5 years');
+  // Which is still a floor she has reached. Nothing here can return a band she is below.
+  assert.equal(chooseExperienceBand(['1-3 years', '2-5 years'], 23), '1-3 years');
+  assert.equal(chooseExperienceBand(['2-5 years', '5+ years'], 12), null);
 });

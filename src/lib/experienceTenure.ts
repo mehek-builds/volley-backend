@@ -194,10 +194,17 @@ export function totalExperienceMonths(
  *   - the skills LIST alone is not evidence. It carries no dates, so it can place a skill on the
  *     profile and can never place it in time. A question about duration cannot be answered from it.
  *   - the whole tenure, filtered by nothing, is not evidence. See the paragraph above.
- * The residual risk is a bullet that names a skill in passing ("migrated a Python service to Go"),
- * which counts that role's whole span. It is accepted knowingly: the answer is a coarse band, every
- * step of the arithmetic underneath rounds down, and the alternative is refusing every question in
- * this family. It is written here so the next reader is deciding it again rather than discovering it.
+ * THE RESIDUAL RISK, stated exactly, because a first cut of this comment stated it too broadly and
+ * a real defect hid inside the slack. It is a bullet that names a skill IN PASSING ("migrated a
+ * Python service to Go"), which counts that role's whole span. That is accepted knowingly: she did
+ * use the tool, the answer is a coarse band, every step of the arithmetic underneath rounds down,
+ * and the alternative is refusing every question in this family.
+ *
+ * IT IS NOT, AND NEVER WAS, A LICENCE FOR PROSE THAT MERELY CONTAINS THE LETTERS. "Owned
+ * go-to-market strategy" beside a skills list holding "Go" is not a tool named in passing, it is no
+ * mention of the tool at all, and the mitigation above does not reach it: rounding down from a span
+ * she never spent is still a fabricated span. That family is refused outright by skillEvidencedIn,
+ * which is where the line between the two is drawn and defended.
  */
 
 /** Regex-escape, local because this file has no imports on purpose (see the header). */
@@ -206,33 +213,132 @@ function escapeForPattern(value: string): string {
 }
 
 /**
- * Does `text` name `skill` as a whole term?
+ * The whole-term pattern for one skill.
  *
- * The boundary is written as alphanumeric lookaround rather than `\b`, because the skills that
- * matter here are not all word characters: `\b` after the "+" of "C++" requires a word character
- * and so never matches, and `\b` around "Node.js" splits at the dot. Alphanumeric lookaround gets
- * both right, and it keeps the refusals that matter: "React" does not match inside "Reactive", and
- * "SQL" does not match inside "PostgreSQL" (a Postgres question is not answered from SQL evidence).
- * Internal whitespace is relaxed so a two-word skill ("AI agents") matches however the text spaces it.
+ * The boundary is alphanumeric lookaround rather than `\b`, because the skills that matter here are
+ * not all word characters: `\b` after the "+" of "C++" requires a word character and so never
+ * matches, and `\b` around "Node.js" splits at the dot. It keeps the refusals that matter: "React"
+ * does not match inside "Reactive", and "SQL" does not match inside "PostgreSQL", so a Postgres
+ * question is never answered from SQL evidence.
+ *
+ * THE HYPHEN IS A WORD CHARACTER FOR THIS PURPOSE. "go-to-market" is one compound word and the "go"
+ * inside it is not the language; without the hyphen in the boundary class, an applicant with "Go"
+ * on her skills list had every go-to-market bullet counted as Go experience. The cost is that
+ * "Python-based pipeline" no longer reads as a Python mention, which is a refusal, and refusals are
+ * the safe direction here. Internal whitespace is relaxed so a two-word skill ("AI agents") matches
+ * however the text spaces it.
  */
-export function skillNamedIn(text: string | null | undefined, skill: string): boolean {
-  const haystack = text?.trim();
-  const needle = skill?.trim();
-  /* TWO CHARACTERS MINIMUM. "C" and "R" are real languages and are also single letters that occur
-   * all over ordinary prose and inside provider handles; a one-letter scope match would be noise
-   * with the authority of a measurement. They are refused rather than guessed at. */
-  if (!haystack || !needle || needle.length < 2) return false;
-  const pattern = needle.split(/\s+/).map(escapeForPattern).join('\\s+');
-  return new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').test(haystack);
+function skillPattern(needle: string): string {
+  return `(?<![A-Za-z0-9-])${needle.split(/\s+/).map(escapeForPattern).join('\\s+')}(?![A-Za-z0-9-])`;
 }
 
-/** The dated roles whose own title or bullets name this skill. */
+/* TWO CHARACTERS MINIMUM, shared by both matchers. "C" and "R" are real languages and are also
+ * single letters that occur all over ordinary prose and inside provider handles; a one-letter match
+ * would be noise with the authority of a measurement. They are refused rather than guessed at. */
+function matchable(text: string | null | undefined, skill: string): { haystack: string; needle: string } | null {
+  const haystack = text?.trim();
+  const needle = skill?.trim();
+  if (!haystack || !needle || needle.length < 2) return null;
+  return { haystack, needle };
+}
+
+/**
+ * COULD ORDINARY ENGLISH PRODUCE THIS TOKEN BY ACCIDENT? The question the evidence rule turns on.
+ *
+ * False for every shape that is not a single plain word however it is cased: a non-letter character
+ * ("C++", "Node.js", ".NET", "C#"), ALL CAPS ("SQL", "AWS", "HTML"), an internal capital
+ * ("TypeScript", "LangChain", "PostgreSQL"), or more than one word ("AI agents"). Prose does not
+ * produce those by accident, so they are matched case-insensitively and nothing more is asked.
+ *
+ * True for a single all-letter word, which is most language and framework names ("Python", "React",
+ * "Kubernetes") AND every prose homograph ("Go", "Excel", "Swift", "Ruby", "Rust", "Dart"). Nothing
+ * about the token itself separates those two groups, which is exactly why the separation is made on
+ * the OCCURRENCE instead, in skillEvidencedIn.
+ */
+function skillIsProseAmbiguous(skill: string): boolean {
+  if (/\s/.test(skill)) return false;
+  if (/[^A-Za-z]/.test(skill)) return false;
+  if (skill === skill.toUpperCase()) return false;
+  if (/[A-Z]/.test(skill.slice(1))) return false;
+  return true;
+}
+
+/**
+ * Does `text` name `skill` as a whole term, case-insensitively?
+ *
+ * FOR THE EMPLOYER'S LABEL, and only for it. How an employer cases a question is a fact about the
+ * employer, never about the applicant: Apollo Research's real label writes "in python or a similar
+ * coding language" in lower case, and refusing to see the scope there would be reading their
+ * house style as evidence about her. Role prose is judged by skillEvidencedIn instead, which asks
+ * a strictly harder question, and the asymmetry between the two is the point rather than an
+ * oversight: one decides WHAT IS BEING ASKED, the other decides WHAT SHE ACTUALLY DID.
+ */
+export function skillNamedIn(text: string | null | undefined, skill: string): boolean {
+  const parts = matchable(text, skill);
+  return parts !== null && new RegExp(skillPattern(parts.needle), 'i').test(parts.haystack);
+}
+
+/**
+ * Does this role's own prose EVIDENCE that she used this skill?
+ *
+ * WHY THIS IS NOT skillNamedIn (measured, and it shipped a false claim to a live employer). One
+ * role, January 2024 to present, bulleted "Owned go-to-market strategy. Helped the team excel at
+ * reporting. Delivered swift turnarounds.", beside a skills list holding Go, Excel and Swift, wrote
+ * "2-3 years" for all three. She had never used any of them. That is NOT the residual risk this
+ * file documents above, where a tool named in passing counts a whole role: there the applicant did
+ * use the tool and a coarse band that rounds down is a defensible reading. Here the true value is
+ * NO EVIDENCE, whose correct output is the refusal this rule already owns.
+ *
+ * A DENY-LIST WAS THE OBVIOUS FIX AND IS THE WRONG ONE. Go, Excel, Swift, Ruby, Rust, Dart, Julia,
+ * Scala, Basic, Spring, Nim, Elm and Crystal are the start of a list with no end, and an
+ * enumerated vocabulary of English words is exactly the per-case patch list this module's own
+ * design rules forbid. Title-only evidence was rejected too: a title almost never names a tool
+ * ("Software Engineer Intern" does not say Python), so it refuses nearly everything.
+ *
+ * SO THE TEST IS ON THE OCCURRENCE, NOT ON THE TOKEN. A tool named in a resume bullet is written as
+ * a proper noun, because that is what it is: "Built a Python backtester", "Owned Go services". The
+ * same letters used as ordinary English are lower case in the middle of a sentence: "excel at
+ * reporting", "swift turnarounds", "go-to-market". For a prose-ambiguous skill the occurrence must
+ * therefore be capitalised, AND its capitalisation must not be explained by sentence position,
+ * since "Swift turnarounds delivered." capitalises an adjective for reasons that say nothing about
+ * any tool. Structurally unambiguous tokens skip both tests, because no casing of "SQL" or "C++" is
+ * ordinary prose.
+ *
+ * WHAT IT COSTS, stated plainly: a bullet that lower-cases a real tool ("built python pipelines")
+ * stops counting, and so does a sentence that opens with one. Both are refusals, both are the safe
+ * direction, and both are recoverable by her in one click. The alternative was continuing to write
+ * years of experience with tools she has never opened.
+ */
+export function skillEvidencedIn(text: string | null | undefined, skill: string): boolean {
+  const parts = matchable(text, skill);
+  if (!parts) return false;
+  const { haystack, needle } = parts;
+  if (!skillIsProseAmbiguous(needle)) return new RegExp(skillPattern(needle), 'i').test(haystack);
+  /* MATCHED CASE-INSENSITIVELY SO THE CAPITAL TEST BELOW IS THE ONLY CASE AUTHORITY, which is a
+   * correction: with a case-SENSITIVE pattern here, the rule was really "her prose cases it the way
+   * her skills list cases it", and that is the wrong question twice over. An applicant who typed
+   * "go" in her skills list could never evidence Go however her bullets wrote it, and the explicit
+   * capital test below became unreachable dead weight that a mutation run duly showed surviving
+   * its own deletion. What matters is how SHE WROTE IT IN THE ROLE, not how she typed a list. */
+  for (const match of haystack.matchAll(new RegExp(skillPattern(needle), 'gi'))) {
+    // Her prose has to write it as a proper noun, whatever casing her skills list happens to use.
+    if (!/^[A-Z]/.test(match[0])) continue;
+    /* And that capital has to mean something. A match at the start of the text, or straight after a
+     * sentence end or a bullet mark, is capitalised by position and carries no information. */
+    const before = haystack.slice(0, match.index).replace(/\s+$/, '');
+    if (before === '' || /[.!?;:\u2022\u2023\u25e6\u2043-]$/.test(before)) continue;
+    return true;
+  }
+  return false;
+}
+
+/** The dated roles whose own title or bullets EVIDENCE this skill. */
 export function experienceEvidencing(
   entries: readonly ExperiencePeriod[] | null | undefined,
   skill: string,
 ): ExperiencePeriod[] {
   if (!entries) return [];
-  return entries.filter((entry) => skillNamedIn(entry.title, skill) || skillNamedIn(entry.description, skill));
+  return entries.filter((entry) => skillEvidencedIn(entry.title, skill) || skillEvidencedIn(entry.description, skill));
 }
 
 /**
@@ -294,9 +400,10 @@ export function namedProfileSkill(
     const key = skill.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    if (!skillNamedIn(text, skill)) continue;
-    const pattern = skill.split(/\s+/).map(escapeForPattern).join('\\s+');
-    const match = new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').exec(text);
+    /* THE SAME PATTERN skillNamedIn TESTS WITH, not a second copy of it. This function needs the
+     * match POSITION and that one needs only a boolean, and when the two built their own regexes
+     * the boundary rule existed twice and could drift. */
+    const match = new RegExp(skillPattern(skill), 'i').exec(text);
     if (match) hits.push({ skill, start: match.index, end: match.index + match[0].length });
   }
   if (hits.length === 0) return null;
@@ -393,10 +500,23 @@ export function readExperienceBand(option: string): Omit<Band, 'option'> | null 
 /**
  * The option whose band contains the applicant's total, verbatim, or null when none does.
  *
- * Bands are sorted by floor and each one's ceiling is trimmed to the next band's floor when that
- * floor sits inside it, so "1-2 years" beside "2-5 years" hands 2.5 years to the second and beside
- * "3-5 years" keeps it in the first. When two bands still both contain the total (a list with
- * genuine overlap), the LOWER one is chosen: it is the smaller claim.
+ * Bands are sorted by floor, then by ceiling, and each one's ceiling is trimmed to the NEXT DISTINCT
+ * floor when that floor sits inside it, so "1-2 years" beside "2-5 years" hands 2.5 years to the
+ * second and beside "3-5 years" keeps it in the first.
+ *
+ * WHAT "THE LOWER ONE WINS" DOES AND DOES NOT MEAN, because this comment used to overclaim it. It
+ * holds among bands that SHARE a floor: "1-5 years" beside "1-2 years" hands one year to "1-2
+ * years", the narrower and smaller claim, because the trim never fires between equal floors and the
+ * sort puts the narrower first. It does NOT hold across distinct floors, where the trim decides
+ * instead: "1-3 years" beside "2-5 years" hands 30 months to "2-5 years" even though "1-3 years"
+ * also contains 30 months. That is the trim doing its job, and it cannot be relaxed without
+ * breaking the contiguous lists it exists for (a plain "1-2 / 2-5" list would start answering
+ * "1-2" for 2.5 years).
+ *
+ * NEITHER OUTCOME CAN OVERSTATE, which is why the trim is left alone. A band is only ever returned
+ * when the total is at or above its floor, so every band this function can return is one the
+ * applicant has genuinely reached; the choice between two bands that both contain her figure is a
+ * choice between two true statements.
  */
 export function chooseExperienceBand(
   options: readonly string[] | null | undefined,

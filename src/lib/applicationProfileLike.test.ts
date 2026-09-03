@@ -96,3 +96,44 @@ test('the dated roles reach the resolver from the parse, the base resume, and th
   assert.equal(experiencePeriodsFromSources({}, {}, []), undefined);
   assert.equal(experiencePeriodsFromSources({ experience: [] }, {}, [{ type: 'job', date_range: '' }]), undefined);
 });
+
+/* A PROJECT IS NOT EMPLOYMENT, AND base_resume_json IS WHERE THAT BREAKS.
+ *
+ * `parsed_json.experience` holds employment only, with leadership in a separate top-level array, so
+ * this path looked correct and was correct FOR THAT SOURCE. `base_resume_json` is a ResumeSpec, and
+ * its `experience[]` is one array holding all three kinds behind a `type` discriminator alongside
+ * `date_range` and `bullets` (src/llm/resumeSpec.ts). fromResume(base) runs whenever the parse
+ * carries no experience array, so a personal project and a club presidency were reaching the
+ * resolver as dated employment, and a project's bullets are exactly where a tool gets named.
+ */
+test('a ResumeSpec base resume contributes its jobs and NOT its projects or leadership', () => {
+  const base = {
+    experience: [
+      { type: 'job', org: 'Cafe', title: 'Operations Intern', date_range: 'Jun 2026 - Aug 2026', bullets: ['Scheduled shifts.'] },
+      { type: 'project', org: 'Personal', title: 'Trading bot', date_range: 'Jan 2024 - Dec 2025', bullets: ['Built a Python backtester.'] },
+      { type: 'leadership', org: 'CS Club', title: 'President', date_range: 'Sep 2023 - May 2024', bullets: ['Ran a Kubernetes cluster.'] },
+    ],
+  };
+  assert.deepEqual(experiencePeriodsFromSources({}, base, []), [
+    { start: undefined, end: undefined, date_range: 'Jun 2026 - Aug 2026', title: 'Operations Intern', description: 'Scheduled shifts.' },
+  ]);
+
+  /* THE TEST IS NEGATIVE ON PURPOSE, and this half is what stops it being "fixed" into a positive
+   * one. A parsed resume entry routinely carries no `type` at all; requiring type === 'job' here
+   * would silently drop every parsed role and zero out the total tenure that already ships. An
+   * untyped row is employment, exactly as it always was. */
+  assert.deepEqual(
+    experiencePeriodsFromSources({ experience: [{ title: 'SWE Intern', start: 'Feb 2025', end: 'May 2025' }] }, {}, []),
+    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'SWE Intern', description: undefined }],
+  );
+  // An explicit job row is kept on the parse path too, and casing is not a way past the filter.
+  assert.deepEqual(
+    experiencePeriodsFromSources({ experience: [
+      { type: 'job', title: 'SWE Intern', start: 'Feb 2025', end: 'May 2025' },
+      { type: ' Project ', title: 'Side thing', start: 'Feb 2020', end: 'May 2024' },
+    ] }, {}, []),
+    [{ start: 'Feb 2025', end: 'May 2025', date_range: undefined, title: 'SWE Intern', description: undefined }],
+  );
+  // A base resume of nothing but projects and leadership is "no dated role on file", not a total.
+  assert.equal(experiencePeriodsFromSources({}, { experience: [base.experience[1], base.experience[2]] }, []), undefined);
+});

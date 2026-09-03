@@ -8096,17 +8096,27 @@ function skillScopedExperienceAnswer(
   if (isPolarQuestion(label)) return null;
   const scope = namedProfileSkill(label, ap.skills);
   if (!scope) return null;
+  /* Every refusal below opens the same way, "<what was asked about> experience left for you", so the
+   * family reads as one rule and a test can match them all with one shape. */
+  const asked = 'ambiguous' in scope ? scope.ambiguous.join(' and ') : scope.skill;
+
+  /* THE UNIT IS TESTED FIRST, AHEAD OF THE AMBIGUITY CHECK, and the order is load bearing. An hours
+   * question naming two skills is refused for its UNIT, because that is the reason no answer exists:
+   * resolving the scope perfectly would not produce one. Reported the other way round it named the
+   * wrong culprit and invited a reader to go and disambiguate a question that is unanswerable
+   * whatever the scope turns out to be, which is precisely the failure the unit rationale exists to
+   * prevent. */
+  if (!DERIVABLE_DURATION_UNIT.test(unit)) {
+    return {
+      skipReason: `${asked} experience left for you (this asks in ${unit.toLowerCase()}, and your resume dates give months, not ${unit.toLowerCase()}): "${label.slice(0, 60)}"`,
+    };
+  }
   if ('ambiguous' in scope) {
     return {
-      skipReason: `experience question left for you (it asks about ${scope.ambiguous.join(' and ')} at once, and those are different spans): "${label.slice(0, 60)}"`,
+      skipReason: `${asked} experience left for you (it asks about ${asked} at once, and those are different spans): "${label.slice(0, 60)}"`,
     };
   }
   const { skill } = scope;
-  if (!DERIVABLE_DURATION_UNIT.test(unit)) {
-    return {
-      skipReason: `${skill} experience left for you (this asks in ${unit.toLowerCase()}, and your resume dates give months, not ${unit.toLowerCase()}): "${label.slice(0, 60)}"`,
-    };
-  }
   const months = skillScopedExperienceMonths(ap.experience_periods, skill, asOf);
   if (months === null) {
     return { skipReason: `${skill} experience left for you (no dated role on your resume evidences it): "${label.slice(0, 60)}"` };

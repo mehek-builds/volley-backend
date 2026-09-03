@@ -36,6 +36,7 @@ import {
 // The high-school test below asserts on the alias ladder as well as on the resolver: the wrong
 // graduation year came from the ladder, not from resolveKnownAnswer, and only this call sees it.
 import { resolveProfileField } from './profileFieldResolution';
+import { experiencePeriodsFromSources } from './applicationProfileLike';
 import { packetAuditSha256, packetVisibleQuestions } from './packetAudit';
 // The employer-named sponsorship tests below resolve the posting country through the real parser
 // rather than passing a code by hand: the parser is the half that decides whether the packet's own
@@ -5534,7 +5535,7 @@ test('a duration question with no grounded answer is handed back, never guessed 
   // And a dated role the parser cannot read poisons its own scope rather than being skipped.
   const unreadable: ApplicationProfileLike = {
     ...skilledProfile,
-    experience_periods: [{ start: 'Summer 2025', end: 'Present', description: 'Python services' }],
+    experience_periods: [{ start: 'Summer 2025', end: 'Present', description: 'Built Python services.' }],
   };
   heldBecause(python, YEAR_BANDS, /no dated role on your resume evidences it/, unreadable);
 
@@ -5567,17 +5568,23 @@ test('the skill-scoped rule declines to have an opinion on questions that are no
   }
 
   /* A QUESTION THAT NAMES A SKILL BUT ASKS FOR NO DURATION is not this rule's business either. The
-   * duration ask is a required part of the shape, not decoration on it. */
+   * duration ask is a required part of the shape, not decoration on it.
+   *
+   * THE ASSERTION REJECTS ANY VALUE, and the weaker form it replaces is why. It read "null, or not a
+   * skipReason matching /experience left for you/", which accepts a `{ value }` silently. Replacing
+   * the duration gate with `experienceDurationUnit(label) ?? 'years'` - the faithful mutation, since
+   * a bare deletion just leaves a null unit and a skipReason reading "this asks in null" - resolves
+   * "Rate your proficiency in Python" to a YEARS BAND written into a proficiency control, and the
+   * old assertion stayed green through it. A negative test that tolerates a wrong answer is not a
+   * negative test. */
   for (const label of [
     'Rate your proficiency in Python',
     'Which of these have you used: Python, SQL?',
+    'What is your Python experience?',
+    'Describe your hands on experience with React',
   ]) {
     const resolved = resolveSkilled(label, YEAR_BANDS);
-    assert.equal(
-      resolved === null || !('skipReason' in resolved && /experience left for you/.test(resolved.skipReason)),
-      true,
-      label,
-    );
+    assert.equal(resolved !== null && 'value' in resolved, false, `must not answer "${label}": ${JSON.stringify(resolved)}`);
   }
 });
 
@@ -5679,5 +5686,105 @@ test('a scoped years-of-experience ask stands the tenure band down, with dated r
     'Total years of full-time work experience', 'How many years of full-time experience do you have?']) {
     const r = ask(label);
     assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+});
+
+/* ---- the two paths that overstated her experience to a live employer ----
+ *
+ * Both were found in review of the first cut of this rule, both wrote a band an employer would read
+ * as a claim about her professional history, and both are end-to-end here rather than only at the
+ * unit level, because both needed TWO modules to go wrong together.
+ */
+
+test('a personal project and a club presidency are not "hands on" employment experience', () => {
+  /* Her base resume is a ResumeSpec: one experience array, three kinds, a `type` discriminator. The
+   * only employment on it is two months of unrelated operations work. Before the loader filtered
+   * non-employment rows, "how many years of hands on experience do you have with Python" answered
+   * 1-2 years off a personal trading-bot project, and the same question about Kubernetes answered
+   * off a club presidency. A project's bullets are exactly where a tool gets named, which is why the
+   * skill rule made a pre-existing date leak into a false claim. */
+  const spec = {
+    experience: [
+      { type: 'job', org: 'Cafe', title: 'Operations Intern', date_range: 'Jun 2026 - Aug 2026', bullets: ['Scheduled shifts.'] },
+      { type: 'project', org: 'Personal', title: 'Trading bot', date_range: 'Jan 2024 - Dec 2025', bullets: ['Built a Python backtester.'] },
+      { type: 'leadership', org: 'CS Club', title: 'President', date_range: 'Sep 2023 - May 2024', bullets: ['Ran a Kubernetes cluster.'] },
+    ],
+  };
+  const ap: ApplicationProfileLike = {
+    skills: ['Python', 'Kubernetes'],
+    experience_periods: experiencePeriodsFromSources({}, spec, []),
+  };
+  for (const skill of ['Python', 'Kubernetes']) {
+    heldBecause(
+      `How many years of hands on experience do you have with ${skill}?`,
+      YEAR_BANDS,
+      /no dated role on your resume evidences it/,
+      ap,
+    );
+  }
+  // The employment that IS on the resume still counts toward the unscoped total: 2 months.
+  assert.deepEqual(resolveSkilled('years of experience', YEAR_BANDS, ap), { value: 'Less than 1 year' });
+});
+
+test('prose that merely contains a skill\'s letters never becomes years of experience', () => {
+  /* Measured: skills ["Go","Excel","Swift"] beside a growth role bulleted with go-to-market, excel
+   * at, and swift turnarounds wrote 2-3 years for all three. She had used none of them. This is not
+   * the "named in passing" risk the module documents, where she did use the tool and a band that
+   * rounds down is defensible: here the true value is no evidence, and no evidence has an answer
+   * already, which is the refusal. */
+  const ap: ApplicationProfileLike = {
+    skills: ['Go', 'Excel', 'Swift', 'Python'],
+    experience_periods: [{
+      start: 'Jan 2024',
+      end: 'Present',
+      title: 'Growth Associate',
+      description: 'Owned go-to-market strategy. Helped the team excel at reporting. Delivered swift turnarounds.',
+    }],
+  };
+  for (const skill of ['Go', 'Excel', 'Swift']) {
+    heldBecause(
+      `How many years of hands on experience do you have with ${skill}?`,
+      YEAR_BANDS,
+      /no dated role on your resume evidences it/,
+      ap,
+    );
+  }
+  /* And the same role, with the same dates, DOES answer for a tool it names as a proper noun. The
+   * rule has to keep working, not just stop being wrong. */
+  const real: ApplicationProfileLike = {
+    ...ap,
+    experience_periods: [{ ...ap.experience_periods![0], description: 'Owned Go services and built a Python backtester.' }],
+  };
+  assert.deepEqual(resolveSkilled('How many years of hands on experience do you have with Go?', YEAR_BANDS, real), { value: '2-3 years' });
+  assert.deepEqual(resolveSkilled('How many years of hands on experience do you have with Python?', YEAR_BANDS, real), { value: '2-3 years' });
+});
+
+test('an unanswerable unit is reported as the unit, even when the scope is also unresolved', () => {
+  /* THE ORDER OF TWO REFUSALS IS ITSELF A CORRECTNESS QUESTION. An hours question naming two skills
+   * has no answer for its UNIT: resolving the scope perfectly would still not produce one. Reported
+   * as an ambiguity it named the wrong culprit and invited a reader to go and disambiguate a
+   * question that is unanswerable whatever the scope turns out to be, which is the exact failure the
+   * unit rationale exists to prevent. */
+  const ap: ApplicationProfileLike = {
+    skills: ['Python', 'JavaScript'],
+    experience_periods: [{ start: 'Jan 2024', end: 'Present', description: 'Shipped Python and JavaScript services.' }],
+  };
+  const reason = heldBecause(
+    'How many hours of coding experience do you have in Python or JavaScript?',
+    APOLLO_HOURS,
+    /this asks in hours/,
+    ap,
+  );
+  assert.doesNotMatch(reason, /at once/);
+  // With a derivable unit, the same two-skill question is reported as the ambiguity it is.
+  heldBecause('How many years of experience do you have in Python or JavaScript?', YEAR_BANDS, /at once/, ap);
+  /* Every refusal in the family opens the same way, so one shape matches them all and the negative
+   * tests above cannot miss one by wording. */
+  for (const [label, options] of [
+    ['How many hours of coding experience do you have in Python or JavaScript?', APOLLO_HOURS],
+    ['How many years of experience do you have in Python or JavaScript?', YEAR_BANDS],
+    ['How many years of hands on experience do you have with Python?', ['5-10 years']],
+  ] as Array<[string, string[]]>) {
+    heldBecause(label, options, /experience left for you \(/, ap);
   }
 });
