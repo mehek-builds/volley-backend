@@ -3014,8 +3014,27 @@ export function canFillReviewedQuestions(_provider: 'managed' | 'direct'): boole
 // case-insensitive substring of name/aria-label/placeholder is what reliably finds them without a
 // per-employer selector. Verify against a live Ashby form's rendered HTML if a real run still shows
 // the URL fields empty; these were written from the naming pattern, not yet confirmed on the wire.
+/* THE LABEL FALLBACK IS THE ONLY ROUTE ON ASHBY, AND IT PINNED A PHRASE THE EMPLOYER NEED NOT USE.
+ *
+ * Ashby gives custom fields opaque UUID `name`s, and the ones measured carry no aria-label and no
+ * placeholder either, so the three attribute arms above match nothing and the trailing label arm is
+ * the only one that can reach the control. It required the label to CONTAIN "LinkedIn Profile".
+ *
+ * Measured live 2026-09-03 on Exa "Software Engineer, Intern" (packet 73768339), the first Ashby
+ * fill to get past the transport containment: 13 fields landed and `github` was one of them, while
+ * `linkedin` was absent from filled_fields entirely and the run parked on
+ * '"LinkedIn" is required and is still empty'. The employer's label is the bare word "LinkedIn",
+ * which does not contain "LinkedIn Profile" - and the sibling GitHub selector, whose label arm has
+ * always been the bare word "GitHub", matched and filled on the same form. That asymmetry is the
+ * whole defect: two selectors written to the same shape, one pinned to a longer phrase than the
+ * employer owes us.
+ *
+ * The specific phrase stays FIRST so a form that does say "LinkedIn Profile" still resolves through
+ * it, and the bare word follows as the fallback - the runner takes the first selector that matches,
+ * so this only ever reaches a control the old list left empty. It is the same breadth GitHub has
+ * shipped with, and no mis-fill has been measured against that one. */
 const ASHBY_LINKEDIN_SELECTOR =
-  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i], label:has-text("LinkedIn Profile") + div input';
+  'input[name="_systemfield_linkedin" i], input[name*="linkedin" i], input[aria-label*="linkedin" i], input[placeholder*="linkedin" i], label:has-text("LinkedIn Profile") + div input, label:has-text("LinkedIn") + div input';
 const ASHBY_GITHUB_SELECTOR =
   'input[name="_systemfield_github" i], input[name*="github" i], input[aria-label*="github" i], input[placeholder*="github" i], label:has-text("GitHub") + div input';
 const ASHBY_PORTFOLIO_SELECTOR =
