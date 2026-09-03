@@ -1672,8 +1672,17 @@ function controlIdFromDiscoveredSelector(selector: string | undefined | null): s
   // three actions to read nothing.
   const hashId = trimmed.match(/^#([A-Za-z](?:[A-Za-z0-9_-]|\\[.:-])*)$/)?.[1]
     ?.replace(/\\([.:-])/g, '$1');
+  /* THE ATTRIBUTE FORM ADMITS A DIGIT-LEADING ID; THE HASH FORM ABOVE STILL CANNOT.
+   *
+   * `#248` is not a CSS selector, which is why the discovery runner declined those ids for so
+   * long, but `[id="248"]` is exactly one, and it is the only durable name Greenhouse's
+   * job-boards renderer gives its demographic react-selects (245/248/249/250 on Hudson River
+   * Trading, measured 2026-09-02). Refusing it here meant no control id, so no probe target, no
+   * `control_id` on the blocker, and no inventory key for the fill to look the options up under.
+   * Every consumer downstream already quotes the id inside `[id="..."]`, so a numeric id builds
+   * the same valid selectors a named one does. */
   return hashId
-    ?? trimmed.match(/^(?:[a-z][a-z0-9-]*)?\[id="([A-Za-z][A-Za-z0-9_.:-]*)"\]$/i)?.[1];
+    ?? trimmed.match(/^(?:[a-z][a-z0-9-]*)?\[id="([A-Za-z0-9][A-Za-z0-9_.:-]*)"\]$/i)?.[1];
 }
 
 const MANAGED_OPTION_NAME_KEY_PREFIX = 'name:';

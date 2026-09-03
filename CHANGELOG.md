@@ -10,7 +10,10 @@
   under 30 seconds even in the worst case. The build now logs per-stage timings (generation,
   repairs, render and checks, save) so a slow build is attributable in production.
 - Resume parsing now races both configured model providers inside one short deadline, cancels the
-  losing request, and falls back to bounded local extraction when neither provider responds.
+  losing request, and falls back to bounded local extraction when neither provider responds. Each
+  provider attempt may now use 12 seconds of that unchanged deadline rather than 8: a dense
+  one-page resume needs 8-10 seconds on both providers, so the old cap made every such upload
+  spend the time twice and then degrade to the local parser anyway.
 - Base and job-tailored resume creation now share a 15-second model budget and can continue from
   grounded uploaded evidence without spending another provider retry on wording-only repairs.
 - Eligible postings remain discoverable for 90 days rather than 14, so the board keeps a role for

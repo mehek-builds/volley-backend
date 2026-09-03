@@ -1162,6 +1162,34 @@ function highSchoolGraduationAnswer(
   return { value: asksWhen ? stored : 'Yes' };
 }
 
+/* AN INSTRUCTION TO WRITE THE HIGH SCHOOL INTO THIS BOX, on a label that also names the university.
+ *
+ * Hudson River Trading's required text field (question_68000291, measured 2026-09-02): "Please
+ * represent both completed and in-progress university degrees above. Please also write in your
+ * high school/secondary school below." questionIsScopedToHighSchool vetoes it, correctly by its own
+ * rule - the label names two institutions and a regex should not adjudicate between them - so
+ * highSchoolRecordRefusal stood down, classifyField answered nothing, and the field fell through to
+ * the drafter, which is the one place a high school name must never come from. The profile has no
+ * high-school name column (only high_school_grad_date), so there is nothing to type and the honest
+ * outcome is a question she answers herself.
+ *
+ * Read narrowly: an instruction verb whose immediate object is HER high school. "Degrees above"
+ * being mentioned does not change which institution the verb is aimed at. A negated instruction
+ * ("do not write your high school here") is the university's control and stays with the veto.
+ * The pattern itself sits beside HIGH_SCHOOL_NAME_REQUEST, after the vocabulary it is built from. */
+function highSchoolWriteInRefusal(label: string): { skipReason: string } | null {
+  if (!HIGH_SCHOOL_WRITE_IN_REQUEST.test(label)) return null;
+  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(label)) return null;
+  /* A CONDITIONAL instruction is not aimed at her. Palantir's "School name (if you did not attend
+   * college, enter your high school)" tells a school leaver what to write; she attended college,
+   * and that control is the university's. Any conditional stands this rule down and leaves the
+   * label to the veto and the classifier, exactly as before. */
+  if (HIGH_SCHOOL_WRITE_IN_CONDITIONAL.test(label)) return null;
+  // Self-identification keeps its own ladder, as in highSchoolRecordRefusal.
+  if (EEO_QUESTION.test(label)) return null;
+  return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
+}
+
 /**
  * Everything a form asks about high school that is not the graduation date.
  *
@@ -4338,6 +4366,13 @@ const HIGH_SCHOOL_NAME_REQUEST = new RegExp(
   String.raw`\b${HIGH_SCHOOL_WORD}(?:['’]s)?\s+names?\b|\bnames?\s+of\s+(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}\b`,
   'i',
 );
+/* The instruction-verb shape highSchoolWriteInRefusal reads: "write in your high school",
+ * "enter your secondary school". See that function for the label it was measured on. */
+const HIGH_SCHOOL_WRITE_IN_REQUEST = new RegExp(
+  String.raw`\b(?:write|enter|type|list|provide|add|input|include|put|fill)\b(?:\s+(?:in|down|out))?\s+(?:your|the|my)\s+${HIGH_SCHOOL_WORD}\b`,
+  'i',
+);
+const HIGH_SCHOOL_WRITE_IN_CONDITIONAL = /\b(?:if|unless|otherwise|in\s+case|only\s+when)\b/i;
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
@@ -7619,6 +7654,11 @@ export function resolveKnownAnswer(
 
   const highSchool = highSchoolGraduationAnswer(label, ap);
   if (highSchool) return highSchool;
+
+  /* Between the two: the graduation rule has already had its say, and this one must run before the
+   * subject rule's veto for a label that names the university only to point past it. */
+  const highSchoolWriteIn = highSchoolWriteInRefusal(label);
+  if (highSchoolWriteIn) return highSchoolWriteIn;
 
   /* Directly after it, so the graduation date answers its own questions and nothing else about
    * high school is answered from the university programme. Up here with the self-declarations for
