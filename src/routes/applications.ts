@@ -170,6 +170,7 @@ import {
   selfSubmittedSubmissionReceiptText,
 } from '../lib/authoritativeSubmissionProjection';
 import { submissionAuthorityEnvelopeForUnattemptedPacket } from './resume';
+import { submissionAuthorityPublicationForPacket } from '../lib/submissionAuthorityEnvelope';
 import { withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
@@ -232,13 +233,58 @@ async function unattemptedPacketSubmissionAuthority(
   if (!FIRST_SEND_REVIEW_STATUSES.has(reviewStatus)) return {};
   try {
     const projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
+    const projection = projections.byPacketId.get(packetId);
+    const retrySafety = projections.retrySafetyByPacketId.get(packetId);
     const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId,
-      projectionState: projections.byPacketId.get(packetId)?.state,
-      retrySafety: projections.retrySafetyByPacketId.get(packetId),
+      projectionState: projection?.state,
+      retrySafety,
       revision: projections.revision,
     });
-    return envelope ? { submission_authority: envelope } : {};
+    if (envelope) return { submission_authority: envelope };
+    /* THE SCREEN THAT SHOWS THE BANNER LOGGED NOTHING. This helper returned a bare `{}` on every
+     * refusal, so the one surface a student actually reads - "Litos cannot start another employer
+     * attempt until the exact prior submission evidence is verified", on the packet review screen -
+     * left no server-side trace of WHY, while the board next door logged a reason per card. On
+     * 2026-09-03 that banner stood on 163 of this account's 200 packets and nothing on any wire
+     * said which check refused them.
+     *
+     * DIAGNOSIS ONLY, PUBLICATION UNCHANGED. What this response carries is still exactly the
+     * unattempted builder's envelope: `none` projection, `no_evidence` or a well-shaped
+     * `safe_not_sent`, and nothing else. submissionAuthorityPublicationForPacket classifies every
+     * projection state, so it is read here purely for its refusal - a packet with real history
+     * publishes there and refuses here, which is correct on both surfaces and is why only its
+     * `published: false` is logged. Calling it cannot change the bytes above; it is pure over data
+     * already in hand and its return value is never returned to the caller. It adds no read: the
+     * projection transaction above already ran, and this classifies what it returned.
+     *
+     * THE VOLUME IS DELIBERATE AND SELF-LIMITING. The dashboard polls this route every 2.5s for the
+     * ONE packet a student has open, so a blocked packet writes a line every 2.5s for as long as
+     * she is looking at the banner, and none once she navigates away. That is the ratio worth
+     * having while a refusal is unexplained: the signal appears exactly when somebody is stuck on
+     * it. If it ever needs damping, drop the state-only reasons and keep the ones carrying a
+     * `rejected` - those are the refusals nothing else in the system can name. */
+    const publication = submissionAuthorityPublicationForPacket({
+      packetId,
+      projection,
+      retrySafety,
+      revision: projections.revision,
+    });
+    if (!publication.published) {
+      log.warn(
+        {
+          packetId,
+          reason: publication.reason,
+          projectionState: projection?.state,
+          retrySafetyKind: retrySafety?.kind,
+          rejectedBranch: publication.rejected?.branch,
+          rejectedField: publication.rejected?.field,
+          rejectedShape: publication.rejected?.shape,
+        },
+        'packet has no publishable submission authority envelope; the send gate stays fail-closed',
+      );
+    }
+    return {};
   } catch (error) {
     log.warn(
       { err: error, packetId },
