@@ -2337,6 +2337,16 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * snapshot of a control's list that is stale the moment the employer edits the form, purely so
      * this one rule can re-derive an answer it already has.
      *
+     * SINCE OVERTAKEN ON THE FIRST HALF, AND NOT ON THE SECOND. ApplicationReviewQuestion DOES carry
+     * `options` now - added for the answers screen, so a question Litos could not answer arrives
+     * beside the choices the control offers rather than as a bare box - so the paragraph above is
+     * history, not a live constraint, and the block below reads that list. What has NOT changed is
+     * the reason this function must not treat the list as its input: a stale snapshot is a bad basis
+     * for DECIDING an answer, which is why resolveKnownAnswer still decides from the label and the
+     * profile alone. Snapping the decided answer onto the list is a separate pass at the call sites
+     * (snapStoredAnswersToOfferedOptions in questionMetadata.ts), where a wrong snapshot can only
+     * fail to match and leave the answer as it stands.
+     *
      * WHAT THIS ASKS INSTEAD IS THE QUESTION THE REFRESH IS ACTUALLY FOR: is the answer already
      * stored still supported by the profile as it stands now? The stored answer IS the option the
      * control offered, so handing it back as a one-element list is the exact candidate under test.
@@ -2347,8 +2357,32 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * Read by standardizedTestAnswer and nothing else, so no other rule changes.
      */
     const storedAsCandidate = question.answer.trim() ? [question.answer.trim()] : undefined;
+    /* THE FORM'S OWN OPTIONS, when the stored row carries them.
+     *
+     * This slot is the CONTROL'S option list, and the refresh had been handing it a one-element list
+     * containing the stored answer instead. So a stored answer could never be re-snapped to the
+     * employer's vocabulary: measured 2026-09-03 on Hudson River Trading, "What is your gender?"
+     * offers Woman / Man / Non-binary / I don't wish to answer, her stored answer is "Female", and
+     * every refresh resolved "Female" against ["Female"] and kept it - the dashboard then asked her
+     * to pick, for a question her profile answers. The run-time resolution has always been given the
+     * real list; this is what puts the refresh in lockstep with it, so a resolver fix reaches a
+     * question that was discovered before it shipped. The stored answer stays a candidate when the
+     * row carries no options, which is every free-text control. */
+    const offeredOptions = Array.isArray((question as { options?: unknown }).options)
+      ? ((question as { options?: unknown }).options as unknown[])
+        .filter((option): option is string => typeof option === 'string' && option.trim().length > 0)
+      : [];
     const known = label
-      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate, asOf)
+      ? resolveKnownAnswer(
+        label,
+        'text',
+        ap,
+        jdText,
+        postingCountry,
+        postingCountryCode,
+        offeredOptions.length > 0 ? offeredOptions : storedAsCandidate,
+        asOf,
+      )
       : null;
     const withProvenance = question as T & {
       answer_source?: unknown;

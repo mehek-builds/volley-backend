@@ -12,7 +12,7 @@ import {
   managedOptionProbeExpectsClosedControl,
   type SupportedPortal,
 } from './portalSubmission';
-import { usableOptions } from './profileFieldResolution';
+import { comparableOption, profileAnswerAliases, usableOptions } from './profileFieldResolution';
 
 export type QuestionMetadataBlocker = {
   kind: 'missing_question_text' | 'missing_exact_options';
@@ -293,6 +293,65 @@ export function storedAnswerMatchesNoExactOption(
   if (!answer) return false;
   if (isConsentRefusingWording(question.answer)) return false;
   return !offered.some((option) => option.trim().toLowerCase() === answer.toLowerCase());
+}
+
+/**
+ * THE SAME ANSWER, WRITTEN THE WAY THE EMPLOYER'S OWN CONTROL WRITES IT.
+ *
+ * MEASURED 2026-09-03 on Hudson River Trading (packet 4a79eec1, greenhouse job-boards). The gender
+ * control offers ["Woman", "Man", "Non-binary", "I don't wish to answer"]; her stored
+ * `eeo_prefs.gender` is "Female"; the stored question row therefore held answer "Female", which is
+ * on none of those options, so reopenUnfitClosedChoiceQuestions blanked it, the dashboard reported
+ * "1 answer needs you", and the send was gated on a question the profile already answers.
+ *
+ * WHY THE REFRESH ALONE CANNOT DO THIS. resolveKnownAnswer decides an answer from the label and the
+ * stored profile and, by the rule written on its own `options` parameter, never consults the option
+ * list; snapping a decided answer onto a real control is profileFieldResolution.ts's separate job.
+ * The fill path calls resolveProfileField and gets "Woman"; the packet-shaping path calls
+ * refreshKnownQuestionAnswers and got "Female" forever, so a resolver fix (PR #888's Female/Woman
+ * equivalence) reached every future fill and no stored row. This pass is the missing half: it runs
+ * on the refresh's output, at the same three call sites, and asks profileAnswerAliases - the same
+ * ladder the managed action builders use - for the forms of the answer, then takes the first one
+ * the control actually offers.
+ *
+ * IT IS GATED ON EXACTLY THE SET reopenUnfitClosedChoiceQuestions IS ABOUT TO BLANK, which is the
+ * whole safety argument and the reason the two are one pair, run one after the other:
+ *   - an answer the control already offers is not touched, because storedAnswerMatchesNoExactOption
+ *     is false for it. That is what keeps refreshKnownQuestionAnswers's applicantReviewedCurrentAnswer
+ *     / reviewedAnswerIsAnOfferedOption guards winning - a reviewed answer they protect is by
+ *     definition an offered option - and what leaves veteran "No" and race "South Asian" alone.
+ *   - a free-text control has no options, so this is a no-op on every one of them.
+ *   - a blank answer, a consent refusal, and a control that is not a strict single choice are all
+ *     refused there too, for the reasons written on that function.
+ * So the only answers this can rewrite are answers that are otherwise about to be destroyed, and it
+ * replaces one of them only with a value the employer itself put on the list.
+ *
+ * IT NEVER INVENTS AND NEVER SUBSTITUTES. When no alias is on the list the answer is returned
+ * exactly as it stands and the re-open takes it, which is today's behaviour: "Trans woman" against
+ * that HRT list stays "Trans woman". The ladder's own ordering does the rest - her wording first,
+ * the coarser federal category next, a decline only last - so a truthful specific answer can never
+ * be displaced by a catch-all here.
+ *
+ * Deterministic and idempotent, so it composes inside packetQuestionFixpoint: a snapped answer IS an
+ * offered option, so the next pass refuses it at the gate and the chain settles.
+ */
+export function snapStoredAnswersToOfferedOptions<T extends StoredClosedChoiceQuestion>(
+  questions: readonly T[],
+): T[] {
+  return questions.map((question) => {
+    if (!storedAnswerMatchesNoExactOption(question)) return question;
+    const label = normalizeReviewQuestionLabel(question.question);
+    if (!label) return question;
+    const offered = usableOptions(question.options);
+    const answer = question.answer.trim();
+    for (const alias of profileAnswerAliases(label, answer)) {
+      const key = comparableOption(alias);
+      if (!key) continue;
+      const match = offered.find((option) => comparableOption(option) === key);
+      if (match) return { ...question, answer: match };
+    }
+    return question;
+  });
 }
 
 /**
