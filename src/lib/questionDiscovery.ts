@@ -2204,7 +2204,12 @@ function comparableAnswer(value: string): string {
  * this round, so a refresh cannot carry a stale claim of attention forward across a re-fill.
  */
 export function answerCarriesCurrentApplicantReview(
-  question: { answer?: string | null; answer_source?: unknown; answer_reviewed_at?: unknown },
+  /* `answer` is required and non-null: both callers type it `string`, and the two lines that
+   * bracket this call in sensitiveQuestionFor - `question.answer.trim().length > 0` and
+   * comparableAnswer's own `value.trim()` - would throw on a null anyway. Accepting one here only
+   * advertised a shape the neighbours cannot survive. The provenance fields stay `unknown` because
+   * the refresh's call site holds them that way. */
+  question: { answer: string; answer_source?: unknown; answer_reviewed_at?: unknown },
   questionsReviewedAt: string | undefined,
 ): boolean {
   /* An ADAPTER onto the canonical predicate, not a copy of it. This call site holds the question
@@ -2214,7 +2219,7 @@ export function answerCarriesCurrentApplicantReview(
    * disagree about the same record. */
   return applicantChoseStoredAnswerInRound(
     {
-      answer: question.answer ?? '',
+      answer: question.answer,
       answer_source: typeof question.answer_source === 'string' ? question.answer_source : undefined,
       answer_reviewed_at: typeof question.answer_reviewed_at === 'string' ? question.answer_reviewed_at : undefined,
     },
@@ -2265,8 +2270,15 @@ export function sensitiveQuestionRequiresAttention(
    *
    * NEVER_FILL_PATTERNS is deliberately ABOVE this and stays absolute: an SSN, a licence number, a
    * captcha or a recording consent is never cleared by a review.
+   *
+   * Deliberately `'skipReason' in known` and not merely "no value": resolveKnownAnswer also returns
+   * null, which means no rule recognised the label at all rather than a rule declining it. Only the
+   * explicit decline was measured, and only the explicit decline carries the "left for you"
+   * instruction this branch relies on, so an unrecognised sensitive label keeps refusing exactly as
+   * it did before. Widen it when there is a measurement, not before.
    */
-  return !applicantReviewed;
+  if (known && 'skipReason' in known) return !applicantReviewed;
+  return true;
 }
 
 export function questionRequiresHumanAttention(question: { question: string; answer?: string }): boolean {
