@@ -693,25 +693,37 @@ describe('base resume priority selection', () => {
       ['required current or role-defining entry missing: Engineer at Gamma Corp'],
     );
 
-    /* AFTER THE FLOOR, nothing reports. planResumeLayout hands the gate its trimmed spec on both
-     * routes (`spec = rendered.spec` / `printed = rendered.spec`), so an entry removed to make the
-     * page fit reaches the gate with an excuse list that never heard about it. Modelled here by
-     * trimming the survivor out of the floor's own output, which is what that pass does. */
+    /* AFTER THE FLOOR, nothing reports - and this half is only worth writing because the excuse
+     * list is non-empty while the removal that matters is absent from it. An empty list proves
+     * nothing here: `relaxing position does NOT relax inclusion` above already covers a gate
+     * called with no excuses at all, and it passes under a blanket excuse for want of a list to
+     * blanket over.
+     *
+     * planResumeLayout hands the gate its trimmed spec on both routes (`spec = rendered.spec` on
+     * the tailored path, `printed = rendered.spec` on the base one), so an entry removed to make
+     * the page fit arrives with an excuse list that never heard about it. The floor is asserted to
+     * have KEPT it first, so the trim is a real second removal rather than an artifact of the
+     * entry never surviving. */
+    const floorKept: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
     const survived = enforceExperienceBulletFloor(
       {
         ...SPEC,
         education_position: 'top' as const,
         experience: [
           { type: 'job' as const, org: required.org, title: 'Engineer', date_range: '2024 - Present', bullets: ['Gamma grounded sentence one', 'Gamma grounded sentence two'] },
+          { type: 'job' as const, org: thin.org, title: 'Volunteer', date_range: '2023', bullets: ['Delta grounded sentence one'] },
         ],
       },
-      [required],
-      { onDropped: () => assert.fail('the floor kept this entry; nothing should have been reported') },
+      [required, thin],
+      { onDropped: ({ sourceId, org, title }) => floorKept.push({ sourceId, org, title }) },
     );
+    /* The floor removed the thin entry and KEPT the required one. */
+    assert.deepEqual(floorKept, [{ sourceId: thin.id, org: thin.org, title: 'Volunteer' }]);
     assert.deepEqual(survived.experience.map((entry) => entry.org), [required.org]);
+    /* Now the layout takes the survivor off to make the page fit, reporting nothing. */
     const trimmedForFit = { ...survived, experience: [] };
     assert.deepEqual(
-      baseResumeSelectionIssues(trimmedForFit, [required], { requireFirst: false, droppedByTheFloor: [] }),
+      baseResumeSelectionIssues(trimmedForFit, [required], { requireFirst: false, droppedByTheFloor: floorKept }),
       ['required current or role-defining entry missing: Engineer at Gamma Corp'],
     );
   });
