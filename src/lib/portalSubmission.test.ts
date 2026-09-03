@@ -41,7 +41,9 @@ import {
   mergeManagedFieldOptions,
   MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL,
   MANAGED_OPTION_PROBE_MAX_CONTROLS,
+  MANAGED_OPTION_PROBE_MENU_WAIT_MS,
   reactSelectListboxSelector,
+  openControlListboxSelector,
   paylocityListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
@@ -8440,8 +8442,32 @@ test('the probe reads the controls discovery found, and never the four it alread
   );
   assert.equal(managedOptionProbeTargets('greenhouse', discovered, {}).includes('school--0'), true,
     'a windowed hardcoded read must be retried and then fail closed');
-  // Not a Greenhouse form, no react-select listbox convention to read.
-  assert.deepEqual(managedOptionProbeTargets('lever', discovered), []);
+  /* AND LEVER IS PROBED TOO, WHERE THIS LINE USED TO ASSERT THE OPPOSITE.
+   *
+   * It read "Not a Greenhouse form, no react-select listbox convention to read" and pinned `[]`,
+   * which is the assertion form of the three-family allow list managedOptionProbeTargets used to
+   * carry. The missing convention was real and is no longer a reason to decline: a control that
+   * reports aria-expanded="true" names its own popup without one, which is what
+   * openControlListboxSelector reads and what Paylocity has shipped on since 2026-08.
+   *
+   * What that refusal cost, measured live on mehekmandal05@gmail.com 2026-09-03: 160 of 179
+   * unanswered REQUIRED choice questions across the queue carry a completely EMPTY option list, and
+   * 19 packets are blocked on nothing else. A choice question with no captured options cannot be
+   * answered at all - the product must send one of the control's own exact option strings - so
+   * every one of those was unanswerable and unaskable at once.
+   *
+   * The role capability is what makes a react-select probeable off-Greenhouse, exactly as it does
+   * on Greenhouse: discovery reports a react-select as inputType 'text' plus role 'combobox', and
+   * only the role says it is a closed list. */
+  assert.deepEqual(
+    managedOptionProbeTargets('lever', discovered, {}, true),
+    ['question_37228964002', 'discipline--0', 'school--0', 'question_37228970002', '4001608008'],
+  );
+  assert.deepEqual(managedOptionProbeTargets('ashby', discovered, {}, true).includes('question_37228964002'), true);
+  // A form with no closed control still costs no call, on every family. That half never changed.
+  assert.deepEqual(managedOptionProbeTargets('lever', [
+    { label: 'Tell us about yourself*', selector: '#question_1', inputType: 'textarea', required: true },
+  ], {}, true), []);
 });
 
 test('the backend consumes the real Stratus text-plus-combobox-role wire shape', () => {
@@ -8609,22 +8635,39 @@ test('the probe pass opens, reads and closes each control, and cannot exceed the
   const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered, {}, true);
   assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${actions.length} actions is over the runner's ceiling`);
   assert.equal(actions.length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
-  // Nothing is typed, uploaded or sent. The identity read precedes two open / read / Escape rounds.
-  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['extract', 'click', 'press']);
+  /* Nothing is typed, uploaded or sent. The identity read precedes two open / wait / read / Escape
+   * rounds. waitForSelector joined that sequence on 2026-09-03 and is the only action here that
+   * spends wall-clock: the extract used to run in the very next action after the click, and click's
+   * only settle is waitForLoadState('networkidle'), which returns immediately for a menu painted
+   * from client state. It is a READ, exactly like the two around it. */
+  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['extract', 'click', 'waitForSelector', 'press']);
   assert.equal(actions.every((a) => a.optional === true), true);
   const first = 'question_9000000';
   const identity = actions.findIndex((a) => a.label === `closed_control:${first}`);
   const open = actions.findIndex((a) => a.label === `option_probe_open:${first}:1`);
+  const menu = actions.findIndex((a) => a.label === `option_probe_menu:${first}:1`);
   const read = actions.findIndex((a) => a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${first}`);
   const close = actions.findIndex((a) => a.label === `option_probe_close:${first}:1`);
-  assert.ok(identity >= 0 && open === identity + 1 && read === open + 1 && close === open + 2);
+  assert.ok(identity >= 0 && open === identity + 1 && menu === open + 1 && read === menu + 1 && close === read + 1);
+  // The wait and the read name the SAME node, or the wait proves nothing about what the read sees.
+  assert.equal(actions[menu]!.selector, reactSelectListboxSelector(first));
+  assert.equal(actions[menu]!.timeout, MANAGED_OPTION_PROBE_MENU_WAIT_MS);
   assert.equal(actions[read]!.selector, reactSelectListboxSelector(first));
   assert.equal(actions[read]!.attribute, undefined);
   assert.equal(actions[close]!.value, 'Escape');
   // No targets, no call. The caller checks for an empty list rather than opening a browser to do
-  // nothing on every Lever and Ashby posting.
-  assert.deepEqual(buildManagedDiscoveredOptionProbeActions('lever', discovered), []);
+  // nothing. It is no longer whole ATS families that produce no targets - only forms whose controls
+  // are all open text - which is the whole point of the 2026-09-03 widening.
+  assert.deepEqual(buildManagedDiscoveredOptionProbeActions('lever', []), []);
   assert.deepEqual(buildManagedDiscoveredOptionProbeActions('greenhouse', []), []);
+  // A Lever form of the same shape is now read, and read through the aria-expanded proof rather
+  // than through a react-select id convention Lever does not have.
+  const leverActions = buildManagedDiscoveredOptionProbeActions('lever', discovered, {}, true);
+  assert.ok(leverActions.length > 0, 'a Lever form full of closed controls must not read as nothing to do');
+  assert.equal(
+    leverActions.find((a) => a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${first}`)?.selector,
+    openControlListboxSelector(first),
+  );
 });
 
 test('a real Greenhouse form fits the probe pass with room to spare', () => {
