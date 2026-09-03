@@ -39,8 +39,9 @@ test('total tenure merges concurrent roles and counts exclusive months', () => {
   assert.equal(totalExperienceMonths([...periods, { date_range: 'Feb 2026 - Present' }], asOf), 15);
   assert.equal(totalExperienceMonths([{ date_range: 'Sep 2025 – Present' }], asOf), 12);
   assert.equal(totalExperienceMonths([{ date_range: 'June 2024 to August 2024' }], asOf), 2);
-  // A bare year is January to December of that year, and a future start is a plan, not tenure.
-  assert.equal(totalExperienceMonths([{ start: '2024', end: '2024' }], asOf), 11);
+  // A bare year is the SHORTEST span it can mean (December start, January end), so a same-year
+  // bare range contributes nothing rather than twelve months; a future start is a plan, not tenure.
+  assert.equal(totalExperienceMonths([{ start: '2024', end: '2024' }], asOf), 0);
   assert.equal(totalExperienceMonths([{ start: 'Jan 2027', end: 'Present' }], asOf), null);
   // A role still running is clipped at today, never extended past it.
   assert.equal(totalExperienceMonths([{ start: 'Aug 2026', end: 'Dec 2026' }], asOf), 1);
@@ -101,4 +102,13 @@ test('the chosen band is the one holding the total, trimmed to its neighbour and
   assert.equal(chooseExperienceBand(undefined, 15), null);
   // Order of arrival does not change the choice.
   assert.equal(chooseExperienceBand([...personio].reverse(), 15), '1-2 years');
+});
+
+test('a bare year is the shortest span it can mean, and an empty end is unknown', () => {
+  // Dec 2023 -> Jan 2024, exclusive: one month, never twenty-three.
+  assert.equal(totalExperienceMonths([{ start: '2023', end: '2024' }], new Date(Date.UTC(2026, 8, 2))), 1);
+  // Dec 2025 -> asOf Sep 2026: nine months, never twenty.
+  assert.equal(totalExperienceMonths([{ start: '2025', end: 'Present' }], new Date(Date.UTC(2026, 8, 2))), 9);
+  // A start with no end is not "present"; the whole total is unknown.
+  assert.equal(totalExperienceMonths([{ start: 'Feb 2025', end: '' }], new Date(Date.UTC(2026, 8, 2))), null);
 });

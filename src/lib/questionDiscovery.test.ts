@@ -5132,6 +5132,8 @@ test('a skip on a blank answer survives the refresh that fills the blank in', ()
  * eligibility record (US: authorized now, sponsorship later), four declared languages, and the
  * canon's three dated roles. */
 const personioProfile: ApplicationProfileLike = {
+  // Her own declaration that she needs sponsorship: without it no permit answer is derived.
+  needs_sponsorship: true,
   citizenship: 'Indian',
   address_country: 'United States',
   address_city: 'Los Angeles',
@@ -5161,7 +5163,6 @@ test('a European work permit is answered No only when the profile proves she is 
   for (const label of [
     measured,
     'Do you have the right to work in the EU?',
-    'Work permit for Germany',
     'Do you hold a valid residence permit for the EEA?',
     'Are you eligible to work in the Schengen area?',
     'do you have a valid work permit for the netherlands?',
@@ -5395,4 +5396,43 @@ test('"available from" already classifies as the start date and is held only by 
     assert.ok(heldByScope && 'skipReason' in heldByScope, label);
     assert.match(heldByScope.skipReason, /availability date left for you/, label);
   }
+});
+
+/* REVIEW OF PR #879: the five wrong-fact classes the adversarial pass executed, pinned. */
+test('a permit question about NEEDING, HISTORY, or a non-polar shape stands the bloc rule down', () => {
+  const ap = { needs_sponsorship: true, citizenship: 'United States', address_country: 'United States',
+    work_eligibility_by_country: [{ country_code: 'US', authorized_now: false }] } as unknown as ApplicationProfileLike;
+  for (const label of [
+    'Do you need a work visa to work in Germany?',
+    'Will you require a work permit for the Netherlands?',
+    'Do you need a work permit to work in the EU?',
+    'Have you ever been refused a work permit for an EU country?',
+    'Have you previously held a work permit in the EU?',
+    'If yes, which EU work permit do you hold?',
+    'EU work permit number',
+    'Please upload a copy of your EU work permit',
+    'Do you have a valid EU work permit? If not, which visa would you need?',
+    'Work permit for Germany',
+  ]) {
+    const r = resolveKnownAnswer(label, 'text', ap, undefined);
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+  // ...while the measured xolife ask still answers, from her declared need for sponsorship.
+  assert.deepEqual(resolveKnownAnswer('do you have a valid eu work permit? custom_attribute_42', 'select', ap, undefined), { value: 'No' });
+  // ...and never without that declaration on record.
+  const undeclared = { ...ap, needs_sponsorship: undefined } as unknown as ApplicationProfileLike;
+  const r = resolveKnownAnswer('do you have a valid eu work permit? custom_attribute_42', 'select', undeclared, undefined);
+  assert.ok(!r || !('value' in r));
+});
+
+test('a language used as an adjective on something else is not a proficiency ask', () => {
+  const ap = { languages: ['English', 'French', 'Arabic'] } as unknown as ApplicationProfileLike;
+  const scale = ['None', 'Basic', 'Advanced', 'Expert'];
+  for (const label of ['Knowledge of French law', 'Level of knowledge of French GAAP', 'Skills: French cuisine',
+    'Arabic calligraphy skills', 'Experience level with English-speaking clients']) {
+    const r = resolveKnownAnswer(label, 'select', ap, undefined, undefined, undefined, scale);
+    assert.ok(!r || !('value' in r), `must not answer "${label}": ${JSON.stringify(r)}`);
+  }
+  assert.deepEqual(resolveKnownAnswer('language skills: english custom_attribute_4230717 field-language', 'select', ap, undefined, undefined, undefined, ['None', 'A1', 'A2', 'B1', 'B2', 'C1']), { value: 'C1' });
+  assert.deepEqual(resolveKnownAnswer('English proficiency', 'select', ap, undefined, undefined, undefined, scale), { value: 'Expert' });
 });

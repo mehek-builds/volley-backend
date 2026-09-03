@@ -5447,6 +5447,11 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   const locationCommitment = isLocationCommitmentQuestion(l);
   const locationChoice = isLocationChoiceQuestion(l);
 
+  /* A permit or visa question names a country to scope the PERMIT, not to ask where she lives or
+   * what she is a citizen of: "Have you ever been refused a work permit for an EU country?" was
+   * answered "United States" by the residence arm (review of PR #879). The bloc and per-country
+   * eligibility rules own every such label and refuse what they cannot prove. */
+  if (/\b(?:work(?:ing)?\s+permit|residence\s+permit|work\s+visa|\bvisa\b|\bpermit\b)/i.test(l)) return null;
   if (CITIZENSHIP_QUESTION.test(l)) return 'citizenship';
   if (!locationCommitment && !locationChoice && RESIDENCE_QUESTION.test(l)) return 'address_country';
 
@@ -7605,6 +7610,15 @@ function blocWorkPermitAnswer(
 ): { value: string } | { skipReason: string } | null {
   if (!BLOC_WORK_PERMIT_QUESTION.test(label)) return null;
   if (SPONSORSHIP_QUESTION.test(label)) return null;
+  /* POLARITY, TENSE AND SHAPE, before anything is derived. The answer below is a No to HOLDING a
+   * permit; "Do you need a work permit?" is that question's mirror, and answering it with the same
+   * No inverts the truth for exactly the applicant this rule was measured on (review of PR #879,
+   * B1). A past-tense or history ask ("Have you ever been refused…", "Did you previously hold…")
+   * asks about a record the profile does not keep (B2). Only a yes/no ask is answerable at all:
+   * "If yes, which permit…", "permit number", "upload a copy", a two-question label are different
+   * asks wearing the permit noun (B7). Each stands the rule down; nothing else answers them. */
+  if (/\b(?:need|needs|needed|require|requires|required|requiring|arrange|obtain|apply\s+for)\b/i.test(label)) return null;
+  if (/\b(?:ever|previously|prior|past|held|refused|denied|revoked|did\s+you|have\s+you\s+(?:ever|previously|been))\b/i.test(label)) return null;
   if (AUTHORIZATION_TYPE_QUESTION.test(label) || AUTHORIZATION_EXPIRY_QUESTION.test(label)
     || WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) return null;
   if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) return null;
@@ -7649,7 +7663,17 @@ function blocWorkPermitAnswer(
     const anyEuropeanAuthorization = (list ?? []).some((row) => scopeCodes.has(row.country_code) && row.authorized_now);
     if (anyEuropeanAuthorization) return { skipReason: workEligibilitySkipReason(label) };
   }
-  if (provablyOutsideEuropeanFreeMovement(ap)) return { value: 'No' };
+  /* THE DERIVED NO IS HER OWN STATEMENT, NOT AN INFERENCE. Living and holding citizenship outside
+   * the bloc does not by itself prove she holds no permit there; her declared need for sponsorship
+   * does. Both must be on record before "No" is typed in her name (review of PR #879, B8). */
+  /* THE DERIVED ANSWER ONLY FITS A YES/NO ASK. A record-backed Yes above may name the permit a
+   * select offers ("Work permit for Germany" with a German record), but a derived No has no
+   * business on "If yes, which permit…", "permit number", "upload a copy" or a two-question label
+   * (review of PR #879, B7). */
+  if (!isPolarQuestion(label)) return { skipReason: workEligibilitySkipReason(label) };
+  if (/\bif\s+(?:yes|not|so)\b|\bnumber\b|\bupload\b|\bcopy\b|\bwhich\b|\bexpir/i.test(label)) return { skipReason: workEligibilitySkipReason(label) };
+  if ((label.match(/\?/g) || []).length > 1) return { skipReason: workEligibilitySkipReason(label) };
+  if (ap.needs_sponsorship === true && provablyOutsideEuropeanFreeMovement(ap)) return { value: 'No' };
   return { skipReason: workEligibilitySkipReason(label) };
 }
 
@@ -7728,6 +7752,27 @@ function languageProficiencyAnswer(
   if (!LANGUAGE_PROFICIENCY_QUESTION.test(label)) return null;
   if (LANGUAGE_PROFICIENCY_NOT_THIS.test(label)) return null;
   if (isPolarQuestion(label)) return null;
+  /* THE LANGUAGE MUST BE THE OBJECT OF THE ASK, not an adjective on something else. "Knowledge of
+   * French law", "Skills: French cuisine", "Arabic calligraphy skills" and "English-speaking clients"
+   * all carry a language token within reach of a level word and none asks how well she speaks it
+   * (review of PR #879, B5). What follows the language token, once provider handles, punctuation,
+   * option lists in parentheses and the level words themselves are set aside, must be empty: a
+   * remaining word is the noun the language was describing. */
+  {
+    const token = Object.keys(SPOKEN_LANGUAGE_ALIASES)
+      .map((alias) => label.match(new RegExp(`\\b${alias}\\b`, 'i')))
+      .find((m) => m && m.index !== undefined);
+    if (token && token.index !== undefined) {
+      const after = label.slice(token.index + token[0].length)
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\bcustom_attribute_\d+\b|\bfield[-_]\S*|\b[a-z][a-z0-9]*_\d+\b|\b\w+_\w+\b/gi, ' ')
+        .replace(new RegExp(`\\b${LANGUAGE_LEVEL_WORD}\\b`, 'gi'), ' ')
+        .replace(/\b(?:language|written|spoken|oral|reading|writing|speaking)\b/gi, ' ')
+        .replace(/[^\p{L}]+/gu, ' ')
+        .trim();
+      if (after) return null;
+    }
+  }
   const named: string[] = [...new Set(
     Object.entries(SPOKEN_LANGUAGE_ALIASES)
       .filter(([token]) => new RegExp(`\\b${token}\\b`, 'i').test(label))
@@ -7766,7 +7811,7 @@ const YEARS_OF_EXPERIENCE_QUESTION =
 const EXPERIENCE_UNSCOPED_VOCABULARY =
   /\b(?:how\s+many|total|overall|years?|of|professional|work(?:ing)?|full[\s-]?time|prior|previous|experience|in\s+years|do\s+you\s+have|have\s+you|have|got|you|your|the|please|required|optional|enter|select|indicate|specify)\b/gi;
 const EXPERIENCE_SCOPE_QUALIFIER =
-  /\b(?:in|with|using|as|on|at|for|related|relevant|hands|specific|industry|field|domain|role|position|technolog\w*|tools?|languages?|frameworks?|platforms?|leadership|manag\w*|coding|programming|software|engineering|develop\w*|design|sales|marketing|research|data|similar|comparable|equivalent|intern\w*|since|after|post|team|customer|client)\b/i;
+  /\b(?:post|pre)[- ]\w+|\blead\w*\b|\bteams?\b|\([^)]*\)|\b[A-Z]{2,}\b|\b(?:in|with|using|as|on|at|for|related|relevant|hands|specific|industry|field|domain|role|position|technolog\w*|tools?|languages?|frameworks?|platforms?|leadership|manag\w*|coding|programming|software|engineering|develop\w*|design|sales|marketing|research|data|similar|comparable|equivalent|intern\w*|since|after|post|team|customer|client)\b/i;
 
 /**
  * "Years of experience" as a band select, answered by arithmetic on the resume's dated roles.
@@ -7789,7 +7834,10 @@ function yearsOfExperienceAnswer(
   if (!YEARS_OF_EXPERIENCE_QUESTION.test(label)) return null;
   if (isPolarQuestion(label)) return null;
   const remainder = label
-    .replace(/\S*[_-]\S*/g, ' ')
+    /* Only a provider handle is set aside (an underscore or a digit marks one); a hyphenated
+     * qualifier like "post-graduation" or "front-end" is content and must reach the scope test
+     * below (review of PR #879, B6). */
+    .replace(/\S*(?:_|\d)\S*/g, ' ')
     .replace(/[*:?.,;()]/g, ' ')
     .replace(EXPERIENCE_UNSCOPED_VOCABULARY, ' ');
   if (EXPERIENCE_SCOPE_QUALIFIER.test(remainder)) return null;

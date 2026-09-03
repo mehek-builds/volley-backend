@@ -105,13 +105,25 @@ function readPeriod(entry: ExperiencePeriod, asOfMonth: number): Span | null | u
     }
   }
   if (!startText) return null;
+  /* AN EMPTY END IS UNKNOWN, NOT "PRESENT". The local parser writes end: '' for a line with one
+   * readable date and no "present" ("Feb 2025", "Feb 2025 - Spring 2025"), and reading that as
+   * ongoing counted a one-month role as running to today (review of PR #879, B4). Only the word
+   * decides: a role is present when the resume says so. */
+  if (!endText) return null;
   const start = readTenureMonth(startText);
-  const end = endText ? readTenureMonth(endText) : 'present';
+  const end = readTenureMonth(endText);
   if (start === undefined || end === undefined || start === 'present') return null;
-  const from = typeof start === 'number' ? start : start.year * 12;
-  const to = end === 'present'
+  /* A BARE YEAR READS AS THE SHORTEST SPAN IT CAN MEAN. A start of "2025" is December 2025 and an
+   * end of "2024" is January 2024, so a "2023 - 2024" role counts one month, never twenty-three:
+   * the total may understate her tenure and may never overstate it (B3). */
+  const from = typeof start === 'number' ? start : start.year * 12 + 11;
+  let to = end === 'present'
     ? asOfMonth
-    : typeof end === 'number' ? end : end.year * 12 + 11;
+    : typeof end === 'number' ? end : end.year * 12;
+  /* Two bare years that read December-to-January of the same or adjacent years are a span the
+   * resume states but this file cannot bound: it contributes nothing, and it does not poison the
+   * total the way an unreadable date does. */
+  if (typeof start !== 'number' && end !== 'present' && typeof end !== 'number' && to < from) to = from;
   if (to < from) return null;
   return { from, to };
 }
