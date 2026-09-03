@@ -21,12 +21,21 @@ export const RESUME_PARSE_BUDGET_MS = 24_000;
  * builds the thin, artifact-titled banks (dash titles, missing entries) behind the base-resume
  * dead-ends fixed in PRs #872/#875. Captured in production logs: openai and anthropic both
  * outcome=error at elapsed_ms=8002-8004 timeout_ms=8000, three uploads in a row, while a 1.2k-char
- * resume parsed in 5.6s. The overall budget is unchanged, so the worst-case upload is unchanged;
- * this only re-slices how much of it one attempt may use, and turns a 9.7s degraded upload into a
- * ~9-10s model-quality one. */
+ * resume parsed in 5.6s; the same dense resume had parsed via the model at ~8.5s earlier the same
+ * day, so 12s clears the observed distribution rather than merely exceeding the old cap.
+ *
+ * The tradeoffs, stated rather than hidden. The DEADLINE is unchanged, but the worst case a
+ * provider chain can actually reach rises with the slices: both providers returning invalid JSON
+ * twice now runs to the full 24s deadline (it used to exhaust at ~17s), and a resume no provider
+ * can parse inside 12s reaches the local fallback ~4s later than before - both accepted, because
+ * the cohort this serves (dense real resumes, the product's headline case) stops degrading at all.
+ * The hedged provider's repair slice truncates to deadline remainder (~11.25s) rather than a full
+ * cap, which is ample; the invariant test pins that a repair can always at least start. The scan
+ * path (Sonnet vision) shares this constant and is re-sliced with it on text-path evidence only -
+ * direction judged right (more scans parse; a hopeless scan's honest 400 arrives ~4s later). */
 export const RESUME_PROVIDER_CALL_CAP_MS = 12_000;
 export const RESUME_PROVIDER_HEDGE_DELAY_MS = 750;
-const MIN_RESUME_PROVIDER_CALL_MS = 750;
+export const MIN_RESUME_PROVIDER_CALL_MS = 750;
 
 export function resumeParseDeadlineFromUploadStart(uploadStartedAtMs: number): number {
   return uploadStartedAtMs + RESUME_PARSE_BUDGET_MS;

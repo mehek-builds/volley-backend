@@ -20,6 +20,7 @@ import {
   parsedProfileWithOneRepair,
   printedGpaIn,
   reconcileGpaWithSource,
+  MIN_RESUME_PROVIDER_CALL_MS,
   RESUME_PARSE_BUDGET_MS,
   RESUME_PROVIDER_CALL_CAP_MS,
   RESUME_PROVIDER_HEDGE_DELAY_MS,
@@ -318,6 +319,18 @@ test('the Anthropic hedge starts before a slow OpenAI request settles', async (t
   assert.equal(parsed.full_name, 'A Candidate');
   assert.equal(anthropicCalls, 1);
   assert.ok(RESUME_PROVIDER_HEDGE_DELAY_MS < RESUME_PROVIDER_CALL_CAP_MS);
+  /* The relationship the 2026-09-03 cap raise almost broke silently: the hedged provider starts
+   * HEDGE_DELAY late and may spend a full initial cap, and its validation-repair call must still
+   * be able to START (resumeParseCallTimeoutMs throws below MIN, which converts every repairable
+   * JSON failure into a local-fallback parse). Every per-call timeout assertion in this suite is
+   * written as min(cap, remaining) and is therefore self-consistent at ANY cap, so without this
+   * line a cap raise that starves the repair pass lands green. The repair slice truncating below
+   * a full cap is fine and expected; disappearing is not. */
+  assert.ok(
+    RESUME_PROVIDER_HEDGE_DELAY_MS + RESUME_PROVIDER_CALL_CAP_MS + MIN_RESUME_PROVIDER_CALL_MS
+      <= RESUME_PARSE_BUDGET_MS,
+    'the hedged provider must retain a startable repair slice inside the parse deadline',
+  );
 });
 
 test('main and job-specific resume creation have grounded model-free fallbacks', () => {
