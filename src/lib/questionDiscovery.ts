@@ -3,6 +3,7 @@ import {
   referralAnswer as referrerDeclarationAnswer,
   graduationWindowAnswer as graduationWindowDeclarationAnswer,
 } from './heldAnswerQuestions';
+import { applicantChoseStoredAnswerInRound } from './applicantAnswer';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -2206,11 +2207,18 @@ export function answerCarriesCurrentApplicantReview(
   question: { answer?: string | null; answer_source?: unknown; answer_reviewed_at?: unknown },
   questionsReviewedAt: string | undefined,
 ): boolean {
-  return Boolean(
-    question.answer?.trim()
-    && question.answer_source === 'applicant_review'
-    && typeof question.answer_reviewed_at === 'string'
-    && question.answer_reviewed_at === questionsReviewedAt,
+  /* An ADAPTER onto the canonical predicate, not a copy of it. This call site holds the question
+   * as a loose record whose provenance fields are `unknown`, so it narrows them and delegates;
+   * everything about what counts as her current-round answer is decided in applicantAnswer.ts and
+   * nowhere else. Writing the comparison out here is what let the fill run and the send gate
+   * disagree about the same record. */
+  return applicantChoseStoredAnswerInRound(
+    {
+      answer: question.answer ?? '',
+      answer_source: typeof question.answer_source === 'string' ? question.answer_source : undefined,
+      answer_reviewed_at: typeof question.answer_reviewed_at === 'string' ? question.answer_reviewed_at : undefined,
+    },
+    questionsReviewedAt,
   );
 }
 
@@ -2229,24 +2237,33 @@ export function sensitiveQuestionRequiresAttention(
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
   const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
+  /* THE RESOLVER ANSWERED, SO ITS ANSWER IS THE CROSS-CHECK AND A REVIEW DOES NOT OVERRIDE IT.
+   *
+   * This branch is the only place a work-eligibility or self-identification answer is ever
+   * compared against what her profile actually says, and R-004 is what happens without it: a
+   * stored "Yes" to "are you legally authorized to work in the United States?" reaching a federal
+   * control while the profile says work_authorized false. An earlier cut of this change let a
+   * current-round review short-circuit the whole function, which removed exactly that check for
+   * every label the resolver answers. It stays first, and it stays unconditional.
+   */
   if (known && 'value' in known) {
     return comparableAnswer(known.value) !== comparableAnswer(answer);
   }
   /* THE RESOLVER DECLINED, AND UNTIL NOW THAT MADE THE QUESTION UNSENDABLE BY ANY ANSWER.
    *
-   * Measured live on 2026-09-03, Exa packet 73768339 (ashby), on the label "do you require visa
+   * Measured live 2026-09-03, Exa packet 73768339 (ashby), on the label "do you require visa
    * sponsorship to work in your selected location? if so, which one? and when does your visa
    * expire?". resolveKnownAnswer returns skipReason "work-eligibility question left for you", so
    * there is no value to compare and the old expression returned true for EVERY answer - her own
-   * reviewed paragraph, and a bare "Yes", both measured true. The dashboard offers no control that
-   * clears this, because no answer could: the send was refused permanently.
+   * reviewed paragraph, and a bare "Yes", both measured true. The dashboard offered no control
+   * that cleared it, because no answer could: the send was refused permanently.
    *
    * A declined resolve means R-004 will not let the PRODUCT declare her work eligibility. It does
    * not mean she may not declare it herself - "left for you" is precisely an instruction to her.
-   * So her own current-round review is the attention this gate asks for, and nothing else is: an
-   * answer the product computed still refuses, exactly as before.
+   * There is no profile value to contradict here, which is why the escape hatch lives in this
+   * branch and only this one.
    *
-   * NEVER_FILL_PATTERNS is deliberately above this and stays absolute. An SSN, a licence number, a
+   * NEVER_FILL_PATTERNS is deliberately ABOVE this and stays absolute: an SSN, a licence number, a
    * captcha or a recording consent is never cleared by a review.
    */
   return !applicantReviewed;

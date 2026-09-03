@@ -23,3 +23,28 @@ export function applicantChoseStoredAnswer(
 ): boolean {
   return question.answer_source?.trim() === 'applicant_review' && Boolean(question.answer.trim());
 }
+
+/* THE SAME CLAIM, PINNED TO ONE REVIEW ROUND: "she chose this, and she chose it in THIS round".
+ *
+ * Lives here beside the predicate it strengthens, for the reason the header above gives - it had
+ * begun to drift the same way. It was written out in submissionRunner, where every branch that can
+ * drop a stored answer during a fill consults it, and again in questionDiscovery for the send
+ * gate, and the two copies disagreed in both directions: one trimmed both timestamps and required
+ * both non-empty, the other compared them raw and so read an empty round as matching an empty
+ * claim. A record could then be hers to the fill and not hers to the gate, which is the deadlock
+ * of a run preserving an answer the send then refuses.
+ *
+ * Both sides are trimmed and both must be non-empty. An absent round is not a match: a packet that
+ * has never been reviewed cannot have been reviewed in its current round.
+ */
+export function applicantChoseStoredAnswerInRound(
+  question: { answer: string; answer_source?: string; answer_reviewed_at?: string },
+  questionsReviewedAt: string | undefined,
+): boolean {
+  const answerReviewedAt = question.answer_reviewed_at?.trim();
+  const reviewRound = questionsReviewedAt?.trim();
+  return applicantChoseStoredAnswer(question)
+    && Boolean(answerReviewedAt)
+    && Boolean(reviewRound)
+    && answerReviewedAt === reviewRound;
+}

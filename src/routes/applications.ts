@@ -3074,7 +3074,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         canonicalSubmittedQuestions, sensitiveProfile, current.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
-        current.questions_reviewed_at,
+        /* submittedReviewedAt, NOT current.questions_reviewed_at. canonicalSubmittedQuestions is
+         * built as { ...current, questions_reviewed_at: submittedReviewedAt } and its answers are
+         * stamped answer_reviewed_at: submittedReviewedAt, which resolveSubmittedApplicationAnswers
+         * mints fresh when the packet has no prior round. Passing the stored value hands this gate
+         * undefined for exactly those packets, so every answer reads as unreviewed and the gate
+         * refuses an answer she just supplied. Lines below pass submittedReviewedAt alongside this
+         * same question array for the same reason. */
+        submittedReviewedAt,
       );
       // A supported portal needs the browser run to discover and surface the live form's
       // declarations. Blocking that run on the pre-run snapshot creates a deadlock: the question
