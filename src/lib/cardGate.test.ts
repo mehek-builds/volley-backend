@@ -259,6 +259,11 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
       assert.equal(await cardGateRouteReachable('/postings/:jobId/questions', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/managed-prepare', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), true);
+      /* The send's own prerequisites (rqw #512): the review screen audits the exact packet and
+         records the acknowledgement before submit-request, so a tier that admits the send but 402s
+         the audit re-creates the onboarding dead end two screens before the payment step. */
+      assert.equal(await cardGateRouteReachable('/applications/:id/packet-audit', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/applications/:id/packet-audit/acknowledge', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), true);
     } finally {
       select.mock.restore();
@@ -296,6 +301,11 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
       assert.equal(await cardGateRouteReachable('/resume/generate', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/managed-prepare', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), false);
+      /* The audit closes with the send it authorizes: a spent account must not keep re-auditing
+         (each audit rebuilds delivery bindings and mints a fresh signed download token) for a
+         packet it can no longer send. */
+      assert.equal(await cardGateRouteReachable('/applications/:id/packet-audit', 'user-1'), false);
+      assert.equal(await cardGateRouteReachable('/applications/:id/packet-audit/acknowledge', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), false);
     } finally {
       select.mock.restore();
