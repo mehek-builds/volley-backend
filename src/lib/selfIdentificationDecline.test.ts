@@ -231,6 +231,22 @@ const OWNER_EEO_PREFS: ApplicationProfileLike = {
   },
 };
 
+/* HER PROFILE PLUS A HISPANIC ANSWER SHE ACTUALLY SAVED.
+ *
+ * The owner's real eeo_prefs above has no hispanic key, because the Settings screen has no such
+ * field, and until 2026-09-03 the resolver answered that question anyway with a manufactured
+ * "Decline to self-identify" (see eeoAnswer, and selfIdentificationAbsence.test.ts for the six live
+ * packets it reached). The two rebuild tests below are about a refusal being RESPELLED by an
+ * employer's list, which is a real and still-live mechanism, so they get a profile where the
+ * refusal is hers. eeoSubjectPreferenceKeys already reads hispanic_ethnicity first, so this is the
+ * exact shape the product will hold the day the Settings screen writes the key. */
+const OWNER_WITH_STORED_HISPANIC_DECLINE: ApplicationProfileLike = {
+  eeo_prefs: {
+    ...(OWNER_EEO_PREFS.eeo_prefs as Record<string, string>),
+    hispanic_ethnicity: 'Decline to self-identify',
+  },
+};
+
 // Verkada, greenhouse, packet f1b2df5a.
 const VERKADA_VETERAN = [
   "I don't wish to answer",
@@ -318,10 +334,20 @@ describe('a stated answer is never answered with a refusal', () => {
      * mint "none of the options match your saved answer". */
     const resolved = resolveProfileField(
       { label: 'Are you Hispanic/Latino?', inputType: 'select', options: ['Yes', 'No', 'Decline To Self Identify'] },
-      OWNER_EEO_PREFS,
+      OWNER_WITH_STORED_HISPANIC_DECLINE,
     );
     assert.equal(resolved?.value, 'Decline To Self Identify');
     assert.equal(resolved?.matchedOption, true);
+    /* AND WITH NOTHING STORED IT RESOLVES NOTHING, which is the other half of the same measurement.
+     * The stored answer this test folds used to be manufactured rather than saved, on this exact
+     * label and this exact list. The folding is right; inventing the thing being folded was not. */
+    assert.equal(
+      resolveProfileField(
+        { label: 'Are you Hispanic/Latino?', inputType: 'select', options: ['Yes', 'No', 'Decline To Self Identify'] },
+        OWNER_EEO_PREFS,
+      ),
+      null,
+    );
   });
 
   test('a lone affirmative option answers nothing at all', () => {
@@ -374,8 +400,11 @@ describe('a stated answer is never answered with a refusal', () => {
  * control does not offer. That is the dashboard row reading ANSWERED with nothing selected.
  */
 describe('a snapped self-identification answer survives the rebuild', () => {
-  const refreshed = (row: Record<string, string>): string => {
-    const [out] = refreshKnownQuestionAnswers([row as never], OWNER_EEO_PREFS, undefined, undefined);
+  const refreshed = (
+    row: Record<string, string>,
+    profile: ApplicationProfileLike = OWNER_EEO_PREFS,
+  ): string => {
+    const [out] = refreshKnownQuestionAnswers([row as never], profile, undefined, undefined);
     return (out as { answer: string }).answer;
   };
 
@@ -385,7 +414,7 @@ describe('a snapped self-identification answer survives the rebuild', () => {
         question: 'Are you Hispanic/Latino?',
         answer: 'Decline To Self Identify',
         answer_option_source: 'Decline to self-identify',
-      }),
+      }, OWNER_WITH_STORED_HISPANIC_DECLINE),
       'Decline To Self Identify',
     );
     /* AND THE CASE-ONLY SPELLING, which is the shape that parked application 6de82956 and the one a
@@ -394,11 +423,23 @@ describe('a snapped self-identification answer survives the rebuild', () => {
      * guard is a byte comparison for this reason and this assertion is what holds it there. */
     assert.equal(
       refreshed({
-        question: 'Do you identify as a member of the LGBTQIA community?',
+        question: 'Are you Hispanic/Latino?',
         answer: 'Decline To Self-Identify',
         answer_option_source: 'Decline to self-identify',
-      }),
+      }, OWNER_WITH_STORED_HISPANIC_DECLINE),
       'Decline To Self-Identify',
+    );
+    /* THE SAME ROW WITH NOTHING STORED IS ERASED, not preserved, and that is the point of the
+     * profile swap above rather than a side effect of it. The currency branch this test pins asks
+     * whether the stored string still states what the PROFILE says; a profile that says nothing
+     * cannot make a refusal current, and the row goes back to her. */
+    assert.equal(
+      refreshed({
+        question: 'Are you Hispanic/Latino?',
+        answer: 'Decline To Self Identify',
+        answer_option_source: 'Decline to self-identify',
+      }),
+      '',
     );
   });
 

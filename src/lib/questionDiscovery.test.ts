@@ -356,7 +356,12 @@ test('holds the work-eligibility pair when one boolean cannot answer the whole q
   );
 });
 
-test('answers EEO / demographic questions with stored preferences or decline', () => {
+test('answers EEO / demographic questions from a stored preference, and from nothing else', () => {
+  /* CHANGED 2026-09-03. The three `{ value: 'Decline to self-identify' }` expectations below were
+   * this test's whole account of an unstored subject, and that value is a refusal nobody gave. It
+   * reached six live packets on the hispanic question, twice stamped as her own reviewed choice.
+   * See eeoAnswer and selfIdentificationAbsence.test.ts. The half that survives unchanged is the
+   * one that was always right: a stored preference is relayed verbatim. */
   const labels = [
     'what is your gender?',
     'are you hispanic or latino?',
@@ -367,18 +372,30 @@ test('answers EEO / demographic questions with stored preferences or decline', (
   for (const label of labels) {
     assert.equal(isRefusedQuestion(label), true, label);
     assert.equal(classifyField(label), null, label);
-    assert.deepEqual(resolveKnownAnswer(label, 'text', {}, undefined), { value: 'Decline to self-identify' });
+    const unstored = resolveKnownAnswer(label, 'text', {}, undefined);
+    assert.ok(unstored && 'skipReason' in unstored, label);
+    assert.match(unstored.skipReason, /self-identification question left for you/, label);
   }
   assert.deepEqual(
     resolveKnownAnswer('what is your gender?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
     { value: 'Female' },
   );
+  // A stored answer for ONE subject does not answer another: each ladder reads its own keys.
+  for (const otherSubject of [
+    'are you a person of transgender experience?',
+    'please select your racial/ethnic background',
+  ]) {
+    const resolved = resolveKnownAnswer(otherSubject, 'text', { eeo_prefs: { gender: 'Female' } }, undefined);
+    assert.ok(resolved && 'skipReason' in resolved, otherSubject);
+  }
+  // And a decline she DID store is her answer, relayed like any other.
   assert.deepEqual(
-    resolveKnownAnswer('are you a person of transgender experience?', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
-    { value: 'Decline to self-identify' },
-  );
-  assert.deepEqual(
-    resolveKnownAnswer('please select your racial/ethnic background', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    resolveKnownAnswer(
+      'are you a person of transgender experience?',
+      'text',
+      { eeo_prefs: { transgender_status: 'Decline to self-identify' } },
+      undefined,
+    ),
     { value: 'Decline to self-identify' },
   );
 });
@@ -498,10 +515,23 @@ test('send-time refresh replaces stale EEO prose with stored profile answers', (
       answer: 'Reviewed policy signals in a fintech environment.',
     },
   ], { needs_sponsorship: true, eeo_prefs: null }, 'This role is based in New York.');
-  assert.equal(questions[0].answer, 'Decline to self-identify');
+  /* CHANGED 2026-09-03: was 'Decline to self-identify', with attention false. The prose IS still
+   * replaced, which is what this test is for, but a profile holding no transgender preference has
+   * no answer to replace it with, so the row is handed back to her instead of being answered by a
+   * refusal she never gave. See eeoAnswer. */
+  assert.equal(questions[0].answer, '');
   assert.equal(questions[1].answer, 'Yes');
   assert.equal(questions[2].answer, 'Reviewed policy signals in a fintech environment.');
-  assert.equal(questionRequiresHumanAttention(questions[0]), false);
+  assert.equal(questionRequiresHumanAttention(questions[0]), true);
+  // With the preference stored, the prose is replaced by her answer and nothing is asked.
+  const stored = refreshKnownQuestionAnswers([
+    {
+      question: 'are you a person of transgender experience? * 431',
+      answer: "I don't think that's relevant to my qualifications for this role.",
+    },
+  ], { eeo_prefs: { transgender_status: 'No' } }, undefined);
+  assert.equal(stored[0].answer, 'No');
+  assert.equal(questionRequiresHumanAttention(stored[0]), false);
 });
 
 /* R-118. The refresh is why a hand-edited packet could never fix the Deepgram blocker: the stored
@@ -668,11 +698,17 @@ test('answers the 18+ attestation from a stored date of birth, and only from tha
     assert.equal(answer === null || !('value' in answer && /^yes$/i.test(answer.value)), true, tenure);
   }
 
-  // "What is your age?" is EEO self-identification, not an attestation, and keeps its own answer.
-  assert.deepEqual(
-    resolveKnownAnswer('What is your age?', 'text', born2005, undefined),
-    { value: 'Decline to self-identify' },
-  );
+  /* "What is your age?" is EEO self-identification, not an attestation, and keeps its own rule. A
+   * stored date of birth is not an answer to it: an age question in a self-identification block is
+   * voluntary and hers to answer, which is why it must not borrow the attestation's authority.
+   * CHANGED 2026-09-03: this asserted { value: 'Decline to self-identify' }, which no ladder and no
+   * stored key ever produced - eeoSubjectPreferenceKeys claims no age subject at all - so it was
+   * the absent-value constant answering a demographic question in her name. */
+  const ageQuestion = resolveKnownAnswer('What is your age?', 'text', born2005, undefined);
+  assert.ok(ageQuestion && 'skipReason' in ageQuestion);
+  assert.match(ageQuestion.skipReason, /self-identification question left for you/);
+  // The 18+ ATTESTATION beside it is unaffected and still answers from the same profile.
+  assert.deepEqual(resolveKnownAnswer(label, 'text', born2005, undefined), { value: 'Yes' });
 });
 
 /* THE PARSE, which is the part of the attestation that turns a loose string into a legal claim.
@@ -809,12 +845,26 @@ test('sensitive gates allow only exact stored work eligibility answers', () => {
   );
   assert.equal(sensitiveQuestionRequiresAttention('social security number', '123-45-6789', 'text', {}, undefined), true);
   assert.equal(sensitiveQuestionRequiresAttention('what is your gender?', 'Female', 'text', {}, undefined), true);
+  /* CHANGED 2026-09-03: was false. A refusal sitting on a control while the profile holds no
+   * transgender preference is a statement the resolver invented, so the gate must surface it. The
+   * assertion below is the same call with the refusal STORED, and it is the one that still passes
+   * through: what makes a decline sendable is that she saved it. */
   assert.equal(
     sensitiveQuestionRequiresAttention(
       'are you a person of transgender experience? * 431',
       'Decline to self-identify',
       'text',
       { eeo_prefs: null },
+      undefined,
+    ),
+    true,
+  );
+  assert.equal(
+    sensitiveQuestionRequiresAttention(
+      'are you a person of transgender experience? * 431',
+      'Decline to self-identify',
+      'text',
+      { eeo_prefs: { transgender_status: 'Decline to self-identify' } },
       undefined,
     ),
     false,
@@ -1632,13 +1682,21 @@ test('required internship form fields resolve from profile-backed defaults inste
     undefined,
   );
   assert.ok(privacy && 'skipReason' in privacy);
+  /* CHANGED 2026-09-03: both asserted { value: 'Decline to self-identify' } from a profile that
+     stores only gender. Neither label has a stored subject to read - eeoSubjectPreferenceKeys
+     claims neither - so the value was the absent-value constant, and it is exactly the class of
+     answer this test's own name says must come from a profile-backed default. */
+  for (const unstoredSelfId of [
+    'Do you consider yourself a member of the LGBTQIA+ community?',
+    'Which categories describe you? Select all that apply to you',
+  ]) {
+    const resolved = resolveKnownAnswer(unstoredSelfId, 'select', profile, undefined);
+    assert.ok(resolved && 'skipReason' in resolved, unstoredSelfId);
+  }
+  // The gender question in the same block still answers from the same profile.
   assert.deepEqual(
-    resolveKnownAnswer('Do you consider yourself a member of the LGBTQIA+ community?', 'select', profile, undefined),
-    { value: 'Decline to self-identify' },
-  );
-  assert.deepEqual(
-    resolveKnownAnswer('Which categories describe you? Select all that apply to you', 'checkbox', profile, undefined),
-    { value: 'Decline to self-identify' },
+    resolveKnownAnswer('What is your gender?', 'select', profile, undefined),
+    { value: 'Female' },
   );
   /* CHANGED 2026-08-09: was `{ value: 'No' }`, a hardcoded legal declaration that she is under no
      non-compete, non-solicitation or confidentiality obligation to any past employer. No column was
@@ -2009,9 +2067,18 @@ test('salary questions stay blank even when the label states a range', () => {
   assert.ok(resolved && 'skipReason' in resolved);
 });
 
-test('eeoAnswer is exact-match-only, never a near-miss (R-018)', () => {
+test('eeoAnswer is exact-match-only, never a near-miss (R-018), and absence is not a refusal', () => {
   assert.equal(eeoAnswer('Male'), 'Male');
-  assert.equal(eeoAnswer(undefined), 'Decline to self-identify');
+  assert.equal(eeoAnswer(' Male '), 'Male');
+  // A decline she STORED is still her answer and comes back verbatim.
+  assert.equal(eeoAnswer('Decline to self-identify'), 'Decline to self-identify');
+  /* THE LINE THIS TEST USED TO PIN WAS THE DEFECT. It asserted
+   * `eeoAnswer(undefined) === 'Decline to self-identify'`, which is a refusal minted out of an
+   * absent profile key and written onto six live packets. See eeoAnswer and
+   * selfIdentificationAbsence.test.ts. */
+  assert.equal(eeoAnswer(undefined), undefined);
+  assert.equal(eeoAnswer(''), undefined);
+  assert.equal(eeoAnswer('   '), undefined);
 });
 
 test('isOpenEndedQuestion recognizes prose asks and rejects short field labels', () => {
@@ -3584,23 +3651,46 @@ test('no production question is answered from a profile with nothing stored', ()
   assert.deepEqual(answered, []);
 });
 
-test('the only constant an empty profile may produce is the EEO decline', () => {
-  /* R-018, and it is not an exception to the rule so much as the rule reaching its floor.
-   * "Decline to self-identify" is a REFUSAL TO STATE, not a statement: it is the option the
-   * employer's own form offers for exactly this, and choosing it claims nothing about her race,
-   * gender, veteran status or disability. Every other constant in this file made a claim. */
+test('an empty profile produces NO constant at all, the EEO decline included', () => {
+  /* THE LAST EXCEPTION TO THE SWEEP ABOVE, AND IT IS GONE.
+   *
+   * This test used to be called "the only constant an empty profile may produce is the EEO
+   * decline", and it argued R-018: a refusal to state is not a statement, it is the option the
+   * employer's own form offers for exactly this, and choosing it claims nothing about her.
+   *
+   * The premise is sound about a refusal SHE GAVE and false about one nobody gave. Measured
+   * 2026-09-03 on the owner's live profile, which holds six self-identification subjects and no
+   * hispanic key because no screen has ever asked for one: that constant was the entire answer to
+   * "are you hispanic/latino?" on six live packets, and on two of them the row was stamped
+   * answer_source 'applicant_review', so the packet asserted she had read the refusal and chosen
+   * it. Choosing an opt-out does claim something - that she was asked and declined.
+   *
+   * So the sweep in the test above this one now has no carve-out: with nothing on file, no machine
+   * produces an answer, full stop. The relay half is unchanged and is what the family is for. */
   for (const label of [
     'How would you describe your gender identity?',
     'Are you Hispanic/Latino?',
     'Do you identify as transgender?',
     'Are you a veteran or active member of the United States Armed Forces?',
   ]) {
-    assert.deepEqual(resolveKnownAnswer(label, 'select', {}, undefined), { value: 'Decline to self-identify' });
+    const resolved = resolveKnownAnswer(label, 'select', {}, undefined);
+    assert.ok(resolved && 'skipReason' in resolved, label);
+    assert.match(resolved.skipReason, /self-identification question left for you/, label);
   }
-  // And a stored preference still wins over the decline, which is the half that makes it a relay.
+  // A stored preference is relayed, which is the half that makes this family a relay and not a rule.
   assert.deepEqual(
     resolveKnownAnswer('How would you describe your gender identity?', 'select', { eeo_prefs: { gender: 'Female' } }, undefined),
     { value: 'Female' },
+  );
+  // Including a stored refusal, which is what the Settings screen lets her save for every subject.
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Do you identify as transgender?',
+      'select',
+      { eeo_prefs: { transgender_status: 'Decline to self-identify' } },
+      undefined,
+    ),
+    { value: 'Decline to self-identify' },
   );
 });
 

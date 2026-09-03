@@ -497,7 +497,15 @@ describe('the factual-declaration class, which the permission never reaches', ()
     const eeo: ApplicationProfileLike = { eeo_prefs: { gender: 'Female' } };
     assert.equal(answer('what is your gender?', eeo, 'select'), 'Female');
     assert.equal(answer('what is your gender?', { ...eeo, ...GRANTED }, 'select'), 'Female');
-    assert.equal(answer('please select your racial/ethnic background', GRANTED, 'select'), 'Decline to self-identify');
+    /* CHANGED 2026-09-03: this asserted 'Decline to self-identify' from a profile with no race on
+     * file, which is the manufactured refusal, not a fact about the permission. The property this
+     * test is named for is asserted directly instead: the permission changes the EEO answer in
+     * neither direction, whether the preference is stored or absent. */
+    const race: ApplicationProfileLike = { eeo_prefs: { race: 'South Asian' } };
+    assert.equal(answer('please select your racial/ethnic background', race, 'select'), 'South Asian');
+    assert.equal(answer('please select your racial/ethnic background', { ...race, ...GRANTED }, 'select'), 'South Asian');
+    assert.equal(answer('please select your racial/ethnic background', GRANTED, 'select'), null);
+    assert.equal(answer('please select your racial/ethnic background', {}, 'select'), null);
     // The demographic-survey consent stays a consent question left for her: it is a data-processing
     // consent WHOSE SUBJECT IS the demographic block, and that block is answered by its own rule.
     const demographic = 'By checking this box, I consent to Reddit collecting, storing, and processing my responses to the demographic data survey above.';

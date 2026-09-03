@@ -916,11 +916,19 @@ export function studyYearLadder(value: string | undefined): string[] {
 // the fact is on the profile, the employer offers a closed list, and every such list carries an
 // explicit opt-out, so a correct answer is always available and a blank is never the right outcome.
 //
-// Nothing here touches eeoAnswer. That function returning "Decline to self-identify" across the
-// corpus's 50 EEO labels is the only approved constant in the resolver, on the grounds that a
-// refusal to state is not a statement, and it is unchanged: the sweep at
-// scripts/_sweep-untraceable.mts reports the same count before and after this section existed.
-// What changes is only whether the answer it produces can be left on the control.
+// Nothing here touches eeoAnswer, and that was true of this section on the day it was written: the
+// sweep at scripts/_sweep-untraceable.mts reported the same count before and after it existed, and
+// what it changed was only whether the answer eeoAnswer produced could be left on the control.
+//
+// THE SENTENCE THIS COMMENT USED TO CARRY IS NO LONGER TRUE AND IS CORRECTED RATHER THAN DELETED.
+// It said that eeoAnswer returning "Decline to self-identify" across the corpus's 50 EEO labels was
+// "the only approved constant in the resolver, on the grounds that a refusal to state is not a
+// statement". The premise is sound for a refusal SHE GAVE and false for one nobody gave: measured
+// 2026-09-03, that constant was the whole answer to the hispanic question on six live packets, on
+// an account whose profile has no hispanic key because no screen has ever asked for one. A refusal
+// to state is indeed not a statement, but writing one in her name is. eeoAnswer now returns
+// undefined when nothing is stored, so this section is reached only for an answer she actually
+// gave, and the last resort below can no longer stand in for a question she was never asked.
 
 /**
  * The wordings to OFFER for a decline, for a fill layer that cannot see the option list. Ordered
@@ -1001,6 +1009,15 @@ function equivalentPronounOption(
  * alternative is a required field left blank on a voluntary question, which blocks the whole
  * application over the one family where a correct answer is guaranteed to exist. It is still the
  * LAST resort rather than an early one, which is the whole reason the stage order above matters.
+ *
+ * THAT ARGUMENT HOLDS FOR AN ANSWER SHE GAVE AND FOR NO OTHER, and until 2026-09-03 nothing said
+ * so. "The list cannot hold what she said" is a real bind with a real least-bad exit; "she never
+ * said anything, because no screen has ever asked her" is not the same situation and takes the
+ * opposite exit, which is to ask. The gap is now closed where the answer is MADE rather than here:
+ * eeoAnswer returns undefined when the profile holds no preference for the subject, resolveKnownAnswer
+ * turns that into a skipReason, and resolveProfileField returns null before it ever calls this
+ * function. So this stage is unreachable for a question with no stored preference, structurally and
+ * not by a check inside it, and every input it can still see is something she stored.
  */
 /* ---- accepting a consent control ----
  *

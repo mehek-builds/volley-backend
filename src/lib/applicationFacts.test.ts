@@ -659,9 +659,15 @@ describe('stored application facts reach the control on the real employer questi
 
   test('military service: Point72 asks a required yes/no with no decline option', () => {
     const label = 'have you served in the military?';
-    // The measured failure: with nothing stored this resolves through the EEO path to "Decline to
-    // self-identify", which is not one of Point72's choices, so the required field stayed empty.
-    assert.equal(selectsNothing(label, {}, YES_NO), true);
+    /* The measured failure: with nothing stored this resolved through the EEO path to "Decline to
+     * self-identify", which is not one of Point72's choices, so the required field stayed empty.
+     *
+     * CHANGED 2026-09-03. selectsNothing means "resolved, and matched no option", and the EEO path
+     * no longer resolves at all when nothing is stored, so the same outcome is asserted as the
+     * stronger pair it now is: nothing reaches the control, and the applicant is told why. See
+     * eeoAnswer. */
+    assert.equal(filled(label, {}, { inputType: 'select', options: YES_NO }), null);
+    assert.match(heldFor(label, {}), /self-identification question left for you/);
     // With the declaration on file it selects a real option.
     assert.equal(filled(label, { military_service: 'No' }, { inputType: 'select', options: YES_NO }), 'No');
     assert.equal(resolve(label, { military_service: 'No' }, { inputType: 'select', options: YES_NO })?.matchedOption, true);
@@ -676,6 +682,8 @@ describe('stored application facts reach the control on the real employer questi
     // With no EEO wording on file, the declaration answers it rather than declining into a
     // list that may not offer a decline.
     assert.equal(filled(eeoLabel, { military_service: 'No' }, { inputType: 'select', options: YES_NO }), 'No');
+    // And with neither on file, nothing is selected and the question is hers.
+    assert.equal(filled(eeoLabel, {}, { inputType: 'select', options: YES_NO }), null);
   });
 
   test('military service is a declaration, never inferred from citizenship or address', () => {
@@ -683,7 +691,9 @@ describe('stored application facts reach the control on the real employer questi
     // Nothing about where she lives or holds a passport may become a yes or a no here.
     assert.notEqual(filled('have you served in the military?', ap, { inputType: 'select', options: YES_NO }), 'Yes');
     assert.notEqual(filled('have you served in the military?', ap, { inputType: 'select', options: YES_NO }), 'No');
-    assert.equal(selectsNothing('have you served in the military?', ap, YES_NO), true);
+    // CHANGED 2026-09-03, for the reason given on the test above: nothing resolves, so nothing is
+    // filled, which is a stronger statement than "resolved and matched no option".
+    assert.equal(filled('have you served in the military?', ap, { inputType: 'select', options: YES_NO }), null);
   });
 
   test('politically exposed person: Tower, and the "Dubai" defect', () => {

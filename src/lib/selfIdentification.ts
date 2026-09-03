@@ -141,6 +141,14 @@ export function isDeclineToState(text: string): boolean {
  *
  * This is a substitution of one refusal for the same refusal, never of a refusal for a statement.
  * Every caller checks isDeclineToState on the answer first.
+ *
+ * ONE CORRECTION TO THE MEASUREMENT ABOVE, because it matters to whoever reads it next. The twenty
+ * hispanic packets were real and this respelling is still right, but the "stored answer" it was
+ * respelling was never hers: eeo_prefs has no hispanic key, so the refusal it started from was
+ * minted by eeoAnswer's absent-value constant rather than saved by the applicant. As of 2026-09-03
+ * that constant is gone and a hispanic question with no stored preference is handed back to her, so
+ * this entry now only ever fires on a refusal she actually stored. The hyphen problem it fixes is
+ * unchanged and still live for every subject she has answered.
  */
 const SELF_ID_VOCABULARY_DECLINE: ReadonlyArray<{ handle: RegExp; wording: string }> = [
   { handle: /(?:^|\s)hispanic_ethnicity$/i, wording: 'Decline To Self Identify' },
@@ -190,7 +198,21 @@ export function declineWordingForControl(label: string, answer: string): string 
 
 /** A race or ethnicity question, as opposed to the rest of the self-identification block. */
 const EEO_RACE_QUESTION = /\brace\b|racial|ethnicit|ethnic\b/i;
-/** Asked as its own yes/no on nearly every US form, and answered from its own stored preference. */
+/* Asked as its own yes/no on nearly every US form, and answerable only from its own stored
+ * preference.
+ *
+ * THE OLD WORDING SAID "answered from its own stored preference" AS THOUGH ONE EXISTED. It does
+ * not. eeoSubjectPreferenceKeys reads hispanic_ethnicity, hispanic and ethnicity for this label and
+ * the Settings screen writes none of them, so on 2026-09-03 the answer to this question on six live
+ * packets was eeoAnswer's old absent-value constant, "Decline to self-identify", a refusal nobody
+ * gave. The backend needs no change to start answering it: the ladder already reads
+ * hispanic_ethnicity first, eeo_prefs is an unconstrained jsonb record with no per-key schema, and
+ * the only missing piece is a field on the Settings screen in role-quick-website.
+ *
+ * WHAT THIS PATTERN IS FOR, and it is the same thing it always was: keeping the federal race
+ * widening in selfIdentificationStatedForms away from this question. Race and ethnicity are
+ * separate axes, a person can be both Hispanic and Asian, and answering a hispanic control from a
+ * stored race would be an identity claim she never made. */
 const EEO_HISPANIC_QUESTION = /hispanic|latin/i;
 /* ANY gender self-identification ask, not only one that spells "gender identity".
  *
