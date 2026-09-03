@@ -121,6 +121,39 @@ test('Pinpoint: a Yes/No list hung on a number field can never capture the numbe
   );
 });
 
+test('Pinpoint: a foreign list on a number field no longer mints a false option provenance', () => {
+  /* THE MEASURABLE HALF OF THE PINPOINT DIRECTION, and the reason it is worth fixing at the
+   * resolver as well as at the mint.
+   *
+   * `matchedOption: true` is a claim with teeth: routes/submissionRunner.ts calls it "THE TRUST
+   * ANCHOR ... the value really did come off the control's own list", writes optionSnapClaim from
+   * it, and the acknowledged-answer gate then trusts that provenance without re-verifying list
+   * membership. On a `number` control carrying a Yes/No pair that never belonged to it, the claim
+   * is simply false.
+   *
+   * Measured against pristine origin/main with this exact input: `matchedOption` came back TRUE,
+   * so a control that can only hold a typed number was recorded as having offered "Yes" and been
+   * picked from. The value is unchanged either way; what changes is that Litos no longer vouches
+   * for a list it should never have been reading. */
+  const resolved = resolveProfileField(
+    { label: 'Are you currently enrolled?', inputType: 'number', options: ['Yes', 'No'] },
+    STORED_PROFILE,
+  );
+  assert.equal(
+    resolved?.matchedOption,
+    false,
+    'a number control cannot have offered a Yes/No row, so nothing may be vouched for',
+  );
+
+  // The same question on a control that really IS a Yes/No chooser keeps its provenance.
+  const realChooser = resolveProfileField(
+    { label: 'Are you currently enrolled?', inputType: 'radio', options: ['Yes', 'No'] },
+    STORED_PROFILE,
+  );
+  assert.equal(realChooser?.value, 'Yes');
+  assert.equal(realChooser?.matchedOption, true);
+});
+
 test('the free-entry set is positive DOM evidence only, and never claims `text`', () => {
   /* WHY `text` IS ABSENT, and it is the single most load-bearing exclusion here. Managed discovery
    * reports inputType `text` for every control it walks, react-selects included, so profileField
