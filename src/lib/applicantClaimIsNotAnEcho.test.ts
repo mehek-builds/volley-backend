@@ -190,6 +190,12 @@ test('a self-identification she genuinely changes is still recorded as hers', ()
     answer_reviewed_at: ROUND,
     answer_override_of: 'Female',
   });
+  /* AND NO MACHINE DERIVATION BESIDE HER CLAIM. The reclassification below is the ALTERNATIVE to
+   * minting, not a companion to it: `answer_option_source` asserts that Litos snapped this value
+   * off the control's list, which is false of a value she picked herself, and it is read by the
+   * refresh's own currency rules. A record carrying both would say two incompatible things about
+   * one string. */
+  assert.equal(saved.answer_option_source, undefined, 'her answer was not snapped by anything');
 });
 
 /* ── Refusing the claim must not destroy the answer ────────────────────────────────────────────
@@ -357,6 +363,42 @@ test('an edit of a machine-resolved answer on an unlisted control is still hers'
   assert.equal(saved.answer, "Bachelor's Degree");
   assert.equal(saved.answer_source, 'applicant_review', 'or the next refresh recomputes it away');
   assert.equal(saved.answer_reviewed_at, ROUND);
+});
+
+test('the machine lookup is asked at the moment the save is asked about, not at the wall clock', () => {
+  /* THE DATE-SENSITIVE HALF OF THE SAME RULE, and the age attestation is the sharpest case in it:
+   * "Are you at least 18 years of age?" is a legal declaration whose correct answer CHANGES on a
+   * birthday, and it routinely arrives on a Yes/No select, so it snaps and the gate can fire on it.
+   *
+   * resolveProfileField used to take no `asOf` at all, so it resolved against `new Date()` while
+   * every other resolution in the same save used the pinned moment. A gate that disagreed with the
+   * refresh beside it for no reason but the wall clock is the exact shape of divergence this whole
+   * branch exists to remove - and on this label the disagreement is between two opposite legal
+   * answers. Current enrollment, study year, availability window and years of experience are the
+   * same family. */
+  const minor = {
+    date_of_birth: '2012-06-15', eeo_prefs: { gender: 'Female' },
+  } as unknown as ApplicationProfileLike;
+  const ageRow: ApplicationReviewQuestion = {
+    id: 'age',
+    question: 'Are you at least 18 years of age?',
+    answer: '',
+    kind: 'required',
+    required: true,
+    portal_input_type: 'select-one',
+    options: ['Yes', 'No'],
+  };
+
+  assert.equal(
+    machineAnswerLookup(minor, undefined, undefined, undefined, new Date('2026-09-03T00:00:00Z'))(ageRow),
+    'No',
+    'before the birthday the machine answers No',
+  );
+  assert.equal(
+    machineAnswerLookup(minor, undefined, undefined, undefined, new Date('2032-09-03T00:00:00Z'))(ageRow),
+    'Yes',
+    'and after it, Yes: the moment is what decides, so the moment has to reach this call',
+  );
 });
 
 test('an untouched Save over a machine value mints nothing, exactly as before', () => {
