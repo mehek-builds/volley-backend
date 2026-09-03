@@ -264,6 +264,19 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/postings/:jobId/questions',
   '/applications/managed-prepare',
   '/applications/from-job',
+  /* THE SEND'S OWN PREREQUISITES, added 2026-09-03. The trace this list was built from (2026-08-29)
+   * read a ReviewStep that posted /submit-request bare - which was the onboarding dead end fixed in
+   * role-quick-website #512: that route gates on currentAcknowledgedPacketAudit, so the flow could
+   * never send at all. The fixed screen audits the exact packet on arrival and records the
+   * applicant's acknowledgement on her press, and both requests belong to the same one free
+   * application this tier exists to let a locked account finish: without them the account walks to
+   * step 6 of /start and the gate 402s the audit two screens before the payment step, which is the
+   * "see it work before paying" redesign defeated by its own allowlist. Both close with the tier the
+   * moment a real submission exists, exactly like submit-request beside them, so a spent account
+   * cannot keep re-auditing packets it can no longer send; and the audit route carries its own
+   * hourly limiter on top. */
+  '/applications/:id/packet-audit',
+  '/applications/:id/packet-audit/acknowledge',
   '/applications/:id/submit-request',
 ]);
 
