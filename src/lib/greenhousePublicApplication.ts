@@ -75,11 +75,88 @@ export type GreenhousePublicApplicationSchema = {
    * so it can only be joined by SUBJECT - see the greenhouse join in submissionRunner.
    */
   complianceOptionsByField: Record<string, string[]>;
+  /**
+   * THE EMPLOYER'S OWN DEMOGRAPHIC QUESTION SET, KEYED BY THE EXACT QUESTION WORDING.
+   *
+   * The `compliance` reading above was measured against one board and generalised. Measured again
+   * 2026-09-03 against Hudson River Trading (boards-api.greenhouse.io/v1/boards/wehrtyou/jobs/
+   * 8052083?questions=true), `compliance` is `null` and the four EEO lists live under a sibling
+   * top-level object, `demographic_questions.questions[]`: `{id: 245, label: "What is your
+   * gender?", required, type, answer_options: [{id, label, free_form, decline_to_answer}]}`. The
+   * label IS the wording the form asks, and the question `id` IS the numeric DOM id the
+   * job-boards renderer gives the react-select (245/248/249/250, the ids every prod blocker
+   * carried). So this set joins by exact label, and the id is the durable selector the runner
+   * could never name because the discovery runner declines digit-leading ids.
+   *
+   * A label two demographic questions share is dropped as ambiguous, the same rule the Ashby
+   * reader applies: a list that might belong to a twin must never be attached to either.
+   */
+  demographicQuestionsByLabel: Record<string, GreenhouseDemographicQuestion>;
+  /**
+   * Field names the employer publishes as OPEN TEXT (`input_text`, `textarea`). The option probe
+   * decides closedness for a `question_<id>` from its label alone, and "Please represent both
+   * completed and in-progress university degrees above. Please also write in your high
+   * school/secondary school below." reads as an education react-select to that heuristic. It is
+   * a text box (question_68000291, HRT, measured 2026-09-02), the probe found no listbox, and the
+   * field was filed missing_exact_options and removed from resolution. The employer's own type is
+   * the authority the heuristic lacks.
+   */
+  openTextFieldNames: string[];
   optionsByLabel: Record<string, string[]>;
   fieldNamesByLabel: Record<string, string>;
   coverLetterSupported: boolean;
   transcriptSupported: boolean;
 };
+
+export type GreenhouseDemographicQuestion = {
+  /** The published question id as a string, e.g. "248". */
+  id: string;
+  options: string[];
+  required: boolean;
+};
+
+function greenhouseDemographicQuestionOptions(question: Record<string, unknown>): string[] {
+  const values = Array.isArray(question.answer_options) ? question.answer_options : [];
+  const options: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const label = trimmed((value as Record<string, unknown>).label);
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    options.push(label);
+  }
+  return options;
+}
+
+/** `demographic_questions.questions[]`, keyed by exact label; ambiguous labels dropped. */
+function parseGreenhouseDemographicQuestions(
+  value: unknown,
+): Record<string, GreenhouseDemographicQuestion> {
+  const out: Record<string, GreenhouseDemographicQuestion> = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  const questions = (value as Record<string, unknown>).questions;
+  const ambiguous = new Set<string>();
+  for (const question of Array.isArray(questions) ? questions : []) {
+    if (!question || typeof question !== 'object' || Array.isArray(question)) continue;
+    const record = question as Record<string, unknown>;
+    const label = greenhousePublicQuestionLabelKey(record.label);
+    const id = typeof record.id === 'number' && Number.isInteger(record.id) && record.id > 0
+      ? String(record.id)
+      : trimmed(record.id)?.match(/^\d+$/)?.[0];
+    const options = greenhouseDemographicQuestionOptions(record);
+    if (!label || !id || options.length === 0) continue;
+    if (out[label]) {
+      ambiguous.add(label);
+      continue;
+    }
+    out[label] = { id, options, required: record.required === true };
+  }
+  for (const label of ambiguous) delete out[label];
+  return out;
+}
 
 function greenhousePublicQuestionFields(value: unknown): Array<Record<string, unknown>> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
@@ -131,6 +208,7 @@ export function parseGreenhousePublicApplicationSchema(
   const optionsByLabel: Record<string, string[]> = {};
   const fieldNamesByLabel: Record<string, string> = {};
   const allFields: Array<{ name?: string; type?: string }> = [];
+  const openTextFieldNames: string[] = [];
   let coverLetterSupported = false;
   let transcriptSupported = false;
 
@@ -147,6 +225,9 @@ export function parseGreenhousePublicApplicationSchema(
       const fieldType = trimmed(field.type)?.toLowerCase();
       if (fieldName && !firstFieldName) firstFieldName = fieldName;
       allFields.push({ name: fieldName, type: fieldType });
+      if (fieldName && (fieldType === 'input_text' || fieldType === 'textarea')) {
+        openTextFieldNames.push(fieldName);
+      }
 
       const options = greenhousePublicFieldOptions(field);
       if (fieldName && options.length > 0) fieldOptions[fieldName] = options;
@@ -195,6 +276,10 @@ export function parseGreenhousePublicApplicationSchema(
   return {
     fieldOptions,
     complianceOptionsByField,
+    demographicQuestionsByLabel: parseGreenhouseDemographicQuestions(
+      (value as Record<string, unknown>).demographic_questions,
+    ),
+    openTextFieldNames,
     optionsByLabel,
     fieldNamesByLabel,
     coverLetterSupported,

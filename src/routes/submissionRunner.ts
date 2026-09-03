@@ -154,6 +154,11 @@ import {
   greenhousePublicQuestionLabelKey,
 } from '../lib/greenhousePublicApplication';
 import {
+  greenhouseDemographicLabelCounts,
+  greenhouseSchemaPublishesAsOpenText,
+  joinGreenhouseDemographicQuestion,
+} from '../lib/greenhouseDemographicQuestions';
+import {
   ashbyPublicApplicationSchema,
   ashbyPublicQuestionLabelKey,
 } from '../lib/ashbyPublicApplication';
@@ -7615,6 +7620,12 @@ async function prepareManaged(
     managedResultFieldOptions(discoveryResult),
     greenhouseSchema?.fieldOptions,
   );
+  /* The ambiguity guard for the demographic join below, computed over the whole discovered list
+   * before the per-field map: a label two discovered controls share must never take a list that
+   * might belong to its twin (the same rule the Ashby join keeps). */
+  const greenhouseDemographicCounts = greenhouseSchema
+    ? greenhouseDemographicLabelCounts(discoveryResult?.discovered ?? [])
+    : new Map<string, number>();
   const normalizedDiscoveredFields = (discoveryResult?.discovered ?? []).map((field) =>
     (portal === 'paylocity' || portal === 'controlled_paylocity')
       ? normalizePaylocityDiscoveredField(field as DiscoveredQuestion)
@@ -7624,6 +7635,19 @@ async function prepareManaged(
       const labelKey = greenhousePublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
       const options = labelKey ? greenhouseSchema.optionsByLabel[labelKey] : undefined;
       if (options?.length) return { ...field, options };
+      /* THE EMPLOYER'S OWN DEMOGRAPHIC SET, JOINED BY ITS EXACT WORDING. Measured on Hudson River
+       * Trading 2026-09-03: `compliance` is null on this board and the four EEO lists sit under
+       * `demographic_questions`, labelled exactly as the form asks and numbered exactly as the DOM
+       * numbers the react-selects (245/248/249/250). The join attaches the published list as the
+       * control's complete inventory and, when the id the runner concatenated onto the label is the
+       * id the board published, an attribute selector on that numeric id - the durable name the
+       * discovery runner could not report. See greenhouseDemographicQuestions.ts. */
+      const demographic = joinGreenhouseDemographicQuestion(
+        field,
+        greenhouseSchema,
+        greenhouseDemographicCounts,
+      );
+      if (demographic !== field) return demographic;
       /* THE EEOC SET, JOINED BY SUBJECT BECAUSE NOTHING ELSE JOINS.
        *
        * Measured on Hudson River Trading packet 4a79eec1, 2026-09-02: four required react-select
@@ -7681,9 +7705,19 @@ async function prepareManaged(
       const options = ashbySchema.optionsByLabel[labelKey];
       return options?.length ? { ...field, options, optionsComplete: true } : field;
     });
+  /* A CONTROL THE BOARD PUBLISHES AS OPEN TEXT IS NEVER PROBED AS A CLOSED LIST.
+   *
+   * managedOptionProbeTarget decides closedness for a `question_<id>` from its label, and HRT's
+   * "Please represent both completed and in-progress university degrees above. Please also write
+   * in your high school/secondary school below." (question_68000291, measured 2026-09-02) reads as
+   * an education react-select to that heuristic. It is an `input_text`: the probe opened nothing,
+   * the failure was filed as missing_exact_options with portal_input_type `text`, and the field was
+   * removed from resolution, so the applicant could neither answer it nor see why. The employer's
+   * published field type is the authority the label heuristic lacks; a probe-less field takes the
+   * ordinary text path and, when nothing on file answers it, reaches her as a question. */
   const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(
     publicSchemaDiscoveredFields,
-  );
+  ).filter((field) => !greenhouseSchemaPublishesAsOpenText(greenhouseSchema, field));
   /* THE THIRD STAGE, and the reason option snapping reaches every confirmed closed control.
    *
    * The discovery pass probes four ids compiled into this repo, because those four are Greenhouse's
