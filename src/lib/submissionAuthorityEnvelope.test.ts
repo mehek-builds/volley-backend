@@ -6,6 +6,7 @@ import {
   submissionAuthorityEnvelopeForUnattemptedPacket,
   submissionAuthorityProjectionTimestampShape,
   submissionAuthorityPublicationForPacket,
+  submissionAuthorityRetrySafetyUuidShape,
   submissionAuthorityStrictTimestampShape,
   submissionAuthorityUnavailableMarker,
   submissionAuthorityUuidShape,
@@ -493,7 +494,15 @@ describe('submissionAuthorityPublicationForPacket', () => {
 const CLIENT_PROJECTION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLIENT_STRICT_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const CLIENT_PROJECTION_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+/* The client's OTHER identifier regex, the one this file did not know it had until 2026-09-03:
+ * features/applications/domain/submission-state.ts:74 holds every retry-verdict identifier to
+ * versions 1-8, while submission-projection.ts:12 holds every projection identifier to 1-5. Both
+ * share the variant nibble. Two constants because the two rules disagree on exactly one character,
+ * and a test that used one shape for both fields could not have caught this file using one rule for
+ * both fields. */
+const CLIENT_RETRY_SAFETY_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const V7_ATTEMPT = 'a3578398-c4cc-714d-9a44-c7943d8effb9';
+const BAD_VARIANT_ATTEMPT = 'a3578398-c4cc-414d-ca44-c7943d8effb9';
 
 describe('submissionAuthorityUuidShape', () => {
   it('classifies each way an identifier can fail the client contract', () => {
@@ -545,6 +554,92 @@ describe('submissionAuthorityUuidShape', () => {
         CLIENT_PROJECTION_UUID.test(value),
         value,
       );
+    }
+  });
+});
+
+describe('submissionAuthorityRetrySafetyUuidShape', () => {
+  /* THE DEFECT THIS FILE ENFORCED FOR THREE REVISIONS, 2026-09-03.
+   *
+   * The deployed dashboard has two identifier rules, not one, and they differ on the version nibble
+   * alone: submission-projection.ts:12 accepts 1-5 for `projection.attempt_id`,
+   * `projection.canonical_application_id` and `projection.packet_id`; submission-state.ts:74 accepts
+   * 1-8 for `retry_safety.attemptId` and `retry_safety.leaseId`. This file applied the projection's
+   * rule to both, so a retry verdict naming an attempt whose version nibble is 6, 7 or 8 was refused
+   * here and would have been accepted there.
+   *
+   * That is not a corner: the ledger's `attempt_id` is a Postgres `uuid` column holding an opaque
+   * 128 bits, appendSubmissionAttemptEvent never version-checks it, and the nine identifiers that
+   * published on mehekmandal05@gmail.com on 2026-09-03 carry version nibbles 1, 1, 1, 3, 4, 4, 4, 4
+   * and 5 - a distribution no RFC-4122 generator produces. So versions 6-8 are ~3/16 of every
+   * attempt id, and `safe_not_sent` is the only verdict that can authorise a first employer send. */
+  it('accepts exactly the identifiers the client accepts on a retry verdict', () => {
+    const values = [
+      ATTEMPT, OTHER_ATTEMPT, PACKET, CANONICAL, V7_ATTEMPT, BAD_VARIANT_ATTEMPT,
+      'A3578398-C4CC-414D-9A44-C7943D8EFFB9',
+      'a3578398-c4cc-114d-8a44-c7943d8effb9',
+      'a3578398-c4cc-514d-ba44-c7943d8effb9',
+      'a3578398-c4cc-614d-9a44-c7943d8effb9',
+      'a3578398-c4cc-814d-9a44-c7943d8effb9',
+      'a3578398-c4cc-014d-9a44-c7943d8effb9',
+      'a3578398-c4cc-914d-9a44-c7943d8effb9',
+      'a3578398-c4cc-f14d-9a44-c7943d8effb9',
+      'a3578398c4cc414d9a44c7943d8effb9',
+      'not-a-uuid', '', '   ',
+    ];
+    for (const value of values) {
+      assert.equal(
+        submissionAuthorityRetrySafetyUuidShape(value) === 'ok',
+        CLIENT_RETRY_SAFETY_UUID.test(value),
+        value,
+      );
+    }
+  });
+
+  it('differs from the projection rule on the version nibble and nowhere else', () => {
+    /* The two rules are one character apart, and the test says so exhaustively rather than by
+     * example: every version nibble against every variant nibble, over both classifiers. A future
+     * edit that widens the projection rule "to match" - the repair this file explicitly must NOT
+     * make, because publishing past submission-projection.ts fails the board's whole collection
+     * check rather than one card - fails here. */
+    for (const version of '0123456789abcdef') {
+      for (const variant of '0123456789abcdef') {
+        const value = `a3578398-c4cc-${version}14d-${variant}a44-c7943d8effb9`;
+        const projection = submissionAuthorityUuidShape(value);
+        const retry = submissionAuthorityRetrySafetyUuidShape(value);
+        assert.equal(projection === 'ok', /[1-5]/.test(version) && /[89ab]/.test(variant), value);
+        assert.equal(retry === 'ok', /[1-8]/.test(version) && /[89ab]/.test(variant), value);
+        // Same classification everywhere the two agree, so only the one nibble ever diverges.
+        if (!'678'.includes(version)) assert.equal(projection, retry, value);
+      }
+    }
+    // And the divergence is exactly versions 6, 7 and 8, which is 3/16 of a uniform identifier.
+    for (const version of '678') {
+      const value = `a3578398-c4cc-${version}14d-9a44-c7943d8effb9`;
+      assert.equal(submissionAuthorityUuidShape(value), 'uuid_version_unsupported', value);
+      assert.equal(submissionAuthorityRetrySafetyUuidShape(value), 'ok', value);
+    }
+  });
+
+  it('still refuses everything the layout and variant rules refuse', () => {
+    // Widening the version nibble widened nothing else. These are the classes both rules share.
+    const cases: ReadonlyArray<readonly [unknown, string]> = [
+      [undefined, 'absent'],
+      [null, 'absent'],
+      [42, 'not_a_string'],
+      ['', 'blank'],
+      ['   ', 'blank'],
+      ['not-a-uuid', 'uuid_malformed'],
+      ['a3578398c4cc414d9a44c7943d8effb9', 'uuid_malformed'],
+      ['a3578398-c4cc-714d-9a44-c7943d8effb9 ', 'uuid_malformed'],
+      ['a3578398-c4cc-014d-9a44-c7943d8effb9', 'uuid_version_unsupported'],
+      ['a3578398-c4cc-914d-9a44-c7943d8effb9', 'uuid_version_unsupported'],
+      ['a3578398-c4cc-f14d-9a44-c7943d8effb9', 'uuid_version_unsupported'],
+      [BAD_VARIANT_ATTEMPT, 'uuid_variant_unsupported'],
+      ['a3578398-c4cc-714d-0a44-c7943d8effb9', 'uuid_variant_unsupported'],
+    ];
+    for (const [value, expected] of cases) {
+      assert.equal(submissionAuthorityRetrySafetyUuidShape(value), expected, JSON.stringify(value));
     }
   });
 });
@@ -623,12 +718,12 @@ describe('submissionAuthorityPublicationForPacket rejection detail', () => {
       projection: { state: 'none' },
       retrySafety: {
         kind: 'safe_not_sent',
-        attemptId: V7_ATTEMPT,
+        attemptId: BAD_VARIANT_ATTEMPT,
         proofKind: 'typed_pre_click_stop',
         resolvedAt: CAPTURED_AT,
       },
       revision: '3',
-    }), { branch: 'none', field: 'retry_safety.attemptId', shape: 'uuid_version_unsupported' });
+    }), { branch: 'none', field: 'retry_safety.attemptId', shape: 'uuid_variant_unsupported' });
     assert.deepEqual(rejection({
       packetId: PACKET,
       projection: { state: 'none' },
@@ -801,7 +896,11 @@ describe('submissionAuthorityPublicationForPacket rejection detail', () => {
      * `reason` from a closed vocabulary; the checkout of role-quick-website on this machine carries
      * no reader for the contract at all, which says that clone is behind the dashboard that shipped
      * the check (role-quick-website #466, 2026-08-31), not that the vocabulary is free. So the
-     * marker keeps its three keys and its six reasons, and branch/field/shape stay server-side. */
+     * marker keeps its three keys, and branch/field/shape stay server-side.
+     *
+     * The malformed identifier now reports as `unpublishable_attempt_identity`, which is the class
+     * the 2026-09-03 census found 162 of on one account - still one word from a closed vocabulary,
+     * still three keys, and still nothing about the value. */
     const publication = submissionAuthorityPublicationForPacket({
       packetId: PACKET,
       projection: { state: 'unverified', attemptId: 'not-a-uuid', observedAt: CAPTURED_AT, reason: 'pressed' },
@@ -815,7 +914,193 @@ describe('submissionAuthorityPublicationForPacket rejection detail', () => {
         PACKET,
         publication.published ? 'boundary_authorized' : publication.reason,
       ),
-      { schema_version: 'submission-authority-v1', packet_id: PACKET, reason: 'unpublishable_projection' },
+      { schema_version: 'submission-authority-v1', packet_id: PACKET, reason: 'unpublishable_attempt_identity' },
     );
+    // And the identifier itself is nowhere in what the marker publishes.
+    assert.equal(JSON.stringify(submissionAuthorityUnavailableMarker(PACKET, publication.reason)).includes('not-a-uuid'), false);
+  });
+});
+
+/**
+ * THE TWO REPAIRS THE 2026-09-03 CENSUS ASKED FOR, AND THE LINE BETWEEN THEM.
+ *
+ * `GET /applications/board/authority-rejections` on mehekmandal05@gmail.com, revision 1624: 200
+ * packets classified, 163 refused, and the (branch, field, shape) table came back
+ *   unverified/projection.attempt_id/uuid_version_unsupported      104
+ *   unverified/projection.attempt_id/uuid_variant_unsupported       46
+ *   repair_required/projection.attempt_id/uuid_version_unsupported  10
+ *   confirmed/projection.attempt_id/uuid_version_unsupported         1
+ *   repair_required/projection.attempt_id/uuid_variant_unsupported   1
+ *   boundary_authorized                                              1
+ * - one field, on three branches, and zero members of every other class the residual word covered.
+ *
+ * Two different things follow from that, and conflating them is how this gate would get broken:
+ *
+ *  - On a RETRY VERDICT the identifier is read by submission-state.ts:74, which accepts versions
+ *    1-8. This file was applying the projection's 1-5 rule there, so it refused envelopes the
+ *    deployed client would have accepted. That is a defect and it is fixed: those publish now.
+ *  - On a PROJECTION the identifier is read by submission-projection.ts:12, which accepts 1-5. The
+ *    refusal is the client's own, and publishing past it would not produce a better card - it would
+ *    make boardSubmissionAuthorityCollectionIsComplete reject the entire board payload, because one
+ *    unparseable envelope discredits the snapshot while a card with no envelope is merely absent.
+ *    So it stays refused, and only its NAME changes, from a residual shared with five other classes
+ *    to the one class 162 of the 163 packets are actually in.
+ */
+describe('the identifier contract the client actually applies, per field', () => {
+  const V7_SAFE_NOT_SENT = {
+    kind: 'safe_not_sent',
+    attemptId: V7_ATTEMPT,
+    proofKind: 'applicant_checked_not_sent',
+    resolvedAt: CAPTURED_AT,
+  } as const;
+
+  it('publishes a resolved packet whose attempt id is version 6, 7 or 8', () => {
+    /* The send-authorising path. `safe_not_sent` is the ledger's proof that an opened attempt never
+     * crossed the employer boundary, and it is the ONLY verdict on a `none` projection that can
+     * authorise a first employer send - it is what a packet lands in after the applicant resolves
+     * its unverified record through the dashboard (DSI Innovations, packet a34e5ce2, 2026-09-03).
+     * A `none` envelope publishes `projection: {state:'none'}` and nothing else, so this identifier
+     * is read by exactly one client parser and that parser accepts versions 1-8. Refusing it here
+     * cost a resolved packet its envelope for a nibble no reader of this envelope looks at. */
+    for (const version of '678') {
+      const attemptId = `a3578398-c4cc-${version}14d-9a44-c7943d8effb9`;
+      const publication = submissionAuthorityPublicationForPacket({
+        packetId: PACKET,
+        projection: { state: 'none' },
+        retrySafety: { ...V7_SAFE_NOT_SENT, attemptId },
+        revision: '3',
+      });
+      assert.equal(publication.published, true, `version ${version} publishes`);
+      assert.ok(publication.published);
+      assert.deepEqual(publication.envelope.retry_safety, {
+        kind: 'safe_not_sent',
+        attemptId,
+        proofKind: 'applicant_checked_not_sent',
+        resolvedAt: CAPTURED_AT,
+      });
+      assert.deepEqual(publication.envelope.projection, { state: 'none' });
+    }
+  });
+
+  it('publishes the same bytes from the unattempted builder and the packet publication', () => {
+    /* The Maven regression, re-run on the widened rule. These two surfaces diverged once before
+     * (2026-09-02: the board published `safe_not_sent`, the builder refused the same packet, and
+     * the dashboard fell back to a stored null and refused a packet the ledger had just proven
+     * un-sent), so any change to one predicate has to be a change to both. */
+    const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
+      packetId: PACKET,
+      projectionState: 'none',
+      retrySafety: V7_SAFE_NOT_SENT,
+      revision: '3',
+    });
+    const publication = submissionAuthorityPublicationForPacket({
+      packetId: PACKET,
+      projection: { state: 'none' },
+      retrySafety: V7_SAFE_NOT_SENT,
+      revision: '3',
+    });
+    assert.ok(envelope);
+    assert.ok(publication.published);
+    assert.deepEqual(publication.envelope, envelope);
+  });
+
+  it('keeps the block on a repair card whose retry identifier is version 6, 7 or 8', () => {
+    /* Same rule, the other retry-verdict site. A repair projection publishes either way, so the
+     * cost here was information rather than publication: the card lost its `retry_safety` to a
+     * `null` and a reader could no longer see WHY it was in repair. `leaseId` moves with it. */
+    const publication = submissionAuthorityPublicationForPacket({
+      packetId: PACKET,
+      projection: { state: 'repair_required', reasons: ['receipt_missing'] },
+      retrySafety: { kind: 'blocked_unverified', attemptId: V7_ATTEMPT, at: CAPTURED_AT, reason: 'pressed' },
+      revision: '3',
+    });
+    assert.ok(publication.published);
+    assert.deepEqual(publication.envelope.retry_safety, {
+      kind: 'blocked_unverified',
+      attemptId: V7_ATTEMPT,
+      at: CAPTURED_AT,
+      reason: 'pressed',
+    });
+  });
+
+  it('still refuses a version 6, 7 or 8 identifier inside a published PROJECTION', () => {
+    /* THE LINE. Widening the retry rule must not widen this one: the deployed client holds
+     * `projection.attempt_id` to versions 1-5, and an envelope carrying one it rejects fails the
+     * board's collection check for every card on the page, not just this one. Refusing is the only
+     * safe answer, and it is the answer on all three branches that publish an attempt id. */
+    const confirmedV7: AuthoritativeSubmissionProjection = { ...confirmedProjection, attemptId: V7_ATTEMPT };
+    const branches: ReadonlyArray<readonly [string, Parameters<typeof submissionAuthorityPublicationForPacket>[0]]> = [
+      ['unverified', {
+        packetId: PACKET,
+        projection: { state: 'unverified', attemptId: V7_ATTEMPT, observedAt: CAPTURED_AT, reason: 'pressed' },
+        retrySafety: { kind: 'blocked_unverified', attemptId: V7_ATTEMPT, at: CAPTURED_AT, reason: 'pressed' },
+        revision: '3',
+      }],
+      ['repair_required', {
+        packetId: PACKET,
+        projection: { state: 'repair_required', attemptId: V7_ATTEMPT, reasons: ['receipt_missing'] },
+        retrySafety: { kind: 'no_evidence' },
+        revision: '3',
+      }],
+      ['confirmed', {
+        packetId: PACKET,
+        projection: confirmedV7,
+        retrySafety: { kind: 'blocked_confirmed', attemptId: V7_ATTEMPT, confirmedAt: CAPTURED_AT },
+        revision: '3',
+      }],
+    ];
+    for (const [branch, input] of branches) {
+      const publication = submissionAuthorityPublicationForPacket(input);
+      assert.equal(publication.published, false, `${branch} still refuses`);
+      assert.ok(!publication.published);
+      assert.equal(publication.reason, 'unpublishable_attempt_identity', branch);
+      assert.deepEqual(publication.rejected, {
+        branch,
+        field: 'projection.attempt_id',
+        shape: 'uuid_version_unsupported',
+      });
+      assert.equal(submissionAuthorityEnvelopeForPacket(input), undefined, branch);
+    }
+  });
+
+  it('names the attempt identity apart from every other residual class', () => {
+    /* The whole reason the word was split. A card refused for its receipt URL has a repair on that
+     * packet; a card refused for its attempt id does not, and on 2026-09-03 the second was 162 of
+     * one account's 163 refusals while the first was zero of them. One word for both is a count. */
+    const residual: ReadonlyArray<readonly [string, Parameters<typeof submissionAuthorityPublicationForPacket>[0]]> = [
+      ['projection.observed_at', {
+        packetId: PACKET,
+        projection: { state: 'unverified', attemptId: ATTEMPT, observedAt: '2026-08-28T08:02:00Z', reason: 'pressed' },
+        retrySafety: { kind: 'blocked_unverified', attemptId: ATTEMPT, at: CAPTURED_AT, reason: 'pressed' },
+        revision: '3',
+      }],
+      ['projection.reasons', {
+        packetId: PACKET,
+        projection: { state: 'repair_required', reasons: [] },
+        retrySafety: { kind: 'no_evidence' },
+        revision: '3',
+      }],
+      ['projection.canonical_application_id', {
+        packetId: PACKET,
+        projection: { state: 'repair_required', canonicalApplicationId: V7_ATTEMPT, reasons: ['receipt_missing'] },
+        retrySafety: { kind: 'no_evidence' },
+        revision: '3',
+      }],
+      ['receipt.final_url', {
+        packetId: PACKET,
+        projection: {
+          ...confirmedProjection,
+          receipt: { ...confirmedProjection.receipt, finalUrl: 'http://example.invalid/receipt' },
+        },
+        retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: CAPTURED_AT },
+        revision: '3',
+      }],
+    ];
+    for (const [field, input] of residual) {
+      const publication = submissionAuthorityPublicationForPacket(input);
+      assert.ok(!publication.published, field);
+      assert.equal(publication.reason, 'unpublishable_projection', field);
+      assert.equal(publication.rejected?.field, field);
+    }
   });
 });
