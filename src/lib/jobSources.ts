@@ -546,7 +546,6 @@ const INTERNATIONAL_INTERNSHIP_ENTRIES: Entry[] = [
   ['Celonis', 'greenhouse', 'celonis'],
   ['Enpal', 'ashby', 'enpal'],
   ['Alan', 'ashby', 'alan'],
-  ['Solaris', 'greenhouse', 'solarisbank'],
   ['Raisin', 'greenhouse', 'raisin'],
   ['Mollie', 'ashby', 'mollie'],
   ['Ledger', 'ashby', 'ledger'],
@@ -760,6 +759,12 @@ const RETIRED_ENTRIES: readonly Entry[] = [
   /* Both left Greenhouse and now post on Ashby; the live entries above point at the new boards. */
   ['Marqeta', 'greenhouse', 'marqeta'],
   ['Clickhouse', 'greenhouse', 'clickhouse'],
+  /* Greenhouse token began returning 404 at 13:08 UTC on 2026-09-03 and stayed there. Solaris SE,
+     the Berlin banking-as-a-service company, is winding down, so there is no successor board to
+     re-point at: solaris, solarisse and solarisbankag are all 404 too, and job-boards.greenhouse.io
+     answers 500 for the token. Checked 2026-09-03. Retired rather than left in place, because a
+     dead board held every pull request on this repo red for the five hours before this. */
+  ['Solaris', 'greenhouse', 'solarisbank'],
 ];
 
 /** The retired catalog, as disabling upserts. Applied by the scheduled source reconciliation. */
