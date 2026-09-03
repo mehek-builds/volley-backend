@@ -188,10 +188,13 @@ test('cannot-tell never decides the exit code', () => {
   const results = [...rows('named-ok', 1000), ...rows('cannot-tell', 48)];
   const judgement = judgeSourceIdentity(results, results.length, new Set());
   assert.equal(judgement.exitCode, 0);
-  assert.equal(
-    judgement.annotations.filter((line) => line.startsWith('::warning title=Board identity unresolved::')).length,
-    48,
+  assert.equal(judgement.counts['cannot-tell'], 48, 'all 48 are counted');
+  /* Annotated up to what GitHub will keep, with the shortfall named rather than dropped. The step
+     summary and the log still carry all 48. */
+  assert.ok(
+    judgement.annotations.some((line) => line.startsWith('::warning title=Board identity unresolved::')),
   );
+  assert.ok(judgement.annotations.some((line) => line.includes('39 further findings')));
 });
 
 test('every source unreachable is a non-result, as it always was', () => {
@@ -237,6 +240,37 @@ test('annotations stay on one line, or GitHub reads the rest as nothing', () => 
   }
   const warning = judgement.annotations.find((line) => line.startsWith('::warning '));
   assert.ok(warning?.includes('first line second line third'), warning);
+});
+
+test('no annotation is dropped without the run saying how many', () => {
+  /* GitHub keeps ten per level per step and discards the rest in silence. On this change's own
+     first CI run eleven boards were empty, eleven warnings were written and ten came back:
+     lever/trustly went missing. The eleventh slot now reports the shortfall instead. */
+  const judgement = judgeSourceIdentity(rows('empty', 11), 1048, new Set());
+  const warnings = judgement.annotations.filter((line) => line.startsWith('::warning '));
+  assert.equal(warnings.length, 10, 'never more than GitHub will keep');
+  assert.equal(
+    warnings.filter((line) => line.includes('title=More not shown::')).length,
+    1,
+    'and the last one accounts for the rest',
+  );
+  assert.ok(warnings.at(-1)?.includes('2 further findings'));
+});
+
+test('a bucket that fits is annotated in full, with no roll-up line', () => {
+  const judgement = judgeSourceIdentity(rows('empty', 10), 1048, new Set());
+  const warnings = judgement.annotations.filter((line) => line.startsWith('::warning '));
+  assert.equal(warnings.length, 10);
+  assert.ok(!warnings.some((line) => line.includes('More not shown')));
+});
+
+test('errors and warnings get their own ten, because GitHub counts them separately', () => {
+  const results = [...rows('named-mismatch', 12, 'Someone Else'), ...rows('empty', 12)];
+  const judgement = judgeSourceIdentity(results, 1048, new Set());
+  assert.equal(judgement.annotations.filter((line) => line.startsWith('::error ')).length, 10);
+  assert.equal(judgement.annotations.filter((line) => line.startsWith('::warning ')).length, 10);
+  assert.equal(judgement.exitCode, 1, 'and truncating the display never touches the verdict');
+  assert.equal(judgement.failures.length, 12, 'every mislabelling is still reported in full');
 });
 
 test('the counts line still carries every bucket, so old runs stay comparable', () => {

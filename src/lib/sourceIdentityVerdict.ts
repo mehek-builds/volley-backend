@@ -121,6 +121,29 @@ const key = (row: { ats_name: string; board_token: string }) => `${row.ats_name}
 const oneLine = (text: string) => text.replace(/\s*[\r\n]+\s*/g, ' ').trim();
 
 /**
+ * GitHub keeps only ten annotations per level per step and drops the rest without saying so.
+ *
+ * Measured on this pull request's own first run: eleven boards were empty, eleven `::warning`
+ * commands were written, and ten annotations came back from the API. `lever/trustly` vanished.
+ * A check whose argument is "liveness became more visible, not less" cannot then lose the
+ * eleventh board quietly, so the last slot is spent saying how many did not fit rather than on
+ * one more row. The full list is in the log and in the step summary either way.
+ */
+const ANNOTATION_LIMIT = 10;
+
+function withinAnnotationLimit(annotations: readonly string[], level: 'error' | 'warning'): string[] {
+  const mine = annotations.filter((line) => line.startsWith(`::${level} `));
+  if (mine.length <= ANNOTATION_LIMIT) return [...annotations];
+  const dropped = mine.length - (ANNOTATION_LIMIT - 1);
+  const kept = new Set(mine.slice(0, ANNOTATION_LIMIT - 1));
+  return [
+    ...annotations.filter((line) => !line.startsWith(`::${level} `) || kept.has(line)),
+    `::${level} title=More not shown::${dropped} further ${level === 'error' ? 'failures' : 'findings'} `
+    + 'are in the step summary and the job log. GitHub shows at most ten annotations per step.',
+  ];
+}
+
+/**
  * Decide the exit code, and say plainly which of the two questions it answers.
  *
  * `addedKeys` is the set of `ats/token` this pull request introduced, or null when the base
@@ -239,7 +262,7 @@ export function judgeSourceIdentity(
     mislabelled,
     deadOnArrival,
     report,
-    annotations,
+    annotations: withinAnnotationLimit(withinAnnotationLimit(annotations, 'error'), 'warning'),
     stepSummary,
   };
 }
