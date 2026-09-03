@@ -316,10 +316,16 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
       assert.equal(await cardGateRouteReachable('/applications/:id/packet-audit', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/:id/packet-audit/acknowledge', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), false);
-      /* The code step closes with the send it belongs to, and closing it costs the applicant
-         nothing: every fact that closes this tier also moves the packet off
-         'awaiting_security_code', so the route answers 409 'not_awaiting' from here on regardless.
-         What she still needs in that state -- resolving an unverified send -- is TIER B1. */
+      /* The code step closes with the tier, and for the packet whose OWN send produced the code
+         request that costs nothing: the same facts that close this tier move that packet off
+         'awaiting_security_code', so the route answers 409 'not_awaiting' from here on anyway, and
+         what she still needs -- resolving an unverified send -- is TIER B1.
+         It is NOT free for a second packet. This predicate is per-account (any row at
+         alreadyAtEmployer()), not per-packet, and ONBOARDING_BUILD_LIMIT is 2, so a packet parked
+         at awaiting_security_code can have this tier closed underneath it by a SIBLING packet's
+         send and be stranded unfiled. See the entry's own comment in cardGate.ts: no tier choice
+         for this one route fixes that, because /packet-audit and /packet-audit/acknowledge close
+         with it and the route cannot clear its acknowledgement without them. */
       assert.equal(await cardGateRouteReachable('/applications/:id/security-code', 'user-1'), false);
     } finally {
       select.mock.restore();

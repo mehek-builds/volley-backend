@@ -298,14 +298,27 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
    * packet points at, two screens short of the payment step. That is the shape rqw #512 fixed for
    * the packet-audit pair, pointed at the state after the send instead of the state before it.
    *
-   * TIER B2 rather than TIER B1 because the tier boundary lands exactly right on its own: the
-   * route is reachable precisely while the packet is unfinished, and the moment the send completes
-   * (status='submitted', pipeline_stage='applied') or folds to an unresolved unverified_submission,
-   * this tier closes -- by which point the route answers 409 'not_awaiting' regardless, and the
-   * applicant's remaining door is POST /submission/unverified on TIER B1. A spent account gains
-   * nothing here, and the route's own currentAcknowledgedPacketAudit gate is served by the two
-   * audit routes above, which stay open on this same tier for this same state (see the
-   * awaiting_security_code carve-out in POST /applications/:id/packet-audit). */
+   * TIER B2 rather than TIER B1 because this route cannot outlive the audit pair it depends on.
+   * The route gates on currentAcknowledgedPacketAudit, and the only two routes that can produce a
+   * current acknowledgement -- /packet-audit and /packet-audit/acknowledge, which carve
+   * awaiting_security_code out of their own refusal precisely so this step can clear -- are on this
+   * tier. Putting the code step one tier up would buy it nothing: it would answer
+   * PACKET_AUDIT_ACK_REQUIRED instead of 402, from a tier that had already closed underneath the
+   * routes it needs. When the send this packet is waiting on does complete, or folds to an
+   * unresolved unverified_submission, the tier closes and the route answers 409 'not_awaiting'
+   * anyway, with POST /submission/unverified on TIER B1 as the remaining door.
+   *
+   * WHAT THIS DOES NOT CLOSE, because the closure is per-ACCOUNT and the strand is per-PACKET.
+   * hasApprovedSubmittedApplication asks whether the USER has any row at alreadyAtEmployer(), not
+   * whether THIS packet reached an employer, and ONBOARDING_BUILD_LIMIT is 2. So a locked account
+   * can park packet A at awaiting_security_code (writing no closing fact, tier still open), build
+   * and send packet B, land B at 'submitted', and close the tier on A's behalf: A is still unfiled,
+   * still genuinely awaiting a code, and this route plus both audit routes 402 again. That is the
+   * same per-account/per-packet mismatch that put POST /submission/unverified on TIER B1, and no
+   * tier choice for this one route fixes it, because the whole audit chain closes together. Closing
+   * it needs a per-packet signal rather than a per-account one, and that is a larger change than
+   * this entry. Tracked separately; the single-packet case, which is the measured one, is fixed
+   * here. */
   '/applications/:id/security-code',
 ]);
 
