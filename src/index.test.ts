@@ -688,6 +688,28 @@ test('account export and deletion require auth', async () => {
   assert.equal((await app.inject({ method: 'DELETE', url: '/account' })).statusCode, 401);
 });
 
+test('the submission-authority rejection census resolves, and needs the caller to be somebody', async () => {
+  /* THE ROUTER, NOT THE HANDLER, 2026-09-03. GET /applications/board/authority-rejections answers
+   * "which of my packets could not publish a send envelope, and which field refused each one" - the
+   * only surface that reading is readable from, since Litos serves from Railway and the environment
+   * this is debugged from has no log reader. `/applications/:id` is a live parametric route in
+   * three other files, so a new static child under `/applications/board` is the one registration
+   * that could be swallowed by a sibling parameter and 404 forever while every source assertion in
+   * routes/submissionAuthorityRejectionExposure.test.ts still passed. 401 rather than 404 is the
+   * whole point: the path resolved and requireAuth answered, before any read reaches a database.
+   *
+   * The board itself is asserted beside it, because adding a static child is also the change that
+   * could take the parent's own registration down with it. */
+  const app = await getApp();
+  for (const url of [
+    '/applications/board/authority-rejections',
+    '/applications/board/authority-rejections?packet_id=c2c6c00a-71e0-4923-bbc2-123322c6d014',
+    '/applications/board',
+  ]) {
+    assert.equal((await app.inject({ method: 'GET', url })).statusCode, 401, url);
+  }
+});
+
 test('the retention sweep is not runnable by an anonymous caller', async () => {
   const app = await getApp();
   const internal = process.env.INTERNAL_CRON_SECRET;
