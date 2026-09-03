@@ -49,8 +49,29 @@ import { resolveProfileField } from './profileFieldResolution';
  *
  * THE ROW'S OWN CONTROL SHAPE IS THE INPUT. `portal_input_type` and `options` are what the last run
  * measured off the employer's form, which is what the screen rendered and what the client posted
- * back. A row with no measured list resolves to the unsnapped value, which is `knownAnswerLookup`'s
- * answer again and changes nothing.
+ * back.
+ *
+ * ONLY WHEN THE SNAP ACTUALLY LANDED ON ONE OF THE EMPLOYER'S OWN OPTIONS, and this clause is the
+ * whole difference between a rule and a guess. It was measured as a regression before it was
+ * measured as a rule: without it, reviewAnswerSave.test.ts's Lever degree case went red.
+ *
+ *   stored (an earlier run's resolution)   "Bachelor of Science in Computer Science"
+ *   she types                              "Bachelor's Degree"
+ *   resolveProfileField, options undefined "Bachelor's Degree", matchedOption FALSE
+ *
+ * With no option list to snap onto, resolveProfileField is not choosing the employer's wording, it
+ * is REPHRASING the profile down its own alias ladder - and the string it lands on is exactly the
+ * kind of thing an applicant types. Treating that as "the machine wrote this" refuses her claim on
+ * the one path the mint rule was built for: the supported edit of a machine-resolved answer, which
+ * refreshKnownQuestionAnswers then recomputes away.
+ *
+ * `matchedOption` is the repo's own predicate for "this value came off the list the caller
+ * supplied", the same one the runner reads to say "none of the options match your saved answer".
+ * Asked through that flag rather than by re-testing the value against `question.options` here: a
+ * second relation that disagreed with the first is exactly how a narrow rule becomes a rewrite with
+ * a decorative guard. So the claim this makes is the narrow one and the true one: THIS EXACT STRING
+ * IS ON THE EMPLOYER'S CONTROL AND IS THE ONE LITOS WOULD PICK. Anything less than that, and the
+ * answer is hers.
  */
 export function machineAnswerLookup(
   profile: ApplicationProfileLike,
@@ -58,17 +79,20 @@ export function machineAnswerLookup(
   postingCountry?: JobCountry,
   postingCountryCode?: string,
 ): (question: ApplicationReviewQuestion) => string | undefined {
-  return (question) => resolveProfileField(
-    {
-      label: question.question,
-      inputType: question.portal_input_type,
-      options: question.options,
-    },
-    profile,
-    jdText,
-    postingCountry,
-    postingCountryCode,
-  )?.value;
+  return (question) => {
+    const resolved = resolveProfileField(
+      {
+        label: question.question,
+        inputType: question.portal_input_type,
+        options: question.options,
+      },
+      profile,
+      jdText,
+      postingCountry,
+      postingCountryCode,
+    );
+    return resolved?.matchedOption ? resolved.value : undefined;
+  };
 }
 
 /**

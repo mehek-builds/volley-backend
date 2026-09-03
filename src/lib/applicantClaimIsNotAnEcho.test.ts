@@ -226,14 +226,42 @@ test('the shapes the mint rule exists for still mint: a degree edit and an off-r
   assert.equal(savedBand.answer_source, 'applicant_review', 'the option she picked is hers');
 });
 
-test('a control with no measured option list resolves to the unsnapped value and changes nothing', () => {
-  /* The lookup reads the ROW's own control shape. With no list there is nothing to snap onto, so it
-   * answers what knownAnswerLookup answers and this gate adds exactly zero refusals - which is what
-   * keeps it from becoming a second, quieter resolver. */
+test('a control with no measured option list is never a machine value, whatever the profile rephrases to', () => {
+  /* THE NARROWING, AND IT WAS MEASURED AS A REGRESSION BEFORE IT WAS WRITTEN AS A RULE. An earlier
+   * draft of this branch asked resolveProfileField for its value unconditionally, and
+   * reviewAnswerSave.test.ts's Lever degree case went red: the stored answer is an earlier run's
+   * "Bachelor of Science in Computer Science", she types "Bachelor's Degree", the control carries no
+   * measured option list, and resolveProfileField rephrases the profile down its own alias ladder to
+   * the very string she typed. That is not the machine choosing the employer's wording; it is the
+   * machine wording the profile, and the string it lands on is exactly what an applicant types.
+   *
+   * So the gate only fires on matchedOption: this exact string is ON the employer's control and is
+   * the one Litos would pick. Anything less and the answer is hers. */
   const openControl = question({ portal_input_type: 'text', options: null });
-  assert.equal(machineAnswerFor(openControl), 'Female', 'the same string the resolver answers');
+  assert.equal(machineAnswerFor(openControl), undefined, 'nothing was snapped onto anything');
   const [saved] = save([openControl], [{ ...openControl, answer: 'Woman' }]);
   assert.equal(saved.answer_source, 'applicant_review', 'so a typed value is still her own');
+});
+
+test('an edit of a machine-resolved answer on an unlisted control is still hers', () => {
+  /* The Lever degree control itself, in the shape reviewAnswerSave.test.ts drives through the route:
+   * a select whose options were never measured, holding an earlier run's own resolution. This is the
+   * path the mint rule exists for - without a claim, refreshKnownQuestionAnswers recomputes her
+   * wording straight back to the profile's on the next read. Pinned here as well as there, because
+   * this file is where the rule that could break it lives. */
+  const leverDegree: ApplicationReviewQuestion = {
+    id: 'degree--0',
+    question: 'What degree are you currently pursuing?',
+    answer: 'Bachelor of Science in Computer Science',
+    kind: 'required',
+    required: true,
+    portal_input_type: 'select',
+    portal_selector: '#degree',
+  };
+  const [saved] = save([leverDegree], [{ ...leverDegree, answer: "Bachelor's Degree" }]);
+  assert.equal(saved.answer, "Bachelor's Degree");
+  assert.equal(saved.answer_source, 'applicant_review', 'or the next refresh recomputes it away');
+  assert.equal(saved.answer_reviewed_at, ROUND);
 });
 
 test('an untouched Save over a machine value mints nothing, exactly as before', () => {
