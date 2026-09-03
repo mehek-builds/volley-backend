@@ -70,6 +70,22 @@ test(
       `);
       assert.deepEqual(consumedAndReset.blocking, []);
 
+      /* WHERE THE EVIDENCE IS READ, pinned because the runner's copy of this gate got it wrong
+       * first. note() judges an upload with widgetHasAnswer(widget) - the whole BLOCK - not the
+       * input's own parent, so a dropzone that wraps the input while the filename chip renders as
+       * the dropzone's SIBLING still reads as uploaded. Reading at the narrower scope would refuse
+       * a correct send, which is the failure direction that costs her an application. */
+      const filenameOutsideTheInputsParent = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <div class="field">
+            <label>CV or resume *</label>
+            <div class="dropzone"><input type="file" name="candidate[cv]"></div>
+            <span class="file-upload__filename">Mehek Mandal Resume.pdf</span>
+          </div>
+        </form>
+      `);
+      assert.deepEqual(filenameOutsideTheInputsParent.blocking, []);
+
       // A file actually sitting in the input is the other half of that evidence.
       await page.setContent(`
         <form data-litos-submit-scope-v1="active">
