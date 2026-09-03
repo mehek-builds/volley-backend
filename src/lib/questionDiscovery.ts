@@ -6852,16 +6852,30 @@ function collapseRepeatedLabel(value: string): string {
  * "cover letter candidate[cover_letter]*" minted as "cover letter candidate[cover_letter]" and read
  * back as "cover letter", and "expected salary salary_expectations (required)" the same way. That is
  * the identity drift #902 closed for the repeat collapse, arriving by a different door. */
-function normalizeDiscoveredLabelOnce(raw: string): string {
-  const withoutHandles = stripFormAttributeHandles(stripProviderHandles(raw)
-    .replace(/\s+/g, ' ')
-    .trim());
+function normalizeDiscoveredLabelOnce(value: string): string {
+  const withoutHandles = stripFormAttributeHandles(value);
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
   return tidyLabel(collapseRepeatedLabel(withoutPlaceholder));
 }
 
+/* THE PROVIDER-HANDLE STRIP RUNS ONCE, OUTSIDE THE LOOP, and that boundary is load-bearing.
+ *
+ * It is not idempotent when composed with tidyLabel, and re-running it destroys questions.
+ * GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE removes a trailing two-to-five digit run, guarded by
+ * requiring whitespace (or a `*`) in front of it - and tidyLabel's job is to remove exactly the
+ * trailing `*` that was doing the guarding. So "Question 10*" survives the strip, loses its
+ * asterisk to tidyLabel, and on a SECOND application the bare " 10" is read as a Greenhouse handle
+ * and taken: twenty-five distinct "Question N*" controls collapse onto ten labels, sixteen of them
+ * merged into the single word "Question". Measured by routes/postingQuestions.test.ts, which is
+ * what caught it.
+ *
+ * That non-idempotence is older than this function and is NOT introduced or fixed here: on main the
+ * same label mints as "Question 10" and any later read of the row produces "Question", which is a
+ * latent instance of exactly the identity drift #902 closed. It belongs to the Greenhouse stripper,
+ * not to the loop, and widening the loop over it would turn a latent bug into an immediate one. */
 export function normalizeDiscoveredLabel(raw: string): string {
-  const label = labelNormalizationFixpoint(raw ?? '', normalizeDiscoveredLabelOnce);
+  const withoutProviderHandles = stripProviderHandles(raw ?? '').replace(/\s+/g, ' ').trim();
+  const label = labelNormalizationFixpoint(withoutProviderHandles, normalizeDiscoveredLabelOnce);
   return label && !isOpaqueIdentifier(label) ? label : '';
 }
 
