@@ -366,7 +366,7 @@ export function managedSubmitVerdict(result: MaybeOutcome | null | undefined): M
 
 export type ManagedReceiptResult = MaybeOutcome & {
   url?: unknown;
-  /** The runner's rendered page text, read for the receipt proof on families without an exact ATS binding. */
+  /** The runner's rendered page text; the receipt proof reads the runner's sentence window, not this. */
   text?: unknown;
   screenshot?: string | null;
   continuationOffered?: unknown;
@@ -600,6 +600,15 @@ function corroboratedFamilyReceipt(
   source: string | null,
 ): boolean {
   if (managedAtsBinding({ url: expectedApplicationUrl })) return false;
+  /* An exact-binding HOST is never corroborated by text, whatever shape its URL took: the binding
+   * above answers by shape, and a same-host receipt on jobs.ashbyhq.com, apply.workable.com or a
+   * greenhouse board without the expected route belongs to those families' own readers. */
+  try {
+    const host = new URL(expectedApplicationUrl).hostname.toLowerCase();
+    if (host === 'jobs.ashbyhq.com' || host === 'apply.workable.com' || /^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/.test(host)) return false;
+  } catch {
+    return false;
+  }
   /* Only a TEXT reading is corroborated here. An ATS container or route verdict belongs to the
    * exact-binding families that own those hooks; one reported on any other host is a foreign or
    * forged container, not a receipt (review of PR #881, finding 4). */
@@ -627,7 +636,11 @@ function corroboratedFamilyReceipt(
 /* The receipt has to NAME THE APPLICATION. A bare "thank you" or "success" is what a closed posting,
  * a cookie screen and a not-found page say too (review of PR #881, finding 1). */
 const RECEIPT_APPLICATION_PHRASE = /\bthank(?:s| you) for (?:submitting|applying|your application)\b|\b(?:your )?application (?:has been |was )?(?:successfully )?(?:submitted|received|sent)\b|\bwe(?: have|'ve)? received your application\b|\bsuccessfully (?:submitted|applied)\b/i;
-const RECEIPT_CLOSURE_CUE = /\b(?:no longer|has been filled|filled|withdrawn|not found|closed|cancell?ed|expired|declined|denied|unfortunately|already applied|not (?:be )?(?:submitted|accepted|processed)|complete (?:the|your)|check your (?:email|inbox)|confirm your|talent (?:network|community|pool)|draft)\b/i;
+/* The runner's 400-char window can carry a doubt sentence after the receipt phrase ("Thanks for
+ * applying! Verify your email address to finish."), and the runner's own phrase arm is not
+ * doubt-gated, so this vocabulary is the only guard on the seven families: it carries every cue the
+ * runner's bare arm refuses on. */
+const RECEIPT_CLOSURE_CUE = /\b(?:no longer|has been filled|filled|withdrawn|not found|closed|cancell?ed|expired|declined|denied|unfortunately|already applied|not (?:be )?(?:submitted|accepted|processed)|cannot be accepted|complete (?:the|your)|check your (?:email|inbox)|confirm your|verify|talent (?:network|community|pool)|draft|error|went wrong|try again|fail(?:ed|ure)?|unable|could ?n[o']?t|can ?not|can't|sign(?:ed)? in|log(?:ged)? in|timed? out|not currently|not hiring|on hold|questionnaire|assessment|next step|incomplete|pending|required|invalid|captcha|robot)\b/i;
 
 /* THE EMPLOYER'S OWN PAGE. On every family this arm serves the tenant IS the subdomain
  * (foo.breezy.hr, x.recruitee.com, acme.teamtailor.com, xolife.jobs.personio.com) or the first
@@ -643,14 +656,15 @@ export function landedOnTheEmployersOwnPage(expected: URL, landed: URL): boolean
   const hostAgrees = expectedHost === landedHost
     || (stripWww(expectedHost) === registrableDomain(expectedHost) && stripWww(landedHost) === registrableDomain(expectedHost));
   if (!hostAgrees) return false;
-  const tenantPrefix = expectedHost === 'jobs.lever.co'
-    ? expected.pathname.split('/').filter(Boolean).slice(0, 2)
-    : expectedHost === 'jobs.crelate.com'
-      ? expected.pathname.split('/').filter(Boolean).slice(0, 2)
-      : null;
-  if (tenantPrefix && tenantPrefix.length === 2) {
+  /* THE SHARED HOSTS, every region: jobs.lever.co and jobs.eu.lever.co carry every Lever tenant
+   * under /<org>/<posting>, jobs.crelate.com every Crelate tenant under /portal/<org>. Whatever
+   * segments the expected path has, the landing path must repeat them. */
+  const sharedHost = /^jobs(?:\.eu)?\.lever\.co$/.test(expectedHost) || expectedHost === 'jobs.crelate.com';
+  if (sharedHost) {
+    const tenantPrefix = expected.pathname.split('/').filter(Boolean).slice(0, 2);
+    if (tenantPrefix.length === 0) return false;
     const landedSegments = landed.pathname.split('/').filter(Boolean);
-    if (landedSegments[0] !== tenantPrefix[0] || landedSegments[1] !== tenantPrefix[1]) return false;
+    if (tenantPrefix.some((segment, index) => landedSegments[index] !== segment)) return false;
   }
   return true;
 }

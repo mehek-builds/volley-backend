@@ -1742,3 +1742,14 @@ test('the measured Teamtailor and Lever receipts verify', () => {
 test('an ATS-container verdict on a non-exact family is not corroborated', () => {
   assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', 'Success', 'https://jobs.lever.co/apollo/b83479c0/apply', 'ats_state').kind, 'unverified');
 });
+
+test('the EU Lever host carries the tenant prefix rule too, and a doubt sentence in the window refuses', () => {
+  assert.equal(confirmedOn('https://jobs.eu.lever.co/other-org/deadbeef/thanks', 'Thanks for applying', 'https://jobs.eu.lever.co/apollo/b83479c0/apply').kind, 'unverified');
+  assert.equal(confirmedOn('https://jobs.eu.lever.co/apollo/b83479c0/thanks', 'Thanks for applying', 'https://jobs.eu.lever.co/apollo/b83479c0/apply').kind, 'confirmed');
+  for (const text of ['Thanks for applying! Verify your email address to finish.', 'Thanks for applying. An error occurred while saving your application.',
+    'Thanks for applying. Sign in to continue.', 'Your application has been received but is incomplete.', 'Thanks for applying. Please answer the screening questionnaire to continue.']) {
+    assert.equal(confirmedOn('https://jobs.lever.co/apollo/b83479c0/thanks', text, 'https://jobs.lever.co/apollo/b83479c0/apply').kind, 'unverified', text);
+  }
+  // An exact-binding host never takes the text route, whatever the URL shape.
+  assert.equal(confirmedOn('https://jobs.ashbyhq.com/cartesia/abc', 'Thanks for applying', 'https://jobs.ashbyhq.com/cartesia/abc').kind, 'unverified');
+});
