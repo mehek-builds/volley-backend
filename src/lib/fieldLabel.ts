@@ -179,12 +179,27 @@ function tokenIsFormAttributeHandle(token: string, preceding: readonly string[])
 function stripTrailingFormAttributeHandles(value: string): string {
   const tokens = value.split(' ').filter(Boolean);
   let kept = tokens.length;
-  while (kept > 0 && tokens.length - kept < MAX_TRAILING_HANDLE_TOKENS) {
+  while (kept > 0) {
     const token = tokens[kept - 1] as string;
     if (token.length > MAX_HANDLE_TOKEN_LENGTH) break;
     if (LABEL_RECOVERABLE_CONTROL_HANDLES.test(token)) break;
     if (!tokenIsFormAttributeHandle(token, tokens.slice(0, kept - 1))) break;
     kept -= 1;
+    /* A RUN LONGER THAN THE CAP IS TRUSTED NOT AT ALL, rather than trimmed back to the cap.
+     *
+     * Trimming to the cap was the first shape and it was wrong twice over. It made this function
+     * NON-IDEMPOTENT, because the tokens the cap refused came off on the next application, and
+     * normalizeDiscoveredLabel is applied once at mint and again on every stored read: the label
+     * discovery wrote was not the label any later read produced, which is exactly the packet
+     * identity drift #902 closed for the repeat collapse. It was also the more aggressive reading
+     * of an anomalous string, in a file whose whole rule is to leave text alone when the evidence
+     * runs out. A `name` and an `id` is two tokens and every measured join is two; a run of five is
+     * not a handle join this function understands, so it declines the whole thing.
+     *
+     * This is what keeps the total bound at four even though the normalizer now iterates: a run of
+     * four or fewer comes off in one pass and leaves no handle for the next, and a longer run is
+     * refused identically on every pass. So iterating cannot eat another four. */
+    if (tokens.length - kept > MAX_TRAILING_HANDLE_TOKENS) return value;
   }
   // Nothing but handles: the label is left exactly as it was. A single meaningful attribute name is
   // often the only thing naming a core identity control ("first_name", "linkedin_url"), and
@@ -196,12 +211,17 @@ function stripTrailingFormAttributeHandles(value: string): string {
 /**
  * The employer's question with the control's own `name` and `id` taken off the end of it.
  *
- * APPLIED EXACTLY ONCE PER PATH, and that is a correctness requirement rather than tidiness: the
- * MAX_TRAILING_HANDLE_TOKENS cap is per call, so a second application would quietly double it and
- * the bound would stop meaning what it says. So this is NOT folded into tidyLabel. The two human
- * facing label surfaces each call it once: normalizeDiscoveredLabel for the stored question text,
- * and humanFieldLabel for the blocker sentence, which keeps the two saying the same words about
- * the same control.
+ * IDEMPOTENT, and that is load-bearing rather than tidiness. A stored question is normalized again
+ * on every read, so a strip that moved a label it had already produced would make the minted label
+ * and the read-back label two different questions to every comparison keyed on the employer's
+ * words, including the one deciding whether the packet about to be filled is the packet she
+ * approved. The all-or-nothing cap above is what buys it: a trusted run comes off whole, and an
+ * untrusted one is refused identically every time.
+ *
+ * Called by the two human-facing label surfaces: normalizeDiscoveredLabel for the stored question
+ * text, and humanFieldLabel for the blocker sentence, which keeps the two saying the same words
+ * about the same control. It is NOT folded into tidyLabel, so that tidyLabel stays purely about
+ * decoration and each surface applies the strip explicitly.
  *
  * normalizeDiscoveredLabel has to run it BEFORE collapseRepeatedLabel. Personio stores "phone phone
  * field-phone" and "location location field-location": that is one label rendered twice with the id
@@ -215,26 +235,25 @@ export function stripFormAttributeHandles(value: string): string {
 /**
  * Collapse whitespace and strip the decoration portals hang off required labels.
  *
- * Applied to a FIXPOINT rather than in one pass. The single pass removed a trailing "*" before it
- * removed a trailing "(required)", so a label carrying both came out still wearing the asterisk:
- * personio's "available from* (required)" tidied to "available from*". Each replacement only ever
- * shortens the string, so the loop terminates.
+ * THE ORDER IS THE FIX, not iteration. The original removed a trailing "*" BEFORE it removed a
+ * trailing "(required)", so a label carrying both came out still wearing the asterisk: personio's
+ * "available from* (required)" tidied to "available from*". Removing the parenthesised marker first
+ * settles both in one pass. An earlier cut wrapped this in a loop as well, and a review measured
+ * that the loop was doing nothing that the reordering had not already done, so it is gone rather
+ * than left standing untested. normalizeDiscoveredLabel iterates the whole chain around this.
  */
 export function tidyLabel(value: string): string {
-  let label = value.replace(/\s+/g, ' ').trim();
-  let previous = '';
-  while (label !== previous) {
-    previous = label;
-    label = label
-      .replace(/\s*\(required\)$/i, '')
-      /* A BARE "required" ONLY BEHIND THE EMPLOYER'S OWN ASTERISK. Teamtailor renders the marker as
-       * "Cover letter* Required", and the asterisk is the evidence that the word is a chip rather
-       * than prose. Without that evidence the word stays: "is a visa required" is a question. */
-      .replace(/\*\s*required[\s.:]*$/i, '')
-      .replace(/[\s*:]+$/g, '') // trailing "*", ":" and the space before them
-      .trim();
-  }
-  return label.replace(/^[\s*]+/, '').trim();
+  return value
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s*\(required\)$/i, '')
+    /* A BARE "required" ONLY BEHIND THE EMPLOYER'S OWN ASTERISK. Teamtailor renders the marker as
+     * "Cover letter* Required", and the asterisk is the evidence that the word is a chip rather
+     * than prose. Without that evidence the word stays: "is a visa required" is a question. */
+    .replace(/\*\s*required[\s.:]*$/i, '')
+    .replace(/[\s*:]+$/g, '') // trailing "*", ":" and the space before them
+    .replace(/^[\s*]+/, '')
+    .trim();
 }
 
 /**

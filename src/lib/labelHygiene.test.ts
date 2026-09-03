@@ -20,11 +20,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { isOpaqueIdentifier, sanitizeProviderBlockers, tidyLabel } from './fieldLabel';
 import { managedOptionProbeControlId } from './portalSubmission';
-import { normalizeDiscoveredLabel, type DiscoveredQuestion } from './questionDiscovery';
+import { normalizeDiscoveredLabel, normalizeReviewQuestionLabel, type DiscoveredQuestion } from './questionDiscovery';
 import { questionLabelIsGenericAnswerControl } from './questionMetadata';
 import { postingQuestionInventoryFromDiscovered } from './postingQuestions';
+import { consentAcceptanceValue } from './profileFieldResolution';
 
 /* ---------------------------------------------------------------------------------------------
  * THE MEASURED STRINGS, one test per rule that carries them.
@@ -273,11 +275,18 @@ test('the blocker sentence names the control the same way the stored question do
 });
 
 test('the strip is bounded, so no text rule can run away down a sentence', () => {
-  /* AT MOST FOUR TOKENS. A `name` and an `id` is two, and a flattened id splits into no more, so a
-   * longer run is not a handle join and the rule stops rather than eating a sentence. */
+  /* AT MOST FOUR TOKENS, AND A LONGER RUN IS REFUSED WHOLE rather than trimmed back to four.
+   *
+   * Trimming to the cap made the normalizer non-idempotent: the tokens the cap refused came off on
+   * the next application, so the label discovery minted was not the label a later read produced.
+   * Refusing the whole run is both idempotent and the more conservative reading of a string this
+   * function does not recognise. A `name` and an `id` is two tokens and every measured join is two. */
+  const fiveHandles = 'tell us more alpha_one beta_two gamma_three delta_four epsilon_five';
+  assert.equal(normalizeDiscoveredLabel(fiveHandles), fiveHandles);
+  // Four is still inside the cap and comes off whole.
   assert.equal(
-    normalizeDiscoveredLabel('tell us more alpha_one beta_two gamma_three delta_four epsilon_five'),
-    'tell us more alpha_one',
+    normalizeDiscoveredLabel('tell us more beta_two gamma_three delta_four epsilon_five'),
+    'tell us more',
   );
   // AND NO LONG TOKEN. Anything past 200 characters is prose, whatever its punctuation.
   const longToken = `a_${'very_long_'.repeat(25)}tail`;
@@ -444,4 +453,116 @@ test('a Greenhouse self-identification control still reaches the option probe by
   const blocker = inventory.metadata_blockers[0];
   assert.equal(blocker?.kind, 'missing_exact_options');
   assert.equal(blocker?.control_id, 'hispanic_ethnicity');
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * EVERY STRING IN THIS FILE IS A FIXPOINT OF THE NORMALIZER, which is #902's contract applied to
+ * this file's own corpus.
+ *
+ * A stored question is normalized again on EVERY read, while discovery mints it from ONE
+ * application. So a normalizer that moves a label it has already produced makes the minted label
+ * and the read-back label two different questions to every comparison keyed on the employer's
+ * words, including the one that decides whether the packet about to be filled is the packet she
+ * approved. The symptom is a packet that is a permanent strict superset of the approval: `missing`
+ * empty, one row forever `unacknowledged`, the count moving once and then frozen, and her stored
+ * answer orphaned by `existingByLabel` every round so she re-answers forever.
+ *
+ * This pass introduced two fresh ways in, and both were found by review rather than by these
+ * tests: the handle strip ran before tidyLabel, so a handle wearing trailing decoration was
+ * invisible on the pass that removed the decoration and bare on the next one; and the token cap was
+ * per call, so a fifth handle token came off on the next read.
+ *
+ * READ OFF THE FILE ITSELF rather than a hand-kept list, so a string added to any test above is
+ * covered here the moment it is written and cannot quietly reintroduce the defect. That is the one
+ * assertion that would have caught both mechanisms. */
+function stringLiteralsInThisFile(): string[] {
+  const source = readFileSync('src/lib/labelHygiene.test.ts', 'utf8');
+  const literals = new Set<string>();
+  for (const match of source.matchAll(/'((?:[^'\\\n]|\\.)*)'/g)) {
+    const raw = match[1] ?? '';
+    literals.add(raw.replace(/\\(.)/g, '$1'));
+  }
+  return [...literals].filter((value) => value.trim().length > 0);
+}
+
+test('every label this file names is a fixpoint of the normalizer', () => {
+  const corpus = stringLiteralsInThisFile();
+  // A guard on the harness itself: a regex that silently matched nothing would make this vacuous,
+  // which is the failure mode that let a non-idempotent output sit pinned in this very file.
+  assert.ok(corpus.length > 80, `expected this file's own corpus, got ${corpus.length} strings`);
+  assert.ok(corpus.includes('yesno-'));
+  assert.ok(corpus.some((value) => value.includes('field-available_from')));
+  for (const raw of corpus) {
+    assert.equal(
+      normalizeDiscoveredLabel(normalizeDiscoveredLabel(raw)),
+      normalizeDiscoveredLabel(raw),
+      `normalizeDiscoveredLabel moved a label it had already produced: ${JSON.stringify(raw)}`,
+    );
+    assert.equal(
+      normalizeReviewQuestionLabel(normalizeReviewQuestionLabel(raw)),
+      normalizeReviewQuestionLabel(raw),
+      `normalizeReviewQuestionLabel moved a label it had already produced: ${JSON.stringify(raw)}`,
+    );
+  }
+});
+
+test('the shapes review measured as drifting are fixpoints now', () => {
+  /* The four the reviewer replayed through the shipped merge and packetQuestionAcknowledgement.
+   * Each one minted one label and read back another, and each froze the packet at "3 to 4". */
+  const measured = [
+    'cover letter candidate[cover_letter]*',
+    'expected salary salary_expectations*',
+    'expected salary salary_expectations (required)',
+    'what is your notice period? a_one b_two c_three d_four e_five',
+  ];
+  for (const raw of measured) {
+    const minted = normalizeDiscoveredLabel(raw);
+    assert.equal(normalizeDiscoveredLabel(minted), minted, raw);
+  }
+  // And the words they settle on are the employer's, not the plumbing's.
+  assert.equal(normalizeDiscoveredLabel('cover letter candidate[cover_letter]*'), 'cover letter');
+  assert.equal(normalizeDiscoveredLabel('expected salary salary_expectations*'), 'expected salary');
+  assert.equal(normalizeDiscoveredLabel('expected salary salary_expectations (required)'), 'expected salary');
+});
+
+test('cleaning a consent label widens what Litos may tick, and that is stated on purpose', () => {
+  /* A DISCLOSED BEHAVIOURAL CHANGE, not a side effect nobody noticed.
+   *
+   * consentLabelSpelling is normalizeDiscoveredLabel, so the consent predicate reads the CLEANED
+   * label. A consent control whose handles used to bury the words now reads as consent, and
+   * consentAcceptanceValue moves from null (held, left for her) to the acceptance value. Measured
+   * against origin/main: "privacy policy application_form[application][privacy]
+   * application_form_application_privacy" returns null on main and the acceptance value here.
+   *
+   * This is the intended consequence of making the label readable, the standing permission is
+   * hers and is checked unchanged, and the answer is the one she granted. It is pinned here
+   * because it is a legally flavoured surface and the widening should be deliberate and visible
+   * rather than discovered later. Nothing in the consent predicate itself is loosened: a label
+   * with no consent wording still returns null, and a refusing option is still never chosen. */
+  const permitted = {
+    full_name: 'Mehek Mandal',
+    consent_acknowledgement_permission: { granted_at: '2026-08-01T00:00:00Z' },
+  } as never;
+  assert.equal(
+    consentAcceptanceValue(
+      'privacy policy application_form[application][privacy] application_form_application_privacy',
+      permitted,
+      null,
+    ),
+    'Yes',
+  );
+  // The permission is still what licenses it: with none granted, the same label is held.
+  assert.equal(
+    consentAcceptanceValue(
+      'privacy policy application_form[application][privacy] application_form_application_privacy',
+      { full_name: 'Mehek Mandal' } as never,
+      null,
+    ),
+    null,
+  );
+  // And a control that is not consent at all is untouched by any of this.
+  assert.equal(
+    consentAcceptanceValue('expected salary salary_expectations field-salary_expectations', permitted, null),
+    null,
+  );
 });

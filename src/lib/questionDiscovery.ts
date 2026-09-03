@@ -6781,10 +6781,14 @@ export function isProviderHandleOnly(value: string): boolean {
  * the row's second read; all that changes is that the FIRST application lands there too, so the
  * mint and every later read agree.
  *
- * ONLY THE COLLAPSE ITERATES. normalizeDiscoveredLabel as a whole deliberately does not: its
- * handle strip is bounded to at most four tokens so no text rule can run away down a sentence, and
- * re-running the whole function eats another four (labelHygiene pins both halves). Iterating just
- * the halving leaves that bound exactly where it was.
+ * THE WHOLE OF normalizeDiscoveredLabel ITERATES THROUGH THIS, not only the collapse. This note
+ * used to say the opposite, on the grounds that the handle strip was bounded to four tokens per
+ * call and so re-running the whole function would eat another four. That reasoning was sound
+ * against the strip as it then stood, and the strip has since been changed to remove the premise:
+ * a trailing handle run longer than the cap is now refused whole rather than trimmed to the cap,
+ * so a second application finds nothing left to take and the total stays bounded at four. With
+ * that, iterating everything is strictly safer than iterating one step, because the steps interact
+ * (the strip runs before tidyLabel, and tidyLabel is what uncovers a handle wearing decoration).
  *
  * Bounded and terminating: a pass that changes nothing stops, and the ceiling is the same eight
  * packetQuestionFixpoint uses, so a normalizer that ever cycles degrades to today's behaviour
@@ -6829,19 +6833,35 @@ function collapseRepeatedLabel(value: string): string {
  * one string. Strip only positively identified provider handles and generic answer placeholders,
  * leaving the employer's full question intact for both display and label-based filling.
  *
- * THE CONTROL'S OWN `name` AND `id` COME OFF BEFORE THE REPEAT COLLAPSE, not only inside tidyLabel
- * afterwards. Personio stores "phone phone field-phone" and "location location field-location":
- * that is one label rendered twice with the id behind it, and collapseRepeatedLabel halves on an
- * EVEN word count, so the handle made the count three and the doubled label survived into the
- * stored question. stripFormAttributeHandles is idempotent, so the second application inside
- * tidyLabel finds nothing left to take.
+ * THE CONTROL'S OWN `name` AND `id` COME OFF BEFORE THE REPEAT COLLAPSE. Personio stores
+ * "phone phone field-phone" and "location location field-location": that is one label rendered
+ * twice with the id behind it, and collapseRepeatedLabel halves on an EVEN word count, so the
+ * handle made the count three and the doubled label survived into the stored question.
+ *
+ * The whole chain is then run to a fixpoint, because the steps interact in the other direction too
+ * (see normalizeDiscoveredLabelOnce). Every value it settles on is one the system already reached
+ * on the row's second read; all that changes is that the FIRST application lands there too, which
+ * is the same property #902 established for the collapse and for the same reason.
  */
-export function normalizeDiscoveredLabel(raw: string): string {
+/* ONE pass of the whole normalization, never called anywhere but from the fixpoint below.
+ *
+ * The steps interact, so a single pass is a step towards the label rather than the label. The
+ * handle strip runs before tidyLabel, and tidyLabel is what removes the decoration a portal hangs
+ * off a required label - so a handle WEARING that decoration is invisible to the strip on the pass
+ * that removes it, and bare on the next one. Measured on the shapes discovery actually returns:
+ * "cover letter candidate[cover_letter]*" minted as "cover letter candidate[cover_letter]" and read
+ * back as "cover letter", and "expected salary salary_expectations (required)" the same way. That is
+ * the identity drift #902 closed for the repeat collapse, arriving by a different door. */
+function normalizeDiscoveredLabelOnce(raw: string): string {
   const withoutHandles = stripFormAttributeHandles(stripProviderHandles(raw)
     .replace(/\s+/g, ' ')
     .trim());
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
-  const label = tidyLabel(collapseRepeatedLabel(withoutPlaceholder));
+  return tidyLabel(collapseRepeatedLabel(withoutPlaceholder));
+}
+
+export function normalizeDiscoveredLabel(raw: string): string {
+  const label = labelNormalizationFixpoint(raw ?? '', normalizeDiscoveredLabelOnce);
   return label && !isOpaqueIdentifier(label) ? label : '';
 }
 
