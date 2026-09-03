@@ -43,6 +43,38 @@ export const RESUME_CONTENT_LIMITS = {
   expandedBulletsPerEntry: 5,
 } as const;
 
+/* WHAT COUNTS AS THE SAME SENTENCE, and it lives here for the same reason the counts do.
+ *
+ * engine/resumePolicy.ts dedupes bullets across entries on this key, so it is the key that decides
+ * how many bullets an entry ACTUALLY ends up with - which is the number the floor then measures
+ * against minBulletsPerEntry. Anything asking "can this entry survive the floor" has to count the
+ * same way, or it answers a different question and the two rules contradict.
+ *
+ * They did. priorityEntryMayBeMandatory counted raw variant strings, so a bank row holding
+ * "Managed the chapter budget" and "Managed the chapter budget." (a re-upload that reparsed one
+ * bullet with a trailing period) counted as two, was called survivable, was made mandatory - and
+ * the floor collapsed the pair to one sentence and dropped the entry, refusing the build on every
+ * posting. One normalizer, asked by both. */
+export function resumeBulletKey(bullet: string): string {
+  return bullet.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/** Distinct grounded sentences in a bank row, counted the way the floor counts them. */
+export function distinctGroundedVariants(bulletVariants: unknown): number {
+  const variants = Array.isArray(bulletVariants) ? bulletVariants : [];
+  const keys = new Set<string>();
+  for (const variant of variants) {
+    if (typeof variant !== 'string' || variant.trim().length === 0) continue;
+    const key = resumeBulletKey(variant);
+    /* An empty key is punctuation with no words in it. The floor passes such a bullet through to
+       its length checks rather than tracking it, so it is a real sentence for counting purposes
+       and cannot be collapsed with another one. The sentinel carries a colon, which
+       resumeBulletKey strips from every real key, so it can never collide with one. */
+    keys.add(key.length > 0 ? key : `unkeyed:${keys.size}`);
+  }
+  return keys.size;
+}
+
 export const RESUME_FIT_FALLBACKS = {
   maxTrimSteps: 100,
   preferredMinimumEntries: 1,

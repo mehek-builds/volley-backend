@@ -58,14 +58,18 @@ test('one bullet is still never enough', () => {
 test('a dropped entry is named, with the fix, rather than silently vanishing', () => {
   /* The half that makes the floor honest. Before this the job was simply absent and the only thing
      that knew why - one more bullet - was the code. */
-  const dropped: { org: string; bullets: number; reason: string }[] = [];
+  const dropped: { org: string; title: string; sourceId: string | null; bullets: number; reason: string }[] = [];
+  const source = bank('Campus Lab', ['Built a thing.']);
   const spec = { experience: [entry('Campus Lab', ['Built a thing.'])] } as never;
-  enforceExperienceBulletFloor(spec, [bank('Campus Lab', ['Built a thing.'])], {
+  enforceExperienceBulletFloor(spec, [source], {
     onDropped: (info) => dropped.push(info),
   });
   /* `reason` distinguishes this from the entry the cross-entry dedupe empties, where "add another
-     bullet" is a dead end rather than the fix. This one really is short. */
-  assert.deepEqual(dropped, [{ org: 'Campus Lab', title: 'Intern', bullets: 1, reason: 'below_floor' }]);
+     bullet" is a dead end rather than the fix. This one really is short.
+
+     `sourceId` names the BANK ROW, which the org and title cannot: those are the model's strings,
+     and the required-entry gate has to excuse a dropped row by something the model cannot reword. */
+  assert.deepEqual(dropped, [{ org: 'Campus Lab', title: 'Intern', sourceId: source.id, bullets: 1, reason: 'below_floor' }]);
 });
 
 test('an entry topped up from the bank to two is kept, not dropped', () => {

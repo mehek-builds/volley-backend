@@ -68,7 +68,7 @@ import {
   resolveJdText,
   type ActionPostingRow,
 } from './jdMatch';
-import { baseResumeSelectionIssues } from '../llm/baseResume';
+import { baseResumeSelectionIssues, priorityEntryMayBeMandatory } from '../llm/baseResume';
 import { leadAlignmentIssues, selectJdAlignedLead, type LeadFallbackDecision } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import {
@@ -853,7 +853,30 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       recent_experience_review?: { selected_entry_id?: string | null; continue_with_found?: boolean };
     } | null)?.recent_experience_review;
     const selectedEntryId = recentReview?.selected_entry_id;
-    const priorityEntry = bank.find((entry) => entry.id === selectedEntryId) ?? null;
+    const sparseSelectionConfirmed = recentReview?.continue_with_found === true;
+    /* The student's onboarding selection, which the model is told to start from. It is a HINT, and
+       it stays one whatever its bank row holds: an entry that cannot survive the floor may still
+       be written onto the page and dropped there with a warning naming the fix. */
+    const selectedEntry = bank.find((entry) => entry.id === selectedEntryId) ?? null;
+    /* MANDATORY IS NARROWER THAN SELECTED, and on this path it had not been. The two gates below
+       (baseResumeSelectionIssues, before and after the one-page fit) demand this entry appear on
+       the finished document, while enforceExperienceBulletFloor is GUARANTEED to remove it when
+       its bank row holds fewer than minBulletsPerEntry grounded variants and the applicant never
+       confirmed continuing with that evidence - allowSparsePriority keys on continue_with_found,
+       exactly as it does on the base path. Demanded and removed, the fail-closed check refuses the
+       packet with resume_quality_hold, and every retry reproduces it: the student cannot apply to
+       ANY posting, and no wording of any JD changes it.
+
+       PRs #872 and #875 closed both heads of this on /resume/base/stream and left this one open,
+       so an account healed in onboarding could still dead-end on every application. Same rule,
+       same predicate: mandatory implies survivable or confirmed. Unconfirmed and sparse, the
+       selection simply is not required here - the tailored path has no legacy fallback to protect
+       it with, because which entry LEADS this page is decided against the posting by
+       leadAlignmentIssues rather than by recency. */
+    const priorityEntry = selectedEntry
+      && priorityEntryMayBeMandatory(selectedEntry, { sparseSelectionConfirmed })
+      ? selectedEntry
+      : null;
 
     const parsed = profileRows[0]?.parsed_json as {
       school?: string;
@@ -951,7 +974,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
                 // bank on every application - which is also what makes their /start edits reach a
                 // real submission instead of dying in base_resume_json.
                 baseSpec,
-                priorityEntry,
+                /* selectedEntry, not priorityEntry: what the student chose is worth telling the
+                   model about even when it is too sparse to be REQUIRED on the finished page. */
+                selectedEntry,
               );
               const policed = applyResumePolicy(generated, education, bank, jdText, { targetRole: body.role }).spec;
               /* Ordering is decided from supported text on both sides of this exact packet, after
@@ -1077,20 +1102,37 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * only the code knew. These ride the same `omissions` channel the renderer already uses for
      * what it trimmed to make the page fit. */
     const droppedForLength: string[] = [];
+    /* THE SECOND WAY THE GATE AND THE FLOOR CONTRADICT, and the tailored path was missing the
+       excuse that closes it. A duplicate bank row with a slightly different identity (a re-upload
+       that renamed "Tri Coast Capital" to "Tri Coast Capital Manhattan Beach, CA") has two
+       grounded variants, so it is survivable and therefore mandatory - and then the floor's
+       cross-entry dedupe takes its sentences away, because they already print under the other
+       copy's heading. Demanding it anyway is the same deterministic refusal by another route.
+
+       EVERY drop is collected, with the bank row id the floor matched. Filtering to the
+       already-printed reason missed the case where the dedupe strips one shared sentence and
+       leaves the entry on a single bullet, and keying the excuse on the model's org and title
+       missed it whenever those strings differed from the bank row's - which is exactly the
+       near-duplicate shape that causes the drop. Fed to the post-fit gate below. */
+    const droppedByTheFloor: Array<{ sourceId?: string | null; org: string; title?: string | null }> = [];
     spec = enforceExperienceBulletFloor(spec, bank, {
-      priorityEntryId: priorityEntry?.id,
-      allowSparsePriority: recentReview?.continue_with_found === true,
+      /* Keyed on the SELECTION and gated by the confirmation, so the entry the floor is allowed
+         to keep is the same entry the gate above is allowed to require. */
+      priorityEntryId: selectedEntry?.id,
+      allowSparsePriority: sparseSelectionConfirmed,
       allowSparseAll: spec.generation_method === 'local_fallback',
       /* Two causes, two sentences. "Add another bullet" is the fix for a thin entry and a dead
          end for a duplicated one: an entry emptied by the dedupe has every bullet already on the
          page under another heading, so a fourth bullet changes nothing and the student would be
          sent round a loop. Say what actually happened instead. */
-      onDropped: ({ org, bullets, reason }) =>
+      onDropped: ({ org, title, sourceId, bullets, reason }) => {
+        droppedByTheFloor.push({ sourceId, org, title });
         droppedForLength.push(
           reason === 'already_printed'
             ? `Left ${org} off: everything under it already appears on this resume under another heading, so printing it again would just repeat you.`
             : `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
-        ),
+        );
+      },
     });
     /* Grounding and the bullet-floor repair can remove or add evidence after the first selection.
      * Recompute from the exact pre-render document so a citation can never survive after its
@@ -1193,8 +1235,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         allowedSingleBulletEntries: allowedSparseEntriesForGeneration(
           spec.generation_method,
           bank,
-          priorityEntry ? [priorityEntry] : [],
-          recentReview?.continue_with_found === true,
+          selectedEntry ? [selectedEntry] : [],
+          sparseSelectionConfirmed,
         ),
       },
     );
@@ -1208,7 +1250,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       );
     }
     if (priorityEntry) {
-      finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
+      /* Post-floor, so this is the gate the dedupe can contradict - and the only one, since the
+         in-loop check above runs before the floor has touched anything. */
+      finalSpecValidation.issues.push(
+        ...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false, droppedByTheFloor }),
+      );
     }
     /* The complete citation is re-checked after fitting. If the one-page pass removed the exact
      * supporting bullet, the packet is blocked rather than storing an explanation the PDF no
