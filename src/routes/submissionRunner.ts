@@ -267,6 +267,7 @@ import {
   eeoSubjectPreferenceKeys,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
+  snapStoredAnswersToOfferedOptions,
 } from '../lib/questionDiscovery';
 import {
   REQUIRED_AND_EMPTY_BLOCKER,
@@ -9012,8 +9013,14 @@ export function resolvePacketAuditQuestionFixpoint(
   const packetMayBeWithEmployer = Boolean(review.submission_claimed_at)
     || review.status === 'submitted'
     || review.status === 'awaiting_security_code';
+  /* Snapped once, on the stored rows, before the fixpoint, and only while the packet is not with
+   * the employer. Outside the transform for the reason on snapStoredAnswersToOfferedOptions: that
+   * loop re-applies itself to its own output, and the refresh inside it overwrites stored answers,
+   * so a spelling rule in there re-spells the machine's value rather than hers. */
   return packetQuestionFixpoint(
-    normalize(review.questions),
+    normalize(packetMayBeWithEmployer
+      ? review.questions
+      : snapStoredAnswersToOfferedOptions(review.questions)),
     (questions) => {
       const refreshed = refreshKnownQuestionAnswers(
         questions,

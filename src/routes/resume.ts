@@ -84,7 +84,7 @@ import {
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
-import { applicationContextForQuestionResolution, normalizeStoredPortalQuestions, refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, normalizeStoredPortalQuestions, refreshKnownQuestionAnswers, snapStoredAnswersToOfferedOptions, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
 import { reopenUnfitClosedChoiceQuestions } from '../lib/questionMetadata';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
@@ -241,8 +241,15 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
     _review: {
       ...review,
       // Same context every live fill resolves against; see applicationContextForQuestionResolution.
+      /* Snapped once, on the stored rows, before the fixpoint. It rides the same
+       * not-yet-with-employer branch the re-open does, so a packet that may already be with the
+       * employer keeps its stored answers verbatim as the record of what was sent. It must stay
+       * OUTSIDE the transform: that loop feeds itself its own output, and the refresh inside it
+       * overwrites stored answers, so a spelling rule in there re-spells the machine's value. */
       questions: packetQuestionFixpoint(
-        normalize(review.questions),
+        normalize(packetMayBeWithEmployer
+          ? review.questions
+          : snapStoredAnswersToOfferedOptions(review.questions)),
         (questions) => {
           const refreshed = refreshKnownQuestionAnswers(
             questions,
