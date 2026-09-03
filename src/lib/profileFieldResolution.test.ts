@@ -1331,3 +1331,26 @@ test('the numeric band stage still answers the GPA lists it was written for', ()
   );
   assert.equal(chooseClosestOption(['3.89'], ['3.0 - 3.5', '3.5 - 4.0']), '3.5 - 4.0');
 });
+
+/* MEASURED 2026-09-03 on Hudson River Trading (packet 4a79eec1, greenhouse job-boards). The label
+ * is "What is your gender?" and the employer's own options are Woman / Man / Non-binary / I don't
+ * wish to answer. Her stored answer is "Female". Of the four EEO controls on that form it was the
+ * only one that did not snap, and it failed on vocabulary alone: the equivalence required the
+ * literal phrase "gender identity", which this label does not carry. */
+test('an EEO gender answer speaks the form\'s own vocabulary, in either direction', () => {
+  const hrt = ['Woman', 'Man', 'Non-binary', "I don't wish to answer"];
+  const female = { eeo_prefs: { gender: 'Female' } } as unknown as ApplicationProfileLike;
+  assert.equal(answer('What is your gender?', hrt, female), 'Woman');
+  assert.equal(answer('Gender', hrt, female), 'Woman');
+  assert.equal(answer('Gender identity', hrt, female), 'Woman');
+  // Her own wording still wins when the list carries it.
+  assert.equal(answer('What is your gender?', ['Female', 'Male', 'Decline to self-identify'], female), 'Female');
+  // ...and the equivalence runs the other way for a board that offers Female/Male.
+  const woman = { eeo_prefs: { gender: 'Woman' } } as unknown as ApplicationProfileLike;
+  assert.equal(answer('What is your gender?', ['Female', 'Male', 'Decline to self-identify'], woman), 'Female');
+  const male = { eeo_prefs: { gender: 'Male' } } as unknown as ApplicationProfileLike;
+  assert.equal(answer('What is your gender?', hrt, male), 'Man');
+  // An answer that is hers alone is never rewritten.
+  const nb = { eeo_prefs: { gender: 'Non-binary' } } as unknown as ApplicationProfileLike;
+  assert.equal(answer('What is your gender?', hrt, nb), 'Non-binary');
+});
