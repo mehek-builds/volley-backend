@@ -648,6 +648,63 @@ test('replays the exact committed result without rendering, storing, or building
   assert.deepEqual(counts.rows[0], { applications: 1, packets: 1, artifacts: 1, versions: 1, links: 1 });
 });
 
+test('a re-link of the same exact packet preserves the original resume_attached_at, not the re-link moment', async () => {
+  /* A re-tailor is not a re-attach (see linkGeneratedPacketToCanonicalApplication's own comment in
+   * resumeArtifactVersions.ts). This exercises the SAME invariant through prepareManagedApplication's
+   * own re-link branch (linkExactPacket, taken whenever !exactCanonicalLink), which calls
+   * linkGeneratedPacketToCanonicalApplication and must not then restamp what it just preserved. */
+  await seedUser(STUDENT, 'student@example.test');
+  const { prepareManagedApplication } = await import('../lib/managedPrepare');
+  const firstNow = new Date('2026-08-31T12:00:00.000Z');
+  const first = await prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+    ...dependencies,
+    now: () => firstNow,
+  });
+  assert.equal(first.state, 'ready_for_review');
+
+  const beforeRelink = await database.query<{ at: string; artifact_id: string }>(
+    `select "resume_attached_at"::text as at, "selected_resume_artifact_id" as artifact_id
+       from "applications" where "id" = $1`,
+    [first.application_id],
+  );
+  const originalStamp = beforeRelink.rows[0].at;
+  const artifactId = beforeRelink.rows[0].artifact_id;
+  assert.ok(originalStamp, 'the first prepare call attaches a resume');
+
+  /* Force the re-link branch (!exactCanonicalLink) without disturbing resume_attached_at: clear
+   * the application_artifacts selection that exactCanonicalLink's last conjunct checks for. The
+   * application row still legitimately carries an attached artifact resume throughout, a shape the
+   * resume_attachment_state_check constraint has no opinion on, so this is a real, valid state a
+   * race or a partial write could leave behind, not a synthetic one the DB would refuse. */
+  await database.query(
+    `update "application_artifacts" set "selected" = false
+       where "application_id" = $1 and "artifact_id" = $2 and "purpose" = 'resume'`,
+    [first.application_id, artifactId],
+  );
+
+  const secondNow = new Date('2026-09-05T09:00:00.000Z');
+  const second = await prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+    ...dependencies,
+    now: () => secondNow,
+  });
+  assert.equal(second.packet_id, first.packet_id, 'the same exact packet is reused, not rebuilt');
+  assert.equal(second.reused, true);
+
+  const afterRelink = await database.query<{ at: string; selected: boolean }>(
+    `select a."resume_attached_at"::text as at,
+            (select aa."selected" from "application_artifacts" aa
+              where aa."application_id" = a."id" and aa."artifact_id" = $2 and aa."purpose" = 'resume') as selected
+       from "applications" a where a."id" = $1`,
+    [first.application_id, artifactId],
+  );
+  assert.equal(afterRelink.rows[0].selected, true, 'the re-link restores the selection it found cleared');
+  assert.notEqual(
+    afterRelink.rows[0].at, secondNow.toISOString(),
+    'the re-link must not restamp resume_attached_at to the moment it ran',
+  );
+  assert.equal(afterRelink.rows[0].at, originalStamp, 'resume_attached_at must stay the moment it first attached');
+});
+
 test('scopes idempotency to the authenticated owner even for the same monitored job', async () => {
   await seedUser(STUDENT, 'student@example.test');
   await seedUser(OTHER_STUDENT, 'other@example.test');

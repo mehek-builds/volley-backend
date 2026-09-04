@@ -432,25 +432,26 @@ async function linkExactPacket(
     applicationId: string;
     packetId: string;
     artifactId: string;
-    attachedAt: Date;
   },
 ) {
+  /* Existence only, on purpose: linkGeneratedPacketToCanonicalApplication (resumeArtifactVersions.ts)
+   * already writes all four resume-linkage columns for us, including a preserveAttachedAt-aware
+   * resume_attached_at that must survive a re-tailor's re-link untouched. A second update here that
+   * repeated those columns would stomp that preservation right back to "now" on every !exactCanonicalLink
+   * re-link - which is exactly the bug this replaced. This check exists only to keep the same 409
+   * managed_application_changed signal (rather than a raw throw surfacing as a 500) when the row is
+   * gone before we can link it. */
+  const [current] = await tx.select({ id: applications.id }).from(applications).where(and(
+    eq(applications.id, input.applicationId),
+    eq(applications.user_id, input.userId),
+  )).limit(1);
+  if (!current) prepareError(409, 'managed_application_changed', 'The application changed before its packet could be linked.');
   await linkGeneratedPacketToCanonicalApplication(tx, {
     userId: input.userId,
     applicationId: input.applicationId,
     generatedResumeId: input.packetId,
     artifactId: input.artifactId,
   });
-  const [attached] = await tx.update(applications).set({
-    resume_attached: true,
-    resume_source: 'artifact',
-    resume_attached_at: input.attachedAt,
-    updated_at: input.attachedAt,
-  }).where(and(
-    eq(applications.id, input.applicationId),
-    eq(applications.user_id, input.userId),
-  )).returning({ id: applications.id });
-  if (!attached) prepareError(409, 'managed_application_changed', 'The application changed before its packet could be linked.');
 }
 
 export async function prepareManagedApplication(
@@ -621,7 +622,6 @@ export async function prepareManagedApplication(
             applicationId,
             packetId: existing.id,
             artifactId: artifact.id,
-            attachedAt: dependencies.now(),
           });
         }
         return {
@@ -1099,7 +1099,6 @@ export async function prepareManagedApplication(
       applicationId,
       packetId: currentRow.id,
       artifactId,
-      attachedAt: dependencies.now(),
     });
     const [committed] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, currentRow.id),
