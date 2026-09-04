@@ -2629,13 +2629,156 @@ function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: S
   });
 }
 
+/* ─── A BARE HUMAN WORD IS NOT AN ADDRESS ─────────────────────────────────────────────────────
+ *
+ * The anchors these speculative fills carry are the words a person would say: 'GPA', 'Graduation
+ * Date', 'End date year'. The runner turns one into a control by matching label text - exact first,
+ * then any label CONTAINING the anchor - and takes `.first()` of what comes back. On a form with
+ * two controls whose labels both carry the word, DOM order decides which one gets typed into, and
+ * nothing in this repo knows that happened.
+ *
+ * MEASURED 2026-09-03 on Hudson River Trading packet 4a79eec1 (greenhouse, job 8052083). That form
+ * asks for the GPA twice, deliberately:
+ *
+ *   question_68000287  "What is your overall college/university GPA?", a 13-band react-select whose
+ *                      options include "3.76 - 4.0" - the band she reviewed and chose.
+ *   question_68000289  a bare <input type="text">, captioned "We recognize that the options above
+ *                      may not cover all global grading systems. Please feel free to write in your
+ *                      GPA below without conversion, along with the corresponding scale..." - which
+ *                      is where a raw "3.89" belongs.
+ *
+ * Against the live markup the anchor 'GPA' gave 0 exact hits and 4 loose ones, and `.first()` was
+ * the BAND's label. The run opened the band control, typed "3.89" into its react-select search box,
+ * filtered thirteen options down to none, and read react-select's own empty-menu notice back to her
+ * as the employer's offer: `no option matched "3.89" (the list offered: "No options")`. The whole
+ * application parked on that one field and nothing reached the employer.
+ *
+ * WHAT THIS RESOLVES, AND THE ONE CHOICE IT WILL NOT MAKE. The packet already carries every control
+ * discovery found, each with the employer's own label, the control's measured shape and its durable
+ * selector, so this repo can compute the same candidate set the runner is about to and does not have
+ * to leave the choice to DOM order. It acts only where the packet PROVES that the anchor names a
+ * control which cannot hold this value - a closed list whose read options do not contain it, or a
+ * measured combobox/listbox/select with no read list vouching for it. Then, and only then:
+ *
+ *   exactly one candidate left that could hold it, and unanswered -> bind the fill to ITS selector
+ *   none left, or more than one                                   -> emit nothing
+ *
+ * Where no candidate is provably wrong - two education rows each offering "End date year", say -
+ * this stands aside entirely and the plain label fill goes out byte for byte as before. Choosing
+ * between controls that could each legitimately take the value is the runner's `.first()`, and
+ * overruling it from here would be swapping one blind guess for another.
+ */
+function managedAnchorNamesQuestion(anchor: string, questionLabel: string): boolean {
+  const normalized = normalizedFailedFieldLabel(questionLabel);
+  if (!normalized) return false;
+  const escaped = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^| )${escaped}(?: |$)`).test(normalized);
+}
+
+/**
+ * Whether the packet PROVES this control cannot hold this value.
+ *
+ * Read options are the stronger evidence and come first: a list that was actually read says exactly
+ * what the control accepts. With no list read, the control's measured shape is the evidence -
+ * combobox, listbox and native select are closed by construction (see measuredClosedListShape), and
+ * a raw profile value no read list has vouched for cannot be typed into one. Absence of both is not
+ * evidence of anything, and returns false.
+ */
+function managedAnchorCandidateRefusesValue(
+  packet: SubmissionPacket,
+  item: SubmissionPacket['questions'][number],
+  value: string,
+): boolean {
+  const options = packetReadOptionsForQuestion(packet, item);
+  if (options) {
+    const wanted = value.trim().toLowerCase();
+    return !options.some((option) => option.trim().toLowerCase() === wanted);
+  }
+  return measuredClosedListShape(reviewQuestionPortalInputType(item)) !== null;
+}
+
+type ManagedAnchorResolution = { kind: 'bind'; selector: string } | { kind: 'refuse' };
+
+function managedAnchorResolution(
+  packet: SubmissionPacket,
+  text: string,
+  value: string | undefined,
+): ManagedAnchorResolution | undefined {
+  const wanted = value?.trim();
+  if (!wanted) return undefined;
+  const anchor = normalizedFailedFieldLabel(text);
+  if (!anchor) return undefined;
+  const named = packet.questions.filter((item) => managedAnchorNamesQuestion(anchor, item.question));
+  // One control, or none this repo can see: the runner has nothing to choose between, or no
+  // evidence reached the packet at all. Either way the existing label fill is unchanged.
+  if (named.length < 2) return undefined;
+  // An exact label match wins in the runner before the loose pass ever runs, so a single control
+  // spelled exactly like the anchor is already resolved deterministically and is left alone.
+  if (named.filter((item) => normalizedFailedFieldLabel(item.question) === anchor).length === 1) return undefined;
+  const holders = named.filter((item) => !managedAnchorCandidateRefusesValue(packet, item, wanted));
+  // Nothing here is provably the wrong control. Not this function's choice to make.
+  if (holders.length === named.length) return undefined;
+  if (holders.length !== 1) return { kind: 'refuse' };
+  const [holder] = holders;
+  /* Already answered means the reviewed-question chain owns this control and fills it at its own
+   * selector with the answer of record. Firing here as well would spend a second action on a value
+   * that is not hers, and MANAGED_ACTION_LIMIT is 120 with a real Greenhouse packet already
+   * reconstructing to exactly that. The alias has nowhere left to go, so it goes nowhere. */
+  if (holder.answer?.trim()) return { kind: 'refuse' };
+  /* No failed-control guard here, deliberately. One was written, and mutating it left every test in
+   * ambiguousLabelAnchor.test.ts green: managedActionTargetsFailedField, the last-line invariant at
+   * the end of the build, already strips an id-scoped action at a failed control, and it matches
+   * `#question_68000289` against controlId `question_68000289` by the same regex it uses for every
+   * other builder. A guard that cannot be made to fail is not defence in depth, it is a line that
+   * makes a test look covered. The boundary is asserted end to end in that file instead. */
+  const selector = durablePortalSelector(reviewQuestionPortalSelector(holder));
+  // A control with no durable handle cannot be addressed precisely, and addressing it by the same
+  // ambiguous label is the defect this whole function exists to end.
+  if (!selector) return { kind: 'refuse' };
+  return { kind: 'bind', selector };
+}
+
 function managedFillByLabelUnlessHandled(
   actions: ManagedBrowserAction[],
   packet: SubmissionPacket,
   text: string,
   value: string | undefined,
   label: string,
+  /* OPT-IN, AND OFF EVERYWHERE BUT GPA, BECAUSE "NOT ON THE READ LIST" IS NOT "CANNOT HOLD IT".
+   *
+   * managedAnchorCandidateRefusesValue treats a read option list as proof of what a control accepts.
+   * That is true of the GPA band, whose thirteen bands are the whole of what it offers. It is FALSE
+   * of an education year menu, whose read list is routinely a truncated window. Measured on a
+   * two-row education section with row 0 published as ['2024','2025','2026','2027'] and row 1
+   * offering 2028, resolution refuses row 0, finds row 1 the sole survivor, and binds
+   *
+   *   {"type":"fill","selector":"#end-year--1","value":"2028","label":"education_end_year"}
+   *
+   * which is her SECOND education entry. Leaving that anchor on the label fill lands it on row 0
+   * through the runner's own resolution, correctly. The same shape moves "May" to #end-month--1 when
+   * row 0 spells months numerically. So generalising this to all eleven anchors fixes GPA and breaks
+   * the education row on the same submission.
+   *
+   * Scoped rather than repaired because the repair needs a way to tell a complete option read from a
+   * truncated one, and the packet carries no such signal. Widening this flag without that signal
+   * reintroduces the regression above; the fixture that catches it is the two-row education section
+   * with row 0 as a combobox, in ambiguousLabelAnchor.test.ts. */
+  resolveAmbiguousAnchor = false,
 ) {
+  const resolution = resolveAmbiguousAnchor ? managedAnchorResolution(packet, text, value) : undefined;
+  if (resolution?.kind === 'refuse') return;
+  /* The id-scoped fill deliberately runs ahead of managedSpeculativeLabelFillSuppressed, whose own
+   * doc comment scopes it to LABEL-resolved fills. That guard stands the ladder down because a
+   * label-resolved guess could land on the answered control; a selector taken from the packet's own
+   * discovery record for a DIFFERENT, unanswered control cannot. On the HRT packet the two rules
+   * disagree precisely there: the suppression sees her answered band and drops "3.89" entirely,
+   * which is right about the band and leaves the write-in empty. A control whose option read FAILED
+   * is still never filled: managedActionTargetsFailedField strips this action by id at the end of
+   * the build, exactly as it strips every other builder's. */
+  if (resolution?.kind === 'bind') {
+    managedFill(actions, resolution.selector, value, label);
+    return;
+  }
   if (managedSpeculativeLabelFillSuppressed(packet, text, value)) return;
   managedFillByLabel(actions, text, value, label);
 }
@@ -7550,8 +7693,11 @@ function pushFixedFieldActions(
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
+      /* The two anchors the resolution is enabled for. A GPA band's read list IS the whole of what
+       * it accepts, so "3.89 is not among these thirteen" really does prove the band cannot hold it.
+       * See the flag's own comment for why that reasoning does not travel to the education rows. */
+      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa', true);
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question', true);
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
