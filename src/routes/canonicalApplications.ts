@@ -21,6 +21,7 @@ import {
   trial_answer_applications,
   users,
 } from '../db/schema';
+import { mergedResumeLinkageIntent, resumeLinkageColumns, resumeLinkageIntentFrom } from '../lib/resumeLinkage';
 import { canonicalCompanyScope, getEntitlementSnapshot } from '../lib/entitlements';
 import { companyDomainFor } from '../lib/companyDomains';
 import { INVENTORY_LIMIT } from '../engine/pipeline';
@@ -265,10 +266,18 @@ export async function updateCanonicalApplicationAfterFill(
       when ${applications.submission_state} = ${preparedSendLifecycle.submissionState} then 'not_started'
       else ${applications.submission_state}
     end`,
-    selected_resume_artifact_id: input.selectedResumeArtifactId,
-    resume_attached: input.resumeAttached,
-    resume_source: input.resumeSource,
-    resume_attached_at: input.resumeAttachedAt,
+    /* THE FOUR RESUME COLUMNS ARE ONE FACT, and they are written as one. This used to copy the
+       caller's four values through verbatim, which is how a request naming only an artifact left
+       the pair behind and produced "an artifact is selected and no resume is attached" on six of
+       Mehek's ten boards. See resumeLinkageColumns. */
+    ...resumeLinkageColumns(
+      resumeLinkageIntentFrom({
+        selectedResumeArtifactId: input.selectedResumeArtifactId,
+        resumeAttached: input.resumeAttached,
+        resumeSource: input.resumeSource,
+      }),
+      { now: input.resumeAttachedAt ?? undefined },
+    ),
     updated_at: new Date(),
   }).where(and(
     eq(applications.id, input.applicationId),
@@ -465,7 +474,13 @@ export async function upsertCanonicalApplicationForUser(input: {
       ));
     }
 
-    const resumeSourceRow = merged.find((row) => row.resume_attached && row.resume_source !== 'none');
+    /* ONE ROW'S LINKAGE, NOT A POINTER FROM ONE AND A PAIR FROM ANOTHER. The old code took
+       selected_resume_artifact_id from the first row that had one and the (attached, source, at)
+       triple from the first row that was attached, which are not necessarily the same row, so the
+       merge could mint the inconsistent shape out of two consistent rows. */
+    const mergedResumeLinkage = resumeLinkageColumns(mergedResumeLinkageIntent(merged), {
+      now: merged.find((row) => row.resume_attached_at)?.resume_attached_at ?? undefined,
+    });
     const [updated] = await tx.update(applications).set({
       legacy_generated_resume_id: merged.find((row) => row.legacy_generated_resume_id)?.legacy_generated_resume_id ?? null,
       job_id: input.jobId ?? merged.find((row) => row.job_id)?.job_id ?? null,
@@ -477,10 +492,7 @@ export async function upsertCanonicalApplicationForUser(input: {
       tracker_state: mostAdvancedLifecycle(merged.map((row) => row.tracker_state)),
       review_state: mostAdvancedLifecycle(merged.map((row) => row.review_state)),
       submission_state: mostAdvancedLifecycle(merged.map((row) => row.submission_state)),
-      selected_resume_artifact_id: merged.find((row) => row.selected_resume_artifact_id)?.selected_resume_artifact_id ?? null,
-      resume_attached: Boolean(resumeSourceRow),
-      resume_source: resumeSourceRow?.resume_source ?? 'none',
-      resume_attached_at: resumeSourceRow?.resume_attached_at ?? null,
+      ...mergedResumeLinkage,
       /* ADDING THE POSTING AGAIN IS THE UNDO. This upsert reuses the existing row for a posting
          the student already has, and a removed row is still that row - so without this clear, a
          student who removed an application and then added the same job back would get a row they
@@ -803,6 +815,11 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
           return reply.status(404).send({ error: 'Resume document not found', code: 'resume_artifact_missing' });
         }
       }
+      /* A REQUEST THAT SAYS "NOT ATTACHED" CLEARS THE POINTER TOO. Without this the pair went to
+         (false, 'none') while selected_resume_artifact_id kept whatever it had, which is the same
+         inconsistent shape from the other direction, and it is the shape resumeLinkageIntentFrom
+         reads as "attached from that artifact". Detaching means detaching. */
+      if (!resumeAttached) selectedResumeArtifactId = null;
       if (resumeAttached && resumeSource === 'base_resume') {
         const [baseProfile] = await db.select({ base_resume_json: profiles.base_resume_json })
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
@@ -823,6 +840,18 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
       resumeSource,
       resumeAttachedAt,
     });
+    /* RESYNC FROM THE ROW THE WRITE ACTUALLY PRODUCED. updateCanonicalApplicationAfterFill derives
+       the stored linkage from resumeLinkageIntentFrom, which reads selectedResumeArtifactId ahead of
+       the (resumeAttached, resumeSource) pair - so a request naming only
+       selected_resume_artifact_id (the gate above never fires for it) writes an attached row while
+       these locals still hold the application's OLD values. Below this point resumeAttached,
+       resumeSource and selectedResumeArtifactId feed both needs_user and the top-level
+       resume_attached/resume_source fields - "the Free preparation contract" the comment above this
+       route names - so leaving them stale made one JSON response say attached in
+       application.resume_attached and not attached at its own top level. */
+    selectedResumeArtifactId = updated?.selected_resume_artifact_id ?? selectedResumeArtifactId;
+    resumeAttached = updated?.resume_attached ?? resumeAttached;
+    resumeSource = (updated?.resume_source as 'artifact' | 'base_resume' | 'none' | undefined) ?? resumeSource;
     const [account, entitlement] = await Promise.all([
       db.select({ automatic_submission_enabled: users.automatic_submission_enabled })
         .from(users).where(eq(users.id, userId)).limit(1),

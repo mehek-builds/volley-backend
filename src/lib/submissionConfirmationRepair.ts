@@ -330,7 +330,18 @@ export async function repairMissingSubmissionConfirmation(input: {
          * the authoritative projection would stay repair_required even with the confirmation fact
          * in place. Complete ONLY absent values, inside this same transaction: an already-written
          * value is never overwritten, and any inconsistency between existing values still fails the
-         * projection assertion below and rolls everything back. */
+         * projection assertion below and rolls everything back.
+         *
+         * RETAINED AS A GUARD, NO LONGER A LIVE PATH. As of 2026-09-04 the database refuses the
+         * shape this condition tests for: applications_resume_attachment_state_check requires
+         * selected_resume_artifact_id to be present exactly when resume_source is 'artifact', so a
+         * row carrying a pointer beside (false, 'none') can no longer be stored. Every row that was
+         * already in it, six of the ten boards Mehek was applying to on 2026-09-03, was completed by
+         * scripts/apply-resume-linkage-invariant-migration.mjs, INCLUDING the application_artifacts
+         * link stamp this block also writes, so nothing this used to complete is left incomplete.
+         * It is kept rather than deleted because it costs one predicate on a path that runs by hand,
+         * and it is what would still complete such a row if that constraint were ever dropped in an
+         * incident. It is not expected to fire again. */
         if (canonical.selected_resume_artifact_id
           && !canonical.resume_attached
           && canonical.resume_source === 'none'

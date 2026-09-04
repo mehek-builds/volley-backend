@@ -393,8 +393,14 @@ async function seedLegacyRepairCandidate(overrides: { pressOnGenerated?: boolean
     structured_content: structuredContent,
     rendered_object_key: objectKey,
   });
-  // Mirrors production's pre-ledger rows: the resume link and selection exist, but none of the
-  // mutable attachment writes or the packet pipeline stage were ever recorded.
+  /* Mirrors production's pre-ledger rows AFTER the 2026-09-04 resume-linkage backfill: the resume
+   * link and selection exist and the attachment tuple is complete, while the packet pipeline stage
+   * still is not. The tuple used to be seeded absent here, which is the shape those rows really had
+   * and which submissionConfirmationRepair completed. The database now refuses that shape
+   * (applications_resume_attachment_state_check), and the backfill completed every row that was in
+   * it, so seeding it absent would be seeding a row production can no longer contain. None of the
+   * assertions in this file read the tuple: what they test is eligibility, idempotency, attempt-id
+   * binding and the two refusals, all of which are unchanged. */
   await backendDb.insert(schema.applications).values({
     id: applicationId,
     user_id: userId,
@@ -409,16 +415,16 @@ async function seedLegacyRepairCandidate(overrides: { pressOnGenerated?: boolean
     submission_state: 'submitted',
     application_fingerprint: `legacy-repair:${packetId}`,
     selected_resume_artifact_id: artifactId,
-    resume_attached: false,
-    resume_source: 'none',
-    resume_attached_at: null,
+    resume_attached: true,
+    resume_source: 'artifact',
+    resume_attached_at: attachedAt,
   });
   await backendDb.insert(schema.application_artifacts).values({
     application_id: applicationId,
     artifact_id: artifactId,
     purpose: 'resume',
     selected: true,
-    attached_at: null,
+    attached_at: attachedAt,
   });
 
   const legacyBinding = (attemptId: string, operation: 'initial_submission' | 'manual_submission'):

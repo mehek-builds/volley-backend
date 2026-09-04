@@ -12,6 +12,7 @@ import {
   unpreparedSendLifecycle,
 } from './canonicalApplicationLifecycle';
 import { immutableDocumentContentHash } from './immutableDocumentHash';
+import { resumeLinkageColumns } from './resumeLinkage';
 
 type ArtifactVersionTransaction = Pick<typeof db, 'select' | 'insert' | 'update'>;
 
@@ -63,7 +64,14 @@ export async function linkGeneratedPacketToCanonicalApplication(
   const terminalLifecycle = sql`${applications.submission_state} = 'submitted' or ${applications.tracker_state} = 'applied'`;
   const [linked] = await tx.update(applications).set({
     legacy_generated_resume_id: input.generatedResumeId,
-    selected_resume_artifact_id: input.artifactId,
+    /* LINKING A PACKET IS ATTACHING ITS RESUME, and until 2026-09-03 this wrote the pointer and
+       none of the three columns that say so. This is the path every tailor takes, so the row it
+       left behind read "a resume artifact is selected and no resume is attached" for any
+       application whose dashboard fill had not separately sent the pair. Six of Mehek's ten boards
+       were in that state on 2026-09-03, each with a PASSED packet audit binding an exact PDF.
+       preserveAttachedAt because a re-tailor repoints an application at a new document; it is not
+       the moment this application first got a resume. */
+    ...resumeLinkageColumns({ kind: 'artifact', artifactId: input.artifactId }, { preserveAttachedAt: true }),
     // Tailoring an already submitted application replaces its document pointer, not its history.
     tracker_state: sql`case when ${terminalLifecycle} then 'applied' else 'applying' end`,
     review_state: sql`case when ${terminalLifecycle} then ${applications.review_state} else 'ready' end`,
@@ -134,7 +142,9 @@ export async function appendEditedResumeArtifactVersion(
         selected: true,
       }).onConflictDoNothing();
       await tx.update(applications).set({
-        selected_resume_artifact_id: artifact.id,
+        // Same fact, same single spelling of it: a first user edit that mints the canonical
+        // artifact is also the write that binds it to this application.
+        ...resumeLinkageColumns({ kind: 'artifact', artifactId: artifact.id }, { preserveAttachedAt: true }),
         updated_at: new Date(),
       }).where(and(eq(applications.id, application.id), eq(applications.user_id, input.userId)));
     }

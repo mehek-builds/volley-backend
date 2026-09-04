@@ -627,10 +627,23 @@ export const applications = pgTable('applications', {
   legacyResumeUnique: uniqueIndex('applications_legacy_resume_unique')
     .on(t.legacy_generated_resume_id)
     .where(sql`${t.legacy_generated_resume_id} is not null`),
+  /* THE POINTER AND THE PAIR ARE ONE FACT, and the constraint now says so in both directions.
+   *
+   * It used to constrain only one: an attached artifact resume had to name a document. The other
+   * direction was free, so "a document is named and no resume is attached" satisfied the first arm
+   * and the database accepted it. Measured 2026-09-03: six of the ten boards Mehek was applying to
+   * were stored in exactly that shape, each with a real owned artifact and a PASSED packet audit,
+   * and nothing anywhere would ever have corrected them.
+   *
+   * Adding "is null" to the other two arms makes selected_resume_artifact_id present exactly when
+   * resume_source is 'artifact'. A row cannot name a document it is not sending, and it cannot
+   * send a document it does not name. Existing rows in the old shape are repaired first by
+   * scripts/apply-resume-linkage-invariant-migration.mjs, which is what makes this constraint
+   * addable at all: with them present the ALTER TABLE fails outright rather than accepting them. */
   resumeAttachmentStateCheck: check('applications_resume_attachment_state_check', sql`
-    (${t.resume_attached} = false and ${t.resume_source} = 'none')
+    (${t.resume_attached} = false and ${t.resume_source} = 'none' and ${t.selected_resume_artifact_id} is null)
     or (${t.resume_attached} = true and ${t.resume_source} = 'artifact' and ${t.selected_resume_artifact_id} is not null)
-    or (${t.resume_attached} = true and ${t.resume_source} = 'base_resume')
+    or (${t.resume_attached} = true and ${t.resume_source} = 'base_resume' and ${t.selected_resume_artifact_id} is null)
   `),
 }));
 

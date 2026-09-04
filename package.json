@@ -134,6 +134,8 @@
     "qa:security-code:prepare": "node scripts/prepare-qa-security-code-proof.mjs",
     "qa:guest-submissions:test": "node --import tsx --test scripts/qa-guest-submissions.test.mjs",
     "deploy:prod": "bash scripts/deploy-prod.sh",
-    "db:account-creation": "node scripts/apply-account-creation-schema.mjs"
+    "db:account-creation": "node scripts/apply-account-creation-schema.mjs",
+    "db:resume-linkage-invariant": "node scripts/apply-resume-linkage-invariant-migration.mjs",
+    "test:resume-linkage-invariant-migration": "node --import tsx --test src/db/resumeLinkageInvariantMigration.test.ts"
   }
 }
