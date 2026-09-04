@@ -1079,3 +1079,106 @@ test('confirming a value the resolver disputes records the override beside the c
   assert.equal(persisted.questions[0].answer_override_of, RESOLVED,
     'which resolution she disagreed with, so the refresh keeps her value while the profile stands');
 });
+
+/* A FROZEN ANSWER THAT SAYS WHERE THE CORRECTION GOES.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com. Flow Traders packet
+ * 8dc65cd0-cab5-4af2-a1d8-2583766fd2d4 (greenhouse) at `ready_for_final_approval`. The dashboard
+ * drew "Answer 1 question", opened the per-question editor with the essay pre-filled, accepted her
+ * typing, and Save came back 409 REVIEW_ANSWERS_NOT_EDITABLE - every time, on an essay containing a
+ * factual error she had to correct before the application went out.
+ *
+ * THE REFUSAL IS NOT WHAT CHANGED, and these tests are written to fail if it ever is. This route
+ * writes answers and nothing else, so a save here would leave the preview screenshot the applicant
+ * approves describing a form built from different answers. reviewAnswerSaveDisposition is right and
+ * stays right: the assertions below check the row afterwards for exactly that reason.
+ *
+ * WHAT CHANGED IS THAT THE 409 NAMES THE EXIT. preparedRunCanRestart already admits this shape, and
+ * submit-request with `restart: true` carries the corrected answers into a fresh fill and a fresh
+ * preview - answers and picture moving in one request. The neighbouring 409 on submit-request
+ * already holds itself to this standard in its own comment: a correct refusal that names neither the
+ * reason nor the way out is indistinguishable from a bug.
+ */
+function readyForFinalApproval(extra: Partial<ApplicationReviewState> = {}): ApplicationReviewState {
+  return stoppedRun({
+    status: 'ready_for_final_approval',
+    attention_reason: undefined,
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    preview_screenshot_url: 'https://screenshots.litos.test/8dc65cd0-preview.png',
+    questions: [{ ...HELD_QUESTION, answer: 'I traded on the CME desk for three years.' }],
+    ...extra,
+  });
+}
+
+test('a filled packet still refuses the in-place save, and now names the route that lands the correction', async () => {
+  const id = await applicationWith(readyForFinalApproval());
+
+  const response = await saveAnswers(id, 'I traded on the CBOT desk for two years.');
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE',
+    'the code does not move: this is still a refusal of THIS route');
+  assert.equal(response.json().restart_with_answers, true,
+    'and the refusal says the correction has somewhere to go');
+  assert.match(response.json().error, /restart true/,
+    'naming the flag by the name the route actually takes, not a gesture at "try elsewhere"');
+  assert.match(response.json().error, /submit-request/,
+    'and the route it goes on');
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'I traded on the CME desk for three years.',
+    'the invariant is untouched: no answer landed underneath the filled form and its preview');
+  assert.equal(persisted.status, 'ready_for_final_approval', 'and nothing moved the packet');
+  assert.equal(persisted.questions_reviewed_at, undefined, 'no review round was minted on a refusal');
+});
+
+test('a filled packet whose run has been claimed keeps the sentence with no exit in it', async () => {
+  const id = await applicationWith(readyForFinalApproval({
+    submission_claimed_at: STOPPED_AT,
+    submission_claim_id: 'claim-1',
+  }));
+
+  const response = await saveAnswers(id, 'I traded on the CBOT desk for two years.');
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE');
+  assert.equal(response.json().restart_with_answers, false,
+    'preparedRunCanRestart refuses a claimed run, so there is no exit and none may be offered');
+  assert.equal(
+    response.json().error,
+    'These answers can no longer be edited from this application’s current submission state',
+    'the generic sentence is what a packet with no way back still gets',
+  );
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'I traded on the CME desk for three years.');
+});
+
+/* THE SEND-EVIDENCE HALF, held to the same rule from the other side. preparedRunCanRestart asks only
+ * about the claim; a row carrying a receipt or an open unverified submission may already be at the
+ * employer whatever its status word says, and the answers on it are the record of what was given. */
+for (const [name, evidence] of [
+  ['the employer\'s own confirmation', {
+    receipt: {
+      confirmation_text: 'Thanks for applying to kos.',
+      final_url: `${PORTAL_URL}/confirmation`,
+      captured_at: STOPPED_AT,
+    },
+  }],
+  ['an unresolved unverified submission', {
+    unverified_submission: { at: STOPPED_AT, cause: 'no_confirmation_state' as const, portal_url: PORTAL_URL },
+  }],
+  ['a recorded submit attempt', { submission_attempted_at: STOPPED_AT }],
+] as Array<[string, Partial<ApplicationReviewState>]>) {
+  test(`a filled packet carrying ${name} is offered no restart route`, async () => {
+    const id = await applicationWith(readyForFinalApproval(evidence));
+
+    const response = await saveAnswers(id, 'I traded on the CBOT desk for two years.');
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().restart_with_answers, false,
+      'a refilled form would be a second application, so this refusal has no exit to name');
+    assert.equal(
+      response.json().error,
+      'These answers can no longer be edited from this application’s current submission state',
+    );
+  });
+}
