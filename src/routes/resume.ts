@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, isNotNull, notInArray, sql } from 'drizzle-orm';
+import { eq, desc, and, inArray, isNotNull, isNull, notInArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
@@ -209,6 +209,40 @@ function monitoredApplicationUrlForGenerate(posting: ActionPostingRow | null): s
     posting.external_id,
     posting.posting_url,
   );
+}
+
+/**
+ * The portal URL a canonical `applications` row should be written with, for both a brand new row
+ * and the mismatch check against one the caller already owns.
+ *
+ * effectiveJobId decides FIRST, unconditionally on whether the caller sent `application`. Before
+ * this, the choice was gated on `application` being present, so a packet built from a job id alone
+ * - no `application` in the body, the shape an extension or job-board-driven generate takes - fell
+ * straight to `undefined` and the canonical row it produced stored `job_id` with no `portal_url`.
+ * Measured on Railway prod 2026-09-04: 174 of 646 packet-linked canonical rows carried a null
+ * portal_url, 118 of them with a job_id. The submission runner still derives its own landing URL
+ * from that same job id later, so those rows carried no portal evidence to freeze an identity
+ * against once a run landed, and the send was refused at CANONICAL_PACKET_BINDING_MISSING.
+ *
+ * `monitoredApplicationUrl` is the caller's job, not this function's: it must already be validated
+ * non-null wherever `effectiveJobId` is set (resume.ts does this immediately after resolving the
+ * posting, replying 409 `job_not_available` otherwise), so a job-id packet is never silently
+ * downgraded to `undefined` here.
+ *
+ * A monitored job is an action capability, not a hint: once a job id is in play, only the URL
+ * reconstructed from that row's own provider, board token, and posting identity may reach a
+ * browser runner, never a caller-supplied `application.portal_url`. That is also why this ignores
+ * `application` entirely whenever `effectiveJobId` is set, rather than merely preferring the
+ * monitored URL over it.
+ */
+export function canonicalApplicationPortalUrlFor(
+  effectiveJobId: string | undefined,
+  monitoredApplicationUrl: string | undefined,
+  application: ResumeGenerateBody['application'],
+): string | undefined {
+  if (effectiveJobId) return monitoredApplicationUrl;
+  if (!application) return undefined;
+  return canonicalSupportedPortalUrl(application.portal_url, application.ats_name) ?? application.portal_url;
 }
 
 function repairedHistorySpec(
@@ -660,23 +694,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }
     }
 
-    /* A monitored job is an action capability, not a hint. Once the request or its owned canonical
-       application supplies a job id, only
-       the URL reconstructed from that row's exact provider, board token, and posting identity may
-       reach a browser runner. A cross-family or malformed row fails here before quota, generation,
-       rendering, or storage. Caller URLs remain available only for the separate no-job flow. */
-    const canonicalApplicationPortalUrl = body.application
-      ? effectiveJobId
-        ? monitoredApplicationUrl
-        : canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name)
-          ?? body.application.portal_url
-      : undefined;
-    if (body.application && effectiveJobId && !canonicalApplicationPortalUrl) {
-      return reply.status(409).send({
-        error: 'Current verified posting not found',
-        code: 'job_not_available',
-      });
-    }
+    // See canonicalApplicationPortalUrlFor's own comment for why. (No separate 409 needed here: it
+    // returns exactly monitoredApplicationUrl whenever effectiveJobId is set, and that was already
+    // proven non-null by the job_not_available reply a few lines up.)
+    const canonicalApplicationPortalUrl = canonicalApplicationPortalUrlFor(
+      effectiveJobId,
+      monitoredApplicationUrl,
+      body.application,
+    );
     const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
 
     // The v2 trial uses durable lifetime counters below. Existing grandfathered accounts retain
@@ -1574,6 +1599,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             selected_resume_artifact_id: null,
             application_fingerprint: `legacy:${resumeId}`,
           });
+        } else if (canonicalApplicationPortalUrl && ownedCanonicalApplication && !ownedCanonicalApplication.portal_url) {
+          /* Regenerating against an EXISTING canonical row (body.application_id supplied) skips the
+           * insert above, so without this the fix only ever reaches a brand new row: one of the 118
+           * already-broken rows this PR exists to stop producing would stay portal_url null forever
+           * for anyone who hits "regenerate" on it rather than creating a fresh application, since
+           * nothing else in this file ever writes applications.portal_url. Scoped to the same "a row
+           * that already had a URL is never touched" rule the rest of this route follows -
+           * ownedCanonicalApplication.portal_url must itself be null - so this can only ever fill a
+           * gap, never overwrite or contest an existing value. */
+          await tx.update(applications)
+            .set({ portal_url: canonicalApplicationPortalUrl })
+            .where(and(eq(applications.id, canonicalApplicationId), isNull(applications.portal_url)));
         }
         await tx.insert(artifacts).values({
           id: canonicalArtifactId,
