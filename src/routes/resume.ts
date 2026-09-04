@@ -74,7 +74,9 @@ import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState }
 import {
   repairHistoryReviewPortalFromMonitoredJob,
   repairReviewPortalFromMonitoredJob,
+  type MonitoredHistoryPortal,
 } from '../lib/applicationPortalRepair';
+import { derivePostingDeadlineStatus } from '../lib/postingDeadline';
 import {
   canonicalMonitoredPortalUrl,
   canonicalSupportedPortalUrl,
@@ -247,7 +249,7 @@ export function canonicalApplicationPortalUrlFor(
 
 function repairedHistorySpec(
   row: typeof generated_resumes.$inferSelect,
-  monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; description: string; jdHash: string }>,
+  monitoredJobs: ReadonlyMap<string, MonitoredHistoryPortal>,
 ): unknown {
   const review = readApplicationReview(row.spec);
   const spec = row.spec;
@@ -299,6 +301,17 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
       ),
     },
   };
+}
+
+/* THE DEADLINE HALF OF THE SAME PROJECTION, applied last so it sees whatever repairedHistorySpec
+ * (the monitor's is_active verdict) already wrote to _review.posting_status - a take-down outranks
+ * a stated deadline, and derivePostingDeadlineStatus only checks that ordering correctly when it
+ * runs after the monitor check, not before it. Reads jd_text alone, so this flags a packet built
+ * before this shipped exactly as well as one built after - no monitored_jobs join, no rebuild. */
+function withPostingDeadlineStatus(spec: unknown, now: Date = new Date()): unknown {
+  const review = readApplicationReview(spec);
+  if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
+  return { ...(spec as Record<string, unknown>), _review: derivePostingDeadlineStatus(review, now) };
 }
 
 // ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
@@ -1958,6 +1971,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         company_name: monitored_jobs.company_name,
         title: monitored_jobs.title,
         description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+        is_active: monitored_jobs.is_active,
+        last_seen_at: monitored_jobs.last_seen_at,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
@@ -1984,6 +1999,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           role: job.title,
           description: job.description,
           jdHash: monitoredDescriptionHash(job.description),
+          isActive: job.is_active,
+          lastSeenAt: job.last_seen_at,
         }] as const),
     );
     const [profile, base] = await Promise.all([
@@ -2039,7 +2056,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return {
         ...row,
         spec: specWithoutDocumentPointers(
-          refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
+          withPostingDeadlineStatus(refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context)),
         ),
         ...(submissionAuthorityEnvelope ? { submission_authority: submissionAuthorityEnvelope } : {}),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,

@@ -134,6 +134,10 @@ export type JsonLdJobPostingCandidate = {
   /** schema.org `identifier`, normalized to its plain value whether the page wrote it as a bare
    *  string or (Teamtailor's own shape, measured live) a `PropertyValue` object's `.value`. */
   identifierValue?: string;
+  /** schema.org `validThrough` on the JobPosting itself, verbatim, when the page states one - an
+   *  ISO 8601 date or datetime string by the spec, though nothing here trusts that without
+   *  checking: see the `Date` parse at its one caller, fetchJsonLdJobDescription. */
+  validThrough?: string;
 };
 
 function identifierValueOf(record: Record<string, unknown>): string | undefined {
@@ -159,7 +163,10 @@ function jobPostingCandidateFromRecord(record: Record<string, unknown>): JsonLdJ
     ? (org as Record<string, unknown>).name as string
     : undefined;
   const url = typeof record.url === 'string' ? record.url : undefined;
-  return { description, title, companyName, url, identifierValue: identifierValueOf(record) };
+  const validThrough = typeof record.validThrough === 'string' && record.validThrough.trim()
+    ? record.validThrough.trim()
+    : undefined;
+  return { description, title, companyName, url, identifierValue: identifierValueOf(record), validThrough };
 }
 
 /**
@@ -358,6 +365,16 @@ export type JsonLdJobDescription = {
   jdText: string;
   pageTitle: string;
   companyName: string;
+  /**
+   * schema.org `validThrough`, parsed to an ISO instant, ONLY when it parses to a real date - an
+   * invalid or malformed value is dropped rather than passed through as a string a caller would
+   * have to re-validate. Absent far more often than present: most postings measured (Recruitee,
+   * Teamtailor) simply do not state one, and this is a bonus signal beside
+   * src/lib/postingDeadline.ts's free-text parser, not a replacement for it - that parser is what
+   * actually reads Mercari's own "Application Deadline: August 31, 2026, 23:59 (JST)" sentence,
+   * which is prose, not structured data, and carries no validThrough at all.
+   */
+  validThrough?: string;
 };
 
 /**
@@ -410,9 +427,17 @@ export async function fetchJsonLdJobDescription(
   const jdText = htmlToText(unescapeDoubleEncodedHtml(chosen.description));
   if (!jdText) return undefined;
 
+  // Round-tripped through `Date` rather than passed through verbatim: schema.org allows a bare
+  // date ("2026-08-31") as well as a full instant, and a caller storing this as a timestamptz
+  // needs a value `Date` itself already accepted, not a string it has to re-validate.
+  const validThrough = chosen.validThrough && !Number.isNaN(new Date(chosen.validThrough).getTime())
+    ? new Date(chosen.validThrough).toISOString()
+    : undefined;
+
   return {
     jdText,
     pageTitle: (chosen.title ?? '').trim(),
     companyName: (chosen.companyName ?? '').trim(),
+    ...(validThrough ? { validThrough } : {}),
   };
 }
