@@ -177,7 +177,10 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
  * preview fill had taken 101 seconds. At three minutes a large board's send is pressed at the
  * buzzer or not at all, and "pressed, outcome unknown" is the one state worse than a refusal.
  * Five minutes is the bound authorizeFinalSubmissionBoundary, managedInitialCallTimeoutMs and
- * managedInitialProviderDeadlineAt already refuse to exceed, so nothing downstream widens. */
+ * managedInitialProviderDeadlineAt already refuse to exceed, so nothing downstream widens. What it
+ * spends is skew headroom: the stratus host refuses a deadline more than five minutes past its own
+ * clock, so a runner clock more than ten seconds behind the database clock refuses every send
+ * (pre-run, the safe direction), where three minutes left 130 seconds of slack. */
 export const SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 5 * 60 * 1000;
 export const ORPHAN_ATTRIBUTION_OPENING_EVIDENCE = 'applicant_attributed_orphan_opening';
 export const ORPHAN_ATTRIBUTION_CONFIRMATION_EVIDENCE = 'applicant_attributed_orphan_confirmation';
