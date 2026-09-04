@@ -41,7 +41,11 @@ export type ManagedFinalSubmitChooser = {
   policyVersion: 3 | 4;
   grammarHash: string;
   submitKind: 'application' | 'verification';
-  outcome: 'selected' | 'no_submit_control' | 'ambiguous_submit';
+  /* 'application_scope_invalid' is the runner reporting that the caller-bound application form was
+   * unavailable, so no chooser run was possible at all. It is READ rather than rejected because
+   * rejecting it made the chooser barrier throw first and hide the confirmation proof's own account
+   * of the same refusal - the five application_scope_* reasons could never reach the operator. */
+  outcome: 'selected' | 'no_submit_control' | 'ambiguous_submit' | 'application_scope_invalid';
   candidateCount: number;
   viableCandidateCount: number;
   topScore: number | null;
@@ -96,7 +100,8 @@ export function readManagedFinalSubmitChooser(
     || raw.submitKind !== expectedSubmitKind
     || (raw.outcome !== 'selected'
       && raw.outcome !== 'no_submit_control'
-      && raw.outcome !== 'ambiguous_submit')) return null;
+      && raw.outcome !== 'ambiguous_submit'
+      && raw.outcome !== 'application_scope_invalid')) return null;
   if (!boundedInteger(raw.candidateCount)
     || !boundedInteger(raw.viableCandidateCount)
     || !boundedInteger(raw.topScoreCount)
@@ -111,6 +116,12 @@ export function readManagedFinalSubmitChooser(
     && (raw.viableCandidateCount < 1 || raw.topScore === null || raw.topScoreCount !== 1)) return null;
   if (raw.outcome === 'no_submit_control'
     && (raw.viableCandidateCount !== 0 || raw.topScore !== null || raw.topScoreCount !== 0)) return null;
+  /* No scope means nothing was scored at all, so every count must be zero - a scope-invalid report
+   * that claims candidates is describing a chooser run it also says could not happen. */
+  if (raw.outcome === 'application_scope_invalid'
+    && (raw.candidateCount !== 0 || raw.viableCandidateCount !== 0 || raw.topScore !== null
+      || raw.topScoreCount !== 0 || raw.addressedScopeCount !== 0
+      || raw.bareSendCandidateCount !== 0)) return null;
   if (raw.outcome === 'ambiguous_submit'
     && (raw.viableCandidateCount < 2 || raw.topScore === null
       || raw.topScoreCount < 2 || raw.topScoreCount > raw.viableCandidateCount)) return null;
