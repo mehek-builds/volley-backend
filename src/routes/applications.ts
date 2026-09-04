@@ -1146,13 +1146,19 @@ async function refuseDuplicateApplication(
        * the user lock means another writer is already moving this user's ledger, and waiting for it
        * would pin a pool client on the send path. Skipping costs nothing: the verdict below simply
        * refuses as it would have, and the next send heals. */
-      if (!await tryLockSubmissionAttemptUser(tx, userId)) return { closedAttemptIds: [] };
-      return closeAbandonedPreBoundaryAttempts({ userId, executor: tx });
+      if (!await tryLockSubmissionAttemptUser(tx, userId)) return { closedAttemptIds: [], failedAttemptIds: [] };
+      return closeAbandonedPreBoundaryAttempts({ userId, executor: tx, log });
     });
     if (healed.closedAttemptIds.length > 0) {
       log.info(
         { applicationId: row.id, closedAttemptIds: healed.closedAttemptIds },
         'Closed abandoned pre-boundary attempts the ledger proves never reached an employer',
+      );
+    }
+    if (healed.failedAttemptIds.length > 0) {
+      log.warn(
+        { applicationId: row.id, failedAttemptIds: healed.failedAttemptIds },
+        'Could not close some abandoned pre-boundary attempts; leaving them for the next heal',
       );
     }
   } catch (error) {

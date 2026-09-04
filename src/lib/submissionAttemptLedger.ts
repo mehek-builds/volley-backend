@@ -100,7 +100,12 @@ export type AppendSubmissionAttemptEventInput = SubmissionAttemptBinding & {
 
 export type SubmissionAttemptEventRecord = typeof application_submission_attempt_events.$inferSelect;
 
-export type SubmissionAttemptLedgerExecutor = Pick<typeof db, 'execute' | 'insert' | 'select'>;
+/* 'transaction' joins the picked members for abandonedAttemptClosure.ts: closing one candidate must
+ * not roll back another one closed in the same call, which needs each candidate's write isolated in
+ * its own savepoint. Every real caller already satisfies this - `db` itself has it, and so does any
+ * `tx` a caller's own `db.transaction` handed them, which is the only other value this type is ever
+ * instantiated with. */
+export type SubmissionAttemptLedgerExecutor = Pick<typeof db, 'execute' | 'insert' | 'select' | 'transaction'>;
 
 export type SubmissionAttemptRetrySafety =
   | { kind: 'no_evidence' }

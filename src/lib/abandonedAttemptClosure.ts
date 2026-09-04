@@ -164,17 +164,36 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
  * event id never collides with repairExpiredAttendedHandoffClaim's write of the same evidence. */
 export const ABANDONED_ATTEMPT_CLOSURE_FACT_KEY = 'abandoned-pre-boundary-attempt';
 
+/** A minimal structural logger, so this module does not have to import Fastify's types to accept
+ * one. Every logger this codebase actually passes around - a Fastify request/instance `log` among
+ * them - already calls `.warn(details, message)` and so already satisfies this. */
+export type AbandonedAttemptClosureLog = {
+  warn: (details: Record<string, unknown>, message: string) => void;
+};
 
 /**
- * Close every abandoned pre-boundary attempt this user still carries, and report which.
+ * Close every abandoned pre-boundary attempt this user still carries, and report which closed and
+ * which could not.
  *
  * Idempotent and safe to call on any send. An attempt already carrying `not_sent_proven` fails
- * attemptNeverReachedEmployer, so a second call closes nothing and writes nothing.
+ * attemptNeverReachedEmployer, so a second call closes nothing and writes nothing for it.
  *
- * THE POST-WRITE ASSERTION IS THE POINT, and it mirrors the one POST /submission/unverified makes:
- * the ledger is re-read after the append and the attempt must actually fold to `safe_not_sent`. A
- * fact that did not move the fold would leave the packet blocked while this function reported it
- * healed, which is the failure the caller cannot see.
+ * EACH CANDIDATE GETS ITS OWN SAVEPOINT. A first cut of this function ran every candidate's append
+ * and post-write assertion straight against the caller's transaction, so one candidate's failure -
+ * the assertion below, or any other error appending its fact - threw out of the whole function and
+ * rolled back every OTHER candidate's close in the same db.transaction, on the one path that is
+ * supposed to heal this. A user carrying two abandoned attempts, one of them malformed, would then
+ * never get either closed: the malformed one fails forever and takes the healthy one down with it
+ * on every future send. Wrapping each candidate in its own `input.executor.transaction` opens a
+ * SAVEPOINT when the executor is already inside a transaction - which every real caller's is - so a
+ * failed candidate rolls back only its own attempted write and the loop moves on to the next one.
+ * Failures are reported, not swallowed: `failedAttemptIds` names every candidate that did not
+ * close, and the caller's own logger records why.
+ *
+ * THE POST-WRITE ASSERTION IS STILL THE POINT, and it mirrors the one POST /submission/unverified
+ * makes: the ledger is re-read after the append and the attempt must actually fold to
+ * `safe_not_sent`. A fact that did not move the fold would leave the packet blocked while this
+ * function reported it healed, which is the failure the caller cannot see.
  *
  * The caller must supply its write transaction. appendSubmissionAttemptEvent takes the user
  * advisory lock, which is reentrant when the caller already holds it.
@@ -182,7 +201,8 @@ export const ABANDONED_ATTEMPT_CLOSURE_FACT_KEY = 'abandoned-pre-boundary-attemp
 export async function closeAbandonedPreBoundaryAttempts(input: {
   userId: string;
   executor: SubmissionAttemptLedgerExecutor;
-}): Promise<{ closedAttemptIds: string[] }> {
+  log?: AbandonedAttemptClosureLog;
+}): Promise<{ closedAttemptIds: string[]; failedAttemptIds: string[] }> {
   const events = await submissionAttemptEventsForUser(input.userId, { executor: input.executor });
   const grouped = groupByAttempt(events);
   /* Only an attempt the fold already treats as a block is worth reading a packet row for. Every
@@ -191,7 +211,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
     const safety = submissionAttemptRetrySafety(attemptEvents);
     return safety.kind === 'blocked_unverified' && safety.reason === 'opened';
   });
-  if (candidates.length === 0) return { closedAttemptIds: [] };
+  if (candidates.length === 0) return { closedAttemptIds: [], failedAttemptIds: [] };
 
   const packetIds = [...new Set(candidates.map(([, attemptEvents]) => attemptEvents[0]!.packet_id))];
   const packets = await input.executor.select({
@@ -211,6 +231,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
   }
 
   const closedAttemptIds: string[] = [];
+  const failedAttemptIds: string[] = [];
   for (const [attemptId, attemptEvents] of candidates) {
     const opening = attemptEvents.find((event) => event.event_kind === 'attempt_opened');
     if (!opening) continue;
@@ -218,24 +239,34 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
       attemptEvents,
       packet: packetById.get(opening.packet_id) ?? null,
     })) continue;
-    await appendSubmissionAttemptEvent({
-      ...submissionAttemptBindingFromEvent(opening),
-      eventId: submissionAttemptEventId(
-        attemptId,
-        'not_sent_proven',
-        ABANDONED_ATTEMPT_CLOSURE_FACT_KEY,
-      ),
-      eventKind: 'not_sent_proven',
-      proofKind: 'typed_pre_click_stop',
-      evidenceCode: ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
-    }, { executor: input.executor });
-    const reread = (await submissionAttemptEventsForUser(input.userId, { executor: input.executor }))
-      .filter((event) => event.attempt_id === attemptId);
-    const resolved = submissionAttemptRetrySafety(reread);
-    if (resolved.kind !== 'safe_not_sent' || resolved.proofKind !== 'typed_pre_click_stop') {
-      throw new Error('ABANDONED_ATTEMPT_CLOSURE_FACT_INCOMPLETE');
+    try {
+      await input.executor.transaction(async (savepoint) => {
+        await appendSubmissionAttemptEvent({
+          ...submissionAttemptBindingFromEvent(opening),
+          eventId: submissionAttemptEventId(
+            attemptId,
+            'not_sent_proven',
+            ABANDONED_ATTEMPT_CLOSURE_FACT_KEY,
+          ),
+          eventKind: 'not_sent_proven',
+          proofKind: 'typed_pre_click_stop',
+          evidenceCode: ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
+        }, { executor: savepoint });
+        const reread = (await submissionAttemptEventsForUser(input.userId, { executor: savepoint }))
+          .filter((event) => event.attempt_id === attemptId);
+        const resolved = submissionAttemptRetrySafety(reread);
+        if (resolved.kind !== 'safe_not_sent' || resolved.proofKind !== 'typed_pre_click_stop') {
+          throw new Error('ABANDONED_ATTEMPT_CLOSURE_FACT_INCOMPLETE');
+        }
+      });
+      closedAttemptIds.push(attemptId);
+    } catch (error) {
+      failedAttemptIds.push(attemptId);
+      input.log?.warn(
+        { attemptId, packetId: opening.packet_id, err: error },
+        'Could not close an abandoned pre-boundary attempt; leaving it for the next heal',
+      );
     }
-    closedAttemptIds.push(attemptId);
   }
-  return { closedAttemptIds };
+  return { closedAttemptIds, failedAttemptIds };
 }
