@@ -7,8 +7,8 @@ import type { EmployerDeliveryBindings } from './employerDeliveryIdentity';
 import type { QuestionMetadataBlocker } from './questionMetadata';
 /* The one function that knows what the applicant was actually shown. Every read path serves this
  * file's questions through normalizeStoredPortalQuestions, so the label in a submit body is the
- * normalizer's output rather than the bytes on the row; see labelsNameTheSameControl. */
-import { labelsNameTheSameControl } from './questionDiscovery';
+ * normalizer's output rather than the bytes on the row; see servedLabelMatchesStoredControl. */
+import { servedLabelMatchesStoredControl } from './questionDiscovery';
 import {
   canonicalSupportedPortalUrl,
   detectPortal,
@@ -514,7 +514,7 @@ export function mergeSubmittedApplicationReviewQuestions(
       && typeof question.answer_reviewed_at === 'string'
       && question.answer_reviewed_at === questionsReviewedAt;
     /* THE LABEL HALF OF THIS IDENTITY IS THE SERVER'S OWN, NOT THE ROW'S BYTES, and reading it as
-     * the row's bytes is the second turn of the loop documented at labelsNameTheSameControl: on a
+     * the row's bytes is the second turn of the loop documented at servedLabelMatchesStoredControl: on a
      * row whose stored label carries a required marker this test can never pass, so a claim minted
      * by one save was stripped again by the next one and the packet forgot she had ever confirmed
      * anything.
@@ -527,7 +527,7 @@ export function mergeSubmittedApplicationReviewQuestions(
      * once. */
     const exactReviewedIdentityUnchanged = provenanceMatchesCurrentReview
       && submittedQuestion.id === question.id
-      && labelsNameTheSameControl(question.question, submittedQuestion.question)
+      && servedLabelMatchesStoredControl(question.question, submittedQuestion.question)
       && submittedQuestion.answer === question.answer;
     /* answer_option_source goes with the answer it describes, and `answer` is replaced below.
      *
@@ -681,10 +681,10 @@ export function mergeSubmittedApplicationReviewQuestions(
        * persists nothing, so on a row whose stored label carries a required marker the premise is
        * false on every request and this test could never pass. Measured on Exa packet 73768339:
        * twelve `confirmed: true` saves, twelve 200s, nothing minted, the same four essays back
-       * again. See labelsNameTheSameControl for the full account and for why the set it admits -
+       * again. See servedLabelMatchesStoredControl for the full account and for why the set it admits -
        * the stored label and the server's own normalization of it, both server-produced - is the
        * honest bar rather than a loosening. A real rename still fails it. */
-      && labelsNameTheSameControl(question.question, submittedQuestion.question),
+      && servedLabelMatchesStoredControl(question.question, submittedQuestion.question),
     );
     /* WHAT SHE WAS OVERRIDING, so her correction cannot outlive the fact it was made against.
      *

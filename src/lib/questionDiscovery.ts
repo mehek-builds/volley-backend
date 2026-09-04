@@ -2275,7 +2275,7 @@ export function answerCarriesCurrentApplicantReview(
  *     not questionKey, which folds case and whitespace and would let a rename that happens to
  *     collapse to the same key stand as a different sentence in front of an employer.
  *
- *     THE MATCH IS labelsNameTheSameControl AND NOT BYTE EQUALITY, because the two strings being
+ *     THE MATCH IS servedLabelMatchesStoredControl AND NOT BYTE EQUALITY, because the two strings being
  *     compared here reach this line from opposite sides of the serve boundary. The mint writes the
  *     STORED label (mergeSubmittedApplicationReviewQuestions writes `answer_confirmed_of:
  *     question.question`); `question.question` on the record handed to this function has already
@@ -2303,7 +2303,7 @@ export function applicantConfirmedSensitiveAnswer(question: {
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return false;
   if (!(question.answer ?? '').trim()) return false;
   return typeof question.answer_confirmed_of === 'string'
-    && labelsNameTheSameControl(label, question.answer_confirmed_of);
+    && servedLabelMatchesStoredControl(question.answer_confirmed_of, label);
 }
 
 /**
@@ -7210,26 +7210,32 @@ export function normalizeReviewQuestionLabel(raw: string): string {
  * WHY THIS IS THE HONEST BAR RATHER THAN A LOOSENING. The guard those tests implement is real: the
  * id fallback lets a submitted question match while carrying a different label, so a body must not
  * be able to rename a control, flag it confirmed, and mint "she read this exact text" onto text its
- * own request never contained. What it must accept is exactly the set of spellings THIS SERVER
- * could have rendered for that stored row, and that set is `{ the stored label, its own review
- * normalization }` - both server-produced, neither supplied by the caller. A genuine rename is
- * still refused, and that is the property the gate exists for: "...in the United States?" and
- * "...in the United Kingdom?" normalize to different strings, have different true answers for this
- * applicant, and never fold together here.
+ * own request never contained. What it must accept is exactly the spellings THIS SERVER could have
+ * put in front of her for that stored row, and there are two: the stored bytes themselves, and the
+ * one string normalizeReviewQuestionLabel makes of them. Both are server-produced. Neither is
+ * supplied by the caller.
  *
- * NOT questionKey, which is what the tests above deliberately avoided and which would not have
- * fixed this anyway: it lowercases and collapses whitespace and leaves the required marker exactly
- * where it was. The normalizer is the only function in the repo that knows what the applicant was
- * shown, because it is the one that decided.
+ * SO IT IS ONE-DIRECTIONAL, AND THAT IS THE WHOLE OF WHY IT IS NOT questionKey WITH BETTER MANNERS.
+ * The candidate is compared against the STORED label's own normalization; the candidate is never
+ * normalized itself. `"  Can you work onsite?  "` against a stored `"Can you work onsite?"` is
+ * therefore still a rename and still invalidates - the server never serves that string, so a body
+ * carrying it is not echoing anything - while `"Why do you want to work at Exa?"` against a stored
+ * `"Why do you want to work at Exa? *"` is exactly what the dashboard was handed. Folding both
+ * sides would have admitted the first as well, and applicationReview.test.ts says, correctly, that
+ * it must not.
  *
- * Exact equality first, so anything the old tests accepted these accept, including a label the
- * normalizer reduces to nothing (an opaque identifier), which is refused rather than matched
- * against every other unreadable label on the form.
+ * A REAL RENAME IS STILL REFUSED, which is the property the gate exists for: "...in the United
+ * States?" and "...in the United Kingdom?" reduce to different strings, have different true answers
+ * for this applicant, and never meet here.
+ *
+ * Exact equality first, so anything the old byte tests accepted these accept - including a label the
+ * normalizer reduces to nothing (an opaque identifier), which then matches only itself rather than
+ * every other unreadable label on the form.
  */
-export function labelsNameTheSameControl(stored: string, submitted: string): boolean {
-  if (stored === submitted) return true;
-  const canonical = normalizeReviewQuestionLabel(stored);
-  return canonical !== '' && canonical === normalizeReviewQuestionLabel(submitted);
+export function servedLabelMatchesStoredControl(storedLabel: string, candidateLabel: string): boolean {
+  if (storedLabel === candidateLabel) return true;
+  const served = normalizeReviewQuestionLabel(storedLabel);
+  return served !== '' && served === candidateLabel;
 }
 
 /* ---------------------------------------------------------------------------------------------
