@@ -265,7 +265,12 @@ async function unattemptedPacketSubmissionAuthority(
      * when the cheap path just above found nothing to publish AND the retry verdict is the one
      * shape a heal could ever change, so every packet with an envelope already and every packet
      * blocked for a real reason - pressed, boundary_authorized, confirmed - costs this hot 2.5s
-     * poll nothing beyond what it already paid above. */
+     * poll nothing beyond what it already paid above.
+     *
+     * SCOPED TO THIS ONE PACKET - REVIEW ROUND 1, 2026-09-05. This route answers for exactly one
+     * packet, so `packetIds: [packetId]` is the whole of what this read could ever need healed;
+     * see healAbandonedPreBoundaryAttemptsForRead's own doc for why an unscoped heal here could
+     * stall a concurrent send on this account's whole backlog instead. */
     let closedAttemptIds: readonly string[] = [];
     if (!envelope && retrySafetyLooksLikeClosableCandidate(retrySafety)) {
       const blockingAttemptId = retrySafety.attemptId;
@@ -273,6 +278,7 @@ async function unattemptedPacketSubmissionAuthority(
         userId,
         log,
         logContext: { packetId, route: 'GET /applications/:id/submission' },
+        packetIds: [packetId],
       })).closedAttemptIds;
       if (closedAttemptIds.includes(blockingAttemptId)) {
         projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
@@ -1184,8 +1190,20 @@ async function refuseDuplicateApplication(
    * never waits, and paid only on the shape this module exists to close.
    *
    * BEST EFFORT, NEVER BLOCKING. A failure here leaves the ledger exactly as it was and the verdict
-   * refuses precisely as it did before, so the worst case is the behaviour that shipped yesterday. */
-  await healAbandonedPreBoundaryAttemptsForRead({ userId, log, logContext: { applicationId: row.id } });
+   * refuses precisely as it did before, so the worst case is the behaviour that shipped yesterday.
+   *
+   * DELIBERATELY UNSCOPED - REVIEW ROUND 1, 2026-09-05. Unlike the three GET callers, this send
+   * path has no one packet or page to narrow to: `row.id` is what is being sent, but
+   * duplicateApplicationVerdict right below can refuse it over an abandoned attempt on a DIFFERENT
+   * packet against the same posting, so scoping this heal to `row.id` alone could leave exactly
+   * the cross-packet phantom this module exists to close. It still cannot run unbounded, though -
+   * see READ_HEAL_MAX_CANDIDATES on healAbandonedPreBoundaryAttemptsForRead's doc
+   * (lib/abandonedAttemptClosure.ts) for why the whole-ledger case is now capped too. */
+  await healAbandonedPreBoundaryAttemptsForRead({
+    userId,
+    log,
+    logContext: { applicationId: row.id },
+  });
   const verdict = await duplicateApplicationVerdict({
     userId,
     applicationId: row.id,

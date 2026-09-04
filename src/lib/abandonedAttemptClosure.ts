@@ -291,29 +291,67 @@ export type AbandonedAttemptReadHealLog = AbandonedAttemptClosureLog & {
  * it again inside a savepoint costs nothing - Postgres advisory xact locks are reentrant within one
  * session - so production's own caller (refuseDuplicateApplication's tryLockSubmissionAttemptUser)
  * pre-locking the same way stays exactly as harmless as it always was.
+ *
+ * REVIEW ROUND 1, 2026-09-05. `packetIds` AND `maxCandidates` ARE BOTH OPTIONAL NARROWING, NEVER A
+ * SAFETY RELAXATION. abandonedPreBoundaryAttemptIsClosable alone still decides what may close;
+ * these two only decide how much of the user's ledger THIS CALL bothers to look at.
+ *
+ *   - `packetIds`, when given, drops every candidate whose packet is not in the set before any of
+ *     them is read or touched. A caller with a natural page of its own - the one packet a
+ *     submission read is about, or the packets on a history/board page - supplies exactly that
+ *     page, never a hint about which of its candidates are safe: this is scope, not a verdict.
+ *     Omitted, every closable candidate in the user's whole ledger is in play, which is what a
+ *     caller with no page of its own (there is exactly one among today's callers - see
+ *     healAbandonedPreBoundaryAttemptsForRead) still gets.
+ *   - `maxCandidates`, when given, caps how many of the (already scoped) candidates this one call
+ *     actually attempts, keeping the SAVEPOINT+SELECT+INSERT loop below bounded no matter how deep
+ *     a backlog the ledger is carrying. See READ_HEAL_MAX_CANDIDATES, right above the function this
+ *     bound exists for, for the incident that made it necessary. Candidates are attempted in the
+ *     order `submissionAttemptEventsForUser` already returns them - oldest attempt_opened first -
+ *     so a cap never starves the same candidate twice: whatever it left for next time is exactly
+ *     what a later call reaches first.
+ *
+ * A candidate the cap left untouched is not refused. abandonedPreBoundaryAttemptIsClosable's own
+ * verdict for it never ran this call, the fold still reports it exactly as blocked as it always
+ * has, and it is neither in closedAttemptIds nor failedAttemptIds - it is simply not yet looked at.
  */
 export async function closeAbandonedPreBoundaryAttempts(input: {
   userId: string;
   executor: SubmissionAttemptLedgerExecutor;
   log?: AbandonedAttemptClosureLog;
+  /** Narrows candidates to these packets alone - see the REVIEW ROUND 1 doc above. */
+  packetIds?: readonly string[];
+  /** Stops after attempting at most this many (already-scoped) candidates - see the REVIEW ROUND 1
+   * doc above and READ_HEAL_MAX_CANDIDATES below. */
+  maxCandidates?: number;
 }): Promise<{ closedAttemptIds: string[]; failedAttemptIds: string[] }> {
   await lockSubmissionAttemptUser(input.executor, input.userId);
   const events = await submissionAttemptEventsForUser(input.userId, { executor: input.executor });
   const grouped = groupByAttempt(events);
   /* Only an attempt the fold already treats as a block is worth reading a packet row for. Every
    * other kind is either safe, confirmed, or malformed, and none of them is this function's. */
-  const candidates = [...grouped.entries()].filter(([, attemptEvents]) => (
+  let candidates = [...grouped.entries()].filter(([, attemptEvents]) => (
     retrySafetyLooksLikeClosableCandidate(submissionAttemptRetrySafety(attemptEvents))
   ));
+  if (input.packetIds) {
+    const scope = new Set(input.packetIds);
+    candidates = candidates.filter(([, attemptEvents]) => scope.has(attemptEvents[0]!.packet_id));
+  }
   if (candidates.length === 0) return { closedAttemptIds: [], failedAttemptIds: [] };
+  // Oldest attempt_opened first, already - submissionAttemptEventsForUser orders the events this
+  // grouping was built from by created_at, so truncating here always defers the NEWEST candidates,
+  // never strands the same one behind an endlessly-refilled backlog.
+  if (typeof input.maxCandidates === 'number' && candidates.length > input.maxCandidates) {
+    candidates = candidates.slice(0, input.maxCandidates);
+  }
 
-  const packetIds = [...new Set(candidates.map(([, attemptEvents]) => attemptEvents[0]!.packet_id))];
+  const involvedPacketIds = [...new Set(candidates.map(([, attemptEvents]) => attemptEvents[0]!.packet_id))];
   const packets = await input.executor.select({
     id: generated_resumes.id,
     spec: generated_resumes.spec,
   }).from(generated_resumes).where(and(
     eq(generated_resumes.user_id, input.userId),
-    inArray(generated_resumes.id, packetIds),
+    inArray(generated_resumes.id, involvedPacketIds),
   ));
   /* A packet id this map has no entry for - row deleted, or never matched the query above - reads
    * as `null` at the lookup below via `?? null`, exactly like a row whose spec would not parse.
@@ -406,6 +444,9 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
  *     nothing on the overwhelming majority of requests - every packet with an envelope already, and
  *     every packet blocked for a real reason (pressed, boundary_authorized, confirmed) - and are
  *     paid only on the one shape this whole module exists to close.
+ *   - IT IS SCOPED AND CAPPED. See the REVIEW ROUND 1 doc immediately below: this call reaches only
+ *     the packets the caller's own response is about, and closes at most READ_HEAL_MAX_CANDIDATES
+ *     of them, so the rare case above is now also a BOUNDED one.
  *
  * BEST EFFORT, NEVER BLOCKING, IDEMPOTENT. Identical contract to refuseDuplicateApplication's own
  * heal block, which this factors out of: a failure here leaves the ledger exactly as it was and the
@@ -413,12 +454,58 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
  * left to close is a fast no-op (closeAbandonedPreBoundaryAttempts's own candidate filter is what
  * makes that true, not anything here).
  */
+/* REVIEW ROUND 1, 2026-09-05. THE BATCH ITSELF HAD NO CAP AND NO SCOPE.
+ *
+ * MEASURED on one account carrying 153 healable phantom attempts, accumulated before this file
+ * existed. closeAbandonedPreBoundaryAttempts closed candidates one at a time, each its own
+ * SAVEPOINT + SELECT + INSERT + fold-and-assert round trip, and healAbandonedPreBoundaryAttemptsForRead
+ * ran the whole loop inside the one `db.transaction` that also holds this user's
+ * `pg_try_advisory_xact_lock('submission-attempt:<userId>')` - for the FULL batch, not per
+ * candidate. A real send takes the same key with the BLOCKING lockSubmissionAttemptUser (see
+ * appendSubmissionAttemptEvent and every submissionRunner.ts call site), so on that account the
+ * first board or history load after this module shipped would have held the lock through roughly
+ * 150 sequential closures while any concurrent send queued behind it and risked its own timeout -
+ * and GET /applications/board, GET /resume/history and GET /applications/:id/submission are three
+ * PASSIVE reads, one of them polled every 2.5s, each independently capable of triggering the whole
+ * batch in parallel with a real send.
+ *
+ * THE FIX IS SCOPE, THEN A CAP, NEVER A WEAKER PROOF. abandonedPreBoundaryAttemptIsClosable is
+ * unchanged and still the only thing that decides what may close.
+ *   - SCOPE. GET /applications/:id/submission passes the one packet it is about;
+ *     GET /resume/history and GET /applications/board pass the packets on the page they are about
+ *     to answer with. Neither ever again reaches a packet the caller's own response does not
+ *     contain, so the packets a response is actually about are the only ones a read heal was ever
+ *     going to touch - there is nothing else left to prioritise between.
+ *   - THE CAP. READ_HEAL_MAX_CANDIDATES bounds how many candidates ANY ONE call attempts, scoped or
+ *     not - refuseDuplicateApplication's own send-path heal (applications.ts) has no natural page to
+ *     scope to and still supplies no `packetIds`, so the cap is what keeps ITS whole-ledger heal
+ *     bounded too. A backlog past the cap is left exactly as flagged as it was; the dashboard polls
+ *     every 2.5s, so the next read - or the next send - reaches it within a few seconds, oldest
+ *     candidate first (see the ordering note on closeAbandonedPreBoundaryAttempts above).
+ *   - THE LOCK ITSELF IS UNCHANGED. Still try, never wait; see tryLockSubmissionAttemptUser below.
+ *     Scope and the cap only shrink how much work happens once the try succeeds - they were never
+ *     about whether to wait for it.
+ *
+ * Chosen small enough that even a stone-cold account's first read after this shipped costs a
+ * bounded handful of round trips, never hundreds: eight SAVEPOINT+SELECT+INSERT cycles is
+ * milliseconds against any real send's own boundary-authorization round trip, where 150 was measured
+ * to matter.
+ */
+export const READ_HEAL_MAX_CANDIDATES = 8;
+
 export async function healAbandonedPreBoundaryAttemptsForRead(input: {
   userId: string;
   log: AbandonedAttemptReadHealLog;
   /** Merged into every log line this call makes, e.g. `{ packetId }` or `{ route: 'board' }` -
    * whatever names the read that triggered the heal for whoever reads the log next. */
   logContext?: Record<string, unknown>;
+  /** Scopes the heal to these packets alone - see the REVIEW ROUND 1 doc above. Every GET this
+   * module heals for supplies the packet(s) its own response is actually about: the one packet
+   * GET /applications/:id/submission was asked for, or the page GET /resume/history and
+   * GET /applications/board are about to answer with. Left `undefined` by the one caller with no
+   * page of its own - refuseDuplicateApplication, on the send path - which still gets a
+   * whole-ledger heal, now bounded by READ_HEAL_MAX_CANDIDATES rather than unbounded. */
+  packetIds?: readonly string[];
 }): Promise<{ closedAttemptIds: string[]; failedAttemptIds: string[] }> {
   const logContext = input.logContext ?? {};
   try {
@@ -429,7 +516,13 @@ export async function healAbandonedPreBoundaryAttemptsForRead(input: {
       if (!await tryLockSubmissionAttemptUser(tx, input.userId)) {
         return { closedAttemptIds: [], failedAttemptIds: [] };
       }
-      return closeAbandonedPreBoundaryAttempts({ userId: input.userId, executor: tx, log: input.log });
+      return closeAbandonedPreBoundaryAttempts({
+        userId: input.userId,
+        executor: tx,
+        log: input.log,
+        packetIds: input.packetIds,
+        maxCandidates: READ_HEAL_MAX_CANDIDATES,
+      });
     });
     if (healed.closedAttemptIds.length > 0) {
       input.log.info(

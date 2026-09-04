@@ -836,10 +836,15 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       ))
       : [];
     if (boardCandidatePacketIds.length > 0) {
+      // SCOPED TO THIS PAGE'S CANDIDATES - REVIEW ROUND 1, 2026-09-05. `packetIds` here is the same
+      // list already computed above for the logContext, now actually bounding what the heal
+      // touches rather than only naming it after the fact - see healAbandonedPreBoundaryAttemptsForRead's
+      // doc (lib/abandonedAttemptClosure.ts) for the whole-ledger stall this closes off.
       const healed = await healAbandonedPreBoundaryAttemptsForRead({
         userId,
         log: request.log,
         logContext: { route: 'GET /applications/board', candidatePacketIds: boardCandidatePacketIds },
+        packetIds: boardCandidatePacketIds,
       });
       if (healed.closedAttemptIds.length > 0) {
         submissionAuthority = (await loadBoardSubmissionAuthority()) ?? submissionAuthority;

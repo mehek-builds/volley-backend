@@ -2056,10 +2056,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       })
       : [];
     if (candidatePacketIds.length > 0) {
+      // SCOPED TO THIS PAGE'S CANDIDATES - REVIEW ROUND 1, 2026-09-05. Same list already computed
+      // above for the logContext, now also bounding what the heal touches - see
+      // healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts) for the
+      // whole-ledger stall this closes off.
       const healed = await healAbandonedPreBoundaryAttemptsForRead({
         userId,
         log: request.log,
         logContext: { route: 'GET /resume/history', candidatePacketIds },
+        packetIds: candidatePacketIds,
       });
       if (healed.closedAttemptIds.length > 0) {
         submissionAuthority = (await loadSubmissionAuthority()) ?? submissionAuthority;
