@@ -76,6 +76,10 @@ import {
   releaseAttemptThatNeverReachedEmployer,
   releaseExpiredAttendedHandoffClaim,
 } from '../lib/expiredHandoffClaimRelease';
+import {
+  releaseStalledFillRun,
+  stalledFillRunReleaseIsAdmissible,
+} from '../lib/stalledFillRunRelease';
 import { attemptNeverPressedReason } from '../lib/managedSubmitOutcome';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
@@ -154,6 +158,7 @@ import {
   submissionAttemptEventsForPacket,
   submissionAttemptsOpenedToday,
   submissionAttemptRetrySafety,
+  submissionAttemptRetrySafetyForPacketEvents,
   tryLockSubmissionAttemptUser,
   type SubmissionAttemptBinding,
   type SubmissionAttemptEventRecord,
@@ -762,6 +767,101 @@ async function repairExpiredAttendedHandoffClaim(
   };
 }
 
+/* The cheapest possible "could this row be a stalled fill" question, asked of the row a route has
+ * ALREADY read, before the helper opens a transaction or touches a lock at all. The same discipline
+ * as expiredHandoffClaimRepairIsPossible above, and for the same reason: GET
+ * /applications/:id/submission runs on every 2.5s dashboard poll, and for the vast majority of rows
+ * this has to be a field read rather than a transaction plus an advisory lock.
+ *
+ * DELIBERATELY NOT the full rule. It answers only "is this the right SHAPE of row", never "may it be
+ * released" - the clock and the ledger proof both live in stalledFillRunReleaseIsAdmissible and are
+ * asked under the lock, against the freshly locked row and the database's own clock. A predicate
+ * that can be checked cheaply and a predicate that decides a release are different things, and
+ * conflating them is how a decision ends up made against a stale read. */
+export function stalledFillRunRepairIsPossible(
+  review: ApplicationReviewState | null,
+): boolean {
+  if (!review) return false;
+  if (review.status !== 'preparing' && review.status !== 'filling') return false;
+  return !review.submission_claim_id && !review.submission_claimed_at && !review.browser_session_id;
+}
+
+/* THE FILL RUN THAT DIED WITHOUT WRITING A TERMINAL STATE, bounded so the packet frees itself.
+ *
+ * Measured live 2026-09-04 on Palantir packet f1cfb841 - status `filling`, no claim, no ledger
+ * attempt, frozen since 06:53:50.899Z, and unreachable by the cron, by the runner's own step, by
+ * every re-run route and by repairExpiredAttendedHandoffClaim. See lib/stalledFillRunRelease.ts for
+ * the whole mechanism and for why this is neither of the two open rules on the neighbouring shapes.
+ *
+ * WHY IT IS A SEPARATE HELPER rather than a fourth arm of repairExpiredAttendedHandoffClaim. That
+ * helper's every arm is about a CLAIM: its precondition returns false as its first line on a row
+ * with neither submission_claim_id nor submission_claimed_at, which is exactly this row, and each
+ * of its arms then releases a claim and writes a ledger fact against the attempt that claim names.
+ * This row has no claim and no attempt, so it shares neither the precondition, nor the arms, nor
+ * the ledger write. Folding it in would mean loosening that precondition for every arm at once,
+ * which is precisely the sort of widening that lets one rule's row reach another rule's release.
+ *
+ * NO LEDGER WRITE, and that is the whole reason a clock is affordable here. There is no attempt to
+ * close, so this cannot poison a live run's own late fold the way a premature not_sent_proven would.
+ * The single write is the row's status.
+ *
+ * Best effort, exactly like its neighbour: null on any miss - a lost try-lock, a lost CAS, a row a
+ * concurrent run has already moved - and the caller proceeds with the stored row, whose gates then
+ * refuse precisely as they did before. A missed release costs one more request; a wrong release
+ * could cost an applicant a duplicate, which is why the ledger proof is required under the lock and
+ * the write is CAS'd against the exact spec that was read. */
+async function repairStalledFillRun(
+  row: NonNullable<Awaited<ReturnType<typeof ownedResume>>>,
+  userId: string,
+  log: FastifyRequest['log'],
+): Promise<NonNullable<Awaited<ReturnType<typeof ownedResume>>> | null> {
+  if (!stalledFillRunRepairIsPossible(readApplicationReview(row.spec))) return null;
+  const result = await db.transaction(async (tx) => {
+    /* TRY, NEVER WAIT, for the reason its neighbour states: waiting on this lock is what let a 280s
+     * managed provider call hold a route open on every dashboard poll. The lock is taken at all
+     * because claimSubmission takes the same one, so holding it means no attempt can be opened
+     * between the ledger read below and the write. */
+    if (!await tryLockSubmissionAttemptUser(tx, userId)) return null;
+    const [locked] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, userId),
+    )).limit(1).for('update');
+    const current = locked ? readApplicationReview(locked.spec) : null;
+    if (!locked || !current) return null;
+    const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+    const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+    const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+    if (Number.isNaN(databaseNow.getTime())) throw new Error('Database reconciliation clock was unavailable');
+    const events = await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
+    const retrySafety = submissionAttemptRetrySafetyForPacketEvents(events);
+    if (!stalledFillRunReleaseIsAdmissible(current, retrySafety, databaseNow.getTime())) return null;
+    const released = releaseStalledFillRun(current, databaseNow.toISOString());
+    const [updated] = await tx.update(generated_resumes)
+      .set({ spec: reviewSpec(released) })
+      .where(and(
+        eq(generated_resumes.id, locked.id),
+        eq(generated_resumes.user_id, userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+      ))
+      .returning({ id: generated_resumes.id });
+    if (!updated) return null;
+    return { row: locked, review: released, stalledStatus: current.status, retrySafety: retrySafety.kind };
+  });
+  if (!result) return null;
+  log.info(
+    {
+      applicationId: result.row.id,
+      stalledStatus: result.stalledStatus,
+      retrySafetyKind: result.retrySafety,
+    },
+    'Released a prepare run that stopped mid-fill without writing a terminal state',
+  );
+  return {
+    ...result.row,
+    spec: { ...(result.row.spec as StoredSpec), _review: result.review },
+  };
+}
+
 function editableResumeSpec(value: unknown): ResumeSpec {
   const spec = normalizeSpec(value);
   if (!spec.school && spec.experience.length === 0 && spec.skills.length === 0) {
@@ -1129,6 +1229,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * no send can have happened and no attended finish is still possible; on any other row it is
       * a no-op and the gate refuses exactly as before. See repairExpiredAttendedHandoffClaim. */
       row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
+      row = await repairStalledFillRun(row, request.jwtPayload!.userId, request.log) ?? row;
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       /* awaiting_security_code is NOT past auditing, and blocking it here deadlocked the code step.
@@ -2908,6 +3009,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * that nothing was pressed and the attended window is over; the disposition below then reads
        * the released row and answers 'start' the ordinary way, with every other gate intact. */
       row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
+      row = await repairStalledFillRun(row, request.jwtPayload!.userId, request.log) ?? row;
       const stored = row.spec as StoredSpec;
       let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
@@ -3589,6 +3691,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let row = await ownedResume(request, reply);
       if (!row) return;
       row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
+      row = await repairStalledFillRun(row, request.jwtPayload!.userId, request.log) ?? row;
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
@@ -3609,6 +3712,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let row = await ownedResume(request, reply);
       if (!row) return;
       row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
+      row = await repairStalledFillRun(row, request.jwtPayload!.userId, request.log) ?? row;
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
