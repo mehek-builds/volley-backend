@@ -9,6 +9,8 @@ import {
 } from './questionMetadata';
 import { blankRequiredQuestionLabels } from './submissionSafety';
 import type { ApplicationReviewQuestion } from './applicationReview';
+import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
+import { packetQuestionFixpoint } from './packetQuestionIdentity';
 
 /* THE PRODUCTION SHAPE, byte for byte. Measured live on the Mytos Lever packet (application
  * 55de7c9e-13c0-44fd-8f78-0dee280dbd33, 2026-08-28): a required degree-classification select with
@@ -321,17 +323,21 @@ test('a label this function does not classify at all is left untouched', () => {
 });
 
 test('provenance made about the un-snapped string is dropped, and the pass is idempotent', () => {
+  /* answer_source and answer_override_of are deliberately ABSENT from this fixture. Either one now
+   * gates the snap entirely before it ever reaches this destructure - see the applicant-provenance
+   * gate tests below - so this test keeps only the incidental provenance a legitimately
+   * unprovenanced snap still has to clear off the un-snapped machine value it is replacing. */
   const reviewed = gradQuestion({
-    answer_source: 'applicant_review',
     answer_reviewed_at: '2026-08-01T00:00:00.000Z',
-    answer_override_of: 'some stale note',
+    consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
+    consent_permission_version: 'v1',
     answer_state: 'skipped',
   });
   const [snapped] = snapStoredAnswersToProfileFieldOptions([reviewed]);
   assert.equal(snapped.answer, 'Spring 2028');
-  assert.equal(snapped.answer_source, undefined);
   assert.equal(snapped.answer_reviewed_at, undefined);
-  assert.equal(snapped.answer_override_of, undefined);
+  assert.equal(snapped.consent_permission_granted_at, undefined);
+  assert.equal(snapped.consent_permission_version, undefined);
   assert.equal('answer_state' in snapped, false);
   assert.equal(snapped.answer_option_source, 'May 2028');
   assert.deepEqual(
@@ -339,6 +345,89 @@ test('provenance made about the un-snapped string is dropped, and the pass is id
     [snapped],
     'a snapped record is a fixed point of its own pass',
   );
+});
+
+/* ── snapStoredAnswersToProfileFieldOptions: the applicant-provenance gate (review finding 1) ────
+ *
+ * THE DEFECT A REVIEW CAUGHT BEFORE THIS PR LANDED. refreshKnownQuestionAnswers deliberately keeps
+ * an applicant's off-list typed correction across a refresh (its override branch in
+ * questionDiscovery.ts, keyed on derivationIsCurrent) - but this function had no matching gate of
+ * its own, and rewrote that same override the moment any alias of her text happened to match an
+ * offered option, stripping the very fields that marked the answer as hers along with it.
+ *
+ * Reproduced: a degree override "Master's Degree" (answer_override_of
+ * "Master of Science in Computer Science") on a list offering "Master's" survives refresh untouched,
+ * then this function used to snap it to "Master's" and strip
+ * answer_source/answer_override_of/answer_confirmed_of - laundering a live, current disagreement
+ * with the resolver into a silent machine echo on the very next read. */
+const DEGREE_LABEL = 'What degree are you currently pursuing?';
+const DEGREE_OPTIONS = ["Master's", "Bachelor's", 'PhD', 'Other'];
+const DEGREE_REVIEWED_AT = '2026-09-04T15:43:00.000Z';
+
+const degreeOverrideQuestion = (overrides: Partial<ApplicationReviewQuestion> = {}): ApplicationReviewQuestion => ({
+  id: 'degree-override',
+  question: DEGREE_LABEL,
+  answer: "Master's Degree",
+  kind: 'required',
+  required: true,
+  portal_input_type: 'combobox',
+  options: [...DEGREE_OPTIONS],
+  answer_source: 'applicant_review',
+  answer_reviewed_at: DEGREE_REVIEWED_AT,
+  answer_override_of: 'Master of Science in Computer Science',
+  ...overrides,
+});
+
+test('a row carrying answer_source applicant_review is never snapped, even when an alias matches', () => {
+  const reviewed = degreeOverrideQuestion();
+  assert.deepEqual(
+    snapStoredAnswersToProfileFieldOptions([reviewed]),
+    [reviewed],
+    'the snap exists only for unprovenanced machine values; her claim is returned whole',
+  );
+});
+
+test('a row carrying answer_override_of alone (no answer_source) is still never snapped', () => {
+  const { answer_source: _answerSource, ...rest } = degreeOverrideQuestion();
+  const reviewed = rest as ApplicationReviewQuestion;
+  assert.equal(reviewed.answer_source, undefined, 'precondition: answer_source really is absent here');
+  assert.deepEqual(snapStoredAnswersToProfileFieldOptions([reviewed]), [reviewed]);
+});
+
+test('a row carrying answer_confirmed_of alone is also never snapped', () => {
+  const { answer_source: _answerSource, answer_override_of: _answerOverrideOf, ...rest } = degreeOverrideQuestion();
+  const reviewed = { ...rest, answer_confirmed_of: DEGREE_LABEL } as ApplicationReviewQuestion;
+  assert.deepEqual(snapStoredAnswersToProfileFieldOptions([reviewed]), [reviewed]);
+});
+
+test('an unprovenanced row with the same off-list answer is snapped exactly as before', () => {
+  // Control: strip every provenance field from the same fixture and confirm the alias match this
+  // gate exists to guard still fires when nothing is protecting the row.
+  const { answer_source: _answerSource, answer_reviewed_at: _answerReviewedAt, answer_override_of: _answerOverrideOf, ...rest } =
+    degreeOverrideQuestion();
+  const unprovenanced = rest as ApplicationReviewQuestion;
+  const [snapped] = snapStoredAnswersToProfileFieldOptions([unprovenanced]);
+  assert.equal(snapped.answer, "Master's", 'confirms the alias match is real and only provenance stops it above');
+});
+
+test('REVIEWER SCENARIO: her degree override survives refresh -> snap -> reopen byte-identical', () => {
+  const profile: ApplicationProfileLike = { degree: 'Master of Science in Computer Science' };
+  const stored = degreeOverrideQuestion();
+  const composed = packetQuestionFixpoint(
+    [stored],
+    (questions) => reopenUnfitClosedChoiceQuestions(snapStoredAnswersToProfileFieldOptions(
+      refreshKnownQuestionAnswers(
+        questions,
+        profile,
+        undefined,
+        DEGREE_REVIEWED_AT,
+        undefined,
+        undefined,
+        new Date(DEGREE_REVIEWED_AT),
+      ),
+    )),
+  );
+  assert.deepEqual(composed, [stored], 'the full read-time composition must not move her override at all');
 });
 
 test('the mechanism generalizes past graduation dates: a GPA rounds onto the option gpaLadder offers', () => {

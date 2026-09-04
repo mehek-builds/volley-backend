@@ -467,6 +467,40 @@ export function snapStoredAnswersToProfileFieldOptions<T extends StoredClosedCho
   return questions.map((question) => {
     const answer = question.answer.trim();
     if (!answer) return question;
+    /* HER OWN PROVENANCE IS NEVER THIS FUNCTION'S TO REWRITE - a review finding against this PR,
+     * fixed here before landing.
+     *
+     * refreshKnownQuestionAnswers's override branch (derivationIsCurrent, questionDiscovery.ts)
+     * deliberately KEEPS an applicant's off-list typed correction across a refresh: she disagreed
+     * with the resolver on the review screen, and that disagreement survives for as long as
+     * answer_override_of still names what the resolver currently computes. Measured: a degree
+     * override "Master's Degree" (answer_override_of "Master of Science in Computer Science") on a
+     * list offering "Master's" survives refresh untouched - and then reached here. combobox is in
+     * REVIEWED_PICK_EXACT_OPTION_TYPE, "Master's" is one of educationLevelLadder's own aliases of her
+     * text, it is the control's only match, and without this guard the code below rewrote her
+     * override to "Master's" and stripped answer_source/answer_override_of/answer_confirmed_of along
+     * with it - laundering a live, current disagreement into a silent machine echo on the very next
+     * read.
+     *
+     * This function exists only for UNPROVENANCED machine values (see the header above): an answer
+     * nobody has claimed, snapped onto the control's own wording so a plain alias match does not
+     * strand it. A row that already carries a claim - answer_source 'applicant_review', or an
+     * answer_override_of/answer_confirmed_of naming what it was reviewed against - is not that, and
+     * is returned exactly as it stands, whether or not any alias below would have matched it.
+     * refreshKnownQuestionAnswers is the only place that judges whether her claim is still current;
+     * this function does not get a second, looser opinion on the same record. */
+    const provenance = question as T & {
+      answer_source?: unknown;
+      answer_override_of?: unknown;
+      answer_confirmed_of?: unknown;
+    };
+    if (
+      provenance.answer_source === 'applicant_review'
+      || typeof provenance.answer_override_of === 'string'
+      || typeof provenance.answer_confirmed_of === 'string'
+    ) {
+      return question;
+    }
     const controlType = question.portal_input_type?.trim().toLowerCase() ?? '';
     if (!REVIEWED_PICK_EXACT_OPTION_TYPE.test(controlType)) return question;
     const offered = usableOptions(question.options);
