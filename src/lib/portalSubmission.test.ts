@@ -15,6 +15,7 @@ import {
   canFillReviewedQuestions,
   canonicalSmartRecruitersOneClickUrl,
   canonicalSupportedPortalUrl,
+  coverLetterAttentionDisposition,
   coverLetterUploadSelector,
   detectPortal,
   fillPortal,
@@ -417,13 +418,54 @@ test('both run paths write the cover letter requirement and what they attached',
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   // Measured on both providers, and only where there is a control to measure. A portal with no
   // cover-letter control leaves the field undefined, which the send gate reads as "not measured".
-  const measured = runner.match(/cover_letter_required: blockersRequireCoverLetter\(/g) ?? [];
+  const measured = runner.match(/const coverLetterRequired = blockersRequireCoverLetter\(/g) ?? [];
   assert.equal(measured.length, 2, 'the managed and direct paths must both measure it');
+  // Written from the SAME variable the safe gate reads, not a second call: see
+  // coverLetterAttentionDisposition below for why the two must never be free to disagree.
+  const written = runner.match(/cover_letter_required: coverLetterRequired/g) ?? [];
+  assert.equal(written.length, 2, 'both paths must write the exact measurement they gated `safe` on');
   const attached = runner.match(/cover_letter_attached: Boolean\(packet\.coverLetter\)/g) ?? [];
   assert.equal(attached.length, 2, 'both paths must record what the run actually carried');
   // The managed measurement reads the discovery pass too: that pass sees the form before the fill
   // and is where a required-and-empty control is most visible.
-  assert.match(runner, /blockersRequireCoverLetter\(\[\s*\.\.\.blockers,\s*\.\.\.\(discoveryResult\?\.blockers \?\? \[\]\),/);
+  assert.match(
+    runner,
+    /const coverLetterRequired = blockersRequireCoverLetter\(\[\s*\.\.\.blockers,\s*\.\.\.\(discoveryResult\?\.blockers \?\? \[\]\),/,
+  );
+});
+
+/* THE SPLIT THAT KEEPS AN OPTIONAL COVER LETTER FROM PARKING A FINISHED APPLICATION.
+ *
+ * Measured live on Sage packet aae653a3-2d5a-4f3e-ba3b-afea4219df37 (2026-09-04, Greenhouse): a
+ * managed run filled all 17 fields, left no unanswered required question and reported no other
+ * blocker, and the packet still landed needs_attention/required_document because
+ * packetForCoverLetterCapability's coverLetterIssue used to gate `safe` unconditionally - on
+ * cover_letter_supported, which only means the form has a file control, never that the employer
+ * asked for one. finalApprovalCoverLetterIssue (applicationReview.ts) was fixed to read
+ * cover_letter_required instead after the same confusion broke Cresta packet 8142004c the other
+ * direction (see coverLetterAttachment.test.ts); this gate had not caught up.
+ *
+ * coverLetterAttentionDisposition is the one place both prepare paths now ask the question, so they
+ * cannot answer it two different ways. */
+test('a required cover letter that failed to prepare still blocks the send', () => {
+  const issue = 'We could not safely prepare your cover letter for this one, so it is not attached. '
+    + 'Everything else is filled in, and you can write or retry a cover letter from your dashboard.';
+  const disposition = coverLetterAttentionDisposition(issue, true);
+  assert.deepEqual(disposition.blocking, [issue]);
+  assert.equal(disposition.skippedReason, undefined);
+});
+
+test('an optional cover letter that failed to prepare only leaves an informational note', () => {
+  const issue = 'We could not safely prepare your cover letter for this one, so it is not attached. '
+    + 'Everything else is filled in, and you can write or retry a cover letter from your dashboard.';
+  const disposition = coverLetterAttentionDisposition(issue, false);
+  assert.deepEqual(disposition.blocking, []);
+  assert.equal(disposition.skippedReason, issue);
+});
+
+test('no cover-letter issue means no attention and no note, required or not', () => {
+  assert.deepEqual(coverLetterAttentionDisposition(undefined, true), { blocking: [] });
+  assert.deepEqual(coverLetterAttentionDisposition(undefined, false), { blocking: [] });
 });
 
 test('every portal detects a cover-letter file control, not optional wording alone', () => {

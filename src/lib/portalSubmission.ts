@@ -6940,6 +6940,48 @@ export function blockersRequireCoverLetter(blockers: readonly string[] | undefin
   return (blockers ?? []).some((blocker) => COVER_LETTER_REQUIRED_BLOCKER.test(blocker ?? ''));
 }
 
+export type CoverLetterAttentionDisposition = {
+  /* Fed straight into the `safe`/directPreparationIsSafe conjunction both prepare paths compute.
+   * Non-empty ONLY when the employer's own form required a letter Litos could not produce - the one
+   * case /submission/approve's finalApprovalCoverLetterIssue would also refuse. */
+  blocking: string[];
+  /* The SAME sentence, read by nobody's send gate. See ApplicationReviewState.cover_letter_skipped_reason. */
+  skippedReason?: string;
+};
+
+/**
+ * Whether a cover-letter prepare failure should hold a fill run back, or merely tell her about it.
+ *
+ * THE SPLIT THIS CLOSES: packetForCoverLetterCapability's coverLetterIssue fires whenever a
+ * SUPPORTED form's cover letter could not be generated or attached, with no opinion on whether the
+ * employer actually asked for one - it cannot have one, since it runs before the fill that would
+ * measure `required`. Both prepare paths used to fold that sentence into `safe` unconditionally,
+ * which is the exact reasoning finalApprovalCoverLetterIssue (lib/applicationReview.ts) was fixed to
+ * stop using: cover_letter_supported means the form has somewhere to put a PDF, never that the
+ * employer wants one, and JazzHR/Breezy/a bare "Attach / Dropbox / Enter manually" trio with no
+ * required marker all carry it true. Measured live on Sage packet
+ * aae653a3-2d5a-4f3e-ba3b-afea4219df37 (2026-09-04): a Greenhouse managed run filled all 17 fields,
+ * left no unanswered required question and no other blocker, and still parked needs_attention /
+ * required_document on an optional letter alone - while the same packet's dashboard copy read "does
+ * not require one" and /submission/approve, asked the RIGHT question, would have said yes.
+ *
+ * So this asks cover_letter_required (lib/portalSubmission.ts's own blockersRequireCoverLetter, off
+ * the run's required-field scan) rather than cover_letter_supported, which is the one fact
+ * finalApprovalCoverLetterIssue already trusts. A REQUIRED failure is unchanged: it still blocks,
+ * because a Send button the approve route will refuse 422 is worse than an honest stop. An OPTIONAL
+ * failure is Litos's own shortfall on a document nobody asked for, not evidence the application is
+ * incomplete, and downgrades to an informational note the send gate never reads.
+ */
+export function coverLetterAttentionDisposition(
+  coverLetterIssue: string | undefined,
+  coverLetterRequired: boolean,
+): CoverLetterAttentionDisposition {
+  if (!coverLetterIssue) return { blocking: [] };
+  return coverLetterRequired
+    ? { blocking: [coverLetterIssue] }
+    : { blocking: [], skippedReason: coverLetterIssue };
+}
+
 /* ELEMENT IDENTITY, AND WHY THE SECOND DOCUMENT IS EXCLUDED BY IT RATHER THAN BY A NAME.
  *
  * On the direct Playwright path the run holds the live page, so it does not have to reason about how

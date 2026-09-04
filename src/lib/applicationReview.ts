@@ -1246,6 +1246,25 @@ export type ApplicationReviewState = {
    * how Cresta failed. Recorded here, at the run, so the evidence check can ask what the run did
    * rather than infer it from state that has since moved. */
   cover_letter_attached?: boolean;
+  /* AN INFORMATIONAL NOTE, NEVER A GATE. The other half of a cover-letter prepare failure: the run's
+   * own coverLetterIssue sentence (packetForCoverLetterCapability, routes/submissionRunner.ts), kept
+   * ONLY when cover_letter_required is not true.
+   *
+   * A REQUIRED failure still travels through attention_reason/attention_categories and gates `safe`
+   * below `ready_for_final_approval` - required_document is the right stop for a document the
+   * employer's own form asked for and does not have. An OPTIONAL failure is Litos's problem, not
+   * evidence the application is incomplete, and folding it into the same blocking machinery is
+   * exactly what parked Sage packet aae653a3-2d5a-4f3e-ba3b-afea4219df37 needs_attention with 17
+   * filled fields, zero unanswered required questions and a dashboard describing the letter as
+   * "does not require one": a retry could never have produced a different outcome, because nothing
+   * about the application was actually wrong. See lib/portalSubmission.ts's
+   * coverLetterAttentionDisposition for where this split is decided, off the same cover_letter_required
+   * measurement finalApprovalCoverLetterIssue already trusts.
+   *
+   * Written (including undefined, to clear a prior run's note) on every prepare that measured a
+   * cover-letter capability, the same discipline attention_reason is held to. Absent means either no
+   * prepare has measured this yet, or the last one had nothing to say. */
+  cover_letter_skipped_reason?: string;
   /* Whether Litos can fill in this posting's application page AT ALL, derived from portal_url.
    *
    * Unlike cover_letter_supported, which can only be answered by looking at a live form mid-run,
