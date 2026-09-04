@@ -307,6 +307,17 @@ describe('the released review', () => {
     assert.equal(released.submission_attempted_at, undefined);
   });
 
+  test('drops the approval the dead send was going to spend', () => {
+    /* Every path to `submitting` writes a fresh submission_authorization in the same patch that
+     * sets the status, so a restart is never short of one. Keeping the dead run's copy would leave
+     * a per_application_approval standing on a packet whose approval was spent on a send that never
+     * happened, and authorizationValidAtClick honours that source without re-asking. */
+    const approved = releaseStalledFillRun(stalledRow({
+      submission_authorization: { source: 'per_application_approval', authorized_at: PALANTIR_FROZEN_AT },
+    }), '2026-09-04T10:00:00.000Z');
+    assert.equal(approved.submission_authorization, undefined);
+  });
+
   test('clears the dead run\'s transient fields and keeps the work it finished', () => {
     assert.equal(released.submission_run_id, undefined);
     assert.equal(released.progress_stage, undefined);

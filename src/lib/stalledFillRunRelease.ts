@@ -256,6 +256,14 @@ export function stalledFillRunReleaseIsAdmissible(
  * packet that is waiting to be restarted. `questions`, `filled_fields`, the packet audit and every
  * other piece of work the dead run actually completed are untouched, so a restart does not
  * re-derive what is already known.
+ *
+ * submission_authorization GOES TOO, and it costs nothing to drop. Every path that reaches
+ * `submitting` writes a fresh one in the same patch that sets the status - the approve route, the
+ * extension route and the standing-consent route all do - so a restart cannot be short of one.
+ * Keeping the dead run's copy would leave a `per_application_approval` standing on a packet whose
+ * approval was spent on a send that never happened, and authorizationValidAtClick honours that
+ * source without re-asking. Same reasoning, and the same field, as
+ * releaseAttemptThatNeverReachedEmployer.
  */
 export function releaseStalledFillRun(
   review: ApplicationReviewState,
@@ -271,6 +279,7 @@ export function releaseStalledFillRun(
     progress_updated_at: undefined,
     handoff_expires_at: undefined,
     browser_context_id: undefined,
+    submission_authorization: undefined,
     attention_reason: STALLED_FILL_RUN_ATTENTION_REASON,
     attention_categories: attentionCategoriesForReasons([STALLED_FILL_RUN_ATTENTION_REASON]),
     updated_at: nowIso,
