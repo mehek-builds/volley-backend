@@ -383,6 +383,30 @@ describe('the route', () => {
     assert.ok(!/not_sent_proven/u.test(helper));
   });
 
+  test('the cheap precondition admits exactly the shape the rule is about, and opens no transaction otherwise', () => {
+    /* THE ONE LINE THAT CAN DISABLE THE WHOLE REPAIR WITHOUT FAILING ANYTHING ELSE. It runs before
+     * the transaction, off the row a route has already read, so it never reaches the library gate
+     * every other test in this file exercises: a precondition shimmed to `false` would leave all of
+     * them green and ship a repair that never runs. It is also the mirror image of the existing
+     * expiredHandoffClaimRepairIsPossible, which refuses a CLAIMLESS row on its first line - which
+     * is why that helper could never reach the measured Palantir packet. */
+    const helper = routeSlice(
+      'export function stalledFillRunRepairIsPossible',
+      'async function repairStalledFillRun',
+    );
+    /* THE WHOLE BODY, not a set of matches. Asserting only that the three lines are PRESENT lets an
+     * inserted `return false;` above them survive: measured, that mutation left all 33 tests in
+     * this file green. What has to be pinned is the exact statement sequence, so nothing can be
+     * added, removed or reordered in front of it. */
+    const body = helper.slice(helper.indexOf('): boolean {') + '): boolean {'.length, helper.lastIndexOf('}'));
+    const statements = body.split('\n').map((line) => line.trim()).filter(Boolean);
+    assert.deepEqual(statements, [
+      'if (!review) return false;',
+      "if (review.status !== 'preparing' && review.status !== 'filling') return false;",
+      'return !review.submission_claim_id && !review.submission_claimed_at && !review.browser_session_id;',
+    ]);
+  });
+
   test('the released status is one the submission-authority envelope is published for', () => {
     /* The second half of the live defect. /applications/:id/submission attaches the envelope only
      * for FIRST_SEND_REVIEW_STATUSES, and a status outside that set leaves the response with no
