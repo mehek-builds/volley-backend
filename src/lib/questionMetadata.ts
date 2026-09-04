@@ -12,7 +12,7 @@ import {
   managedOptionProbeExpectsClosedControl,
   type SupportedPortal,
 } from './portalSubmission';
-import { usableOptions } from './profileFieldResolution';
+import { FREE_ENTRY_INPUT_TYPE, usableOptions } from './profileFieldResolution';
 
 export type QuestionMetadataBlocker = {
   kind: 'missing_question_text' | 'missing_exact_options';
@@ -57,6 +57,29 @@ export function discoveredQuestionControlType(
 ): string {
   const inputType = field.inputType.trim().toLowerCase() || 'text';
   const role = field.role?.trim().toLowerCase();
+  /* A FREE-ENTRY TYPE IS THE ONE FACT NEITHER OF THE TWO RULES BELOW MAY OVERRULE.
+   *
+   * This function mints `portal_input_type`, which is the single value every downstream consumer
+   * reads to decide TYPED versus PICKED - measuredClosedListShape picks the fill action from it,
+   * CLOSED_CONTROL_TYPE raises the missing-options blocker from it, and the keep/re-open gates in
+   * questionDiscovery.ts judge a stored answer from it. Both rules below could mint a menu from
+   * half the evidence, and neither ever checked the other half:
+   *
+   *   role alone      -> a react-select shell with an EMPTY menu is still called `combobox`;
+   *   options alone   -> a list hung on a control that cannot hold one still promotes it.
+   *
+   * Measured live 2026-09-03, Hudson River Trading packet 4a79eec1: a run parked on the GPA fill
+   * with `no option matched "3.89" (the list offered: "No options")` - react-select's own empty-menu
+   * placeholder read back as though it were the employer's list. Measured on Pinpoint across the
+   * ten-board sweep, from the other side: `["Yes","No"]` arrives attached to `number` fields, where
+   * a years-of-experience or salary answer is then ranked against a two-row menu it can never join.
+   *
+   * FREE_ENTRY_INPUT_TYPE is positive evidence only and never includes `text`, which is what
+   * managed discovery reports for every control it walks including react-selects. So a real
+   * searchable combobox is untouched by this line and still reaches the role rule below; only a
+   * control whose type the DOM states outright, and states as one react-select never renders, is
+   * held to its own type here. */
+  if (FREE_ENTRY_INPUT_TYPE.test(inputType)) return inputType;
   if (role === 'combobox' || role === 'listbox') return role;
   if (inputType === 'text' && usableOptions(field.options).length > 0) return 'combobox';
   return inputType;
@@ -76,6 +99,11 @@ export function discoveredQuestionNeedsExactOptionsBeforeResolution(
 ): boolean {
   const inputType = field.inputType.trim().toLowerCase();
   const role = field.role?.trim().toLowerCase();
+  /* The same rule discoveredQuestionControlType now states, at the one other place a bare `role`
+   * could speak for a control over its own type. A free-entry control has no option inventory to
+   * wait for, so holding its resolution until one arrives waits forever: the list is never coming,
+   * and the answer it was holding is a number that only ever needed typing. */
+  if (FREE_ENTRY_INPUT_TYPE.test(inputType)) return false;
   return EXACT_OPTIONS_BEFORE_RESOLUTION_TYPE.test(inputType) || role === 'listbox';
 }
 
