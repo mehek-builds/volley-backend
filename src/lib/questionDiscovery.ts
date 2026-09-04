@@ -2269,12 +2269,22 @@ export function answerCarriesCurrentApplicantReview(
  *   - NOT A NEVER_FILL LABEL. An SSN or a CAPTCHA is refused whatever anybody confirms; those are
  *     not declarations Litos may carry at all. Same order as the gate below, so the two agree.
  *   - THE ANSWER IS NOT BLANK. A blank is not a declaration and cannot have been affirmed.
- *   - THE CONFIRMATION NAMES THIS QUESTION'S CURRENT TEXT, byte for byte. The stored claim is what
- *     makes a rename detectable: a confirmation made against the United States wording must not
- *     carry over to a United Kingdom one, and for this applicant those two have different true
- *     answers. Byte equality rather than questionKey, matching every other exact-identity test in
- *     this codebase, because a rename that folds to the same key is still a different sentence in
- *     front of an employer.
+ *   - THE CONFIRMATION NAMES THIS QUESTION'S CURRENT CONTROL. The stored claim is what makes a
+ *     rename detectable: a confirmation made against the United States wording must not carry over
+ *     to a United Kingdom one, and for this applicant those two have different true answers. Still
+ *     not questionKey, which folds case and whitespace and would let a rename that happens to
+ *     collapse to the same key stand as a different sentence in front of an employer.
+ *
+ *     THE MATCH IS servedLabelMatchesStoredControl AND NOT BYTE EQUALITY, because the two strings being
+ *     compared here reach this line from opposite sides of the serve boundary. The mint writes the
+ *     STORED label (mergeSubmittedApplicationReviewQuestions writes `answer_confirmed_of:
+ *     question.question`); `question.question` on the record handed to this function has already
+ *     been through normalizeStoredPortalQuestions, because every caller resolves the packet before
+ *     reading it. On a row whose stored label carries a required marker those are different strings
+ *     for one control, so byte equality here would accept the mint and then refuse to read it back
+ *     on the very next request - a confirmation recorded, a 200 returned, and the gate still shut.
+ *     Same predicate as the mint gate, so the writer and the reader cannot drift into disagreeing
+ *     about whether she confirmed something.
  *
  * The answer half needs no test here: answer_confirmed_of is an ANSWER-CLAIM, so the merge drops it
  * the moment the answer changes and no confirmation can survive onto a value it was not made for.
@@ -2292,7 +2302,8 @@ export function applicantConfirmedSensitiveAnswer(question: {
   if (!label || !isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return false;
   if (!(question.answer ?? '').trim()) return false;
-  return typeof question.answer_confirmed_of === 'string' && question.answer_confirmed_of === label;
+  return typeof question.answer_confirmed_of === 'string'
+    && servedLabelMatchesStoredControl(question.answer_confirmed_of, label);
 }
 
 /**
@@ -7169,6 +7180,62 @@ function truncateReviewQuestionLabel(label: string): string {
 export function normalizeReviewQuestionLabel(raw: string): string {
   const label = normalizeDiscoveredLabel(raw);
   return label ? truncateReviewQuestionLabel(label) : '';
+}
+
+/**
+ * IS THIS THE LABEL THE SERVER ITSELF PUT IN FRONT OF HER FOR THAT STORED CONTROL?
+ *
+ * THE DEFECT, MEASURED 2026-09-04 on the Exa "Software Engineer, Intern" packet 73768339 (ashby).
+ * Four required essay questions, every one already drafted and answered. The dashboard walked them
+ * one per screen, each "Save and next" sent PUT /applications/:id/review/answers carrying
+ * `confirmed: true` for that one question, and every one of the four returned 200. A reload came
+ * back to "1 of 4", the same question, the same 365-character answer. Twelve confirmations across
+ * three full passes minted nothing at all, and `unapprovedLitosDraftQuestionLabels` still named all
+ * four, so the send gate would have refused too. There was no exit.
+ *
+ * ONE STRING, TWO SPELLINGS. The row holds the employer's label as the run captured it, required
+ * marker and all - "Why do you want to work at Exa? *". Every read path serves it through
+ * normalizeStoredPortalQuestions, which rewrites `question` to normalizeReviewQuestionLabel's
+ * output - "Why do you want to work at Exa?" - and persists nothing. The dashboard posts back the
+ * list it was SHOWN, so the body carries the normalized spelling while the row keeps the raw one,
+ * and mergeSubmittedApplicationReviewQuestions cannot repair the divergence even in principle: it
+ * writes `question: question.question` on purpose, because a public body may not rename a control.
+ * So the two spellings are permanent, and every equality test that crosses the serve boundary
+ * fails for as long as the packet exists.
+ *
+ * Both tests that crossed it are in that merge. `applicantConfirmedAnswer` refused to mint her
+ * claim, and `exactReviewedIdentityUnchanged` refused to carry one already minted - so the loop had
+ * a second turn of the screw waiting even if the first had passed.
+ *
+ * WHY THIS IS THE HONEST BAR RATHER THAN A LOOSENING. The guard those tests implement is real: the
+ * id fallback lets a submitted question match while carrying a different label, so a body must not
+ * be able to rename a control, flag it confirmed, and mint "she read this exact text" onto text its
+ * own request never contained. What it must accept is exactly the spellings THIS SERVER could have
+ * put in front of her for that stored row, and there are two: the stored bytes themselves, and the
+ * one string normalizeReviewQuestionLabel makes of them. Both are server-produced. Neither is
+ * supplied by the caller.
+ *
+ * SO IT IS ONE-DIRECTIONAL, AND THAT IS THE WHOLE OF WHY IT IS NOT questionKey WITH BETTER MANNERS.
+ * The candidate is compared against the STORED label's own normalization; the candidate is never
+ * normalized itself. `"  Can you work onsite?  "` against a stored `"Can you work onsite?"` is
+ * therefore still a rename and still invalidates - the server never serves that string, so a body
+ * carrying it is not echoing anything - while `"Why do you want to work at Exa?"` against a stored
+ * `"Why do you want to work at Exa? *"` is exactly what the dashboard was handed. Folding both
+ * sides would have admitted the first as well, and applicationReview.test.ts says, correctly, that
+ * it must not.
+ *
+ * A REAL RENAME IS STILL REFUSED, which is the property the gate exists for: "...in the United
+ * States?" and "...in the United Kingdom?" reduce to different strings, have different true answers
+ * for this applicant, and never meet here.
+ *
+ * Exact equality first, so anything the old byte tests accepted these accept - including a label the
+ * normalizer reduces to nothing (an opaque identifier), which then matches only itself rather than
+ * every other unreadable label on the form.
+ */
+export function servedLabelMatchesStoredControl(storedLabel: string, candidateLabel: string): boolean {
+  if (storedLabel === candidateLabel) return true;
+  const served = normalizeReviewQuestionLabel(storedLabel);
+  return served !== '' && served === candidateLabel;
 }
 
 /* ---------------------------------------------------------------------------------------------

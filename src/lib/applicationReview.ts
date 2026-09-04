@@ -5,6 +5,10 @@ import type { RequiredDocumentAsk } from './requiredDocuments';
 import type { SubmissionStopRecord } from './submissionStop';
 import type { EmployerDeliveryBindings } from './employerDeliveryIdentity';
 import type { QuestionMetadataBlocker } from './questionMetadata';
+/* The one function that knows what the applicant was actually shown. Every read path serves this
+ * file's questions through normalizeStoredPortalQuestions, so the label in a submit body is the
+ * normalizer's output rather than the bytes on the row; see servedLabelMatchesStoredControl. */
+import { servedLabelMatchesStoredControl } from './questionDiscovery';
 import {
   canonicalSupportedPortalUrl,
   detectPortal,
@@ -509,10 +513,21 @@ export function mergeSubmittedApplicationReviewQuestions(
     const provenanceMatchesCurrentReview = question.answer_source === 'applicant_review'
       && typeof question.answer_reviewed_at === 'string'
       && question.answer_reviewed_at === questionsReviewedAt;
+    /* THE LABEL HALF OF THIS IDENTITY IS THE SERVER'S OWN, NOT THE ROW'S BYTES, and reading it as
+     * the row's bytes is the second turn of the loop documented at servedLabelMatchesStoredControl: on a
+     * row whose stored label carries a required marker this test can never pass, so a claim minted
+     * by one save was stripped again by the next one and the packet forgot she had ever confirmed
+     * anything.
+     *
+     * THE `questionKey` CLAUSE GOES WITH IT, and it is being removed rather than kept "for safety".
+     * Byte equality implied it, so beside `===` it asserted nothing and cost nothing. Beside the
+     * server's own normalization it is a strictly DIFFERENT fold - case and whitespace, and the
+     * required marker left exactly where it was - so keeping it would reject precisely the packet
+     * this change exists for while still looking like a belt beside braces. One identity, stated
+     * once. */
     const exactReviewedIdentityUnchanged = provenanceMatchesCurrentReview
       && submittedQuestion.id === question.id
-      && submittedQuestion.question === question.question
-      && questionKey(submittedQuestion.question) === questionKey(question.question)
+      && servedLabelMatchesStoredControl(question.question, submittedQuestion.question)
       && submittedQuestion.answer === question.answer;
     /* answer_option_source goes with the answer it describes, and `answer` is replaced below.
      *
@@ -653,14 +668,23 @@ export function mergeSubmittedApplicationReviewQuestions(
      * is nothing. See SubmittedApplicationReviewQuestion. */
     const applicantConfirmedAnswer = Boolean(
       questionsReviewedAt && submittedAnswer && submittedQuestion.confirmed === true
-      /* AND ONLY UNDER THE EXACT STORED TEXT. The claim is persisted against the stored label
-       * (`question: question.question` below), and the id fallback lets a submitted question match
-       * while carrying a DIFFERENT label - so without this test a public body could rename a control,
-       * flag it confirmed, and mint "she read this exact text" onto text its own request never
-       * contained. Exact equality rather than questionKey, matching exactReviewedIdentityUnchanged:
-       * the review screen posts back the stored label verbatim, so a genuine confirmation always
-       * passes, and a case-or-whitespace rename is still a rename. */
-      && submittedQuestion.question === question.question,
+      /* AND ONLY UNDER A LABEL THIS SERVER ITSELF SHOWED HER FOR THIS ROW. The claim is persisted
+       * against the stored label (`question: question.question` below), and the id fallback lets a
+       * submitted question match while carrying a DIFFERENT label - so without this test a public
+       * body could rename a control, flag it confirmed, and mint "she read this exact text" onto
+       * text its own request never contained. That guard is unchanged; what changed is what counts
+       * as the text she was shown.
+       *
+       * THIS USED TO READ `submittedQuestion.question === question.question`, on the stated premise
+       * that "the review screen posts back the stored label verbatim". It does not. Every read path
+       * serves these rows through normalizeStoredPortalQuestions, which rewrites the label and
+       * persists nothing, so on a row whose stored label carries a required marker the premise is
+       * false on every request and this test could never pass. Measured on Exa packet 73768339:
+       * twelve `confirmed: true` saves, twelve 200s, nothing minted, the same four essays back
+       * again. See servedLabelMatchesStoredControl for the full account and for why the set it admits -
+       * the stored label and the server's own normalization of it, both server-produced - is the
+       * honest bar rather than a loosening. A real rename still fails it. */
+      && servedLabelMatchesStoredControl(question.question, submittedQuestion.question),
     );
     /* WHAT SHE WAS OVERRIDING, so her correction cannot outlive the fact it was made against.
      *
