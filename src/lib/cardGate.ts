@@ -264,6 +264,15 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/postings/:jobId/questions',
   '/applications/managed-prepare',
   '/applications/from-job',
+  /* THE REJOIN READ, added 2026-09-03 beside the route it exists to keep from being called twice.
+   * GET /applications/onboarding-packet hands the build step back the packet a free build already
+   * paid for, so a reload mid-sequence resumes instead of spending the second grant on the same
+   * posting (routes/applicationFromJob.ts carries the measurement). It belongs on this tier and not
+   * on the two permanent ones: it serves tailored resume content, so it must close when the one
+   * free application it belongs to is finished, exactly like /resume/generate beside it. Read-only
+   * and packet-free for an account that never built - `{ application: null }` - so opening it to a
+   * locked account grants nothing an account that has not built anything could use. */
+  '/applications/onboarding-packet',
   /* THE SEND'S OWN PREREQUISITES, added 2026-09-03. The trace this list was built from (2026-08-29)
    * read a ReviewStep that posted /submit-request bare - which was the onboarding dead end fixed in
    * role-quick-website #512: that route gates on currentAcknowledgedPacketAudit, so the flow could
