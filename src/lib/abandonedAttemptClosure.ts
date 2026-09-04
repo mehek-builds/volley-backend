@@ -60,16 +60,29 @@ import {
   type SubmissionAttemptLedgerExecutor,
 } from './submissionAttemptLedger';
 
+/** What this predicate could establish about the packet an attempt's opening names. `null` means
+ * the row could not be read - missing, or its stored review would not parse - and that is a
+ * REFUSAL, never a stand-in for "no claim". See the note on `packet` below. */
+export type AbandonedAttemptClosurePacket = {
+  /** The packet review's `submission_claim_id`, which IS the attempt id of the run holding it:
+   * claimSubmission generates one value and uses it for both. `null` means the packet holds no
+   * claim at all. */
+  claimId: string | null;
+};
+
 /**
  * Whether this attempt is provably dead and provably pre-boundary, so closing it costs nothing.
  *
- * `packetClaimId` is the packet review's `submission_claim_id`, which IS the attempt id of the run
- * holding it: claimSubmission generates one value and uses it for both. Pass null when the packet
- * holds no claim.
+ * `packet` is what the caller could establish about the row an attempt's opening names, at the
+ * moment it asked. UNKNOWN IS NOT "NO CLAIM". A packet row that has been deleted, or whose spec no
+ * longer parses as a review, tells this predicate nothing about whether some other run still holds
+ * it - so pass `null` for that, and it refuses, exactly like every other shape this predicate is
+ * unsure of. Only a packet the caller actually read - `{ claimId }` - may answer the liveness
+ * question below.
  */
 export function abandonedPreBoundaryAttemptIsClosable(input: {
   attemptEvents: readonly SubmissionAttemptEventRecord[];
-  packetClaimId: string | null | undefined;
+  packet: AbandonedAttemptClosurePacket | null;
 }): boolean {
   const events = input.attemptEvents;
   if (events.length === 0) return false;
@@ -85,10 +98,11 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
    * line is unreachable on its own; it is here so a future event kind cannot make it necessary
    * without anyone noticing. */
   if (events.some((event) => event.attempt_id !== attemptId)) return false;
+  if (!input.packet) return false;
   /* THE LIVENESS DISCRIMINATOR. Still the packet's claim means a run may still be executing it, and
    * that case needs a wall-clock bound to reach the same certainty (see PR #912), rather than the
    * certainty this line gets for free. */
-  if (input.packetClaimId && input.packetClaimId === attemptId) return false;
+  if (input.packet.claimId === attemptId) return false;
   return true;
 }
 
@@ -133,9 +147,13 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
     eq(generated_resumes.user_id, input.userId),
     inArray(generated_resumes.id, packetIds),
   ));
-  const claimByPacketId = new Map<string, string | null>();
+  /* A packet id this map has no entry for - row deleted, or never matched the query above - reads
+   * as `null` at the lookup below via `?? null`, exactly like a row whose spec would not parse.
+   * Both are "unknown", and unknown refuses; see abandonedPreBoundaryAttemptIsClosable. */
+  const packetById = new Map<string, AbandonedAttemptClosurePacket | null>();
   for (const packet of packets) {
-    claimByPacketId.set(packet.id, readApplicationReview(packet.spec)?.submission_claim_id ?? null);
+    const review = readApplicationReview(packet.spec);
+    packetById.set(packet.id, review ? { claimId: review.submission_claim_id ?? null } : null);
   }
 
   const closedAttemptIds: string[] = [];
@@ -144,7 +162,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
     if (!opening) continue;
     if (!abandonedPreBoundaryAttemptIsClosable({
       attemptEvents,
-      packetClaimId: claimByPacketId.get(opening.packet_id) ?? null,
+      packet: packetById.get(opening.packet_id) ?? null,
     })) continue;
     await appendSubmissionAttemptEvent({
       ...submissionAttemptBindingFromEvent(opening),

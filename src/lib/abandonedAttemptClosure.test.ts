@@ -48,11 +48,15 @@ const OPENED_AND_PRESSED = [
   event('press_observed'),
 ];
 
+const NO_CLAIM = { claimId: null };
+const MOVED_TO_OTHER_ATTEMPT = { claimId: OTHER_ATTEMPT };
+const STILL_THIS_ATTEMPT = { claimId: ATTEMPT };
+
 describe('the Databricks class closes with no applicant and no clock', () => {
   test('an opened-only attempt whose packet has dropped the claim is closable', () => {
     assert.equal(attemptNeverReachedEmployer(OPENED_ONLY), true);
     assert.equal(
-      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packetClaimId: null }),
+      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packet: NO_CLAIM }),
       true,
     );
   });
@@ -63,16 +67,24 @@ describe('the Databricks class closes with no applicant and no clock', () => {
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({
         attemptEvents: OPENED_ONLY,
-        packetClaimId: OTHER_ATTEMPT,
+        packet: MOVED_TO_OTHER_ATTEMPT,
       }),
       true,
     );
   });
+});
 
-  test('an undefined claim reads the same as an absent one', () => {
+describe('an unknown packet refuses, and is never read as "no claim"', () => {
+  test('a packet row that could not be read - deleted, or its spec unparseable - is refused', () => {
+    /* Review round 1: the first cut of this predicate took `packetClaimId: string | null | undefined`
+     * and folded a missing or unreadable row down to `null`, which read exactly like a packet that
+     * was read fine and simply holds no claim. Those are not the same fact. A row this function
+     * could not read says nothing about whether some other run still holds it, so `packet: null` has
+     * to refuse - the opposite of what a dropped claim proves - or a deleted packet row would close
+     * an attempt that may still be live. */
     assert.equal(
-      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packetClaimId: undefined }),
-      true,
+      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packet: null }),
+      false,
     );
   });
 });
@@ -83,7 +95,7 @@ describe('the live claim is left to the predicate that pays a clock for it', () 
      * a matching claim means a run may still be executing this attempt. Closing it here would be
      * the poll-kills-the-send defect, arrived at from a different direction. */
     assert.equal(
-      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packetClaimId: ATTEMPT }),
+      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packet: STILL_THIS_ATTEMPT }),
       false,
     );
   });
@@ -94,7 +106,7 @@ describe('the ledger proof is never relaxed', () => {
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({
         attemptEvents: OPENED_AND_AUTHORIZED,
-        packetClaimId: null,
+        packet: NO_CLAIM,
       }),
       false,
     );
@@ -102,7 +114,7 @@ describe('the ledger proof is never relaxed', () => {
 
   test('an observed press keeps blocking', () => {
     assert.equal(
-      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_AND_PRESSED, packetClaimId: null }),
+      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_AND_PRESSED, packet: NO_CLAIM }),
       false,
     );
   });
@@ -111,7 +123,7 @@ describe('the ledger proof is never relaxed', () => {
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({
         attemptEvents: [event('attempt_opened'), event('submission_confirmed')],
-        packetClaimId: null,
+        packet: NO_CLAIM,
       }),
       false,
     );
@@ -121,18 +133,18 @@ describe('the ledger proof is never relaxed', () => {
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({
         attemptEvents: [event('attempt_opened'), event('not_sent_proven')],
-        packetClaimId: null,
+        packet: NO_CLAIM,
       }),
       false,
     );
   });
 
   test('an empty ledger and a malformed attempt are both refused', () => {
-    assert.equal(abandonedPreBoundaryAttemptIsClosable({ attemptEvents: [], packetClaimId: null }), false);
+    assert.equal(abandonedPreBoundaryAttemptIsClosable({ attemptEvents: [], packet: NO_CLAIM }), false);
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({
         attemptEvents: [event('attempt_opened'), event('attempt_opened')],
-        packetClaimId: null,
+        packet: NO_CLAIM,
       }),
       false,
     );
@@ -146,7 +158,7 @@ describe('the ledger proof is never relaxed', () => {
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({
         attemptEvents: [event('attempt_opened'), event('attempt_opened', { attempt_id: OTHER_ATTEMPT })],
-        packetClaimId: null,
+        packet: NO_CLAIM,
       }),
       false,
     );
