@@ -1,12 +1,16 @@
-/* THE FORM THAT ASKS FOR THE GPA TWICE, AND THE ONE WORD THAT NAMED BOTH CONTROLS.
+/* THE FORM THAT ASKS FOR THE GPA THREE TIMES, AND THE ONE WORD THAT NAMED ALL THREE CONTROLS.
  *
  * Measured live 2026-09-03 on Hudson River Trading packet 4a79eec1 (greenhouse job-boards, job
- * 8052083, read from boards-api.greenhouse.io/v1/boards/wehrtyou/jobs/8052083?questions=true). The
- * posting carries two GPA controls on purpose:
+ * 8052083, "Software Engineering Internship (C++ or Python) - Summer 2027", read from
+ * boards-api.greenhouse.io/v1/boards/wehrtyou/jobs/8052083?questions=true). The posting spells
+ * "GPA" on THREE controls, all three deliberate, and the fixtures below are that response verbatim:
  *
- *   question_68000287  "What is your overall college/university GPA?" - a 13-band react-select
- *                      whose options include "3.76 - 4.0", the band she reviewed and chose.
- *   question_68000289  an `input_text` with zero values, rendered as a bare
+ *   question_68000287  "What is your overall college/university GPA?" - a required 13-band
+ *                      multi_value_single_select whose options include "3.76 - 4.0", the band she
+ *                      reviewed and chose, alongside four UK honours classes.
+ *   question_68000288  "Please select the corresponding GPA scale:" - a required three-option
+ *                      multi_value_single_select, a DIFFERENT stored field entirely.
+ *   question_68000289  an `input_text` with zero values, not required, rendered as a bare
  *                      <input type="text" class="input input__single-line">, captioned "We
  *                      recognize that the options above may not cover all global grading systems.
  *                      Please feel free to write in your GPA below without conversion, along with
@@ -15,9 +19,12 @@
  * portalSubmission emitted `{type:'fillByLabelText', text:'GPA', value:'3.89', label:'gpa'}`. The
  * runner resolves an anchor by exact label match and then by any label CONTAINING it, and takes
  * `.first()`: against that markup the exact pass found 0 and the loose pass found 4, of which the
- * first was `<label id="question_68000287-label">` - the BAND. So the run opened the band control,
- * typed "3.89" into its react-select search box, watched thirteen options filter to none, and read
- * react-select's own empty-menu notice back to her as the employer's offer:
+ * first was `<label id="question_68000287-label">` - the BAND. Three of those four loose hits are
+ * the controls above, which is the whole point: one word, three controls, DOM order deciding.
+ *
+ * So the run opened the band control, typed "3.89" into its react-select search box, watched
+ * thirteen options filter to none, and read react-select's own empty-menu notice back to her as
+ * the employer's offer:
  *
  *   status: failed
  *   attention_reason: ... "gpa" (no option matched "3.89" (the list offered: "No options"),
@@ -32,8 +39,10 @@
  * emitter, whose anchor is the full sentence "What is your GPA?" - a phrase no label on this
  * posting contains, so it resolves to nothing here and is left exactly as it was.
  *
- * Each test below was re-run against the unfixed helper body and against a managedAnchorResolution
- * shimmed to `undefined`, and each one failed there. The survivors are recorded in the PR.
+ * Thirteen mutations were applied to the production file with this file untouched, helpers shimmed
+ * to a constant rather than deleted, including deletion of the GPA CALL SITE itself. Every one was
+ * caught. The PR carries the table and the one guard that was written, could not be made to fail,
+ * and was therefore deleted rather than shipped.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -49,10 +58,18 @@ const WRITE_IN_LABEL = 'We recognize that the options above may not cover all gl
 
 const BAND_LABEL = 'What is your overall college/university GPA?';
 
-/** The bands the posting publishes, trimmed to the rows these assertions depend on. */
-const BAND_OPTIONS = ['< 3.0', '3.01 - 3.25', '3.26 - 3.50', '3.51 - 3.75', '3.76 - 4.0'];
+const SCALE_LABEL = 'Please select the corresponding GPA scale:';
+
+/** The thirteen bands the posting publishes, in the board API's own order. */
+const BAND_OPTIONS = [
+  'First-Class Honours (UK)', 'Upper Second-Class Honours (UK)', 'Lower Second-Class Honours (UK)',
+  'Third-Class Honours (UK)', '< 3.0', '3.01 - 3.25', '3.26 - 3.50', '3.51 - 3.75', '3.76 - 4.0',
+  '4.01 - 4.25', '4.26 - 4.50', '4.51 - 4.75', '4.76 - 5.0',
+];
+const SCALE_OPTIONS = ['0.0 - 4.0', '0.0 - 5.0', 'UK Grading Scale'];
 
 const BAND = { selector: '#question_68000287', label: BAND_LABEL };
+const SCALE = { selector: '#question_68000288', label: SCALE_LABEL };
 const WRITE_IN = { selector: '#question_68000289', label: WRITE_IN_LABEL };
 
 const BAND_QUESTION = {
@@ -60,6 +77,14 @@ const BAND_QUESTION = {
   answer: '3.76 - 4.0',
   answerSource: 'applicant_review',
   portalSelector: BAND.selector,
+  portalInputType: 'combobox',
+};
+
+const SCALE_QUESTION = {
+  question: SCALE_LABEL,
+  answer: '0.0 - 4.0',
+  answerSource: 'applicant_review',
+  portalSelector: SCALE.selector,
   portalInputType: 'combobox',
 };
 
@@ -99,8 +124,8 @@ function hrtPacket(overrides: Record<string, unknown> = {}): SubmissionPacket {
     gpa: '3.89',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
-    questions: [BAND_QUESTION, WRITE_IN_QUESTION],
-    fieldOptions: { question_68000287: BAND_OPTIONS },
+    questions: [BAND_QUESTION, SCALE_QUESTION, WRITE_IN_QUESTION],
+    fieldOptions: { question_68000287: BAND_OPTIONS, question_68000288: SCALE_OPTIONS },
     ...overrides,
   } as unknown as SubmissionPacket;
 }
@@ -141,6 +166,11 @@ test('the measured failure cannot recur: no emitted action can drive the band wi
     [],
     'the raw profile GPA must never be able to reach the banded dropdown',
   );
+  assert.deepEqual(
+    reaching(packet, SCALE),
+    [],
+    'nor the scale menu beside it, which is a different stored field entirely',
+  );
   assert.equal(
     build(packet).some((action) => action.type === 'fillByLabelText' && action.text === 'GPA'),
     false,
@@ -155,7 +185,7 @@ test('the measured failure cannot recur: no emitted action can drive the band wi
 
 test('a write-in the review already answered is not filled twice, and never with the profile value', () => {
   const packet = hrtPacket({
-    questions: [BAND_QUESTION, { ...WRITE_IN_QUESTION, answer: '3.89/4.0 (USC)' }],
+    questions: [BAND_QUESTION, SCALE_QUESTION, { ...WRITE_IN_QUESTION, answer: '3.89/4.0 (USC)' }],
   });
   assert.deepEqual(
     build(packet).filter((action) => action.selector === WRITE_IN.selector).map((action) => action.value),
@@ -164,6 +194,15 @@ test('a write-in the review already answered is not filled twice, and never with
   );
   assert.deepEqual(reaching(packet, WRITE_IN), [], 'the profile value must not chase an answered control');
   assert.deepEqual(reaching(packet, BAND), [], 'nor go looking for the band instead');
+  assert.deepEqual(reaching(packet, SCALE), [], 'nor the scale menu');
+  // Her reviewed scale answer is untouched throughout, and it reaches only the scale control.
+  const scale = build(packet).filter((action) => action.value === '0.0 - 4.0');
+  assert.equal(scale.length > 0, true, 'the scale answer must still be filled');
+  for (const action of scale) {
+    assert.equal(actionCouldReach(action, SCALE), true, 'the scale answer reaches the scale menu');
+    assert.equal(actionCouldReach(action, BAND), false, 'and never the band beside it');
+    assert.equal(actionCouldReach(action, WRITE_IN), false, 'and never the write-in');
+  }
 });
 
 test('when every control the anchor names is a closed list, the raw GPA reaches none of them', () => {
@@ -259,7 +298,7 @@ test('a control with no durable handle is refused rather than addressed by the a
    * bind to that, and falling back to the bare anchor is the defect itself, so nothing is sent. */
   const packet = hrtPacket({
     fieldOptions: {},
-    questions: [BAND_QUESTION, { ...WRITE_IN_QUESTION, portalSelector: '[data-litos-discovered-7]' }],
+    questions: [BAND_QUESTION, SCALE_QUESTION, { ...WRITE_IN_QUESTION, portalSelector: '[data-litos-discovered-7]' }],
   });
   assert.deepEqual(reaching(packet, BAND), [], 'an unbindable target must not put the value at the band');
   assert.equal(
