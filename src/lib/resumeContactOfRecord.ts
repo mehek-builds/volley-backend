@@ -1,4 +1,5 @@
 import type { ContactHeader } from '../engine/resumeRender';
+import { US_STATES } from './cities';
 
 /**
  * THE CONTACT BLOCK IS SERVER BUSINESS, not something a client gets to be the only source of.
@@ -178,11 +179,52 @@ export type ResumeContactStaleness = {
  * route touches nothing, exactly as it should - those are refused-or-ignored here, not silently
  * folded into "stale".
  */
+/** Everything but the digits, gone - so "+1 (213) 574-6270" reads the same as "+12135746270". A
+ * live form fill and a stored header routinely carry the same number in different punctuation, and
+ * that difference is not a move. */
+function normalizedPhone(value: string): string {
+  return value.replace(/\D+/g, '');
+}
+
+/**
+ * "Los Angeles, CA" and "Los Angeles, California" are the same fact typed two ways. The header's
+ * region half is assembled from address_state (resumeHeaderLocation), and nothing forces that
+ * column to hold one spelling over the other, so a packet built from one and compared against the
+ * other would read as stale for a formatting choice rather than a move.
+ *
+ * Only the region gets the state lookup - US_STATES (lib/cities.ts) is a code/name table, not a
+ * city alias list, and city names get the same trim-and-lowercase every other field gets rather
+ * than an invented equivalence this module has no table for.
+ */
+function normalizedLocation(value: string): string {
+  const commaIndex = value.lastIndexOf(',');
+  if (commaIndex < 0) return value.trim().toLowerCase();
+  const city = value.slice(0, commaIndex).trim().toLowerCase();
+  const region = value.slice(commaIndex + 1).trim().toLowerCase();
+  const state = US_STATES.find(([code, name]) => code.toLowerCase() === region || name.toLowerCase() === region);
+  return `${city}, ${state ? state[0].toLowerCase() : region}`;
+}
+
+/**
+ * Whether two values of the same mutable contact field describe the same fact, not necessarily the
+ * same bytes. Raw string comparison here is what made resumeContactStaleness read a phone number
+ * or a state re-typed in a different format as a move: the applicant had not gone anywhere, and the
+ * "your resume header is out of date" signal fired anyway.
+ */
+function contactFieldValuesMatch(field: MutableContactField, before: string, after: string): boolean {
+  if (before === after) return true;
+  if (field === 'phone') return normalizedPhone(before) === normalizedPhone(after);
+  if (field === 'location') return normalizedLocation(before) === normalizedLocation(after);
+  return before.trim().toLowerCase() === after.trim().toLowerCase();
+}
+
 export function resumeContactStaleness(
   stored: ContactHeader,
   profile: Record<string, unknown> | undefined,
 ): ResumeContactStaleness | null {
   const current = refreshResumeContactFromProfile(stored, profile, { fields: MUTABLE_CONTACT_FIELDS });
-  const drifted = MUTABLE_CONTACT_FIELDS.some((field) => (current[field] ?? '') !== (stored[field] ?? ''));
+  const drifted = MUTABLE_CONTACT_FIELDS.some(
+    (field) => !contactFieldValuesMatch(field, stored[field] ?? '', current[field] ?? ''),
+  );
   return drifted ? { stored, current } : null;
 }

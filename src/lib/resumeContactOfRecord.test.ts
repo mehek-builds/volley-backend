@@ -280,6 +280,81 @@ describe('resumeContactStaleness', () => {
     assert.ok(staleness);
     assert.equal(staleness.current.linkedin_url, 'https://www.linkedin.com/in/mehekmandal');
   });
+
+  /* REVIEW FINDING 4. The comparison used to be `!==` on raw strings, so a phone number or a state
+   * re-typed in a different format read as a move the applicant never made and fired the "your
+   * resume header is out of date" signal for nothing.
+   *
+   * PHONE: digits only. "+1 (213) 574-6270" and "+12135746270" are the same number - punctuation a
+   * form control or an OAuth import happens to add or drop is not a move. */
+  test('a phone number re-typed with different punctuation is not reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 (213) 574-6270',
+      location: 'Los Angeles, California',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      phone: '+12135746270',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* LOCATION: the region half, specifically. address_state is free text, and nothing forces it to
+   * hold "CA" over "California" - resumeHeaderLocation just prints whatever is on the row, so a
+   * packet built while it read one way and a profile now reading the other must not look like she
+   * moved. */
+  test('a state spelled out in full instead of abbreviated is not reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, CA',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      phone: '+1 213 574 6270',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* TEXT FIELDS: trim and case only - a link is not a place name, and this module has no
+   * equivalence table for one beyond what a person plausibly re-typed the same URL as. */
+  test('a link that only differs in case is not reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      linkedin_url: 'https://www.LinkedIn.com/in/mehekmandal',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* THE OTHER HALF OF THE SAME FIX: none of this normalization may swallow a REAL move. A
+   * genuinely different city and a genuinely different number - not merely re-formatted - must
+   * still trip the signal, exactly as 'a moved applicant is reported stale' above already pins,
+   * repeated here beside the cosmetic cases so the two live next to each other. */
+  test('a real move past mere formatting is still reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 (213) 574-6270',
+      location: 'Los Angeles, CA',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      phone: '+1 (415) 555-0199',
+      address_city: 'San Francisco',
+      address_state: 'California',
+    });
+    assert.ok(staleness);
+    assert.equal(staleness.current.phone, '+1 (415) 555-0199');
+    assert.equal(staleness.current.location, 'San Francisco, California');
+  });
 });
 
 describe('the location reaches the rendered resume', () => {
