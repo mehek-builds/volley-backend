@@ -357,6 +357,7 @@ import {
 } from '../lib/submissionAttemptLedger';
 import {
   ApplicantEmailRegenerationRequiredError,
+  ApplicantEmailRouteUnknownError,
   readPinnedApplicantEmail,
   resolveFrozenApplicantEmail,
 } from '../lib/applicationEmail';
@@ -11608,6 +11609,8 @@ export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
   regenerationRequired?: boolean;
+  /** The routing probe could not run. A retry, not a rebuild. See ApplicantEmailRouteUnknownError. */
+  routeCheckUnavailable?: boolean;
   /* The packet's own resume file is gone from storage, so no packet could be assembled at all. */
   packetDocumentExpired?: boolean;
   /* The applicant-facing sentence from a ManagedActionBudgetError, or null. A string rather than a
@@ -11636,14 +11639,14 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
+  const { captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
   const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
   /* preClickProvenByLedger joins the needs_attention list rather than falling to 'failed', and that
      is load-bearing rather than cosmetic. submitRequestDisposition treats an unclaimed
      needs_attention row as re-runnable and a 'failed' one as not, so a packet released by the
      ledger proof has to land here or the release buys nothing: the claim would come off and the
      packet would still refuse to send. */
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || destinationUnverifiedBeforeSend || uncertainAfterClaim || preClickProvenByLedger || providerSessionFailure
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || routeCheckUnavailable || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || destinationUnverifiedBeforeSend || uncertainAfterClaim || preClickProvenByLedger || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -11652,6 +11655,13 @@ export function submissionFailureOutcome(input: {
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
       : regenerationRequired
         ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
+      /* NAMED APART FROM THE ARM ABOVE, because the recovery is the opposite one. That sentence
+         tells her to rebuild the packet; this one would have her rebuild a packet that is fine, to
+         fix a network probe that a retry fixes. Nothing was sent either way - both stop before a
+         browser session opens - so the promise at the end is the same and only the instruction
+         differs. */
+      : routeCheckUnavailable
+        ? 'Litos could not reach the check that confirms where this employer’s reply would go, so it did not send. Nothing was sent to the employer. This one is worth trying again in a few minutes; the application itself is fine.'
       : packetDocumentExpired
         /* Ranked here for the same reason as its neighbours, and it is the earliest stop of the
            whole family: buildPacket throws before a browser session is opened, so nothing was
@@ -12297,6 +12307,14 @@ export function submissionFailureReview(
      rather than by decision. */
   const requiredFieldConfirmation = error instanceof ManagedRequiredFieldConfirmationError;
   const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
+  /* THE ROUTE COULD NOT BE CHECKED, which is a retry rather than a rebuild.
+   *
+   * Ranked beside regenerationRequired because it stops at the same place - resolveFrozenApplicantEmail
+   * runs before any browser session opens, so nothing was filled and nothing was sent - but it owes
+   * the opposite sentence. Until this existed a thrown deliverability probe was caught as `null` and
+   * reported as a regeneration hold, which told the applicant to rebuild a packet that was never
+   * broken and could not be fixed by rebuilding it. */
+  const routeCheckUnavailable = error instanceof ApplicantEmailRouteUnknownError;
   /* The third member of the same family as the two branches above, and it arrives with proof.
      buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
      is called at all, and it records submitActionAppended: false to say so. So the click provably
@@ -12376,7 +12394,7 @@ export function submissionFailureReview(
   const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
     packetDriftIssues: packetDrift?.issues,
     destinationUnverifiedBeforeSend: destinationUnverified,
     /* SUPPRESSED BY THE PROOF, and this is where defect 2 is actually fixed. uncertainAfterClaim's
