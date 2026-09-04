@@ -961,6 +961,16 @@ export function submissionAuthorityPublicationForPacket(input: {
     /* Both ids are optional on a repair projection, so an absent one is not a defect and only a
      * PRESENT malformed one refuses the card. Hence the undefined guard outside firstRejection
      * rather than an `absent` class inside it. */
+    /* packet_id IS SHAPE-CHECKED HERE TOO, and leaving it out was the one hole this whole design
+     * exists to close. The equality test above proves the id names THIS packet; it says nothing
+     * about whether the deployed client can parse it. Its parser holds projection.packet_id to
+     * versions 1-5 (submission-projection.ts uuidString) while this file's UUID and the board
+     * context check both accept 1-8, so a version-6-to-8 packet id passed every gate here and was
+     * refused only on the client - and a projection the client cannot parse makes
+     * boardSubmissionAuthorityCollectionIsComplete discard EVERY card on the board, not this one.
+     * That is the same blast radius that justifies refusing rather than widening, applied to the
+     * identifier the argument had skipped. Measured on this branch before the check existed: a
+     * packet id of a3578398-c4cc-714d-9a44-c7943d8effb9 published from both branches. */
     const rejectedIds = firstRejection('repair_required', [
       ...(projection.attemptId !== undefined
         ? [['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)] as const]
@@ -970,6 +980,9 @@ export function submissionAuthorityPublicationForPacket(input: {
           'projection.canonical_application_id',
           submissionAuthorityUuidShape(projection.canonicalApplicationId),
         ] as const]
+        : []),
+      ...(typeof projection.packetId === 'string'
+        ? [['projection.packet_id', submissionAuthorityUuidShape(projection.packetId)] as const]
         : []),
     ]);
     if (rejectedIds) return unavailable(reasonForRejection(rejectedIds), rejectedIds);
@@ -1037,6 +1050,11 @@ export function submissionAuthorityPublicationForPacket(input: {
   const rejectedConfirmed = firstRejection('confirmed', [
     ['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)],
     ['projection.canonical_application_id', submissionAuthorityUuidShape(projection.canonicalApplicationId)],
+    /* The equality above proved this id names THIS packet; it proved nothing about the client being
+     * able to parse it. See the matching note on the repair_required list: an unparseable
+     * projection discards the whole board, so the identifier that binds the card has to clear the
+     * client's own rule like every identifier beside it. */
+    ['projection.packet_id', submissionAuthorityUuidShape(projection.packetId)],
     [
       'projection.tracker_stage',
       CONFIRMED_TRACKER_STAGES.has(projection.trackerStage) ? 'ok' : 'outside_client_vocabulary',
