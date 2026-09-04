@@ -157,6 +157,8 @@ test('history rebinds a job-bound supported URL before preserving generic portal
       role: 'Software Engineer',
       description: DESCRIPTION,
       jdHash: monitoredDescriptionHash(DESCRIPTION),
+      isActive: true,
+      lastSeenAt: new Date('2026-09-01T12:00:00.000Z'),
     }]]),
   );
   assert.equal(repaired.portal_url, 'https://jobs.ashbyhq.com/acme/ashby-job-1/application');
