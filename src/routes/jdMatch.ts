@@ -848,7 +848,15 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
            * classified the packet, the field of the shape it would have emitted, and the class that
            * field failed (see SubmissionAuthorityRejectedShape). They are a classification, never
            * the value: an attempt id stays an internal identifier. Absent when the reason is
-           * already the whole story, and pino drops the keys then. */
+           * already the whole story, and pino drops the keys then.
+           *
+           * AND THE ANSWER, from the census route below, same account, same day: 162 of the 163 are
+           * ONE field - `projection.attempt_id`, on `unverified` 150 times, `repair_required` 11 and
+           * `confirmed` once, failing the version nibble 115 times and the variant nibble 47. Zero
+           * timestamps, zero receipts, zero cross-packet bindings, and zero on the `none` branch the
+           * whole thing was first read as. Those now report as `unpublishable_attempt_identity`
+           * rather than as the residual, so this line and the marker beside it say the same word for
+           * the same class and neither has to be re-derived from a count again. */
           const rejected = 'rejected' in publication ? publication.rejected : undefined;
           request.log.warn(
             {
@@ -907,6 +915,24 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
    * here, and the two Vercel projects are abandoned aliases with empty logs. So the largest single
    * send blocker on the account (163 of 200 cards refused on 2026-09-03, all under the one word
    * `unpublishable_projection`) stayed unfalsifiable from every surface she can actually reach.
+   *
+   * WHAT IT ANSWERED THE FIRST TIME IT WAS RUN, 2026-09-03, mehekmandal05@gmail.com, revision 1624,
+   * 200 classified and 163 refused:
+   *
+   *   unverified       projection.attempt_id  uuid_version_unsupported  104
+   *   unverified       projection.attempt_id  uuid_variant_unsupported   46
+   *   repair_required  projection.attempt_id  uuid_version_unsupported   10
+   *   boundary_authorized                                                 1
+   *   confirmed        projection.attempt_id  uuid_version_unsupported    1
+   *   repair_required  projection.attempt_id  uuid_variant_unsupported    1
+   *
+   * One field, three branches, and none of the five other classes the residual word covered. Four
+   * sessions of sampling had put the cause on the `none` branch's `retry_safety.attemptId`, which
+   * this table shows has ZERO members. Two repairs came straight off it (see
+   * lib/submissionAuthorityEnvelope.ts): the retry-verdict identifier rule was narrower than the
+   * client's own and now is not, and the projection-identifier class - a correct refusal that must
+   * stay one - was lifted out of the residual into `unpublishable_attempt_identity` so a marker
+   * names it. Re-run this route to measure either repair; it is the only surface that can.
    *
    * WHY IT CANNOT QUARANTINE A CARD. It publishes no card. The board's payload, its collection
    * fields, its envelopes and its `submission_authority_unavailable` markers are not touched by a
