@@ -402,6 +402,76 @@ test('refused when the row itself says an employer may already hold this packet'
   assert.equal(row.resume_object_key, objectKey);
 });
 
+/* THE STATE THE MEASURED DEFECT ACTUALLY SITS IN. Pony.ai, Belvedere Trading and the rest (see the
+ * route's own comment) are filled and unclaimed, waiting on her final look - reviewAnswerSaveDisposition
+ * refuses that status unconditionally, which is why this route now asks resumeContactRefreshDisposition
+ * instead. Proves both halves finding 1 asked for: the refresh actually lands (200, a voided
+ * acknowledgement) and the review status leaves the approval screen the same way PATCH
+ * /applications/:id/resume leaves it from every status it starts an edit from. */
+test('an unclaimed final-approval packet refreshes: acknowledgement voided, status leaves final approval', async () => {
+  const { id, objectKey: oldKey } = await applicationWith(STALE_CONTACT, baseReview({
+    status: 'ready_for_final_approval',
+  }));
+
+  const auditInput: CreatePacketAuditInput = {
+    ownerId: userId,
+    applicationId: id,
+    jdText: JD_TEXT,
+    spec: RESUME_SPEC,
+    jobContext: { company: 'Northwind Labs', role: 'Software Engineer' },
+    questions: [],
+    applicantSnapshot: { profile: { email: STALE_CONTACT.email } },
+    resumeEmail: STALE_CONTACT.email,
+    applicantEmail: 'app-alias@apply.trylitos.test',
+    employerDelivery: {
+      version: 'employer_delivery_v1',
+      mode: 'browser',
+      sha256: '1'.repeat(64),
+    },
+    pdfObjectKey: oldKey,
+    pdfBytes: Buffer.from('%PDF-1.7 the exact bytes she reviewed and acknowledged'),
+    editedTerms: [],
+    clauses: [{ text: JD_TEXT, start: 0, end: JD_TEXT.length, verdict: 'unscoreable' }],
+    rejected: [],
+    degraded: false,
+    terms: { covered: [], missing: [], edited: [] },
+  };
+  const audit = createPacketAudit(auditInput);
+  assert.equal(verifyCurrentPacketAudit({ ...auditInput, audit }).valid, true, 'baseline audit must be valid before any refresh');
+
+  const response = await refreshContact(id);
+  assert.equal(response.statusCode, 200, response.body);
+  const body = response.json();
+  assert.deepEqual(body.contact.before, STALE_CONTACT);
+  assert.deepEqual(body.contact.after, REFRESHED_CONTACT);
+  // No questions on this fixture, so PATCH /applications/:id/resume's own status move
+  // (questions.length > 0 ? 'questions_ready' : 'ready_to_submit') lands here.
+  assert.equal(body.review.status, 'ready_to_submit');
+
+  const row = await storedRow(id);
+  assert.notEqual(row.resume_object_key, oldKey);
+  const spec = row.spec as Record<string, unknown>;
+  assert.equal((spec._review as { status: string }).status, 'ready_to_submit');
+
+  const after = verifyCurrentPacketAudit({ ...auditInput, pdfObjectKey: row.resume_object_key, audit });
+  assert.equal(after.valid, false);
+  assert.equal(after.reason, 'packet_stale');
+});
+
+test('a claimed final-approval packet still refuses - the run holding it may already have shown it to the employer', async () => {
+  const { id, objectKey } = await applicationWith(STALE_CONTACT, baseReview({
+    status: 'ready_for_final_approval',
+    submission_claimed_at: '2026-08-20T10:00:00.000Z',
+  }));
+
+  const response = await refreshContact(id);
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'CONTACT_REFRESH_NOT_AVAILABLE');
+
+  const row = await storedRow(id);
+  assert.equal(row.resume_object_key, objectKey, 'nothing was written while the packet is claimed');
+});
+
 test('refused when the packet\'s resume email is no longer the current one', async () => {
   const staleEmailContact = { ...STALE_CONTACT, email: 'an-old-address@example.test' };
   const { id, objectKey } = await applicationWith(staleEmailContact, baseReview());

@@ -65,6 +65,7 @@ import {
   blankRequiredQuestionLabels,
   preparedRunCanRestart,
   preparedRunHandoffExpired,
+  resumeContactRefreshDisposition,
   resumeEditDisposition,
   reviewAnswerSaveDisposition,
   submissionQuestionGate,
@@ -2823,10 +2824,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * run holds this row, or the row's own evidence says an employer may already have this
        * packet. Neither state is one this route may write underneath - see
        * reviewAnswerSaveDisposition for exactly what it refuses and why, including
-       * ready_for_final_approval (the picture she is previewing must not change under her) and
        * employerMayHoldApplication (an unclaimed row can still carry evidence the employer already
-       * has it). */
-      if (reviewAnswerSaveDisposition(review) !== 'save') {
+       * has it).
+       *
+       * NOT reviewAnswerSaveDisposition itself, though: its ready_for_final_approval refusal is
+       * unconditional, which is right for an ANSWER save (rewriting an answer underneath the
+       * preview she is looking at changes what that preview means) and wrong here - a header
+       * refresh leaves every answer untouched, and the packet-audit path already voids her
+       * acknowledgement the moment the PDF's bytes move (see this route's own comment above,
+       * verifyCurrentPacketAudit -> packet_stale). resumeContactRefreshDisposition opens exactly
+       * that one status, exactly the way the sibling PATCH /applications/:id/resume route already
+       * does via resumeEditDisposition, while keeping every other reviewAnswerSaveDisposition
+       * refusal - claimed or evidence-bearing alike. */
+      if (resumeContactRefreshDisposition(review) !== 'save') {
         return reply.status(409).send({
           error: 'This application’s packet cannot be refreshed from its current submission state',
           code: 'CONTACT_REFRESH_NOT_AVAILABLE',
@@ -2886,10 +2896,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
 
       const now = new Date().toISOString();
+      /* A refresh that left status at ready_for_final_approval would leave the applicant approving
+       * a preview of a packet whose PDF just changed underneath her - verifyCurrentPacketAudit
+       * already answers packet_stale for the swapped object key (see this route's comment above),
+       * but the STATUS also has to move off the approval screen, the same move PATCH
+       * /applications/:id/resume makes for every edit it starts from, or the dashboard is left
+       * offering to approve and send a picture nobody has reviewed. Every other status this route
+       * reaches keeps its status exactly as it was: a phone, a residence or a link is not a
+       * question answer and does not invalidate one. */
+      const statusAfterRefresh = review.status === 'ready_for_final_approval'
+        ? (review.questions.length > 0 ? 'questions_ready' as const : 'ready_to_submit' as const)
+        : review.status;
       // Through settleStall like every other _review writer in this file - a no-op for every status
       // this route reaches, since none of them are needs_attention with an open stall, but the rule
       // is "every writer", not "every writer that currently needs it".
-      const finalReview = settleStall({ ...review, updated_at: now });
+      const finalReview = settleStall({ ...review, status: statusAfterRefresh, updated_at: now });
       const updatedSpec = {
         ...stored,
         _contact: newContact,
