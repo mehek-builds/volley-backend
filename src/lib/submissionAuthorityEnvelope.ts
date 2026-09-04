@@ -86,12 +86,19 @@ const PROJECTION_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?
  * (domain/board-submission-authority.ts:56) reject the WHOLE payload, while a card with no envelope
  * is merely absent. Only the retry-safety rule moves, and it moves exactly onto the client's. */
 const UUID_LAYOUT = /^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])[0-9a-f]{3}-([0-9a-f])[0-9a-f]{3}-[0-9a-f]{12}$/i;
-/** `submission-projection.ts:12`: the rule for every identifier inside a published projection. */
+/** `submission-projection.ts:12`: the client's rule for a ROW id inside a published projection. */
 const UUID_VERSION = /^[1-5]$/;
-/** `submission-state.ts:74`: the rule for every identifier inside a published retry verdict. */
-const RETRY_SAFETY_UUID_VERSION = /^[1-8]$/;
-/** Shared by both client regexes, so a refusal on the variant nibble is correct on either field. */
+/** The variant rule that goes with it. Row ids are gen_random_uuid(), so both cost them nothing. */
 const UUID_VARIANT = /^[89ab]$/i;
+/* THE LEDGER'S OWN IDENTIFIERS ARE NOT RFC-4122, and the deployed client no longer pretends they
+ * are. `attempt_id` and `leaseId` are minted into Postgres `uuid` columns, which take any 128 bits,
+ * and appendSubmissionAttemptEvent never version-checks them - the histogram above is the proof, and
+ * an RFC rule on them accepts a fraction of what the system mints. The dashboard now validates these
+ * by LAYOUT (submission-projection.ts LEDGER_ID_PATTERN, submission-state.ts SUBMISSION_UUID), so
+ * this file moves exactly onto that rule, in the one direction it is allowed to move: onto the
+ * client's, never past it. Row ids - `canonical_application_id`, `packet_id` - keep UUID_VERSION,
+ * because the client still holds THEM to it. */
+const LEDGER_ID_NIBBLE = /^[0-9a-f]$/i;
 
 /**
  * WHY ONE FIELD WAS REFUSED, as a class rather than as its value.
@@ -241,10 +248,11 @@ export type SubmissionAuthorityRejection = {
  * How this value fails the client's PROJECTION identifier contract, or `ok`.
  *
  * `ok` is true exactly when `projectionUuid` accepts the value, because that predicate is defined
- * in terms of this function. This is the narrower of the client's two rules (versions 1-5) and
- * belongs only to identifiers published INSIDE a projection: `attempt_id`,
- * `canonical_application_id`, `packet_id`. A retry verdict's identifiers are held to
- * `submissionAuthorityRetrySafetyUuidShape` instead.
+ * in terms of this function. This is the client's ROW-identifier rule (versions 1-5, variant 8-b)
+ * and belongs only to `canonical_application_id` and `packet_id`, which are table primary keys
+ * minted by `gen_random_uuid()`. The identifiers the LEDGER mints - `projection.attempt_id` and a
+ * retry verdict's `attemptId`/`leaseId` - are held to `submissionAuthorityLedgerIdShape` instead,
+ * because the ledger never promised an RFC version and the client no longer asks it for one.
  */
 export function submissionAuthorityUuidShape(value: unknown): FieldShape {
   return uuidShape(value, UUID_VERSION);
@@ -253,31 +261,45 @@ export function submissionAuthorityUuidShape(value: unknown): FieldShape {
 /**
  * How this value fails the client's RETRY-SAFETY identifier contract, or `ok`.
  *
- * Identical to `submissionAuthorityUuidShape` except on the version nibble, where the deployed
- * client accepts 1-8 rather than 1-5 (submission-state.ts:74 against submission-projection.ts:12).
- * Two functions rather than one parameterised export because the CALLER has to choose, per field,
- * which of the client's two rules that field is actually held to - and a caller that has to name
- * the rule cannot silently inherit the wrong one, which is exactly how `retry_safety.attemptId`
- * came to be judged by the projection's rule.
+ * A retry verdict carries only ledger-minted identifiers, so this is now exactly
+ * `submissionAuthorityLedgerIdShape`. It stays a named export because the CALLER has to choose, per
+ * field, which of the client's two rules that field is held to, and a caller that has to name the
+ * rule cannot silently inherit the wrong one - which is exactly how `retry_safety.attemptId` came
+ * to be judged by the projection's rule in the first place.
  *
- * The gap is not theoretical. The identifiers this system mints are opaque 128 bits with uniformly
- * distributed version nibbles (see UUID_LAYOUT above for the live histogram), so versions 6, 7 and
- * 8 are 3/16 of every attempt id - and `safe_not_sent` is the ONLY verdict that can authorise a
- * first employer send, so every one of those refused a resolved packet its envelope for a rule the
- * client does not apply to that field.
+ * The gap this closed was never theoretical: `safe_not_sent` is the ONLY verdict that can authorise
+ * a first employer send, so every identifier refused here for its nibbles cost a provably-unsent
+ * packet its envelope.
  */
 export function submissionAuthorityRetrySafetyUuidShape(value: unknown): FieldShape {
-  return uuidShape(value, RETRY_SAFETY_UUID_VERSION);
+  return submissionAuthorityLedgerIdShape(value);
 }
 
-function uuidShape(value: unknown, version: RegExp): FieldShape {
+/**
+ * How this value fails the client's LEDGER IDENTIFIER contract, or `ok`.
+ *
+ * Layout only: any version nibble, any variant nibble. This is the rule for the identifiers the
+ * submission attempt ledger mints - `projection.attempt_id`, `retry_safety.attemptId`,
+ * `retry_safety.leaseId` - and it is the deployed client's own rule for them. See LEDGER_ID_NIBBLE.
+ *
+ * It is still a real check: a value that is not 128 bits in UUID layout is still refused, so a
+ * truncated, padded or non-hex identifier cannot reach the wire. What it no longer does is refuse a
+ * well-formed ledger id for a version the ledger never promised to stamp - the class that was 162
+ * of this account's 163 refusals, and that reached the applicant as a red "verify the exact prior
+ * submission evidence" banner with no control able to clear it.
+ */
+export function submissionAuthorityLedgerIdShape(value: unknown): FieldShape {
+  return uuidShape(value, LEDGER_ID_NIBBLE, LEDGER_ID_NIBBLE);
+}
+
+function uuidShape(value: unknown, version: RegExp, variant: RegExp = UUID_VARIANT): FieldShape {
   if (value === undefined || value === null) return 'absent';
   if (typeof value !== 'string') return 'not_a_string';
   if (!value.trim()) return 'blank';
   const layout = UUID_LAYOUT.exec(value);
   if (!layout) return 'uuid_malformed';
   if (!version.test(layout[1]!)) return 'uuid_version_unsupported';
-  if (!UUID_VARIANT.test(layout[2]!)) return 'uuid_variant_unsupported';
+  if (!variant.test(layout[2]!)) return 'uuid_variant_unsupported';
   return 'ok';
 }
 
@@ -834,7 +856,7 @@ export function submissionAuthorityRefusalTallies(
  * worse card, it is a worse BOARD, because boardSubmissionAuthorityCollectionIsComplete rejects the
  * whole payload for one unparseable envelope while skipping every card that carries none. So no
  * check here is ever widened past the client's own rule to unblock a packet - only onto it, where
- * this file had been narrower than the client for a field (see RETRY_SAFETY_UUID_VERSION).
+ * this file had been narrower than the client for a field (see submissionAuthorityLedgerIdShape).
  */
 export function submissionAuthorityPublicationForPacket(input: {
   packetId: string;
@@ -913,7 +935,7 @@ export function submissionAuthorityPublicationForPacket(input: {
   if (projection.state === 'unverified') {
     if (projection.reason === 'boundary_authorized') return unavailable('boundary_authorized');
     const rejected = firstRejection('unverified', [
-      ['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)],
+      ['projection.attempt_id', submissionAuthorityLedgerIdShape(projection.attemptId)],
       ['projection.observed_at', submissionAuthorityStrictTimestampShape(projection.observedAt)],
     ]);
     /* THE LIVE CAUSE, 2026-09-03. 150 of this account's 163 refusals land on this exact line, all of
@@ -973,7 +995,7 @@ export function submissionAuthorityPublicationForPacket(input: {
      * packet id of a3578398-c4cc-714d-9a44-c7943d8effb9 published from both branches. */
     const rejectedIds = firstRejection('repair_required', [
       ...(projection.attemptId !== undefined
-        ? [['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)] as const]
+        ? [['projection.attempt_id', submissionAuthorityLedgerIdShape(projection.attemptId)] as const]
         : []),
       ...(projection.canonicalApplicationId !== undefined
         ? [[
@@ -1048,7 +1070,7 @@ export function submissionAuthorityPublicationForPacket(input: {
    * `captured_at` still cannot fire on an unparseable `submitted_at`, because Date.parse gives NaN
    * there and NaN is greater than nothing. */
   const rejectedConfirmed = firstRejection('confirmed', [
-    ['projection.attempt_id', submissionAuthorityUuidShape(projection.attemptId)],
+    ['projection.attempt_id', submissionAuthorityLedgerIdShape(projection.attemptId)],
     ['projection.canonical_application_id', submissionAuthorityUuidShape(projection.canonicalApplicationId)],
     /* The equality above proved this id names THIS packet; it proved nothing about the client being
      * able to parse it. See the matching note on the repair_required list: an unparseable

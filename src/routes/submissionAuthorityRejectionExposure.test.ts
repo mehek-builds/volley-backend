@@ -45,7 +45,10 @@ const CAPTURED_AT = '2026-08-28T08:02:00.000Z';
 /* SENTINELS, not plausible data. Every one of these is a value a refusal is caused BY, so if any of
  * them can be found in the payload the route publishes, the classification leaked the thing it
  * exists to withhold. They are shaped to survive JSON.stringify unchanged and to be greppable. */
-const SENTINEL_ATTEMPT = '7ffffff1-5eed-7eed-0eed-5eed5eed5eed';
+/* A LEDGER id is validated by layout now, so a sentinel that refuses has to fail the LAYOUT - its
+ * nibbles no longer refuse anything, because the ledger never promised an RFC version or variant.
+ * Still greppable, still survives JSON.stringify unchanged. */
+const SENTINEL_ATTEMPT = 'sentinel5eed-attempt-5eed5eed5eed';
 const SENTINEL_CANONICAL = '7ffffff2-5eed-7eed-0eed-5eed5eed5eed';
 const SENTINEL_TIMESTAMP = '2026-08-28T08:02:00.7654321Z';
 const SENTINEL_URL = 'http://leaked.example.invalid/receipt-7ffffff3';
@@ -130,11 +133,11 @@ const REFUSAL_SITES: ReadonlyArray<{
   rejected: { branch: string; field: string; shape: string };
 }> = [
   {
-    /* The sentinel's version nibble is 7 and its variant nibble is 0. Version 7 is inside the
-     * RETRY-SAFETY contract the client actually applies to this field (submission-state.ts:74
-     * accepts 1-8), so what refuses it here is the variant, which both of the client's rules share.
-     * That is the whole point of the split: the refusal that survives is the one the client would
-     * also make, and the one that no longer happens is the one only this file was making. */
+    /* What refuses this now is the LAYOUT, which is the only rule the client still applies to a
+     * ledger-minted identifier. That is the point the split was always making, carried to its end:
+     * the refusal that survives is the one the client would also make, and the nibble refusals -
+     * which only this file was making, and which cost 162 of one account's 163 cards their
+     * envelope - no longer happen at all. */
     site: 'none: a safe_not_sent whose attempt id the client would quarantine',
     projection: { state: 'none' },
     retrySafety: {
@@ -144,20 +147,19 @@ const REFUSAL_SITES: ReadonlyArray<{
       resolvedAt: CAPTURED_AT,
     },
     reason: 'unpublishable_attempt_identity',
-    rejected: { branch: 'none', field: 'retry_safety.attemptId', shape: 'uuid_variant_unsupported' },
+    rejected: { branch: 'none', field: 'retry_safety.attemptId', shape: 'uuid_malformed' },
   },
   {
-    /* THE LIVE CAUSE. 150 of the 163 refusals measured on 2026-09-03 are this site, and this exact
-     * field, on a packet whose only defect is that the ledger id of its held attempt is not shaped
-     * like an RFC-4122 identifier. It is a correct refusal - the projection parser
-     * (submission-projection.ts:12) holds `projection.attempt_id` to versions 1-5 and an envelope
-     * emitted past it would fail the board's whole collection check - so what this pins is that it
-     * reports as its own class rather than as the residual it sat inside for four sessions. */
+    /* THE SITE THAT WAS THE LIVE CAUSE. 150 of the 163 refusals measured on 2026-09-03 were here,
+     * on this exact field, on packets whose only defect was that a ledger id is not shaped like an
+     * RFC-4122 identifier. That refusal is GONE: the client now validates the field by layout, this
+     * file moved onto that rule, and those packets publish. What remains here - and what this site
+     * now pins - is the refusal that is still real: an identifier that is not 128 bits at all. */
     site: 'unverified: a held attempt whose identifier the client cannot bind',
     projection: { state: 'unverified', attemptId: SENTINEL_ATTEMPT, observedAt: CAPTURED_AT, reason: 'pressed' },
     retrySafety: { kind: 'blocked_unverified', attemptId: SENTINEL_ATTEMPT, at: CAPTURED_AT, reason: 'pressed' },
     reason: 'unpublishable_attempt_identity',
-    rejected: { branch: 'unverified', field: 'projection.attempt_id', shape: 'uuid_version_unsupported' },
+    rejected: { branch: 'unverified', field: 'projection.attempt_id', shape: 'uuid_malformed' },
   },
   {
     site: 'unverified: a held attempt whose observation is not a strict timestamp',
@@ -339,7 +341,7 @@ describe('submissionAuthorityRefusalTallies', () => {
       reason: 'unpublishable_attempt_identity',
       branch: 'none',
       field: 'retry_safety.attemptId',
-      shape: 'uuid_variant_unsupported',
+      shape: 'uuid_malformed',
       packets: 3,
     });
     for (const tally of tallies.slice(1)) assert.equal(tally.packets, 1);
