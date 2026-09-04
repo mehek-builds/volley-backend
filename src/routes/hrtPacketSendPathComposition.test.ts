@@ -25,9 +25,11 @@
  *   sponsorship   the resolver DECLINES the label (three countries), so there is no profile value
  *                 to contradict and her own current-round review settles it. CLEARED here.
  *   gender        the resolver ANSWERS "Female" from her eeo_prefs and the packet holds "Woman",
- *                 which is the same declaration in the control's own vocabulary. The value branch
- *                 compares bytes and still refuses. NOT cleared here, and deliberately so: this
- *                 change must not touch the branch that cross-checks against her profile.
+ *                 which is the same declaration in the control's own vocabulary. CLEARED, by the
+ *                 value branch reading the two spellings as one statement rather than as two
+ *                 strings. The cross-check against her profile is unchanged and still first: what
+ *                 changed is that it compares meanings under resolution's own option vocabulary
+ *                 instead of bytes.
  */
 
 import assert from 'node:assert/strict';
@@ -190,10 +192,30 @@ test('the head form forwards the review round the list form was given', () => {
   );
 });
 
-test('the gender question is NOT cleared by this change, and that is the honest state of it', () => {
-  /* The resolver answers this label from her profile, so it takes the value branch, which compares
-   * bytes and stays first and unconditional. "Woman" is her profile's "Female" written in the
-   * control's own vocabulary, and reading those two as the same declaration is a SEPARATE change to
-   * a SEPARATE branch. Pinned here so nobody reads this PR as clearing packet 4a79eec1 whole. */
-  assert.deepEqual(stillRefusedAfterTheSendPath(packet([SPONSORSHIP, GENDER])), [GENDER_LABEL]);
+test('the whole packet clears, with no press from her on either question', () => {
+  /* THE ACCEPTANCE TEST FOR PACKET 4a79eec1, over the composed path rather than over the predicate.
+   * Two questions, two different reasons they were refused, and neither of them her fault:
+   *
+   *   sponsorship  the resolver declines a three-country label, and her own current-round answer
+   *                settles it. That is the declined branch, shipped separately.
+   *   gender       the resolver answers "Female" and the control offers "Woman". That is this
+   *                change, in the value branch.
+   *
+   * Both must be empty here or the packet is still unsendable, whichever half is fixed. */
+  assert.deepEqual(stillRefusedAfterTheSendPath(packet([SPONSORSHIP, GENDER])), []);
+});
+
+test('and the gender answer that stopped needing her is the one the control can hold', () => {
+  /* A cleared gate beside an answer the fixpoint blanked or respelled would be worse than the
+   * refusal: reopenUnfitClosedChoiceQuestions blanks an answer no option holds, and "Female" is on
+   * no option of this control. Asserted after the fixpoint, not before it. */
+  const review = packet([GENDER]);
+  const merged = resolveSubmittedApplicationAnswers({
+    current: review, submitted: [asSent(GENDER)], profile: HER_PROFILE,
+  });
+  const settled = resolvePacketAuditQuestionFixpoint(
+    { ...review, questions: merged.questions, questions_reviewed_at: merged.questionsReviewedAt },
+    HER_PROFILE, review.jd_text, undefined, undefined, new Date(),
+  );
+  assert.equal(settled[0].answer, 'Woman', 'the employer receives the option it offered');
 });

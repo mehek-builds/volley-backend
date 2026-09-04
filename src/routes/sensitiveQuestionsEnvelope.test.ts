@@ -19,9 +19,9 @@
  *   sponsorship   the resolver DECLINES the label, so her own current-round answer settles it and
  *                 it leaves the list. This is the fix.
  *   gender        the resolver ANSWERS "Female" from her eeo_prefs while the packet holds the
- *                 control's own "Woman". That is the value branch, which cross-checks against her
- *                 profile and stays first and unconditional, so it is still listed. Reading those
- *                 two spellings as one declaration is a separate change to a separate branch.
+ *                 control's own "Woman". The value branch now reads those two as one declaration,
+ *                 under resolution's own option vocabulary, so it leaves the list too. The list is
+ *                 empty and nothing on this packet is waiting on a press from her.
  */
 
 import assert from 'node:assert/strict';
@@ -172,8 +172,9 @@ before(async () => {
    *
    * application_profile.eeo_prefs, NOT profiles.parsed_json. loadApplicationProfileLike takes
    * eeo_prefs off the application_profile row and nowhere else, so a fixture that writes it into
-   * parsed_json produces a profile with no stated gender at all - and the gender question below is
-   * then listed for the wrong reason, which is a test that passes while proving nothing. */
+   * parsed_json produces a profile with no stated gender at all - and the gate then refuses for the
+   * right reason about the wrong record, which is a test that passes while proving nothing. This row
+   * is the whole provenance signal: nothing on the packet and nothing in a request can move it. */
   await db.insert(schema.application_profile).values({
     user_id: userId,
     eeo_prefs: { gender: 'Female', veteran_status: 'No', disability_status: 'No' },
@@ -210,11 +211,11 @@ after(async () => {
   }
 });
 
-test('the declaration the resolver declines leaves the list once she has answered it herself', () => {
+test('nothing on this packet is waiting on a press from her', () => {
   return applicationWith(filledPacket([SPONSORSHIP_QUESTION, GENDER_QUESTION]))
     .then(async (id) => {
-      assert.deepEqual(await needsHer(id), [GENDER_LABEL],
-        'the sponsorship label is gone; the one her profile answers in another spelling is not');
+      assert.deepEqual(await needsHer(id), [],
+        'neither question is waiting on her: one she answered herself, one her profile answers');
     });
 });
 

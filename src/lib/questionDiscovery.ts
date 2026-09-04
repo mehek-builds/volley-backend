@@ -2295,6 +2295,64 @@ export function applicantConfirmedSensitiveAnswer(question: {
   return typeof question.answer_confirmed_of === 'string' && question.answer_confirmed_of === label;
 }
 
+/**
+ * DOES THIS SELF-IDENTIFICATION ANSWER STATE WHAT HER STORED PROFILE STATES, IN THE EMPLOYER'S WORDS?
+ *
+ * ONE RULE, TWO READERS, AND THE DRIFT BETWEEN THEM IS THE DEFECT THIS EXTRACTION FIXES.
+ * refreshKnownQuestionAnswers has kept a demographic answer written in the control's vocabulary
+ * since the Verkada hispanic fix: her profile says "Female", the employer's control offers
+ * "Woman / Man / Non-binary", resolution chose one for the other, and the refresh keeps the
+ * employer's spelling rather than overwriting it with hers. The R-004 send gate was never told. It
+ * asked ONE question of the value branch - does the resolver compute this same string, byte for
+ * byte - and a respelled answer never does, by construction.
+ *
+ * So the two readers disagreed about the same record: the refresh said "this is her profile answer,
+ * keep it" and the gate said "nobody has vouched for this, refuse the send". Measured on packet
+ * 4a79eec1 (Hudson River Trading, greenhouse), where "what is your gender?" was reported as needing
+ * her confirmation for an answer that came from her profile and nowhere else, on a control her
+ * profile spelling is not even offered by. Extracting the rule is what stops that recurring: adding
+ * a third way for an answer to state her profile value now changes both readers or neither.
+ *
+ * THE PRINCIPLE, which is narrower than "the machine may fill in demographics". She supplied her
+ * profile deliberately, once, and that IS her declaration; re-asking her per application is the
+ * product distrusting a statement she already made. What must still refuse is the machine INVENTING
+ * a legal answer her profile does not cover, which is what R-004 is the logged incident for.
+ *
+ * THE DISCRIMINATOR IS RECOMPUTED, NEVER ASSERTED, and that is the whole of why this is safe.
+ * `resolverValue` is what resolveKnownAnswer answers for this label FROM HER STORED PROFILE ROW on
+ * this very call. Nothing on the question record, and nothing in any request body, can move it. So
+ * this is not "a record claims it came from her profile"; it is "her profile, read now, says this".
+ * Correct her eeo_prefs and every answer that no longer states the new value stops passing on the
+ * next read, with no record to go stale and no cache to invalidate.
+ *
+ * selfIdentificationAnswerStates IS THE EXACT CONVERSE OF chooseEeoOption, which is what makes it
+ * the right test rather than a loosening. An answer it accepts is one resolution ITSELF would have
+ * chosen from a list offering only that answer, for the profile value in hand: her own spelling, the
+ * one curated equivalent (Female / Woman), the federal race category that wholly contains her stated
+ * subgroup, or the single option a stored yes/no polarity affirms or denies. And it is a refusal for
+ * a refusal and a claim for a claim, never one for the other, so a machine that put "Woman" on a
+ * profile holding no gender is still refused: an unset preference resolves to
+ * "Decline to self-identify", and a decline does not state a claim.
+ *
+ * DELIBERATELY NOT KEYED ON answer_option_source OR answer_override_of, tempting as both are. Those
+ * record that a snap or an override happened and are written only by resolution, the fill and the
+ * merge, so they look like the provenance marker this rule wants. They are the wrong ones. Each is
+ * a claim about the PAST, so it needs derivationIsCurrent beside it to say the profile has not moved
+ * since, which is a second thing to keep honest when comparing against the profile as it is now
+ * needs none; and a record written by a path that does not snap carries neither, so keying on them
+ * would make the gate's verdict depend on which code wrote a row rather than on what her profile
+ * says. The refresh keeps reading them for its own decision, which is a different one: whether to
+ * OVERWRITE the employer's spelling with hers.
+ */
+export function selfIdentificationAnswerStatesProfileValue(
+  label: string,
+  resolverValue: string,
+  answer: string,
+): boolean {
+  if (!label || !answer.trim() || !EEO_QUESTION.test(label)) return false;
+  return selfIdentificationAnswerStates(label, resolverValue, answer);
+}
+
 export function sensitiveQuestionRequiresAttention(
   label: string,
   answer: string,
@@ -2340,7 +2398,15 @@ export function sensitiveQuestionRequiresAttention(
    * every label the resolver answers. It stays first, and it stays unconditional.
    */
   if (known && 'value' in known) {
-    return comparableAnswer(known.value) !== comparableAnswer(answer);
+    if (comparableAnswer(known.value) === comparableAnswer(answer)) return false;
+    /* THE SAME DECLARATION, IN THE EMPLOYER'S OWN WORDS. Byte equality above is the strict form of
+     * "her profile says this" and it is not the only form: resolution writes her value in the
+     * control's own vocabulary, so what reaches the employer is routinely the employer's spelling of
+     * her own statement, on a list her spelling is not offered by. This is NOT the escape hatch the
+     * declined branch below carries and does not read a review stamp, a confirmation or any other
+     * record field: it compares her profile, read on this call, against the answer. See the
+     * predicate for why an answer it accepts is one resolution itself would have chosen. */
+    return !selfIdentificationAnswerStatesProfileValue(label, known.value, answer);
   }
   /* THE RESOLVER DECLINED, AND UNTIL NOW THAT MADE THE QUESTION UNSENDABLE BY ANY ANSWER.
    *
@@ -2808,12 +2874,20 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
        * control still hits. Byte inequality keeps the branch inert only when the resolver really did
        * recompute the answer to itself, and that row falls through to the branch at the bottom which
        * already returns it, provenance and all. */
+      /* THE VOCABULARY HALF NOW LIVES IN selfIdentificationAnswerStatesProfileValue, unchanged, and
+       * so do the EEO subject test and the non-blank answer beside it: this conjunction is exactly
+       * what it was. It moved because the R-004 send gate has to ask the same thing of the same
+       * record, and the two answering it differently is the shipped defect - this branch kept a
+       * respelled demographic answer while the gate reported it as needing her confirmation.
+       *
+       * THE OTHER TWO CONDITIONS STAY HERE AND ARE NOT THE GATE'S. The byte inequality is about THIS
+       * branch being inert when the resolver recomputed the answer to itself. derivationIsCurrent is
+       * about whether to OVERWRITE the employer's spelling with hers, which needs a claim about the
+       * past; the gate compares against the profile as it is now and needs none. */
       if (label
-        && question.answer.trim()
-        && EEO_QUESTION.test(label)
         && question.answer.trim() !== known.value.trim()
         && derivationIsCurrent(derivedFrom, known.value)
-        && selfIdentificationAnswerStates(label, known.value, question.answer)) return question;
+        && selfIdentificationAnswerStatesProfileValue(label, known.value, question.answer)) return question;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
       /* 'covers' keeps the reviewed range because the profile still sits inside it, exactly as
        * the boolean rule always did and for any parseable two-part range. 'incomparable' keeps it
