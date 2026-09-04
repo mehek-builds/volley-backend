@@ -1426,8 +1426,8 @@ test('blocker reasons stay in sync with the managed runner', { skip: RUNNER_SOUR
 /* A PASS THAT BOUND NOTHING, AND WHY THE CONTRACT HAD TO LEARN TO READ ONE.
  *
  * The proof shape above asks every pass to name the form it bound and the control it pressed. Two
- * of the runner's emissions are built at points where neither exists — managed-browser.js:15237,
- * where the caller-bound application form was unusable, and :15300, where the security-code
+ * of the runner's emissions are built at points where neither exists — managed-browser.js:15390,
+ * where the caller-bound application form was unusable, and :15458, where the security-code
  * controls did not retain the exact code. Both refuse BEFORE any submit handle is resolved, and
  * both say so by carrying null fingerprints.
  *
@@ -1445,7 +1445,7 @@ test('blocker reasons stay in sync with the managed runner', { skip: RUNNER_SOUR
 const UNBOUND_SCOPE_MESSAGE = 'The caller-bound application form was unavailable at submit time';
 const UNBOUND_CODE_MESSAGE = 'The security code controls did not retain the exact caller-supplied code';
 
-/** managed-browser.js:15237 — nothing was bound, and the pass says so in every field. */
+/** managed-browser.js:15390 — nothing was bound, and the pass says so in every field. */
 function applicationScopeFailurePass(blockerReason: string) {
   return {
     submitKind: 'application' as const,
@@ -1467,7 +1467,7 @@ function applicationScopeFailurePass(blockerReason: string) {
   };
 }
 
-/** managed-browser.js:15300 — a form was located and never identified, and no control was matched. */
+/** managed-browser.js:15458 — a form was located and never identified, and no control was matched. */
 function securityCodeUnretainedPass() {
   return {
     submitKind: 'verification' as const,
@@ -1603,12 +1603,28 @@ test('a post-press blocker reason can never buy the unbound shape', () => {
   }
 });
 
-test('the unbound reasons are a strict subset of the reasons the runner can emit', () => {
+/* THE MEMBERSHIP LIST ITSELF, PINNED AS A LITERAL, because the two tests around it cannot see an
+ * addition. `a post-press blocker reason can never buy the unbound shape` iterates the full reason
+ * list and SKIPS anything already in the unbound set, so a reason added there is skipped rather
+ * than checked; a size comparison stays true at seven entries. Measured: adding
+ * 'submit_request_unobserved' - a reason that means the click landed and its request went missing -
+ * left this file at 56/56 green while unboundScopeProof began reading that run as "nothing sent".
+ *
+ * So the set is asserted member for member. Adding a reason here is a deliberate act that must
+ * update this literal, and the comment on MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS is the standard it
+ * has to meet: decided before any submit handle exists. */
+test('the unbound reasons are exactly the six refusals decided before a press', () => {
+  assert.deepEqual([...MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS].sort(), [
+    'application_scope_ambiguous',
+    'application_scope_detached',
+    'application_scope_missing',
+    'application_scope_not_form',
+    'application_scope_unavailable',
+    'successful_address_changed',
+  ], 'a reason was added to or removed from the pre-press subset; is the new one decided before any submit handle exists?');
   for (const reason of MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS) {
     assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} is not a reason this service accepts at all`);
   }
-  assert.ok(MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.size < MANAGED_BLOCKER_REASONS.size,
-    'the pre-press subset must stay a subset; a post-press reason must never be added');
 });
 
 /* THE ONE THING THAT OUTRANKS THE PROOF. A payload claiming a press, carrying a pass that says no
@@ -1643,11 +1659,47 @@ test('an unbound pass can never be read as a confirmed send', () => {
  * The branch above believes exactly two scope-side combinations because those are the two the
  * runner writes. A third synthetic pass appearing in the runner must fail here rather than in
  * production, where it would read as an unreadable proof on a run that sent nothing. */
+/* Pins the SHAPES the way `blocker reasons stay in sync with the managed runner` pins the reasons,
+ * and it has to read the fields rather than count the passes. Counting `formFingerprint: null`
+ * alone says nothing about submitMatchCount or sameNode, so the runner could change either at one
+ * of these sites and leave this green while unboundScopeProof silently stopped matching that pass
+ * in production - fail-closed, so nothing is mis-sent, but this whole fix would quietly stop
+ * working for that site. Each fingerprintless scope object is parsed and offered to the same
+ * predicate the backend uses. */
 test('the runner writes no third unbound scope shape', { skip: RUNNER_SOURCE_ABSENT }, () => {
   const source = readFileSync(RUNNER_SOURCE_PATH, 'utf8');
-  const emitted = [...source.matchAll(/formFingerprint:\s*null/g)];
-  assert.equal(emitted.length, 2,
-    `the runner now builds ${emitted.length} fingerprintless passes; unboundScopeProof knows two`);
+  const scopes = [...source.matchAll(/scope:\s*\{([^}]*formFingerprint:\s*null[^}]*)\}/g)];
+  assert.equal(scopes.length, 2,
+    `the runner now builds ${scopes.length} fingerprintless scopes; unboundScopeProof knows two`);
+
+  for (const [, body] of scopes) {
+    const field = (name: string) => {
+      const found = new RegExp(`${name}:\\s*([A-Za-z0-9_'-]+)`).exec(body!);
+      assert.ok(found, `the runner's fingerprintless scope no longer names ${name}`);
+      return found![1]!;
+    };
+    /* The literal the runner writes, offered to the real predicate rather than re-asserted here, so
+     * this test cannot drift from the rule it is pinning. */
+    const pass = {
+      submitKind: 'application',
+      scope: {
+        scopeKind: field('scopeKind') === 'null' ? null : field('scopeKind').replace(/'/g, ''),
+        formFingerprint: null,
+        submitFingerprint: null,
+        formMatchCount: Number(field('formMatchCount')),
+        submitMatchCount: Number(field('submitMatchCount')),
+        requiredControlCount: Number(field('requiredControlCount')),
+        sameNode: field('sameNode') === 'true',
+      },
+      requiredControls: [], attempts: [], retries: 0,
+      unresolved: [UNBOUND_SCOPE_MESSAGE],
+      blockerReason: 'application_scope_missing',
+      submissionOutcome: 'blocked',
+    };
+    assert.ok(refusal(unboundRun(pass), 'application') instanceof ManagedRequiredFieldConfirmationError,
+      `the runner writes a fingerprintless scope unboundScopeProof rejects: ${body!.replace(/\s+/g, ' ').trim()}`);
+  }
+
   for (const sentence of [UNBOUND_SCOPE_MESSAGE, UNBOUND_CODE_MESSAGE]) {
     assert.ok(source.includes(sentence),
       `the runner no longer writes "${sentence}", so RUNNER_AUTHORED_BLOCKERS is repeating a dead string`);

@@ -601,8 +601,8 @@ describe('a blocked submission releases, and is never dressed up as a possible s
 
 /* THE TWO REFUSALS THAT COULD NOT SAY WHY, AND THE ROW THEY WROTE INSTEAD.
  *
- * stratus builds two passes at points where it has bound nothing: managed-browser.js:15237, when
- * the caller-bound application form is unusable, and :15300, when the security-code controls do not
+ * stratus builds two passes at points where it has bound nothing: managed-browser.js:15390, when
+ * the caller-bound application form is unusable, and :15458, when the security-code controls do not
  * retain the exact code. Both refuse before any submit handle exists and report it with null
  * fingerprints, and until the unbound-scope branch the backend rejected both as malformed —
  * discarding six real refusal causes and naming an internal check in their place.
@@ -636,7 +636,7 @@ describe('a refusal that never bound a scope releases on its own proof', () => {
     return result;
   }
 
-  /** managed-browser.js:15237, field for field. */
+  /** managed-browser.js:15390, field for field. */
   const applicationScopeFailure = (blockerReason: string) => ({
     submitKind: 'application',
     scope: {
@@ -656,7 +656,7 @@ describe('a refusal that never bound a scope releases on its own proof', () => {
     submissionOutcome: 'blocked',
   });
 
-  /** managed-browser.js:15300, field for field. */
+  /** managed-browser.js:15458, field for field. */
   const securityCodeUnretained = () => ({
     submitKind: 'verification',
     scope: {

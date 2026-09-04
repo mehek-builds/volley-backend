@@ -335,8 +335,8 @@ export type ManagedBrowserResult = {
         /* NULLABLE ONLY ON A PASS THAT BOUND NOTHING, and the runtime gate is what enforces that.
          *
          * managed-browser.js builds two SYNTHETIC passes at points where no scope was ever
-         * fingerprinted - the caller-bound application form was unusable (15237), and the security
-         * code controls did not retain the exact code (15300). Both carry a blockerReason naming a
+         * fingerprinted - the caller-bound application form was unusable (15390), and the security
+         * code controls did not retain the exact code (15458). Both carry a blockerReason naming a
          * refusal that PRECEDES any press, and both are the runner's way of saying "there was
          * nothing here to identify", which is a truthful report and not a malformed one.
          *

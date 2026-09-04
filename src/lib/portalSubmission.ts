@@ -45,6 +45,7 @@ import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
   readManagedFinalSubmitChooser,
   readManagedFinalSubmitNoClick,
+  readManagedSubmitOutcome,
 } from './managedSubmitOutcome';
 import { receiptProof } from './receiptProof';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from './workableApplicationUrl';
@@ -12163,8 +12164,11 @@ function observedManagedSubmitWithheld(result: unknown): boolean {
  */
 function observedManagedSubmitPressClaimed(result: unknown): boolean {
   if (!isRecord(result)) return false;
-  const outcome = result.submitOutcome;
-  return isRecord(outcome) && outcome.pressed === true;
+  /* readManagedSubmitOutcome is the canonical read of this field, and submissionProvablyNotSent
+   * already uses this exact expression for this exact purpose - refusing to believe a no-send from
+   * a result that contradicts itself about the press. Two hand-rolled readings of one field drift;
+   * this one defers so a nuance added there reaches this gate too. */
+  return readManagedSubmitOutcome(result)?.pressed === true;
 }
 
 function confirmationContractError(message: string, submitWithheld = false): never {
@@ -12219,7 +12223,7 @@ const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
   'Bound submit control or application form was replaced before submission',
   'Bound application form or submit identity changed during confirmation',
   'Litos could not bind required-field validation to the selected application form',
-  /* The two synthetic passes' own sentences, managed-browser.js:15236 and :15294. Without these the
+  /* The two synthetic passes' own sentences, managed-browser.js:15398 and :15458. Without these the
    * only text a scope refusal could offer the applicant was UNATTRIBUTED_REQUIRED_BLOCKER - "a
    * required answer is still missing" - which names the wrong problem on a form Litos never
    * reached, and sends her to fill in fields that were not the reason it stopped. */
@@ -12333,7 +12337,7 @@ export const MANAGED_BLOCKER_REASONS: ReadonlySet<string> = new Set([
  * below accepts a pass that fingerprints NOTHING - no form, no submit control - and reports it as
  * "blocked, nothing sent". That verdict is only sound when the reason it carries is one that can
  * physically only be reached before a control is pressed. Every reason here is decided while the
- * scope is being resolved (managed-browser.js:14095-14118) or while a caller-supplied value is
+ * scope is being resolved (managed-browser.js:14257-14280) or while a caller-supplied value is
  * being re-checked, in both cases before any submit handle exists.
  *
  * A POST-press reason must never appear here. 'submit_request_unobserved' means the click already
@@ -12355,8 +12359,8 @@ export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Se
  * The contract below asks every pass for the identity of the form it bound and the control it
  * pressed, because for a pass that pressed something those are the only evidence that the press was
  * the authorized one. Two of the runner's emissions cannot answer, and their inability IS the
- * report: managed-browser.js:15237 refuses because the caller-bound application form was unusable,
- * and 15300 refuses because the security-code controls did not retain the exact code. Neither ever
+ * report: managed-browser.js:15390 refuses because the caller-bound application form was unusable,
+ * and 15458 refuses because the security-code controls did not retain the exact code. Neither ever
  * resolved a scope, so neither has a fingerprint to give.
  *
  * Until this branch existed both died at contractError('scope kind') / ('scope identity'), which
@@ -12377,11 +12381,17 @@ export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Se
  * says it pressed never takes this branch, however well-formed the pass is.
  *
  * THE TWO SCOPE-SIDE COMBINATIONS ARE PINNED RATHER THAN RANGED, because they are the two the
- * runner writes and nothing should be able to invent a third. 15237 reports honestly that it bound
- * nothing (scopeKind null, formMatchCount 0). 15300 reports scopeKind 'form' with formMatchCount 1
+ * runner writes and nothing should be able to invent a third. 15390 reports honestly that it bound
+ * nothing (scopeKind null, formMatchCount 0). 15458 reports scopeKind 'form' with formMatchCount 1
  * while still carrying a null formFingerprint - a form was located, never identified - which is a
  * half-claim this service tolerates but does not rely on: with the submit side unclaimed, the form
  * side proves nothing either way. `the runner writes no third unbound scope shape` pins both.
+ *
+ * The scope side and the reason are pinned INDEPENDENTLY, so a reason the runner only writes on one
+ * of the two shapes is accepted on either. That is deliberate rather than overlooked: binding each
+ * reason to the shape it ships with today would break the moment stratus makes 15458 report the
+ * honest unbound shape, and the safety property does not need the binding - it holds on every
+ * combination, because all six reasons are decided before any submit handle exists.
  */
 function unboundScopeProof(pass: Record<string, unknown>): boolean {
   const scope = pass.scope;
