@@ -17,11 +17,17 @@ import { POSTING_STATUS_MID_RUN_STATUSES } from './applicationPortalRepair';
  * CONSERVATIVE ON PURPOSE, matching the brief this shipped against: only four fixed English label
  * phrases are recognised ("Application Deadline:", "Deadline:", "Apply by", "Applications close"),
  * only a month-NAME date with an explicit year counts (no "08/31/2026" - MM/DD or DD/MM is a guess
- * this file refuses to make), and a parenthesised timezone abbreviation that is not on the short
- * known list below is treated as ambiguous and the WHOLE match is refused rather than silently
- * assumed to be UTC. A parser that occasionally misses a real deadline is a missed flag; a parser
- * that occasionally invents a wrong one tells an applicant Litos will not send something it safely
- * could, which is the worse failure for a tool she is trusting to act on her behalf.
+ * this file refuses to make), a stated time may be either a 24-hour clock or a 12-hour one with an
+ * AM/PM marker (in any of "PM", "pm", "p.m." - dots and case both ignored), and a timezone
+ * abbreviation - parenthesised OR bare, immediately after the time or its AM/PM marker - that is
+ * not on the short known list below (or, for the bare "ET"/"PT" pair, not resolvable from the U.S.
+ * daylight-saving calendar for the stated date) is treated as ambiguous and the WHOLE match is
+ * refused rather than silently assumed to be UTC. The same refusal applies to ANY other trailing
+ * word immediately abutting the time that this file does not recognise as either an AM/PM marker or
+ * a known zone - guessing that it is safe to ignore is exactly the kind of guess this file exists to
+ * not make. A parser that occasionally misses a real deadline is a missed flag; a parser that
+ * occasionally invents a wrong one tells an applicant Litos will not send something it safely could,
+ * which is the worse failure for a tool she is trusting to act on her behalf.
  *
  * PURE, DELIBERATELY. This runs at packet-creation time (managedPrepare.ts, against a fresh
  * monitored_jobs.description) and, just as importantly, at READ time against a packet's own
@@ -63,10 +69,17 @@ const MONTH_DISPLAY_NAMES = [
 ];
 
 /* A short, deliberately incomplete list of the zone abbreviations actually measured on job
- * postings. Anything not here is refused rather than guessed - see the file header. Offsets are
- * STANDARD TIME, not DST-adjusted: a job posting's own deadline is rarely worth modelling daylight
- * saving for, and the alternative (silently picking a wrong hour half the year) is worse than the
- * conservative one-hour-off a DST abbreviation like EDT already names explicitly. */
+ * postings. Anything not here - and not the bare "ET"/"PT" special case just below - is refused
+ * rather than guessed, see the file header. Offsets are STANDARD TIME, not DST-adjusted: a job
+ * posting's own deadline is rarely worth modelling daylight saving for, and the alternative
+ * (silently picking a wrong hour half the year) is worse than the conservative one-hour-off a DST
+ * abbreviation like EDT already names explicitly.
+ *
+ * EXCEPTION: a BARE "ET" or "PT" - no S or D letter at all, so the poster never said which one -
+ * names a real, common zone just as plainly as "EST" or "EDT" does; refusing it outright would
+ * throw away a timezone a career page states clearly only because it left daylight saving out of
+ * the letters. resolveZoneOffsetMinutes below resolves those two from the U.S. daylight-saving
+ * calendar for the STATED date instead, so they are deliberately left out of this fixed table. */
 const ZONE_OFFSET_MINUTES: Readonly<Record<string, number>> = {
   UTC: 0, GMT: 0,
   EST: -5 * 60, EDT: -4 * 60,
@@ -84,15 +97,71 @@ const ZONE_OFFSET_MINUTES: Readonly<Record<string, number>> = {
   AEST: 10 * 60, AEDT: 11 * 60,
 };
 
+/** The day-of-month (1-based) of the nth Sunday of a given UTC month - e.g. n=2 for "the second
+ * Sunday". Used only to locate the two U.S. daylight-saving transition dates below. */
+function nthSundayDom(year: number, monthIndex: number, n: number): number {
+  const first = Date.UTC(year, monthIndex, 1);
+  const firstSundayDom = 1 + ((7 - new Date(first).getUTCDay()) % 7);
+  return firstSundayDom + (n - 1) * 7;
+}
+
+/* Whether U.S. clocks are on daylight saving time (EDT/PDT, not EST/PST) on the given STATED
+ * calendar date - the rule in force since 2007: starts the second Sunday in March, ends the first
+ * Sunday in November. Resolved at DATE granularity, not the literal 2 a.m. transition instant: a
+ * deadline stated for the transition day itself reads as that day's predominant offset, which is
+ * precise enough for a feature comparing a whole day's cutoff, not sub-hour billing. */
+function isUsDaylightSaving(year: number, monthIndex: number, day: number): boolean {
+  const dstStartMillis = Date.UTC(year, 2, nthSundayDom(year, 2, 2));
+  const dstEndMillis = Date.UTC(year, 10, nthSundayDom(year, 10, 1));
+  const dayMillis = Date.UTC(year, monthIndex, day);
+  return dayMillis >= dstStartMillis && dayMillis < dstEndMillis;
+}
+
+/** Resolves a stated zone-like word (any letter run the regex found immediately after the time - see
+ * MONTH_DAY_YEAR_RE, which deliberately does not bound its length or vet its content) to minutes
+ * east of UTC, or null if this file does not recognise it - the caller refuses the whole match on
+ * null rather than guessing, which is what makes an unrelated trailing word like "sharp" refuse the
+ * same way an actually-unknown zone abbreviation does. A bare "ET"/"PT" is resolved from the U.S.
+ * daylight-saving calendar for the STATED date (see isUsDaylightSaving); every other abbreviation is
+ * a fixed lookup. */
+function resolveZoneOffsetMinutes(
+  zoneRaw: string,
+  year: number,
+  monthIndex: number,
+  day: number,
+): number | null {
+  const zone = zoneRaw.toUpperCase();
+  if (zone === 'ET' || zone === 'PT') {
+    const daylight = isUsDaylightSaving(year, monthIndex, day);
+    if (zone === 'ET') return daylight ? ZONE_OFFSET_MINUTES.EDT : ZONE_OFFSET_MINUTES.EST;
+    return daylight ? ZONE_OFFSET_MINUTES.PDT : ZONE_OFFSET_MINUTES.PST;
+  }
+  const offset = ZONE_OFFSET_MINUTES[zone];
+  return offset === undefined ? null : offset;
+}
+
 const MONTH_NAME_PATTERN = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
 
 /* Anchored to the START of the text handed to it (see parseStatedApplicationDeadline, which slices
  * the text right after a label match before running this). Requires a day and a four-digit year;
- * time and a parenthesised zone are optional. "August 31, 2026, 23:59 (JST)" and "August 31 2026"
- * both match; "August 2026" (no day) and "08/31/2026" (no month name) both do not. */
+ * time and a zone are optional. "August 31, 2026, 23:59 (JST)", "August 31, 2026, at 11:59 PM EST"
+ * and "August 31 2026" all match; "August 2026" (no day) and "08/31/2026" (no month name) both do
+ * not.
+ *
+ * The time itself may be introduced by an optional "at" ("...2026, at 11:59 PM EST" reads the same
+ * as "...2026, 11:59 PM EST" - dropping this connector left the whole time ungrouped and silently
+ * defaulting to end-of-day UTC, see the module header's second MEASURED CASE), then an optional
+ * AM/PM marker, then EITHER a parenthesised or a bare zone - group 6 is the AM/PM marker, groups 7
+ * and 8 are the parenthesised and bare zone respectively (toStatedDeadline reads whichever of the
+ * two is set). Both the AM/PM marker and the zone are left as loosely-bounded letter runs on
+ * purpose: it is toStatedDeadline's job to recognise them and refuse the whole match if it cannot,
+ * never this regex's job to silently drop a trailing word it was not expecting. */
 const MONTH_DAY_YEAR_RE = new RegExp(
   `^(${MONTH_NAME_PATTERN})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})`
-  + '(?:,?\\s+(\\d{1,2}):(\\d{2})(?::\\d{2})?\\s*(?:\\(([A-Za-z]{2,6})\\))?)?',
+  + '(?:,?\\s+(?:at\\s+)?(\\d{1,2}):(\\d{2})(?::\\d{2})?'
+  + '\\s*([AaPp]\\.?[Mm]\\.?)?'
+  + '\\s*(?:\\(([A-Za-z]+)\\)|([A-Za-z]+))?'
+  + ')?',
   'i',
 );
 
@@ -108,7 +177,7 @@ function labelPattern(): RegExp {
 const DATE_LOOKAHEAD_CHARS = 60;
 
 function toStatedDeadline(match: RegExpExecArray): StatedDeadline | null {
-  const [, monthRaw, dayRaw, yearRaw, hourRaw, minuteRaw, zoneRaw] = match;
+  const [, monthRaw, dayRaw, yearRaw, hourRaw, minuteRaw, ampmRaw, zoneParenRaw, zoneBareRaw] = match;
   const monthIndex = MONTHS[(monthRaw ?? '').toLowerCase().replace(/\.$/, '')];
   if (monthIndex === undefined) return null;
   const day = Number(dayRaw);
@@ -126,12 +195,23 @@ function toStatedDeadline(match: RegExpExecArray): StatedDeadline | null {
     hour = Number(hourRaw);
     minute = Number(minuteRaw);
     second = 0;
-    if (hour > 23 || minute > 59) return null;
+    if (minute > 59) return null;
+    if (ampmRaw !== undefined) {
+      // A 12-hour clock: only 1-12 is a real hour on its face, so a stated "13 PM" is not a value
+      // this file reinterprets - it is refused like any other reading it cannot trust.
+      if (hour < 1 || hour > 12) return null;
+      const isPm = ampmRaw.trim().charAt(0).toLowerCase() === 'p';
+      if (isPm && hour !== 12) hour += 12; // 12 PM is already noon.
+      if (!isPm && hour === 12) hour = 0; // 12 AM is midnight, not hour 12.
+    } else if (hour > 23) {
+      return null;
+    }
+    const zoneRaw = zoneParenRaw ?? zoneBareRaw;
     if (zoneRaw !== undefined) {
-      const offset = ZONE_OFFSET_MINUTES[zoneRaw.toUpperCase()];
-      // An explicit zone this file does not recognise is exactly the ambiguity the header
-      // describes: refuse the whole match rather than silently assume UTC for it.
-      if (offset === undefined) return null;
+      const offset = resolveZoneOffsetMinutes(zoneRaw, year, monthIndex, day);
+      // An explicit zone this file does not recognise - parenthesised or bare - is exactly the
+      // ambiguity the header describes: refuse the whole match rather than silently assume UTC.
+      if (offset === null) return null;
       offsetMinutes = offset;
     }
     // No zone stated at all with an explicit time: assumed UTC, documented in the file header.

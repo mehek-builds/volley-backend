@@ -63,6 +63,86 @@ test('reads a bare "Deadline:" label with an explicit time and no zone, assumed 
   assert.equal(parsed.deadlineUtc.toISOString(), '2026-03-03T17:00:00.000Z');
 });
 
+// Regression: a 12-hour PM time with a parenthesised zone was silently read as if the raw hour
+// (11) were already 24-hour and no zone had been stated at all, landing on 2026-08-31T11:59:00.000Z
+// instead of the correct 2026-09-01T04:59:00Z (11:59 PM EST = 04:59 UTC the next day).
+test('reads a 12-hour PM time with a parenthesised zone to the correct next-day UTC instant', () => {
+  const parsed = parseStatedApplicationDeadline('Deadline: August 31, 2026, 11:59 PM (EST)');
+  assert.ok(parsed);
+  assert.equal(parsed.deadlineUtc.toISOString(), '2026-09-01T04:59:00.000Z');
+  assert.equal(parsed.displayDate, 'August 31, 2026');
+});
+
+// Regression: the same deadline phrased with "at" before the time and a bare (unparenthesised) zone
+// abutting it - the old regex required a digit immediately after the date, so "at" broke the time
+// group entirely and this fell all the way to the whole-day 23:59:59 UTC default, not just the
+// wrong hour.
+test('reads the same deadline introduced by "at" with a bare zone and no parens', () => {
+  const parsed = parseStatedApplicationDeadline('Deadline: August 31, 2026, at 11:59 PM EST.');
+  assert.ok(parsed);
+  assert.equal(parsed.deadlineUtc.toISOString(), '2026-09-01T04:59:00.000Z');
+});
+
+test('reads "11:59pm" with no space before a bare zone', () => {
+  const parsed = parseStatedApplicationDeadline('Deadline: March 3, 2026, 11:59pm EST');
+  assert.ok(parsed);
+  // 11:59 PM EST = 23:59 EST = 04:59 UTC the next calendar day.
+  assert.equal(parsed.deadlineUtc.toISOString(), '2026-03-04T04:59:00.000Z');
+});
+
+test('reads "12:00 AM" (midnight) with a bare zone, not literal hour 12', () => {
+  const parsed = parseStatedApplicationDeadline('Deadline: March 3, 2026, 12:00 AM PST');
+  assert.ok(parsed);
+  // Midnight PST on March 3 is 08:00 UTC the same day, not 12:00 or 12:00+8=20:00.
+  assert.equal(parsed.deadlineUtc.toISOString(), '2026-03-03T08:00:00.000Z');
+});
+
+test('reads "p.m." with dots and a parenthesised zone', () => {
+  const parsed = parseStatedApplicationDeadline('Deadline: March 3, 2026, 12:30 p.m. (JST)');
+  assert.ok(parsed);
+  // Noon hour in 12-hour PM stays 12, not 24: 12:30 PM JST = 03:30 UTC the same day.
+  assert.equal(parsed.deadlineUtc.toISOString(), '2026-03-03T03:30:00.000Z');
+});
+
+test('still reads a 24-hour time with a parenthesised zone and no AM/PM marker', () => {
+  const parsed = parseStatedApplicationDeadline('Deadline: March 3, 2026, 23:59 (JST)');
+  assert.ok(parsed);
+  assert.equal(parsed.deadlineUtc.toISOString(), '2026-03-03T14:59:00.000Z');
+});
+
+test('refuses a time with an unrecognized bare trailing token rather than assuming UTC', () => {
+  assert.equal(parseStatedApplicationDeadline('Deadline: March 3, 2026, 11:59 XYZ'), null);
+});
+
+test('refuses an ordinary trailing word that happens to abut the time, same as an unknown zone', () => {
+  // "sharp" is exactly the class of trailing token the header warns about: not a zone, not AM/PM,
+  // and abutting the time closely enough that silently ignoring it would be a guess.
+  assert.equal(parseStatedApplicationDeadline('Deadline: March 3, 2026, 17:00 sharp'), null);
+});
+
+test('refuses an hour outside 1-12 on a 12-hour clock rather than reinterpreting it', () => {
+  assert.equal(parseStatedApplicationDeadline('Deadline: March 3, 2026, 13:00 PM'), null);
+  assert.equal(parseStatedApplicationDeadline('Deadline: March 3, 2026, 0:30 AM'), null);
+});
+
+test('resolves a bare "ET" to standard time in winter and daylight time in summer', () => {
+  const winter = parseStatedApplicationDeadline('Deadline: December 15, 2026, 12:00 PM ET');
+  const summer = parseStatedApplicationDeadline('Deadline: July 15, 2026, 12:00 PM ET');
+  assert.ok(winter);
+  assert.ok(summer);
+  assert.equal(winter.deadlineUtc.toISOString(), '2026-12-15T17:00:00.000Z'); // EST, UTC-5
+  assert.equal(summer.deadlineUtc.toISOString(), '2026-07-15T16:00:00.000Z'); // EDT, UTC-4
+});
+
+test('resolves a bare "PT" to standard time in winter and daylight time in summer', () => {
+  const winter = parseStatedApplicationDeadline('Deadline: December 15, 2026, 9:00 AM PT');
+  const summer = parseStatedApplicationDeadline('Deadline: July 15, 2026, 9:00 AM PT');
+  assert.ok(winter);
+  assert.ok(summer);
+  assert.equal(winter.deadlineUtc.toISOString(), '2026-12-15T17:00:00.000Z'); // PST, UTC-8
+  assert.equal(summer.deadlineUtc.toISOString(), '2026-07-15T16:00:00.000Z'); // PDT, UTC-7
+});
+
 test('rejects "deadline-driven environment" - a label with no date after it', () => {
   assert.equal(parseStatedApplicationDeadline('Litos looks for a deadline-driven environment.'), null);
 });
