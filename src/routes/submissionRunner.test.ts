@@ -6865,6 +6865,21 @@ test('recordManagedAuthorizedAttemptRefused proves the ledger fact and never wri
   assert.match(body, /employerRefusalReleasePatch\(latestReview, \{/);
   assert.doesNotMatch(body, /unverified_submission:/,
     'this function must never itself write an unverified_submission record');
+
+  // The per-user ledger lock is taken before anything else in the transaction, the same discipline
+  // writeReviewWithRunnerNotSentFact (this file) and closeAbandonedPreBoundaryAttempts
+  // (lib/abandonedAttemptClosure.ts) use as the first line of their own transactions.
+  assert.match(body, /await lockSubmissionAttemptUser\(tx, row\.user_id\);/);
+
+  // A lost CAS on the final review write must never let the not_sent_proven event committed just
+  // above it stand alone: the row is locked for the width of the transaction, the same way
+  // writeReviewWithRunnerNotSentFact locks it for its own CAS, and a miss on the final write throws
+  // - rolling the whole transaction, ledger event included, back - rather than resolving false and
+  // leaving a closed ledger attempt with no review patch to show for it.
+  assert.match(body, /\)\.limit\(1\)\.for\('update'\);/,
+    'the row read at the top of the transaction must be locked for its width, not just read');
+  assert.match(body, /if \(updated\.length === 0\) throw new Error\('EMPLOYER_REFUSAL_NOT_SENT_REVIEW_WRITE_CONFLICT'\);/,
+    'a lost CAS on the final write must roll back the transaction, not silently resolve false');
 });
 
 test('the ledger admits employer_rejected_not_filed to close an authorized attempt, alongside her own look', () => {

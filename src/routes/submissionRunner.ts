@@ -1446,10 +1446,16 @@ export async function recordManagedAuthorizedAttemptRefused(
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     await lockSubmissionAttemptUser(tx, row.user_id);
+    // .for('update') for the same reason writeReviewWithRunnerNotSentFact takes it: this
+    // transaction is about to append an immutable not_sent_proven ledger event and then use THIS
+    // read of spec as the CAS base for the review write that closes it. Without the row lock, a
+    // concurrent writer can land its own update in the gap between this select and that CAS,
+    // which is exactly the shape that let a lost CAS below commit the ledger event with no review
+    // patch to show for it.
     const [latest] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, row.user_id),
-    )).limit(1);
+    )).limit(1).for('update');
     const latestReview = latest ? readApplicationReview(latest.spec) : null;
     if (!latest || !latestReview
       || latestReview.submission_claim_id !== attemptBinding.attemptId
@@ -1500,7 +1506,18 @@ export async function recordManagedAuthorizedAttemptRefused(
       eq(generated_resumes.user_id, latest.user_id),
       sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
     )).returning({ id: generated_resumes.id });
-    return updated.length > 0;
+    /* Throw rather than return false, exactly as writeReviewWithRunnerNotSentFact does on the same
+     * miss: this point is only reachable after the not_sent_proven event above has already been
+     * appended in this same transaction, so a silent `return false` here would let that ledger
+     * event commit with no review patch to show for it - the attempt permanently closed as
+     * safe_not_sent while the row it was supposed to release keeps whatever stale status it had.
+     * Throwing rolls the whole transaction back, ledger event included, so the caller sees a
+     * failed attempt rather than a half-applied one and the retry starts clean. Left uncaught here
+     * on purpose: submit()'s own try/finally wraps every call site in this function the same way,
+     * so this folds into the same SubmissionExecutionError -> fail() path every other not-sent
+     * writer's conflict already takes, with no special handling needed at the call site. */
+    if (updated.length === 0) throw new Error('EMPLOYER_REFUSAL_NOT_SENT_REVIEW_WRITE_CONFLICT');
+    return true;
   });
 }
 
@@ -11411,7 +11428,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * recognised pre-filing refusal code. recordManagedAuthorizedAttemptRefused records that as a
      * not_sent_proven/employer_rejected_not_filed ledger fact - never an applicant attestation -
      * and releases the claim, so the packet becomes needs_attention and retryable through the
-     * ordinary Review and send path instead of parking on "I found it there / It is not there". */
+     * ordinary Review and send path instead of parking on "I found it there / It is not there".
+     * Its return value is deliberately not read: a lost-CAS conflict throws (see its own comment)
+     * rather than resolving false, and that throw is left to fall through this bare await, out
+     * through the try/finally above, into the same SubmissionExecutionError -> fail() path every
+     * other not-sent writer's conflict in this function already takes. */
     if (verdict.kind === 'employer_refused') {
       await recordManagedAuthorizedAttemptRefused(row, attemptBinding, {
         httpStatus: verdict.httpStatus,
