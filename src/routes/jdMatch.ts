@@ -18,6 +18,10 @@ import { applications, generated_resumes, autofill_events, monitored_jobs, caree
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { resolveRevision } from '../lib/buildInfo';
 import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissionProjection';
+import {
+  healAbandonedPreBoundaryAttemptsForRead,
+  retrySafetyLooksLikeClosableCandidate,
+} from '../lib/abandonedAttemptClosure';
 import { SUBMISSION_AUTHORITY_SCHEMA_VERSION } from '../lib/submissionAuthorityRevision';
 import {
   submissionAuthorityPublicationForPacket,
@@ -797,9 +801,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       // thousands of cards the student will never scroll to and renders a select for each.
       .limit(BOARD_LIMIT);
 
-    const submissionAuthority = await (async () => {
+    const boardPacketIds = rows.map((row) => row.id);
+    const loadBoardSubmissionAuthority = async () => {
       try {
-        return await authoritativeSubmissionProjection({ userId, packetIds: rows.map((row) => row.id) });
+        return await authoritativeSubmissionProjection({ userId, packetIds: boardPacketIds });
       } catch (error) {
         request.log.warn(
           { err: error },
@@ -807,7 +812,39 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         );
         return null;
       }
-    })();
+    };
+    let submissionAuthority = await loadBoardSubmissionAuthority();
+    /* A READ CAN HEAL WHAT A SEND ALREADY WOULD. Full mechanism and safety argument on
+     * healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts).
+     *
+     * THE TRIGGER HERE IS THE RETRY VERDICT ITSELF, not "no envelope" - unlike /resume/history and
+     * GET /applications/:id/submission, this route publishes a real, correctly-shaped envelope for
+     * a `blocked_unverified`/`opened` card (state `unverified`, see submissionAuthorityPublicationForPacket
+     * below): the card is not unpublishable, it is truthfully published as BLOCKED, by an attempt
+     * the ledger can already prove never reached an employer. retrySafetyLooksLikeClosableCandidate
+     * names exactly that shape, so this is still paid for only on the rare card a heal could
+     * actually change - every card that is genuinely sent, held or already sendable costs nothing
+     * beyond the read above.
+     *
+     * RE-PROJECTS THE WHOLE PAGE, deliberately, same as /resume/history: this route publishes one
+     * `submission_authority_revision` for the whole collection, and a narrower re-projection would
+     * hand some cards a newer revision than others on one response. Skipped entirely when nothing
+     * actually closed. */
+    const boardCandidatePacketIds = submissionAuthority
+      ? boardPacketIds.filter((packetId) => (
+        retrySafetyLooksLikeClosableCandidate(submissionAuthority!.retrySafetyByPacketId.get(packetId))
+      ))
+      : [];
+    if (boardCandidatePacketIds.length > 0) {
+      const healed = await healAbandonedPreBoundaryAttemptsForRead({
+        userId,
+        log: request.log,
+        logContext: { route: 'GET /applications/board', candidatePacketIds: boardCandidatePacketIds },
+      });
+      if (healed.closedAttemptIds.length > 0) {
+        submissionAuthority = (await loadBoardSubmissionAuthority()) ?? submissionAuthority;
+      }
+    }
 
     return reply.status(200).send({
       stages: STAGES,

@@ -21,6 +21,8 @@ import { application_submission_attempt_events, generated_resumes } from '../db/
 import {
   abandonedPreBoundaryAttemptIsClosable,
   closeAbandonedPreBoundaryAttempts,
+  retrySafetyDiagnosticForAbsentEnvelope,
+  retrySafetyLooksLikeClosableCandidate,
   type AbandonedAttemptClosurePacketReview,
 } from './abandonedAttemptClosure';
 import { STALLED_FILL_RUN_RELEASE_MS } from './stalledFillRunRelease';
@@ -28,6 +30,7 @@ import {
   attemptNeverReachedEmployer,
   type SubmissionAttemptEventKind,
   type SubmissionAttemptEventRecord,
+  type SubmissionAttemptRetrySafety,
   type SubmissionAttemptLedgerExecutor,
 } from './submissionAttemptLedger';
 
@@ -533,6 +536,97 @@ describe('the savepoint isolates one candidate\'s failure from another\'s succes
       events.filter((stored) => stored.attempt_id === BAD_ATTEMPT).length,
       1,
       'the failed candidate is left exactly as it was - only its original opening',
+    );
+  });
+});
+
+/* THE READ-PATH HELPERS, PURE HALF. healAbandonedPreBoundaryAttemptsForRead itself needs a real
+ * database (it opens a transaction and takes the advisory lock) and is exercised end to end in
+ * src/routes/submissionAuthorityReadHeal.db.test.ts against the three GET routes it heals. The two
+ * functions below are the pure logic either side of that call - "is this worth trying to heal" and
+ * "why is the envelope still absent afterwards" - and need no database at all. */
+describe('retrySafetyLooksLikeClosableCandidate', () => {
+  test('is true for exactly one shape: blocked_unverified with reason opened', () => {
+    assert.equal(
+      retrySafetyLooksLikeClosableCandidate({ kind: 'blocked_unverified', attemptId: ATTEMPT, at: '2026-08-20T00:00:00.000Z', reason: 'opened' }),
+      true,
+    );
+  });
+
+  test('is false for every other blocked_unverified reason, every other kind, and undefined', () => {
+    assert.equal(
+      retrySafetyLooksLikeClosableCandidate({ kind: 'blocked_unverified', attemptId: ATTEMPT, at: '2026-08-20T00:00:00.000Z', reason: 'pressed' }),
+      false,
+    );
+    assert.equal(
+      retrySafetyLooksLikeClosableCandidate({ kind: 'blocked_unverified', attemptId: ATTEMPT, at: '2026-08-20T00:00:00.000Z', reason: 'invalid_sequence' }),
+      false,
+    );
+    assert.equal(
+      retrySafetyLooksLikeClosableCandidate({
+        kind: 'blocked_unverified',
+        attemptId: ATTEMPT,
+        at: '2026-08-20T00:00:00.000Z',
+        reason: 'boundary_authorized',
+        leaseId: OTHER_ATTEMPT,
+        expiresAt: '2026-08-20T00:05:00.000Z',
+      }),
+      false,
+      'a held boundary authorization is durable employer risk, never a heal candidate',
+    );
+    assert.equal(
+      retrySafetyLooksLikeClosableCandidate({ kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: '2026-08-20T00:00:00.000Z' }),
+      false,
+    );
+    assert.equal(retrySafetyLooksLikeClosableCandidate({ kind: 'no_evidence' }), false);
+    assert.equal(
+      retrySafetyLooksLikeClosableCandidate({
+        kind: 'safe_not_sent', attemptId: ATTEMPT, proofKind: 'typed_pre_click_stop', resolvedAt: '2026-08-20T00:00:00.000Z',
+      }),
+      false,
+    );
+    assert.equal(retrySafetyLooksLikeClosableCandidate(undefined), false);
+  });
+});
+
+describe('retrySafetyDiagnosticForAbsentEnvelope', () => {
+  const OPENED: SubmissionAttemptRetrySafety = {
+    kind: 'blocked_unverified', attemptId: ATTEMPT, at: '2026-08-20T00:00:00.000Z', reason: 'opened',
+  };
+
+  test('names a closable-shaped attempt the heal did not close as unclosable_attempt', () => {
+    assert.equal(
+      retrySafetyDiagnosticForAbsentEnvelope({ retrySafety: OPENED, closedAttemptIds: [] }),
+      'unclosable_attempt',
+      'no heal ran at all (e.g. the lock was contended, or none of this read\'s candidates matched)',
+    );
+    assert.equal(
+      retrySafetyDiagnosticForAbsentEnvelope({ retrySafety: OPENED, closedAttemptIds: [OTHER_ATTEMPT] }),
+      'unclosable_attempt',
+      'a heal ran and closed a DIFFERENT attempt in the same call; this one is still blocked',
+    );
+  });
+
+  test('reports blocked_by_attempt for every real block this module never touches', () => {
+    assert.equal(
+      retrySafetyDiagnosticForAbsentEnvelope({
+        retrySafety: { kind: 'blocked_unverified', attemptId: ATTEMPT, at: '2026-08-20T00:00:00.000Z', reason: 'pressed' },
+        closedAttemptIds: [],
+      }),
+      'blocked_by_attempt',
+      'a pressed attempt is durable employer risk, not a shape this predicate was ever asked about',
+    );
+    assert.equal(
+      retrySafetyDiagnosticForAbsentEnvelope({
+        retrySafety: { kind: 'blocked_confirmed', attemptId: ATTEMPT, confirmedAt: '2026-08-20T00:00:00.000Z' },
+        closedAttemptIds: [],
+      }),
+      'blocked_by_attempt',
+    );
+    assert.equal(
+      retrySafetyDiagnosticForAbsentEnvelope({ retrySafety: undefined, closedAttemptIds: [] }),
+      'blocked_by_attempt',
+      'no retry verdict at all (a projection read failure) is reported separately by every caller',
     );
   });
 });

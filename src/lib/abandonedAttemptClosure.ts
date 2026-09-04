@@ -45,6 +45,7 @@
  */
 
 import { and, eq, inArray } from 'drizzle-orm';
+import { db } from '../db';
 import { generated_resumes } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
 import { employerMayHoldApplication, type StoredSendEvidence } from './managedSubmitOutcome';
@@ -59,8 +60,10 @@ import {
   submissionAttemptEventId,
   submissionAttemptEventsForUser,
   submissionAttemptRetrySafety,
+  tryLockSubmissionAttemptUser,
   type SubmissionAttemptEventRecord,
   type SubmissionAttemptLedgerExecutor,
+  type SubmissionAttemptRetrySafety,
 } from './submissionAttemptLedger';
 
 /** The packet-review facts this closure asks about employer contact: its own status, checked
@@ -209,11 +212,41 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
  * event id never collides with repairExpiredAttendedHandoffClaim's write of the same evidence. */
 export const ABANDONED_ATTEMPT_CLOSURE_FACT_KEY = 'abandoned-pre-boundary-attempt';
 
+/**
+ * Whether a retry verdict names the one shape this module ever closes: an attempt the fold has
+ * already reduced to "opened and nothing else". `closeAbandonedPreBoundaryAttempts` uses this to
+ * pick which attempt groups are worth reading a packet row for at all; a read path uses the same
+ * predicate BEFORE paying for a heal transaction, so it only ever opens one for a packet a heal
+ * could actually change. Kept as one predicate rather than the inline check it replaces so the two
+ * questions - "should I bother closing this" and "should I bother trying to" - can never drift
+ * apart from each other.
+ */
+export function retrySafetyLooksLikeClosableCandidate(
+  retrySafety: SubmissionAttemptRetrySafety | undefined,
+// Extract<T, { kind: 'blocked_unverified'; reason: 'opened' }> alone would be `never` here: Extract
+// keeps a union member only when the WHOLE member is assignable to the target, and
+// blocked_unverified's own `reason` is a four-way union that is not assignable to the literal
+// `'opened'`. Narrowing `kind` with Extract and `reason` with an intersection gets both correctly.
+): retrySafety is Extract<SubmissionAttemptRetrySafety, { kind: 'blocked_unverified' }> & { reason: 'opened' } {
+  return retrySafety?.kind === 'blocked_unverified' && retrySafety.reason === 'opened';
+}
+
 /** A minimal structural logger, so this module does not have to import Fastify's types to accept
  * one. Every logger this codebase actually passes around - a Fastify request/instance `log` among
  * them - already calls `.warn(details, message)` and so already satisfies this. */
 export type AbandonedAttemptClosureLog = {
   warn: (details: Record<string, unknown>, message: string) => void;
+};
+
+/** `AbandonedAttemptClosureLog` plus `.info`, for the read-path wrapper below, which reports a
+ * successful heal at `info` exactly as `refuseDuplicateApplication` always has. A separate type
+ * rather than widening `AbandonedAttemptClosureLog` itself: `closeAbandonedPreBoundaryAttempts`
+ * never calls `.info` and its own test harness (abandonedAttemptClosure.test.ts) constructs a
+ * `{ warn }`-only fake, which a required `.info` here would break for no reason. Every real
+ * logger this codebase passes around - Fastify's `request.log` and `fastify.log` among them -
+ * already satisfies both. */
+export type AbandonedAttemptReadHealLog = AbandonedAttemptClosureLog & {
+  info: (details: Record<string, unknown>, message: string) => void;
 };
 
 /**
@@ -269,10 +302,9 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
   const grouped = groupByAttempt(events);
   /* Only an attempt the fold already treats as a block is worth reading a packet row for. Every
    * other kind is either safe, confirmed, or malformed, and none of them is this function's. */
-  const candidates = [...grouped.entries()].filter(([, attemptEvents]) => {
-    const safety = submissionAttemptRetrySafety(attemptEvents);
-    return safety.kind === 'blocked_unverified' && safety.reason === 'opened';
-  });
+  const candidates = [...grouped.entries()].filter(([, attemptEvents]) => (
+    retrySafetyLooksLikeClosableCandidate(submissionAttemptRetrySafety(attemptEvents))
+  ));
   if (candidates.length === 0) return { closedAttemptIds: [], failedAttemptIds: [] };
 
   const packetIds = [...new Set(candidates.map(([, attemptEvents]) => attemptEvents[0]!.packet_id))];
@@ -329,4 +361,120 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
     }
   }
   return { closedAttemptIds, failedAttemptIds };
+}
+
+/* A READ CAN SEE THE SAME PROOF A SEND ALREADY DOES.
+ *
+ * MEASURED 2026-09-05, production. Pony.ai (Workable) packet fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb:
+ * `status: failed` from a 2026-08-14 run, no claim, no receipt, no unverified_submission, exact
+ * packet audit passed. GET /applications/:id/submission carried NO `submission_authority` key at
+ * all - not an unparseable one, an ABSENT one - and the dashboard's send gate fell back to the
+ * packet's stored null and refused: "Litos cannot start another employer attempt until the exact
+ * prior submission evidence is verified". The ledger already had everything needed to prove
+ * otherwise; nothing had ever asked it to on this path.
+ *
+ * THE GAP PR #941 LEFT, NAMED IN ITS OWN BODY. refuseDuplicateApplication heals this exact shape -
+ * see the block above it closes - but only on the three send-path POSTs (submit-request,
+ * submission/approve, the extension precheck). GET /applications/board, GET /resume/history and
+ * GET /applications/:id/submission each fold the same phantom attempt as a block and never call a
+ * POST that would heal it. A student who only ever reads never sends, and never gets read.
+ *
+ * WHY THIS IS A HEAL AND NOT A NEW WIRE SHAPE. The tempting cheaper fix is a read-only projection
+ * that recognises a closable candidate and reports it as sendable without writing anything. It
+ * cannot ship: the deployed dashboard's retry-safety parser
+ * (features/applications/domain/submission-state.ts, submissionRetrySafetyFromUnknown) enumerates
+ * exactly five `kind` values and returns `null` for anything else, so a sixth kind invented here -
+ * `abandoned_pre_boundary` or any other name - is discarded by the client and
+ * submissionRetrySafetyAllowsRetry falls back to false, refusing exactly as today. Only `no_evidence`
+ * and `safe_not_sent` ever authorise a retry, and the ledger only produces `safe_not_sent` by
+ * actually appending the not-sent fact. So a read that wants to publish an envelope has to become
+ * the write that earns one, same as a send already does.
+ *
+ * WHY THIS IS SAFE ON A GET. Three things bound it to the send path's own safety, not a weaker one:
+ *   - IT IS THE SAME PROOF. closeAbandonedPreBoundaryAttempts is the one function that decides
+ *     what may close, and it is called here unmodified - a read can heal only what a send already
+ *     could, never more.
+ *   - IT NEVER WAITS. tryLockSubmissionAttemptUser is non-blocking; a contended lock returns
+ *     `false` and this heals nothing, exactly the "TRY, NEVER WAIT" rule repairExpiredAttendedHandoffClaim
+ *     and refuseDuplicateApplication already state. See tryLockSubmissionAttemptUser's own doc
+ *     (submissionAttemptLedger.ts) for the incident a BLOCKING lock on a read caused here before:
+ *     lockSubmissionAttemptUser held across one slow call queued /resume/history and five other
+ *     routes behind it. This function is built on the non-blocking half of that lesson, not the
+ *     blocking half.
+ *   - IT IS RARE BY CONSTRUCTION. Every caller below checks retrySafetyLooksLikeClosableCandidate
+ *     BEFORE calling this, so the transaction, the lock attempt and the ledger read all cost
+ *     nothing on the overwhelming majority of requests - every packet with an envelope already, and
+ *     every packet blocked for a real reason (pressed, boundary_authorized, confirmed) - and are
+ *     paid only on the one shape this whole module exists to close.
+ *
+ * BEST EFFORT, NEVER BLOCKING, IDEMPOTENT. Identical contract to refuseDuplicateApplication's own
+ * heal block, which this factors out of: a failure here leaves the ledger exactly as it was and the
+ * caller's envelope stays exactly as absent as it is today, and a second read that finds nothing
+ * left to close is a fast no-op (closeAbandonedPreBoundaryAttempts's own candidate filter is what
+ * makes that true, not anything here).
+ */
+export async function healAbandonedPreBoundaryAttemptsForRead(input: {
+  userId: string;
+  log: AbandonedAttemptReadHealLog;
+  /** Merged into every log line this call makes, e.g. `{ packetId }` or `{ route: 'board' }` -
+   * whatever names the read that triggered the heal for whoever reads the log next. */
+  logContext?: Record<string, unknown>;
+}): Promise<{ closedAttemptIds: string[]; failedAttemptIds: string[] }> {
+  const logContext = input.logContext ?? {};
+  try {
+    const healed = await db.transaction(async (tx) => {
+      // TRY, NEVER WAIT - see the doc above. A lost race just means another writer already holds
+      // this user's ledger lock, and the caller's envelope stays absent exactly as it would have
+      // without this call.
+      if (!await tryLockSubmissionAttemptUser(tx, input.userId)) {
+        return { closedAttemptIds: [], failedAttemptIds: [] };
+      }
+      return closeAbandonedPreBoundaryAttempts({ userId: input.userId, executor: tx, log: input.log });
+    });
+    if (healed.closedAttemptIds.length > 0) {
+      input.log.info(
+        { ...logContext, closedAttemptIds: healed.closedAttemptIds },
+        'Closed abandoned pre-boundary attempts on a read; the ledger now proves this packet is sendable',
+      );
+    }
+    if (healed.failedAttemptIds.length > 0) {
+      input.log.warn(
+        { ...logContext, failedAttemptIds: healed.failedAttemptIds },
+        'Could not close some abandoned pre-boundary attempts on a read; leaving them for the next heal',
+      );
+    }
+    return healed;
+  } catch (error) {
+    input.log.warn(
+      { ...logContext, err: error },
+      'Could not close abandoned pre-boundary attempts on a read; the packet stays fail-closed',
+    );
+    return { closedAttemptIds: [], failedAttemptIds: [] };
+  }
+}
+
+/**
+ * Why a submission-authority envelope is still absent after a read-path heal has already had its
+ * chance to close what it could. Named for GET /applications/:id/submission's
+ * `retry_safety_diagnostic`, so the sentence on the dashboard's refusal banner has a machine-
+ * readable reason beside it instead of needing the ledger read by hand - see the file header for
+ * the Pony.ai measurement this answers.
+ *
+ * `unclosable_attempt` names exactly the packets `abandonedPreBoundaryAttemptIsClosable` looked at
+ * and declined: still the packet's live claim, too recent to be sure the run has exited, or the
+ * packet's own review says an employer may already hold something. `blocked_by_attempt` is every
+ * other real block this module was never going to touch - pressed, boundary_authorized, confirmed,
+ * or no retry verdict at all (a projection read failure, reported separately by the caller).
+ */
+export function retrySafetyDiagnosticForAbsentEnvelope(input: {
+  retrySafety: SubmissionAttemptRetrySafety | undefined;
+  /** This read's own heal outcome - `[]` when no heal ran at all, e.g. because the packet was
+   * never a closable-shaped candidate to begin with. */
+  closedAttemptIds: readonly string[];
+}): 'blocked_by_attempt' | 'unclosable_attempt' {
+  const { retrySafety } = input;
+  if (retrySafetyLooksLikeClosableCandidate(retrySafety) && !input.closedAttemptIds.includes(retrySafety.attemptId)) {
+    return 'unclosable_attempt';
+  }
+  return 'blocked_by_attempt';
 }
