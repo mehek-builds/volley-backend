@@ -266,6 +266,19 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
   const review = readApplicationReview(spec);
   if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
   const asOf = new Date();
+  /* THE DEADLINE HALF OF THE SAME PROJECTION, folded in here rather than as a later pass over the
+   * built rows, so it can be inside the one composition documentResponseContract.test.ts and
+   * portalSupport.test.ts pin verbatim - a spec leaving this route has to go through
+   * specWithoutDocumentPointers with nothing appended after it, and a second `.map()` right before
+   * `reply.send` answered with `spec: withPostingDeadlineStatus(entry.spec)`, which is a spec that
+   * never passes through the stripper at all. Reading it HERE, before this function's own `_review`
+   * spread below, is also what keeps the ordering derivePostingDeadlineStatus itself requires: `spec`
+   * at this point is repairedHistorySpec's OUTPUT, so `review` already carries whatever the monitor's
+   * is_active verdict wrote to _review.posting_status, and a take-down outranks a stated deadline
+   * only when the deadline check runs after that, not before it. Reads jd_text alone, so this flags a
+   * packet built before this shipped exactly as well as one built after - no monitored_jobs join, no
+   * rebuild. */
+  const reviewWithPostingStatus = derivePostingDeadlineStatus(review, asOf);
   const normalize = (questions: typeof review.questions) => review.portal_url && isPortalSupported(review.portal_url)
     ? normalizeStoredPortalQuestions(questions, detectPortal(review.portal_url))
     : questions;
@@ -279,7 +292,7 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
   return {
     ...(spec as Record<string, unknown>),
     _review: {
-      ...review,
+      ...reviewWithPostingStatus,
       // Same context every live fill resolves against; see applicationContextForQuestionResolution.
       questions: packetQuestionFixpoint(
         normalize(review.questions),
@@ -305,17 +318,6 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
       ),
     },
   };
-}
-
-/* THE DEADLINE HALF OF THE SAME PROJECTION, applied last so it sees whatever repairedHistorySpec
- * (the monitor's is_active verdict) already wrote to _review.posting_status - a take-down outranks
- * a stated deadline, and derivePostingDeadlineStatus only checks that ordering correctly when it
- * runs after the monitor check, not before it. Reads jd_text alone, so this flags a packet built
- * before this shipped exactly as well as one built after - no monitored_jobs join, no rebuild. */
-function withPostingDeadlineStatus(spec: unknown, now: Date = new Date()): unknown {
-  const review = readApplicationReview(spec);
-  if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
-  return { ...(spec as Record<string, unknown>), _review: derivePostingDeadlineStatus(review, now) };
 }
 
 // ─── Transient model-capacity handling (live QA 2026-07-16) ──────────────────
@@ -2139,17 +2141,6 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           : undefined,
       };
     });
-    /* THE DEADLINE HALF OF THE SAME PROJECTION (see withPostingDeadlineStatus above), applied here
-     * as its own pass over the finished rows rather than folded into the `spec` composition above.
-     * portalSupport.test.ts pins that composition verbatim - specWithoutDocumentPointers wrapping
-     * refreshedHistorySpec wrapping repairedHistorySpec - to prove the REPAIRED spec, not row.spec,
-     * is what reaches the wire; a repair nothing serializes is a repair that did not happen. Running
-     * this after that composition (rather than nested inside it) keeps that proof intact while still
-     * running "last": every row above has already been through repairedHistorySpec, so this still
-     * sees whatever is_active verdict it wrote to _review.posting_status before a stated deadline
-     * gets to weigh in. */
-    return reply.status(200).send({
-      resumes: resumes.map((entry) => ({ ...entry, spec: withPostingDeadlineStatus(entry.spec) })),
-    });
+    return reply.status(200).send({ resumes });
   });
 }

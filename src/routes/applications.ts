@@ -4322,8 +4322,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
-      // The deadline half of the same projection - see resume.ts's withPostingDeadlineStatus for
-      // why it has to run after the monitor's is_active repair rather than before it.
+      // The deadline half of the same projection - see resume.ts's refreshedHistorySpec, and
+      // derivePostingDeadlineStatus's own doc comment, for why it has to run after the monitor's
+      // is_active repair (just above) rather than before it.
       review = derivePostingDeadlineStatus(review);
       const profile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       review = {
