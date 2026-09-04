@@ -167,7 +167,27 @@ export function parseAshbyPublicApplicationSchema(
     if (seenLabels.has(labelKey)) ambiguousLabels.add(labelKey);
     seenLabels.add(labelKey);
     const options = ashbyFieldOptions(field);
-    if (options.length === 0) continue;
+    if (options.length === 0) {
+      /* A YES/NO QUESTION HAS TWO CHOICES, AND ASHBY NEVER LISTS THEM.
+       *
+       * Ashby's `Boolean` field carries no `selectableValues`: its two answers are implied by the
+       * type, and the hosted form renders them as two plain buttons, "Yes" and "No", beside a hidden
+       * checkbox that holds the value (the fill half already clicks exactly those pills - see
+       * pickOptionPill in stratus's managed-browser.js). So this reader published nothing for them,
+       * discovery's DOM walk finds no option markup either, and every Boolean question reached the
+       * packet as "Exact choices not read": a metadata blocker the applicant could clear only by
+       * leaving Litos for the employer's page. Measured live 2026-09-04 on Sentry's "Software
+       * Engineer, Intern (Summer 2027)" (packet 84bf5354): the three Boolean questions - hybrid
+       * office willingness, visa sponsorship, prior Sentry use - were exactly the three "employer
+       * fields stayed untouched", while every ValueSelect on the same form published normally.
+       *
+       * The two labels are the texts the pills carry and the only two values the field accepts, so
+       * publishing them is reading the employer's control, not inventing a choice. Every other
+       * optionless type (String, LongText, File, Email, Phone, Number, Date, Location) still
+       * publishes nothing, exactly as before. */
+      if (field.type === 'Boolean') optionsByLabel[labelKey] = ['Yes', 'No'];
+      continue;
+    }
     if (field.isMany === true) {
       if (!multiSelectLabels.includes(labelKey)) multiSelectLabels.push(labelKey);
       continue;
