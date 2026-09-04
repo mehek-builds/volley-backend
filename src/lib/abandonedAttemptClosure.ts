@@ -49,7 +49,6 @@ import { generated_resumes } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
 import { employerMayHoldApplication, type StoredSendEvidence } from './managedSubmitOutcome';
 import { STALLED_FILL_RUN_RELEASE_MS } from './stalledFillRunRelease';
-import { reviewAnswerSaveDisposition } from './submissionSafety';
 import {
   appendSubmissionAttemptEvent,
   ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
@@ -63,10 +62,11 @@ import {
   type SubmissionAttemptLedgerExecutor,
 } from './submissionAttemptLedger';
 
-/** The packet-review facts this closure asks about employer contact, kept to exactly the shape
- * reviewAnswerSaveDisposition already reads so the two never have to be reconciled by hand. */
+/** The packet-review facts this closure asks about employer contact: its own status, checked
+ * against SUBMISSION_BOUNDARY_STATUSES below, plus the four StoredSendEvidence facts
+ * employerMayHoldApplication already reads. See packetReviewProvesNoEmployerContact. */
 export type AbandonedAttemptClosurePacketReview =
-  Pick<ApplicationReviewState, 'status' | 'submission_claimed_at'> & StoredSendEvidence;
+  Pick<ApplicationReviewState, 'status'> & StoredSendEvidence;
 
 /** What this predicate could establish about the packet an attempt's opening names. `null` means
  * the row could not be read - missing, or its stored review would not parse - and that is a
@@ -80,10 +80,54 @@ export type AbandonedAttemptClosurePacket = {
   review: AbandonedAttemptClosurePacketReview;
 };
 
-/** The packet review's own answer to "may an employer already hold something", asked through the
- * same two predicates submissionSafety.ts and managedSubmitOutcome.ts already use for it, so a
- * later change to either widens or narrows this closure too instead of silently disagreeing with
- * it.
+/* REVIEW ROUND 2, 2026-09-04. STATUSES WHERE A MANAGED BROWSER MAY BE AT OR PAST THE BOUNDARY.
+ *
+ * The first cut of packetReviewProvesNoEmployerContact below borrowed reviewAnswerSaveDisposition
+ * (submissionSafety.ts) for its status opinion, reasoning that "reject" already meant "do not trust
+ * this row". It does not: that function refuses `ready_for_final_approval` UNCONDITIONALLY, for a
+ * reason with nothing to do with employer contact - the packet has a filled-form preview on screen,
+ * and a concurrent answer save would leave that picture describing a form it no longer matches.
+ * Borrowed here, that one line meant a packet parked at ready_for_final_approval on a NEWER attempt
+ * could never get an orphaned, provably-dead EARLIER attempt closed - which is exactly the
+ * Databricks shape this module exists for (see the file header): she reaches final approval on
+ * attempt B, and the block from abandoned attempt A never lifts, because the packet's OWN status -
+ * not any evidence on the row - refused it forever.
+ *
+ * So this closure enumerates its own boundary statuses instead of borrowing anyone else's opinion
+ * of the row. A live run's StoredSendEvidence fields (receipt, security_code, unverified_submission,
+ * submission_attempted_at) are written by that run AS IT GOES, and this closure holds no lock on
+ * whatever OTHER attempt currently owns the claim - so while the packet's status says a browser may
+ * be at or past the boundary, those fields cannot be trusted as the complete picture, only as
+ * whatever had been written the instant this query ran.
+ *
+ *   submitting              A claimed run is actively authorizing or pressing the employer
+ *                           boundary right now.
+ *   submission_claimed      A run has taken the claim and not yet released it - the other status a
+ *                           live send holds before it authorizes the boundary; the identical pairing
+ *                           guards attemptNeverReachedEmployerIsReleasable in
+ *                           expiredHandoffClaimRelease.ts against the same poll-kills-the-send risk.
+ *   submitted               A click is known to have landed.
+ *   awaiting_security_code  The form was already sent once and the applicant is mid-verification -
+ *                           see the status union in applicationReview.ts ("the form has already
+ *                           been sent to the employer once").
+ *
+ * NOT boundary statuses, enumerated so a future status added to the union has to be sorted into one
+ * list or the other rather than silently defaulting: ready_for_final_approval (filled and
+ * previewed, never clicked - the exact packet this closure exists to unblock), needs_attention,
+ * failed, filling, preparing and submit_requested (each a run that already stopped short of the
+ * boundary, or has taken no claim yet), and resume_ready, questions_ready, ready_to_submit (too
+ * early for any claim to exist at all).
+ */
+const SUBMISSION_BOUNDARY_STATUSES = new Set<ApplicationReviewState['status']>([
+  'submitting',
+  'submission_claimed',
+  'submitted',
+  'awaiting_security_code',
+]);
+
+/** The packet review's own answer to "may an employer already hold something", built for this
+ * closure alone - see the SUBMISSION_BOUNDARY_STATUSES comment above for why it is no longer
+ * borrowed from a gate that answers a different question.
  *
  * THIS IS THE SECOND PROOF a legacy_backfill opening needs. attemptNeverReachedEmployer is pure
  * arithmetic over event kinds, and a legacy_backfill attempt carries only `attempt_opened` because
@@ -99,7 +143,7 @@ export type AbandonedAttemptClosurePacket = {
 function packetReviewProvesNoEmployerContact(review: AbandonedAttemptClosurePacketReview): boolean {
   if (employerMayHoldApplication(review)) return false;
   if (review.submission_attempted_at) return false;
-  if (reviewAnswerSaveDisposition(review) === 'reject') return false;
+  if (SUBMISSION_BOUNDARY_STATUSES.has(review.status)) return false;
   return true;
 }
 

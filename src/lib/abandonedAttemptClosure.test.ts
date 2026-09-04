@@ -205,6 +205,67 @@ describe('a legacy_backfill opening needs the packet review to prove it too', ()
   });
 });
 
+describe('review round 2: the packet\'s own status boundary, not a borrowed disposition', () => {
+  /* The Databricks shape itself, named in the file header: attempt A opened, never reached the
+   * employer, and the packet has since moved on to a newer claimed attempt B that reached
+   * ready_for_final_approval - filled and previewed, never clicked. The first cut of this predicate
+   * borrowed reviewAnswerSaveDisposition, which refuses ready_for_final_approval UNCONDITIONALLY for
+   * a reason that has nothing to do with employer contact (protecting the on-screen preview from a
+   * concurrent answer save), and that refusal - inherited here - is exactly what made attempt A
+   * unclosable forever. */
+  test('a newer claimed attempt at ready_for_final_approval does not block closing the dead orphan', () => {
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: OPENED_ONLY,
+        packet: { claimId: OTHER_ATTEMPT, review: { status: 'ready_for_final_approval' } },
+      }),
+      true,
+    );
+  });
+
+  test('submitting refuses - a managed browser may be at or past the boundary on the live claim', () => {
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: OPENED_ONLY,
+        packet: { claimId: OTHER_ATTEMPT, review: { status: 'submitting' } },
+      }),
+      false,
+    );
+  });
+
+  test('ready_for_final_approval with an unresolved unverified_submission still refuses', () => {
+    /* The status guard clears this one exactly like the first case above - it is
+     * employerMayHoldApplication, asked of the row's OTHER evidence, that still refuses, because an
+     * unresolved unverified record means something may already be at the employer regardless of
+     * what status the packet is currently sitting at. */
+    const review: AbandonedAttemptClosurePacketReview = {
+      status: 'ready_for_final_approval',
+      unverified_submission: {} as unknown as AbandonedAttemptClosurePacketReview['unverified_submission'],
+    };
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: OPENED_ONLY,
+        packet: { claimId: OTHER_ATTEMPT, review },
+      }),
+      false,
+    );
+  });
+
+  test('ready_for_final_approval with submission_attempted_at set still refuses', () => {
+    const review: AbandonedAttemptClosurePacketReview = {
+      status: 'ready_for_final_approval',
+      submission_attempted_at: '2026-09-03T10:00:00.000Z',
+    };
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: OPENED_ONLY,
+        packet: { claimId: OTHER_ATTEMPT, review },
+      }),
+      false,
+    );
+  });
+});
+
 describe('the time margin: a claim that just moved on could still be a live browser', () => {
   /* Every other proof holds for this fixture - never reached the employer, packet claim dropped,
    * benign review - so the bound below is the ONLY thing standing between it and closing. */
