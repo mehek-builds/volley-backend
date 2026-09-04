@@ -1,0 +1,42 @@
+name: Resume linkage invariant migration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+      # Railway's private root, mirrored the way ci.yml's schema-drift job does since #786:
+      # the proxy chain cannot be verified from a public trust store, and without this the
+      # apply script dies on TLS before a single statement.
+      SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT: ${{ secrets.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Require production schema connection
+        shell: bash
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "SCHEMA_CHECK_DATABASE_URL is required." >&2
+            exit 2
+          fi
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Apply resume linkage invariant migration
+        run: npm run db:resume-linkage-invariant
