@@ -1596,6 +1596,22 @@ describe('the submit network record', () => {
     });
     assert.equal(outcome?.network?.length, 20);
   });
+
+  test('a raw status of 0 normalises to null, the same shape a transport failure with no status takes', () => {
+    // 0 is what a browser reports for a network error, a CORS block, or a request the runner
+    // aborted - never a real HTTP response. Read literally it would fall through as a bare number,
+    // neither the null the transport-failure case already produces nor a real status code.
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: [{ method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 0 }],
+      },
+    });
+    assert.deepEqual(outcome?.network, [
+      { method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: null },
+    ]);
+  });
 });
 
 /* THE PRESS THAT TALKED ONLY TO A CHALLENGE SERVER. The network record below is the measured one:
@@ -1975,6 +1991,30 @@ describe('a success or an unknown outcome anywhere on the bound endpoint blocks 
       APPLY_URL,
     );
     assert.equal(verdict.kind, 'employer_refused', 'a login wall alongside the refusal must not block it');
+  });
+
+  test('a bound status of 0 (network error, CORS block, or an aborted request) anywhere blocks the refusal too', () => {
+    // Same hazard as the no-status case above, wearing a different shape: 0 is what a browser
+    // reports when the transport itself never got an HTTP response, not a real status code. Left
+    // unnormalised it would slip past the null check yet also miss the 200-400 success range,
+    // reading as neither - and a later bound 428 would then be free to read as a proven refusal of
+    // a first attempt that, for all this run knows, silently went through.
+    const verdict = exactManagedSubmitVerdict(
+      twoEntryResult([{ status: 0 }, { status: 428 }]),
+      APPLY_URL,
+    );
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+      'a status-0 attempt never proves the first attempt was not filed; a later 428 does not rule that out');
+  });
+
+  test('a single refusal alone (no status-0 sibling) is still proven', () => {
+    // Regression guard on the fix above, same shape as the 401 guard: a lone bound 428 with
+    // nothing else in the run must keep reading as a proven refusal.
+    const verdict = exactManagedSubmitVerdict(
+      twoEntryResult([{ status: 428 }]),
+      APPLY_URL,
+    );
+    assert.equal(verdict.kind, 'employer_refused', 'a bound refusal with no other bound attempt must still be proven');
   });
 });
 

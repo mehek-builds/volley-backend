@@ -262,7 +262,12 @@ const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
     entries.push({
       method: value.method.slice(0, 10),
       url: value.url.split(/[?#]/)[0].slice(0, 300),
-      status: typeof value.status === 'number' ? value.status : null,
+      /* A numeric status under 100 is never a real HTTP response - 0 is what a browser reports
+       * for a network error, a CORS block, or a request the runner aborted, and the range is
+       * otherwise unused. Normalising it to null here, the same shape a transport failure that
+       * returned no status at all already takes, means every consumer of this record - today and
+       * whatever is added later - sees one "no real answer came back" case instead of two. */
+      status: typeof value.status === 'number' && value.status >= 100 ? value.status : null,
       ...(typeof value.failure === 'string' ? { failure: value.failure.slice(0, 120) } : {}),
       ...(typeof value.body_excerpt === 'string' ? { body_excerpt: value.body_excerpt.slice(0, 2_000) } : {}),
       ...(typeof value.content_type === 'string' ? { content_type: value.content_type.slice(0, 100) } : {}),
@@ -672,17 +677,22 @@ function boundEmployerSubmitNetworkEntry(
     }
     const binding = greenhouseEmbedSubmitBinding(url);
     if (!binding || binding.tenant !== expected.tenant || binding.jobToken !== expected.jobToken) continue;
-    /* A 2xx/3xx, OR an unknown outcome (no status at all - the transport never returned one), on
-     * ANY of this posting's own bound submit attempts means the run cannot be read as a clean
-     * refusal, whichever attempt this is and whatever order they came in. Measured shape: a real
-     * Greenhouse run can press submit, get back a 428 captcha-retry, and have the client re-press
-     * with captcha_retried:true - the SAME bound URL, a 2xx the second time. A refusal-shaped entry
-     * after that 2xx would be reading a duplicate-apply rejection as a first refusal; the reverse
-     * order is no safer, since an earlier no-status/2xx attempt this run never confirmed could
-     * just as well have been filed silently, with a later 428 answering a retry of an application
-     * that was already there. Both shapes fail closed to null (unverified) rather than risk a
-     * proven refusal that lets a caller release the claim and a re-send duplicate the application. */
-    if (entry.status === null || (entry.status >= 200 && entry.status < 400)) return null;
+    /* A 2xx/3xx, an unknown outcome (no status at all - the transport never returned one), OR a
+     * status under 100 (0 is what a browser reports for a network error, a CORS block, or a request
+     * the runner aborted - never a real HTTP response), on ANY of this posting's own bound submit
+     * attempts means the run cannot be read as a clean refusal, whichever attempt this is and
+     * whatever order they came in. Measured shape: a real Greenhouse run can press submit, get back
+     * a 428 captcha-retry, and have the client re-press with captcha_retried:true - the SAME bound
+     * URL, a 2xx the second time. A refusal-shaped entry after that 2xx would be reading a
+     * duplicate-apply rejection as a first refusal; the reverse order is no safer, since an earlier
+     * no-status/2xx/network-error attempt this run never confirmed could just as well have been
+     * filed silently, with a later 428 answering a retry of an application that was already there.
+     * readSubmitNetwork above already normalises a sub-100 status to null before this function ever
+     * sees one; the explicit check here is defense in depth for whatever else ever builds a
+     * SubmitNetworkEntry[] directly. All three shapes fail closed to null (unverified) rather than
+     * risk a proven refusal that lets a caller release the claim and a re-send duplicate the
+     * application. */
+    if (entry.status === null || entry.status < 100 || (entry.status >= 200 && entry.status < 400)) return null;
     // Last bound submit-class entry wins, not first: a retried press appends a LATER entry to the
     // same bound endpoint, and that later entry - not whichever one happened to come first in the
     // array - is the run's own final word on this posting, once the guard above has already ruled
