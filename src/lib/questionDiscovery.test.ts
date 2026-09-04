@@ -4483,6 +4483,95 @@ test('a "select your school" label is classified, and its neighbours still are n
   assert.equal(classifyField('select your college major'), 'major');
 });
 
+/* THE DEFECT: MEASURED live on api.trylitos.com 2026-09-04, Belvedere Trading "Software Engineer
+ * Intern - Summer 2027" (Lever, packet c4413bff-5a08-423f-852c-5d60bd360f3b, account
+ * mehekmandal05@gmail.com). The discovered questions, in order: "name of school ✱" (answered
+ * "University of Southern California, Viterbi School of Engineering" - correct), "school major"
+ * (answered "Computer Science" - correct), then "school minor" (answered "University of Southern
+ * California, Viterbi School of Engineering" - WRONG: the applicant has no minor, and the profile
+ * carries only a school and a major). A school/university alias matched the word "school" before
+ * any rule recognising "minor" existed to decline it. Same class as the 2026-08-26 "name of your
+ * attending or graduated school" fix above, inverted: that one left a real school question
+ * unanswered, this one answers an unrelated question with someone else's field.
+ */
+test('a label naming the minor is never answered from the school or the major', () => {
+  const ap: ApplicationProfileLike = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    major: 'Computer Science',
+  };
+
+  for (const label of ['Minor', 'minor (if any)', 'school minor', 'Field of study - minor', 'Academic minor']) {
+    assert.equal(classifyField(label), 'minor', label);
+    assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
+  }
+
+  // Its neighbours, discovered on the same packet, are unaffected.
+  assert.equal(classifyField('name of school'), 'school');
+  assert.equal(classifyField('school'), 'school');
+  assert.equal(classifyField('school major'), 'major');
+  assert.deepEqual(resolveKnownAnswer('name of school', 'text', ap, undefined), { value: ap.school });
+  assert.deepEqual(resolveKnownAnswer('school', 'text', ap, undefined), { value: ap.school });
+  assert.deepEqual(resolveKnownAnswer('school major', 'text', ap, undefined), { value: ap.major });
+
+  // The decline is conditional, not hardcoded: a profile that DOES carry a minor is answered from
+  // it, the same shape as every other education field on ApplicationProfileLike. Nothing populates
+  // `minor` today (see its own comment on the type), but the rule itself does not assume that.
+  const withMinor: ApplicationProfileLike = { ...ap, minor: 'Data Science' };
+  assert.deepEqual(resolveKnownAnswer('school minor', 'text', withMinor, undefined), { value: 'Data Science' });
+});
+
+/* THE QUALIFIER GUARD, added in review before this ever shipped a wrong answer. MINOR_QUESTION's
+ * bare `\bminors?\b` also matches every one of these labels, and none of them ask for a field of
+ * study - a minor CHILD, a minor OFFENSE, a minor INFRACTION, a minor INJURY and the framing "are
+ * you a minor" are five different things that happen to spell the same word as the academic one.
+ *
+ * Built with `minor: 'Data Science'` ON the profile deliberately, unlike the test above. With
+ * nothing stored, resolveKnownAnswer's 'minor' case declines no matter how the label classified, so
+ * that shape of assertion would pass whether or not this guard existed - it is exactly the "no wrong
+ * answer YET" gap the qualifier closes. Only a populated `ap.minor` proves these labels were never
+ * handed her stored academic minor as an answer to a question about her family, her record, or her
+ * own age. A date of birth is on the profile too, so "Are you a minor?" is also checked against the
+ * one rule that could honestly answer an age question - see the comment at MINOR_QUESTION's call
+ * site for why that label classifies null rather than 'minor': AGE_ATTESTATION_QUESTION does not
+ * itself contain "minor", so ageAttestationAnswer does not answer it either, and null is what leaves
+ * it for the applicant instead of this rule inventing a discipline fact nobody has. */
+test('a minor child, offense, infraction, injury or age is never the academic minor', () => {
+  const ap: ApplicationProfileLike = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    major: 'Computer Science',
+    minor: 'Data Science',
+    date_of_birth: '2001-01-01',
+  };
+
+  for (const label of [
+    'Do you have any minor children?',
+    'Emergency contact (must not be a minor)',
+    'felony or minor offense',
+    'minor infractions on your driving record',
+    'minor injuries',
+    'Are you a minor?',
+  ]) {
+    assert.notEqual(classifyField(label), 'minor', label);
+    assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
+  }
+});
+
+// A control asking for BOTH facts in one label still classifies 'minor' (MINOR_ACADEMIC_CUE's own
+// `major` alternative sees that word sitting right beside "minor" and calls it academic, correctly)
+// and still declines: one stored major is not an honest answer to a control that also asks for a
+// minor she does not have.
+test('a compound major-and-minor label still declines rather than answering half the question', () => {
+  const ap: ApplicationProfileLike = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    major: 'Computer Science',
+  };
+
+  for (const label of ['Major and minor', 'Field of study (major or minor)']) {
+    assert.equal(classifyField(label), 'minor', label);
+    assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
+  }
+});
+
 /* ---- one control, one answer, whatever the caller knows about its type ----
  *
  * Teamtailor welds the placeholder and the control's name attributes into the captured label, so
