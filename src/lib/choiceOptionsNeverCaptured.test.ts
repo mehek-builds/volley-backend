@@ -337,21 +337,47 @@ test('a combobox menu measured by an earlier run survives a run whose probe read
   assert.deepEqual(second.options, GENDER_MENU, 'run 2 must not replace a measured menu with nothing');
 });
 
-test('the answer beside it still reverts, which is the LARGER half and is NOT fixed here', async () => {
-  /* SEPARATE DEFECT, PINNED SO IT IS NOT MISTAKEN FOR THIS ONE and so the follow-up has a home.
+test('her reviewed pick survives that same unread run, which is the LARGER half', async () => {
+  /* THE COLLATERAL DAMAGE, now closed. `reviewedAnswerStillFits` used to compute `reviewedOption`
+   * against `usableOptions(field.options)` - the FRESH read - and was additionally vetoed by
+   * `unreadClosedControl?.kind === 'missing_exact_options'`. On an unread menu both clauses rejected
+   * her pick, so the resolver's profile value replaced it and the question read ANSWERED with
+   * nothing selected. On origin/main this assertion returned "Female".
    *
-   * `reviewedAnswerStillFits` computes `reviewedOption` against `usableOptions(field.options)` - the
-   * FRESH read - not against the list the record carries. On an unread menu that set is empty, so
-   * her reviewed "Woman" is on no offered option as far as the gate can see, the gate returns false,
-   * and the resolver's profile value replaces it. The stored answer becomes "Female", which the
-   * control does not offer: the question then reads ANSWERED with nothing selected, which is the
-   * loop reviewedComboboxOptionKept.test.ts was written for, reached through a different door.
-   *
-   * Retaining the list at the WRITE site cannot fix this, as this test proves: the gate never
-   * consults the retained list. The fix is to give that gate the same effective-options notion this
-   * change gives the write, and it is deliberately not made here - that gate decides whether her
-   * answer or the profile wins, and widening it is its own measured change. */
+   * The gate now judges her pick against the menu last measured on this same control, so an ordinary
+   * probe miss no longer overrules a choice that is verifiably on the employer's list. */
   const { second } = await twoRunsOverAGenderCombobox();
-  assert.equal(second!.answer, 'Female', 'still reverts today - update this test when the gate is fixed');
-  assert.ok(!GENDER_MENU.includes(second!.answer), 'and the value it reverts to is unfillable');
+  assert.equal(second!.answer, 'Woman', 'her reviewed pick of an employer option must survive');
+  assert.ok(GENDER_MENU.includes(second!.answer), 'and it is a value the control actually offers');
+  // Her provenance rides with the answer that is still hers.
+  assert.equal(second!.answer_source, 'applicant_review');
+});
+
+test('an unread control with NO menu ever measured still refuses to keep a stored answer', async () => {
+  /* THE VETO IS RELAXED, NOT REMOVED. Where nothing has ever measured this control's options there is
+   * no membership test to pass, so the gate must behave exactly as before - otherwise the widening
+   * would turn "never measured" into apparent authority to fill a closed control. */
+  const field = (options: string[] | null) => ({
+    label: 'what is your gender? 247', selector: '[data-litos-discovered-3]', durableSelector: '[id="247"]',
+    inputType: 'text', role: 'combobox', maxLength: null, options,
+    ...(options ? { optionsComplete: true } : {}), required: true,
+  });
+  const state = (questions: unknown[]) => ({
+    jd_text: 'Build C++ services.', role: 'Software Engineering Internship',
+    portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=wehrtyou&token=8052083',
+    ats_name: 'greenhouse', status: 'ready_to_submit', edited_terms: [], questions,
+    skipped_reasons: [], questions_reviewed_at: REVIEWED_ROUND, updated_at: REVIEWED_ROUND,
+  }) as never;
+  // Her pick is stored, but no run ever captured this control's options.
+  const stored = [{
+    id: 'q-247', question: 'what is your gender?', answer: 'Woman', kind: 'required', required: true,
+    portal_selector: '[id="247"]', portal_input_type: 'combobox',
+    answer_source: 'applicant_review', answer_reviewed_at: REVIEWED_ROUND,
+  }];
+  const result = await discoverAndResolveQuestions(
+    [field(null)] as never, { user_id: 'user-1' } as never, state(stored),
+    { school: 'USC', eeo_prefs: { gender: 'Female' } } as never, true, 'greenhouse',
+  );
+  const out = result.questions[0];
+  if (out) assert.equal(out.options ?? null, null, 'nothing was ever measured, so nothing is kept');
 });

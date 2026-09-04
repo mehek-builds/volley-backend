@@ -6279,13 +6279,48 @@ export async function discoverAndResolveQuestions(
     const unreadClosedControl = questionMetadataBlockerForDiscovered(field, {
       closedControlRequiresOptions: true,
     });
+    /* THE MENU HER PICK IS JUDGED AGAINST: this run's read, or - when this run read nothing - the
+     * one the last read measured on THIS SAME CONTROL.
+     *
+     * Without this the gate is disarmed by an ordinary probe miss. Measured on origin/main at the
+     * deployed revision (107e1ae7), two runs over one Greenhouse gender combobox `[id="245"]`:
+     * run 1 read the menu and stored her reviewed "Woman"; run 2's probe read nothing, so
+     * `offeredOptions` was empty, `reviewedOption` was undefined, `unreadClosedControl` was
+     * `missing_exact_options`, and BOTH clauses below rejected her pick. The resolver's "Female"
+     * replaced it - a value that control does not offer - and the question then read ANSWERED with
+     * nothing selected. That is the loop reviewedComboboxOptionKept.test.ts exists for, reached
+     * through a different door: not a gate that judged her answer wrongly, but a gate that could
+     * not see the menu that proves it fits.
+     *
+     * WHY WIDENING HERE CANNOT DISCARD AN ANSWER. `reviewedOption` appears only POSITIVELY in both
+     * clauses below, so defining it more often can only make `reviewedAnswerStillFits` true where it
+     * was false - it keeps fit answers, and can never re-open one. And it is defined only when her
+     * answer is a byte-for-byte member (trim + case) of a menu really measured on this control, which
+     * is the repo's own standard for "verifiably fillable whether or not the menu was complete"
+     * (see REVIEWED_PICK_EXACT_OPTION_TYPE in lib/questionDiscovery.ts).
+     *
+     * optionsSurvivingAnUnreadMenu supplies the retained half under its own guards - same
+     * portal_selector, still a closed control, never a type storedAnswerMatchesNoExactOption may
+     * blank - so the types that need exact options before resolution, which are intercepted at the
+     * top of this loop anyway, cannot reach this widening. */
+    const menuMeasuredForThisControl = offeredOptions.length > 0
+      ? offeredOptions
+      : optionsSurvivingAnUnreadMenu({
+        freshOptions: field.options,
+        controlType,
+        selector: portalSelectorForField(field),
+        existing,
+      }) ?? [];
     const reviewedOption = existing?.answer_source === 'applicant_review'
-      ? offeredOptions.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
+      ? menuMeasuredForThisControl.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
       : undefined;
     const reviewedAnswerStillFits = existing !== undefined
       && applicantChoseStoredAnswerInRound(existing, current.questions_reviewed_at)
       && existing.answer.trim().length > 0
-      && unreadClosedControl?.kind !== 'missing_exact_options'
+      /* An unread control no longer vetoes a pick that is ON the menu the last read measured for it.
+       * The veto stands wherever no such menu exists, which is every case it was written for: the
+       * send gate still holds on a control whose options nothing has ever measured. */
+      && (unreadClosedControl?.kind !== 'missing_exact_options' || reviewedOption !== undefined)
       && (
         (!(known && 'value' in known) && (offeredOptions.length === 0 || reviewedOption !== undefined))
         /* HER CURRENT-ROUND CHOICE OF AN OFFERED OPTION OUTRANKS A PROFILE VALUE THE CONTROL
@@ -6311,7 +6346,9 @@ export async function discoverAndResolveQuestions(
         required: existing.required || fieldIsRequired,
         portal_selector: portalSelectorForField(field),
         portal_input_type: controlType,
-        options: offeredOptions.length > 0 ? offeredOptions : null,
+        // The menu that just proved her answer fits is the menu the record keeps: writing
+        // `offeredOptions` here would delete a retained list at the very moment it was relied on.
+        options: menuMeasuredForThisControl.length > 0 ? menuMeasuredForThisControl : null,
       });
       continue;
     }
