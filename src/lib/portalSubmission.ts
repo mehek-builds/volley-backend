@@ -12340,6 +12340,28 @@ export const MANAGED_BLOCKER_REASONS: ReadonlySet<string> = new Set([
   'submit_enctype_changed', // the observed request's enctype differed from the bound one
   'submit_payload_changed', // the observed request's payload differed from the bound one
   'submit_transport_release_failed', // the matched request could not be released to the network
+  /* THE ACTIVATION GUARD'S OWN WITNESSES, and the eight this list first missed.
+   *
+   * managed-browser.js reports these through `unchanged(reason, event)` rather than by assigning
+   * blockerReason, and five of them are BUILT AT RUNTIME - `eventType(event) + '_binding_changed'`,
+   * where the type comes from `ordinaryActivationEvents` and falls back to 'activation' when the
+   * getter throws. A scan for reason LITERALS cannot see a name that does not exist as a literal,
+   * which is why they were absent while every other reason was accounted for.
+   *
+   * Their absence was not merely a reporting gap. contractError('blocker reason') is NOT
+   * fail-closed: confirmationContractError releases when submitWithheld is true, and the runner
+   * sets pressed:false on exactly these blocks - after the click. So an unlisted post-press reason
+   * took the release path rather than the unknown one. All eight are post-press and none belongs in
+   * MANAGED_PRE_PRESS_BLOCKER_REASONS: listing them here routes them to the tail throw, where that
+   * set makes them unknown. */
+  'pointerdown_binding_changed', // a pointerdown listener saw the binding change mid-activation
+  'mousedown_binding_changed', // a mousedown listener saw the binding change mid-activation
+  'focus_binding_changed', // a focus listener saw the binding change mid-activation
+  'click_binding_changed', // a click listener saw the binding change mid-activation
+  'activation_binding_changed', // same, when the event's type could not be read
+  'submit_capture_binding_changed', // the capture-phase submit witness saw the binding change
+  'submit_document_bubble_binding_changed', // the document-bubble witness saw the binding change
+  'submit_window_bubble_binding_changed', // the window-bubble witness saw the binding change
 ]);
 
 /* THE REFUSALS THAT PROVE THEMSELVES BY PRECEDING THE PRESS.

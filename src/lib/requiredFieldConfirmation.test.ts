@@ -1383,6 +1383,18 @@ function runnerBlockerReasons(source: string): Set<string> {
   collect(/\breason(?:\s*=|:|\s*\|\|)\s*'([a-z_]+)'/g);
   collect(/\breason\s*=\s*[^;\n]*?\?\s*'([a-z_]+)'\s*:\s*'([a-z_]+)'/g);
   collect(/blockActivation\('([a-z_]+)'/g);
+  /* The activation guard reports through `unchanged(reason, event)`, which forwards to
+   * blockActivation. Three of its reasons are literals; the rest are built at runtime. */
+  collect(/unchanged\('([a-z_]+)'/g);
+  /* `eventType(event) + '_binding_changed'` never exists as a literal anywhere, so no scan of
+   * literals can find it. Rebuild the family from the event list the runner actually registers,
+   * plus the 'activation' fallback eventType() returns when the type getter throws. Reading the
+   * array rather than hard-coding it means a new activation event joins the set on its own. */
+  const activationEvents = source.match(/const ordinaryActivationEvents = \[([^\]]*)\]/);
+  assert.ok(activationEvents, 'the runner still lists the activation events it witnesses');
+  const eventTypes = [...activationEvents[1]!.matchAll(/'([a-z]+)'/g)].map((match) => match[1]!);
+  assert.ok(eventTypes.length > 0, 'the activation event list is still readable');
+  for (const type of [...eventTypes, 'activation']) found.add(`${type}_binding_changed`);
   /* `armActivation` reports by return value, and its result becomes the blockerReason whenever it
    * is anything but 'armed'. Slice to that sentinel rather than scanning every `return` in a
    * twenty-thousand-line file. */
@@ -1395,10 +1407,17 @@ function runnerBlockerReasons(source: string): Set<string> {
 }
 
 test('the blocker reason union and the runtime allowlist are the same list', () => {
-  const source = readFileSync('src/lib/browserbase.ts', 'utf8');
+  /* Strip BOTH comment forms before slicing, not after. Stripping afterwards made the slice
+     boundary depend on comment punctuation - a semicolon inside any inline comment ended the union
+     early - and it left block-comment prose inside the matched region, where a quoted fragment like
+     '_binding_changed' reads as a declared member. Both were live: this assertion caught the second
+     one on the very commit that added the comment. */
+  const source = readFileSync('src/lib/browserbase.ts', 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
   const start = source.indexOf('blockerReason?:');
   assert.ok(start >= 0, 'the confirmation proof still declares blockerReason');
-  const union = source.slice(start, source.indexOf(';', start)).replace(/\/\/[^\n]*/g, '');
+  const union = source.slice(start, source.indexOf(';', start));
   const declared = new Set([...union.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!));
   assert.deepEqual(
     [...declared].sort(),
@@ -1416,7 +1435,13 @@ const RUNNER_SOURCE_ABSENT = existsSync(RUNNER_SOURCE_PATH)
 
 test('blocker reasons stay in sync with the managed runner', { skip: RUNNER_SOURCE_ABSENT }, () => {
   const emitted = runnerBlockerReasons(readFileSync(RUNNER_SOURCE_PATH, 'utf8'));
-  assert.ok(emitted.size > 30, `the scan found only ${emitted.size} reasons; the patterns went stale`);
+  /* Derived from the allowlist rather than a magic number: the runner's vocabulary is all but the
+     handful of retired reasons this service keeps under ADD, NEVER REMOVE. A floor five below the
+     real yield let a partial pattern regression pass unnoticed. */
+  assert.ok(
+    emitted.size >= MANAGED_BLOCKER_REASONS.size - 2,
+    `the scan found ${emitted.size} of ${MANAGED_BLOCKER_REASONS.size} reasons; the patterns went stale`,
+  );
   const unknown = [...emitted].filter((reason) => !MANAGED_BLOCKER_REASONS.has(reason)).sort();
   assert.deepEqual(unknown, [], 'the runner emits a blocker reason this service would reject as a contract error');
   /* Deliberately one-directional. This service may keep a reason the runner has retired — a run
@@ -1811,4 +1836,25 @@ test('a press the runner claims outranks the proof, however it spells it', () =>
   assert.ok(thrownBy(boundRefusal('submit_node_replaced', { pressed: false }))
     instanceof ManagedRequiredFieldConfirmationError);
   assert.ok(thrownBy(boundRefusal('submit_node_replaced')) instanceof ManagedRequiredFieldConfirmationError);
+});
+
+test('the activation guard\'s runtime-built reasons are all named and none of them releases', () => {
+  /* These are the eight the first pass of this list missed: `unchanged()` never assigns
+     blockerReason, and five of the names are concatenated at runtime, so a literal scan is blind to
+     them. Being unlisted was not a reporting gap - contractError releases when the runner denies its
+     own press, which it does on exactly these blocks, AFTER the click. */
+  const runtimeBuilt = ['pointerdown', 'mousedown', 'focus', 'click', 'activation']
+    .map((type) => `${type}_binding_changed`);
+  for (const reason of [...runtimeBuilt, 'submit_capture_binding_changed',
+    'submit_document_bubble_binding_changed', 'submit_window_bubble_binding_changed']) {
+    assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} would be rejected as a contract error`);
+    assert.ok(
+      !MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason),
+      `${reason} is witnessed during activation, so it can never prove the press did not happen`,
+    );
+    assert.ok(
+      thrownBy(boundRefusal(reason)) instanceof ManagedConfirmationUnprovenError,
+      `${reason} must leave the outcome unknown`,
+    );
+  }
 });
