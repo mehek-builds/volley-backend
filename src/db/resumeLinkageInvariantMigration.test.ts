@@ -150,6 +150,9 @@ test('the migration repairs every broken linkage shape and then makes it unstora
     assert.deepEqual(previewReport.promotedApplicationIds, [DSI]);
     assert.deepEqual(previewReport.clearedApplicationIds.sort(), [DELETED_DOC, NOT_A_RESUME, SOMEONE_ELSES].sort());
     assert.deepEqual(previewReport.baseResumePointerApplicationIds, [BASE_RESUME_WITH_POINTER]);
+    // Nothing left unaccounted for, so a real run would go on to install the constraint.
+    assert.equal(previewReport.remainingViolations, 0);
+    assert.equal(previewReport.constraintTightened, true);
     // And it changed nothing: the row it named is still broken.
     assert.equal((await rows(database)).get(DSI)!.resume_attached, false);
 
@@ -163,6 +166,10 @@ test('the migration repairs every broken linkage shape and then makes it unstora
     assert.equal(report.cleared, 3);
     assert.equal(report.baseResumePointersCleared, 1);
     assert.equal(report.linkStampsCompleted, 1);
+    // Every row was accounted for, so the constraint actually went on this time.
+    assert.equal(report.remainingViolations, 0);
+    assert.equal(report.constraintTightened, true);
+    assert.equal(report.constraintSkippedReason, undefined);
 
     /* THE LINK STAMP IS PART OF THE SAME ATTACHMENT. application_artifacts.attached_at is read by
      * the authoritative submission projection, which refuses an exact link whose stamp is null, and
@@ -282,8 +289,13 @@ test('the migration repairs every broken linkage shape and then makes it unstora
         cleared: secondReport.cleared,
         baseResumePointersCleared: secondReport.baseResumePointersCleared,
         linkStampsCompleted: secondReport.linkStampsCompleted,
+        remainingViolations: secondReport.remainingViolations,
+        constraintTightened: secondReport.constraintTightened,
       },
-      { promoted: 0, cleared: 0, baseResumePointersCleared: 0, linkStampsCompleted: 0 },
+      {
+        promoted: 0, cleared: 0, baseResumePointersCleared: 0, linkStampsCompleted: 0,
+        remainingViolations: 0, constraintTightened: true,
+      },
     );
   } finally {
     await server?.stop();
@@ -292,21 +304,32 @@ test('the migration repairs every broken linkage shape and then makes it unstora
   }
 });
 
-test('the migration refuses to install the constraint if any row still violates it', { timeout: 60_000 }, async () => {
-  /* The repair is a PRECONDITION of the constraint, not a nicety beside it, so the script asserts
-   * zero violations between the two and rolls back rather than letting the ALTER TABLE fail with a
-   * message about a row nobody named. The shape used here is one the repair deliberately does not
-   * touch: resume_attached true with source 'none', which the old constraint also forbade and which
-   * therefore can only arrive from outside this schema. */
-  const socketDir = mkdtempSync(join(tmpdir(), 'resume-linkage-invariant-refuse-'));
+/* THE SHARED FIXTURE FOR BOTH TESTS BELOW: everything SCHEMA_BEFORE already seeds, plus one row no
+ * repair rule targets. resume_attached true with source 'none' is a shape the PRE-migration
+ * constraint also forbade, so it can only have arrived from outside this schema; it is what "a row
+ * this script did not anticipate" looks like in a test. The constraint is loosened to `check (true)`
+ * only so the fixture can be inserted at all, exactly as the schema-drift test above does. */
+async function seedUnrepairableViolation(database: PGlite): Promise<void> {
+  await database.exec(SCHEMA_BEFORE.replace(/constraint applications_resume_attachment_state_check check \([\s\S]*?\n    \)/, 'check (true)'));
+  await database.exec(`
+    insert into applications (id, user_id, selected_resume_artifact_id, resume_attached, resume_source)
+    values ('dddddddd-dddd-4ddd-8ddd-ddddddddddd1', '${USER}', null, true, 'none')
+  `);
+}
+
+test('a residual violation this script cannot explain does not undo the repairs it already made', { timeout: 60_000 }, async () => {
+  /* The migration used to treat ANY leftover violation as a reason to roll back the whole
+   * transaction, including rows it had just correctly repaired: one row nobody anticipated, found
+   * live and not reasoned about in this script, would hand DSI's row straight back to
+   * (false, 'none') and exit non-zero. Repair now commits on its own before the constraint is even
+   * attempted, so it survives a row like this one that only the constraint step has to skip. */
+  // Short prefix, deliberately: the full path grows a Unix-socket filename below it, and macOS
+  // caps sun_path around 104 bytes. See the sibling test's prefix for the one that found this.
+  const socketDir = mkdtempSync(join(tmpdir(), 'rli-partial-'));
   const database = await PGlite.create();
   let server: PGLiteSocketServer | null = null;
   try {
-    await database.exec(SCHEMA_BEFORE.replace(/constraint applications_resume_attachment_state_check check \([\s\S]*?\n    \)/, 'check (true)'));
-    await database.exec(`
-      insert into applications (id, user_id, selected_resume_artifact_id, resume_attached, resume_source)
-      values ('dddddddd-dddd-4ddd-8ddd-ddddddddddd1', '${USER}', null, true, 'none')
-    `);
+    await seedUnrepairableViolation(database);
     server = new PGLiteSocketServer({
       db: database,
       path: join(socketDir, '.s.PGSQL.5432'),
@@ -316,13 +339,95 @@ test('the migration refuses to install the constraint if any row still violates 
     const databaseUrl = `postgresql://postgres:postgres@localhost/postgres?host=${socketDir}`;
 
     const result = await runMigration(databaseUrl);
-    assert.notEqual(result.code, 0, 'the migration must fail rather than half-apply');
-    assert.match(result.stderr, /still violate the resume linkage invariant after repair/);
+    // Not a failure: every row this script knows how to explain was repaired. Nothing watching this
+    // exit code should be told otherwise.
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+    const report = JSON.parse(result.stdout.trim().split('\n').pop()!);
+    assert.equal(report.event, 'resume_linkage_invariant_applied');
+    assert.equal(report.remainingViolations, 1);
+    assert.equal(report.constraintTightened, false);
+    assert.match(report.constraintSkippedReason, /1 application row\(s\) still violate/);
 
-    // And it rolled back: the DSI row is untouched, so a retry after investigation starts clean.
+    // THE REPAIRABLE ROW IS REPAIRED, not held hostage by the one row nothing here can explain.
+    assert.equal(report.promoted, 1);
     const after = await rows(database);
-    assert.equal(after.get(DSI)!.resume_attached, false);
-    assert.equal(after.get(DSI)!.selected_resume_artifact_id, LIVE_ARTIFACT);
+    assert.deepEqual(after.get(DSI), {
+      id: DSI,
+      selected_resume_artifact_id: LIVE_ARTIFACT,
+      resume_attached: true,
+      resume_source: 'artifact',
+      resume_attached_at: ROW_LAST_TOUCHED,
+    });
+
+    // AND A ROW THAT WAS ALREADY RIGHT stays right and is not touched by any of this.
+    assert.deepEqual(after.get(ALREADY_ATTACHED), {
+      id: ALREADY_ATTACHED,
+      selected_resume_artifact_id: LIVE_ARTIFACT,
+      resume_attached: true,
+      resume_source: 'artifact',
+      resume_attached_at: ATTACHED_LONG_AGO,
+    });
+
+    // AND THE CONSTRAINT IS STILL THE OLD, LOOSE ONE, proven behaviourally rather than merely
+    // claimed in the JSON summary: a shape the tightened constraint would refuse is still accepted.
+    await database.exec(`
+      insert into applications (id, user_id, selected_resume_artifact_id, resume_attached, resume_source)
+      values ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1', '${USER}', '${LIVE_ARTIFACT}', false, 'none')
+    `);
+  } finally {
+    await server?.stop();
+    await database.close();
+    rmSync(socketDir, { recursive: true, force: true });
+  }
+});
+
+test('the artifact-missing repair still clears and commits when an unrelated row skips the constraint', { timeout: 60_000 }, async () => {
+  /* The other repair branch, under the same partial-failure condition. A pointer to a document that
+   * is gone is cleared, and that clear is just as durable as a promotion when the constraint has to
+   * be left off for a row this script cannot explain. */
+  // Measured 2026-09-04: 'resume-linkage-invariant-partial-clear-' plus the socket filename below
+  // it overran macOS's ~104-byte sun_path limit and PGLiteSocketServer.start() failed with EINVAL.
+  // Short prefix, same reason as the sibling test above.
+  const socketDir = mkdtempSync(join(tmpdir(), 'rli-clear-'));
+  const database = await PGlite.create();
+  let server: PGLiteSocketServer | null = null;
+  try {
+    await seedUnrepairableViolation(database);
+    server = new PGLiteSocketServer({
+      db: database,
+      path: join(socketDir, '.s.PGSQL.5432'),
+      maxConnections: 8,
+    });
+    await server.start();
+    const databaseUrl = `postgresql://postgres:postgres@localhost/postgres?host=${socketDir}`;
+
+    const result = await runMigration(databaseUrl);
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+    const report = JSON.parse(result.stdout.trim().split('\n').pop()!);
+    // The three pointers whose document is gone (deleted, wrong kind, another user's) still clear.
+    assert.equal(report.cleared, 3);
+    assert.equal(report.constraintTightened, false);
+    assert.equal(report.remainingViolations, 1);
+
+    const after = await rows(database);
+    for (const id of [DELETED_DOC, NOT_A_RESUME, SOMEONE_ELSES]) {
+      assert.deepEqual(after.get(id), {
+        id,
+        selected_resume_artifact_id: null,
+        resume_attached: false,
+        resume_source: 'none',
+        resume_attached_at: null,
+      }, id);
+    }
+
+    // Re-running is still safe: the unresolved row is reported again, not compounded, and nothing
+    // that was already repaired is repaired a second time.
+    const second = await runMigration(databaseUrl);
+    assert.equal(second.code, 0, second.stderr || second.stdout);
+    const secondReport = JSON.parse(second.stdout.trim().split('\n').pop()!);
+    assert.equal(secondReport.cleared, 0);
+    assert.equal(secondReport.remainingViolations, 1);
+    assert.equal(secondReport.constraintTightened, false);
   } finally {
     await server?.stop();
     await database.close();
