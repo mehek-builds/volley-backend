@@ -5785,11 +5785,14 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
  * Today's bundle ships exactly one decline so neither path fires; this is the guard for the day it
  * ships two.
  *
- * The cleared barrier is REQUIRED wherever it is asked for, and omitted entirely (never made
- * optional) on the evidence run, which must always come home. */
+ * The cleared barrier is REQUIRED by default wherever it is asked for, and omitted entirely
+ * (never made optional) on the evidence run, which must always come home. `clearedOptional` is
+ * the one deliberate exception to "required by default" - see the terminal call site in
+ * pushWorkableManagedPhoneTerminalActions for why the barrier that runs there can no longer be
+ * allowed to end the run under its own name the way the preflight barrier still may. */
 function pushWorkableCookieBoundaryActions(
   actions: ManagedBrowserAction[],
-  labels: { decline: string; cleared?: string },
+  labels: { decline: string; cleared?: string; clearedOptional?: boolean },
 ) {
   actions.push({
     type: 'click',
@@ -5804,7 +5807,7 @@ function pushWorkableCookieBoundaryActions(
     type: 'waitForSelector',
     selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
     label: labels.cleared,
-    optional: false,
+    optional: labels.clearedOptional === true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
 }
@@ -6032,8 +6035,44 @@ const WORKABLE_PHONE_COUNTRY_TERMINAL_READBACK_LABEL = 'workable_phone_terminal:
  *
  * 1. The COOKIE boundary. Workable can mount a fresh consent dialog after resume parsing and the
  *    other form mutations, and its backdrop intercepts the pointer - which now matters for the
- *    atomic submit click rather than for the country combobox. Decline again, then require both
- *    the dialog and the backdrop gone before anything after this is allowed to click.
+ *    atomic submit click rather than for the country combobox. Decline again, then wait for both
+ *    the dialog and the backdrop to be gone before anything after this is allowed to click.
+ *
+ *    THE WAIT IS OPTIONAL HERE, and it was not always: #847 (2026-09-02) reasoned explicitly about
+ *    this exact risk in its review round, finding 6 - "required barrier kills plans that
+ *    previously completed" - and kept it required anyway, betting that reordering the PREFLIGHT
+ *    decline to run after the app mounts would stop a second dialog from ever needing to be
+ *    caught here. MEASURED 2026-09-04 22:14-22:15Z production, Pony.ai "Software Engineer Intern -
+ *    Generalist" packet fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, fill run f3aab6c5: that bet did not
+ *    hold. The run recorded "Employer questions 3 items completed" - every fixed field, the resume
+ *    upload, and all three reviewed questions already captured - then died with
+ *    `page.waitForSelector: Timeout 10000ms exceeded.` and nothing else, which is this exact
+ *    barrier's own error shape (WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR, MANAGED_FILL_TIMEOUT_MS)
+ *    and the only required 10s waitForSelector reachable this late in a Workable run with a
+ *    resolved phone plan (workable_phone_value_visible, workable_phone_country_visible and this
+ *    function's own terminal re-reads below are already optional; see git blame db2b512f and
+ *    51ec7ec5). The identical error text was also stored by a 2026-08-14 run, predating even the
+ *    phone-country machinery (blame aae73e6a, 2026-08-24) - `page.waitForSelector: Timeout
+ *    10000ms exceeded.` carries no selector or label of its own, so "identical text" only proves a
+ *    required 10s wait has intermittently died at more than one position over time, not that this
+ *    is the same position each time. What it does NOT do this time is stay a theory: the progress
+ *    evidence pins this run specifically past employer questions, where the only candidate is this
+ *    barrier.
+ *
+ *    So the barrier keeps proving the overlay is gone - a real dialog the decline could not reach
+ *    is still exactly the fact worth recording - but it no longer gets to discard three already-
+ *    answered employer questions plus a completed resume upload over one re-verification. A
+ *    timeout here now lands in `skipped` (the runner's per-action catch already treats an optional
+ *    `waitForSelector` timeout as non-fatal - see managed-browser.js's catch(actionError), which
+ *    checks `action.optional` with no exemption for the action type; the exemption at "waitForSelector
+ *    is exempt outright" a few lines above that catch is a different, earlier mechanism - it only
+ *    stops the zero-wait pre-check from cancelling the wait before it starts, it does not bypass
+ *    this catch), and the run proceeds to the terminal re-reads and the final submit click, whose
+ *    own actionability wait becomes the real enforcement if a dialog is genuinely still
+ *    intercepting the pointer. THE PREFLIGHT barrier (workable_cookie_preflight_cleared) is
+ *    UNCHANGED and stays required: failing there costs nothing (no field has been filled yet), and
+ *    #847's specific fix for that race - the decline reordered to run after the form mounts - has
+ *    not been contradicted by any later measurement.
  *
  * 2. The TOLERANT re-reads. The strict proofs ran before the parse remount could land, so they can
  *    no longer see a parse that rewrites the committed value afterwards. These re-reads can - and
@@ -6055,6 +6094,7 @@ function pushWorkableManagedPhoneTerminalActions(
   pushWorkableCookieBoundaryActions(actions, {
     decline: 'workable_cookie_final_decline',
     cleared: 'workable_cookie_final_cleared',
+    clearedOptional: true,
   });
   // Bridge the remount before reading, exactly as the early block does, and just as optionally: a
   // widget that never comes back costs one bounded wait, never the run.

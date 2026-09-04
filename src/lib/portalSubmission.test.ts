@@ -4975,11 +4975,17 @@ test('managed Workable phone selects exact UAE and proves the value before the r
     timeout: 10_000,
     requireUnique: true,
   });
+  /* Unlike the preflight barrier, this one is now OPTIONAL: measured 2026-09-04/05 production,
+   * Pony.ai fdcf4ccb fill run f3aab6c5 died here with `page.waitForSelector: Timeout 10000ms
+   * exceeded.` after "Employer questions 3 items completed" - three answered questions, the resume
+   * upload and every fixed field already captured, discarded by one re-verification of an overlay
+   * that #847's own review (finding 6) already flagged as a risk and bet the preflight reorder
+   * would prevent. See the block comment on pushWorkableManagedPhoneTerminalActions. */
   assert.deepEqual(actions[lateCookieClearedIndex], {
     type: 'waitForSelector',
     selector: WORKABLE_COOKIE_CLEARED,
     label: 'workable_cookie_final_cleared',
-    optional: false,
+    optional: true,
     timeout: 10_000,
   });
   assert.deepEqual(actions[capabilityIndex], {
@@ -5226,6 +5232,49 @@ test('managed Workable final cookie boundary handles both a late modal and no mo
 
   assert.deepEqual(replay(true), ['decline', 'cleared', 'terminal-read']);
   assert.deepEqual(replay(false), ['optional-miss', 'cleared', 'terminal-read']);
+});
+
+/* THE REGRESSION PIN for the 2026-09-04/05 production failure: Pony.ai fdcf4ccb fill run f3aab6c5
+ * recorded "Employer questions 3 items completed" - every fixed field, the resume upload and all
+ * three reviewed questions already captured - then died with `page.waitForSelector: Timeout
+ * 10000ms exceeded.` and nothing else. That is WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR's own
+ * error shape (MANAGED_FILL_TIMEOUT_MS = 10_000) and the only required 10s waitForSelector
+ * reachable this late in a Workable run with a resolved phone plan: workable_phone_value_visible,
+ * workable_phone_country_visible and this function's own terminal re-reads are already optional
+ * (blame db2b512f, 51ec7ec5), so a timeout on any of those was already landing in `skipped`, not
+ * ending the run. Only workable_cookie_final_cleared was still `optional: false`.
+ *
+ * #847's review round (finding 6) considered exactly this shape - "required barrier kills plans
+ * that previously completed" - and kept the barrier required, betting that reordering the
+ * PREFLIGHT decline to run after the app mounts would stop a second dialog from ever needing to be
+ * caught here. This production run is the measurement that bet did not fully cover. The fix keeps
+ * the barrier's diagnostic value (a timeout still lands in `skipped` under its own name) while
+ * refusing to let it discard an application that already reached employer questions. */
+test('the terminal cookie barrier is optional so it cannot discard already-answered employer questions', () => {
+  const fillActions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  });
+  const submitActions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  }, true);
+  for (const [name, actions] of Object.entries({ fill: fillActions, submit: submitActions })) {
+    const preflightCleared = actions.find((action) => action.label === 'workable_cookie_preflight_cleared');
+    const finalCleared = actions.find((action) => action.label === 'workable_cookie_final_cleared');
+    assert.equal(preflightCleared?.type, 'waitForSelector', name);
+    assert.equal(finalCleared?.type, 'waitForSelector', name);
+    // Nothing has been filled yet at the preflight position, so a stuck dialog still fails the
+    // whole run there under its own name - that race is #847's, and it stays fixed.
+    assert.equal(preflightCleared?.optional, false, `${name}: the preflight barrier still fails closed`);
+    // Everything has already been filled by the terminal position, so the same overlay check must
+    // not be allowed to discard it - this is the fix this test pins.
+    assert.equal(finalCleared?.optional, true, `${name}: the terminal barrier must not end a completed fill`);
+    // Both barriers keep proving the SAME fact with the SAME bound; only the consequence of a
+    // timeout changed, never the selector or the budget.
+    assert.equal(finalCleared?.selector, preflightCleared?.selector, name);
+    assert.equal(finalCleared?.timeout, preflightCleared?.timeout, name);
+  }
 });
 
 /* THE PRODUCTION-SHAPED REPLAY of the five live refutations, and of the fix. The resume upload
