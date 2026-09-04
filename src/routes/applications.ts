@@ -81,6 +81,7 @@ import {
   stalledFillRunReleaseIsAdmissible,
 } from '../lib/stalledFillRunRelease';
 import { attemptNeverPressedReason, employerMayHoldApplication } from '../lib/managedSubmitOutcome';
+import { closeAbandonedPreBoundaryAttempts } from '../lib/abandonedAttemptClosure';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
@@ -148,6 +149,7 @@ import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
 import { canonicalApplicationForNewPacketAttempt } from '../lib/canonicalPacketBinding';
 import {
   appendSubmissionAttemptEvent,
+  ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
   attemptNeverReachedEmployer,
   authorizeFinalSubmissionBoundary,
   freezePostingIdentity,
@@ -717,7 +719,7 @@ async function repairExpiredAttendedHandoffClaim(
         eventId: submissionAttemptEventId(opening.attempt_id, 'not_sent_proven', 'never-reached-employer'),
         eventKind: 'not_sent_proven',
         proofKind: 'typed_pre_click_stop',
-        evidenceCode: 'attempt_never_reached_employer',
+        evidenceCode: ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
       }, { executor: tx });
       return { row: locked, review: released, disposition: 'never_reached' as const };
     }
@@ -1122,6 +1124,49 @@ async function refuseDuplicateApplication(
   userId: string,
   log: FastifyInstance['log'],
 ): Promise<DuplicateApplicationVerdict> {
+  /* HEAL WHAT LITOS CAN PROVE BEFORE REFUSING ANYTHING, so a block that needs no human never
+   * reaches one.
+   *
+   * Measured 2026-09-03 on Databricks 1d4c8113: the refusal named an earlier attempt carrying
+   * `attempt_opened` alone and sent the applicant to check the employer's page for it. The ledger
+   * already proves that attempt never crossed the boundary, so there was nothing on that page to
+   * find, and the block it created was permanent. closeAbandonedPreBoundaryAttempts writes the
+   * not-sent fact the ledger already licenses, and the verdict below is then computed against a
+   * ledger that no longer holds a phantom.
+   *
+   * ON THE SEND PATH AND NOT A READ PATH. The applicant has just asked to send, which is exactly
+   * when it is right to spend a write resolving what can be resolved. This is deliberately not
+   * inside duplicateApplicationVerdict, which the gates call to ask a question, not to change one.
+   *
+   * BEST EFFORT, NEVER BLOCKING. A failure here leaves the ledger exactly as it was and the verdict
+   * refuses precisely as it did before, so the worst case is the behaviour that shipped yesterday. */
+  try {
+    const healed = await db.transaction(async (tx) => {
+      /* TRY, NEVER WAIT, the same rule repairExpiredAttendedHandoffClaim states. A lost race for
+       * the user lock means another writer is already moving this user's ledger, and waiting for it
+       * would pin a pool client on the send path. Skipping costs nothing: the verdict below simply
+       * refuses as it would have, and the next send heals. */
+      if (!await tryLockSubmissionAttemptUser(tx, userId)) return { closedAttemptIds: [], failedAttemptIds: [] };
+      return closeAbandonedPreBoundaryAttempts({ userId, executor: tx, log });
+    });
+    if (healed.closedAttemptIds.length > 0) {
+      log.info(
+        { applicationId: row.id, closedAttemptIds: healed.closedAttemptIds },
+        'Closed abandoned pre-boundary attempts the ledger proves never reached an employer',
+      );
+    }
+    if (healed.failedAttemptIds.length > 0) {
+      log.warn(
+        { applicationId: row.id, failedAttemptIds: healed.failedAttemptIds },
+        'Could not close some abandoned pre-boundary attempts; leaving them for the next heal',
+      );
+    }
+  } catch (error) {
+    log.warn(
+      { applicationId: row.id, err: error },
+      'Could not close abandoned pre-boundary attempts; the duplicate verdict is unchanged',
+    );
+  }
   const verdict = await duplicateApplicationVerdict({
     userId,
     applicationId: row.id,
