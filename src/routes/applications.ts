@@ -930,13 +930,23 @@ async function loadSensitiveQuestionProfile(userId: string): Promise<Application
  * need a confirmation, instead of the applicant discovering them one 422 at a time. Three sessions
  * were spent on packet 4a79eec1 without anyone seeing which question was blocking, because the only
  * place the answer existed was a paragraph of error text after pressing Send.
+ *
+ * EXPORTED FOR ONE END-TO-END TEST AND NOTHING ELSE IN src. That test composes the real send path -
+ * resolveSubmittedApplicationAnswers, then resolvePacketAuditQuestionFixpoint to a fixpoint - and
+ * has to ask "would the send still refuse this packet". The only honest way to ask it is to call
+ * THIS function, the one POST /submission/approve calls; re-implementing its filter in a test file
+ * would pass whatever this function happened to do, which is the vacuous-test shape.
  */
-function sensitiveQuestionsFor(
+export function sensitiveQuestionsFor(
   questions: readonly ApplicationReviewQuestion[],
   profile: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
+  /* The packet's own review round, so a question she answered herself in THIS round can satisfy a
+   * gate that the resolver has declined to answer for her. Omitting it is fail-closed: every
+   * question then reads as unreviewed and the gate behaves exactly as it did before. */
+  questionsReviewedAt?: string,
 ): ApplicationReviewQuestion[] {
   return normalizeApplicationReviewQuestions(questions)
     /* An OPTIONAL sensitive question with no answer is an offer, not a blocker. R-096 now mints
@@ -946,24 +956,34 @@ function sensitiveQuestionsFor(
        hold a complete application hostage to a section the employer itself marked optional. A
        REQUIRED sensitive question keeps the gate exactly as it stands, answered or not. */
     .filter((question) => question.required || question.answer.trim().length > 0)
-    /* THE RECORD-FIRST FORM, so her own confirmation is an input to the gate that is asking about
-     * her, and so that it cannot stop being one by accident. The label-and-answer form takes the
-     * record as a trailing optional argument, and deleting that argument here is a one-token change
-     * with no type error and no failing test that silently reverts the whole fix. See
-     * reviewQuestionRequiresAttention. */
+    /* THE RECORD-FIRST FORM, so her own confirmation and her own current-round review are both
+     * inputs to the gate that is asking about her, and so that neither can stop being one by
+     * accident. The label-and-answer form takes the record and the reviewed flag as trailing
+     * optional arguments, and dropping either at a call site is a one-token change with no type
+     * error and no failing test that silently reverts one of the two fixes. See
+     * reviewQuestionRequiresAttention, which is why the round is passed here rather than a boolean
+     * derived from it. */
     .filter((question) => reviewQuestionRequiresAttention(
-      question, profile, jdText, postingCountry, postingCountryCode,
+      question, profile, jdText, postingCountry, postingCountryCode, questionsReviewedAt,
     ));
 }
 
-function sensitiveQuestionFor(
+/** The head of the list above. Exported for the same one end-to-end test, and for the same reason. */
+export function sensitiveQuestionFor(
   questions: readonly ApplicationReviewQuestion[],
   profile: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry: JobCountry | undefined,
   postingCountryCode?: string,
+  /* FORWARDED, AND THIS IS THE LINE THE MERGE WOULD HAVE EATEN. The list form gained the review
+   * round while the head form was being split out of it; a head form that quietly dropped the round
+   * would have left every send gate in this file resolving a declined question as unreviewed, which
+   * is the whole defect, with every test still green because the list form kept working. */
+  questionsReviewedAt?: string,
 ): ApplicationReviewQuestion | undefined {
-  return sensitiveQuestionsFor(questions, profile, jdText, postingCountry, postingCountryCode)[0];
+  return sensitiveQuestionsFor(
+    questions, profile, jdText, postingCountry, postingCountryCode, questionsReviewedAt,
+  )[0];
 }
 
 /* THE DUPLICATE GATE as the routes see it.
@@ -1951,6 +1971,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           current.jd_text,
           packetCountry,
           packetCountryCode,
+          current.questions_reviewed_at,
         );
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
@@ -3118,6 +3139,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         canonicalSubmittedQuestions, sensitiveProfile, current.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
+        /* submittedReviewedAt, NOT current.questions_reviewed_at. canonicalSubmittedQuestions is
+         * built as { ...current, questions_reviewed_at: submittedReviewedAt } and its answers are
+         * stamped answer_reviewed_at: submittedReviewedAt, which resolveSubmittedApplicationAnswers
+         * mints fresh when the packet has no prior round. Passing the stored value hands this gate
+         * undefined for exactly those packets, so every answer reads as unreviewed and the gate
+         * refuses an answer she just supplied. Lines below pass submittedReviewedAt alongside this
+         * same question array for the same reason. */
+        submittedReviewedAt,
       );
       // A supported portal needs the browser run to discover and surface the live form's
       // declarations. Blocking that run on the pre-run snapshot creates a deadlock: the question
@@ -3642,6 +3671,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           review.jd_text,
           postingCountryFromJobContext(row.job_context),
           postingCountryCodeFromJobContext(row.job_context),
+          /* THE SAME ROUND THE SEND GATE READS. Without it this surface lists a question the send
+           * would let through - she answered it herself in this round - and the applicant is sent
+           * to confirm something nothing is waiting on. A list that disagrees with the gate it
+           * describes is worse than no list. */
+          review.questions_reviewed_at,
         ).map((question) => question.question),
         ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, review.status, request.log)),
       });
@@ -4231,6 +4265,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         approvalReview.questions, sensitiveProfile, approvalReview.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
+        approvalReview.questions_reviewed_at,
       );
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);

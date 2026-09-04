@@ -285,7 +285,7 @@ import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '
 import { loadApplicationProfileLike, loadUnattendedConsentGrant } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
-import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
+import { applicantChoseStoredAnswer, applicantChoseStoredAnswerInRound } from '../lib/applicantAnswer';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import {
   dedupeQuestionMetadataBlockers,
@@ -5917,18 +5917,6 @@ export function compactMaterialQuestions(
     });
   }
   return [...selected.values()];
-}
-
-function applicantChoseStoredAnswerInRound(
-  question: { answer: string; answer_source?: string; answer_reviewed_at?: string },
-  questionsReviewedAt: string | undefined,
-): boolean {
-  const answerReviewedAt = question.answer_reviewed_at?.trim();
-  const reviewRound = questionsReviewedAt?.trim();
-  return applicantChoseStoredAnswer(question)
-    && Boolean(answerReviewedAt)
-    && Boolean(reviewRound)
-    && answerReviewedAt === reviewRound;
 }
 
 export async function discoverAndResolveQuestions(

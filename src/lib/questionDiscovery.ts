@@ -3,6 +3,7 @@ import {
   referralAnswer as referrerDeclarationAnswer,
   graduationWindowAnswer as graduationWindowDeclarationAnswer,
 } from './heldAnswerQuestions';
+import { applicantChoseStoredAnswerInRound } from './applicantAnswer';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -2195,6 +2196,38 @@ function comparableAnswer(value: string): string {
 }
 
 /**
+ * THE ANSWER CARRIES A REVIEW SHE MADE IN THIS ROUND - the only signal in this file that a human
+ * has actually attended to a question, rather than a value the product computed for her.
+ *
+ * The round check is what makes it hard to launder. Pinning answer_reviewed_at to the packet's own
+ * questions_reviewed_at stops a review recorded in an earlier round from standing in for one in
+ * this round, so a refresh cannot carry a stale claim of attention forward across a re-fill.
+ */
+export function answerCarriesCurrentApplicantReview(
+  /* `answer` is required and non-null: both callers type it `string`, and the two lines that
+   * bracket this call in sensitiveQuestionFor - `question.answer.trim().length > 0` and
+   * comparableAnswer's own `value.trim()` - would throw on a null anyway. Accepting one here only
+   * advertised a shape the neighbours cannot survive. The provenance fields stay `unknown` because
+   * the refresh's call site holds them that way. */
+  question: { answer: string; answer_source?: unknown; answer_reviewed_at?: unknown },
+  questionsReviewedAt: string | undefined,
+): boolean {
+  /* An ADAPTER onto the canonical predicate, not a copy of it. This call site holds the question
+   * as a loose record whose provenance fields are `unknown`, so it narrows them and delegates;
+   * everything about what counts as her current-round answer is decided in applicantAnswer.ts and
+   * nowhere else. Writing the comparison out here is what let the fill run and the send gate
+   * disagree about the same record. */
+  return applicantChoseStoredAnswerInRound(
+    {
+      answer: question.answer,
+      answer_source: typeof question.answer_source === 'string' ? question.answer_source : undefined,
+      answer_reviewed_at: typeof question.answer_reviewed_at === 'string' ? question.answer_reviewed_at : undefined,
+    },
+    questionsReviewedAt,
+  );
+}
+
+/**
  * DID THE APPLICANT HERSELF MAKE THIS DECLARATION, on this exact question, for this exact answer.
  *
  * THE DEAD END THIS OPENS, traced end to end on packet 4a79eec1 (Hudson River Trading, greenhouse)
@@ -2275,6 +2308,15 @@ export function sensitiveQuestionRequiresAttention(
    * on file", which is what a caller that cannot supply one honestly means, and what every record
    * written before the field existed is. */
   confirmation?: { answer_confirmed_of?: unknown },
+  /* DID SHE ANSWER THIS ONE HERSELF, IN THIS ROUND. Defaults to false, which is exactly the
+   * behaviour every caller had before this parameter existed.
+   *
+   * BESIDE answer_confirmed_of RATHER THAN INSTEAD OF IT, and the two are not interchangeable. A
+   * confirmation is her word about ONE question and clears the gate wherever it applies; this is a
+   * weaker signal - an answer bearing an applicant_review stamp in the packet's current round - and
+   * it is admitted in ONE branch only, the one where the resolver explicitly declined and there is
+   * therefore no profile value for a machine claim to contradict. See the two branches below. */
+  applicantReviewed: boolean = false,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
@@ -2288,7 +2330,43 @@ export function sensitiveQuestionRequiresAttention(
     answer_confirmed_of: confirmation?.answer_confirmed_of,
   })) return false;
   const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
-  return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+  /* THE RESOLVER ANSWERED, SO ITS ANSWER IS THE CROSS-CHECK AND A REVIEW DOES NOT OVERRIDE IT.
+   *
+   * This branch is the only place a work-eligibility or self-identification answer is ever
+   * compared against what her profile actually says, and R-004 is what happens without it: a
+   * stored "Yes" to "are you legally authorized to work in the United States?" reaching a federal
+   * control while the profile says work_authorized false. An earlier cut of this change let a
+   * current-round review short-circuit the whole function, which removed exactly that check for
+   * every label the resolver answers. It stays first, and it stays unconditional.
+   */
+  if (known && 'value' in known) {
+    return comparableAnswer(known.value) !== comparableAnswer(answer);
+  }
+  /* THE RESOLVER DECLINED, AND UNTIL NOW THAT MADE THE QUESTION UNSENDABLE BY ANY ANSWER.
+   *
+   * Measured live 2026-09-03, Exa packet 73768339 (ashby), on the label "do you require visa
+   * sponsorship to work in your selected location? if so, which one? and when does your visa
+   * expire?". resolveKnownAnswer returns skipReason "work-eligibility question left for you", so
+   * there is no value to compare and the old expression returned true for EVERY answer - her own
+   * reviewed paragraph, and a bare "Yes", both measured true. The dashboard offered no control
+   * that cleared it, because no answer could: the send was refused permanently.
+   *
+   * A declined resolve means R-004 will not let the PRODUCT declare her work eligibility. It does
+   * not mean she may not declare it herself - "left for you" is precisely an instruction to her.
+   * There is no profile value to contradict here, which is why the escape hatch lives in this
+   * branch and only this one.
+   *
+   * NEVER_FILL_PATTERNS is deliberately ABOVE this and stays absolute: an SSN, a licence number, a
+   * captcha or a recording consent is never cleared by a review.
+   *
+   * Deliberately `'skipReason' in known` and not merely "no value": resolveKnownAnswer also returns
+   * null, which means no rule recognised the label at all rather than a rule declining it. Only the
+   * explicit decline was measured, and only the explicit decline carries the "left for you"
+   * instruction this branch relies on, so an unrecognised sensitive label keeps refusing exactly as
+   * it did before. Widen it when there is a measurement, not before.
+   */
+  if (known && 'skipReason' in known) return !applicantReviewed;
+  return true;
 }
 
 /**
@@ -2310,14 +2388,31 @@ export function sensitiveQuestionRequiresAttention(
  * something the refresh never returns.
  */
 export function reviewQuestionRequiresAttention(
-  question: { question: string; answer: string; answer_confirmed_of?: unknown },
+  question: {
+    question: string;
+    answer: string;
+    answer_confirmed_of?: unknown;
+    answer_source?: unknown;
+    answer_reviewed_at?: unknown;
+  },
   ap: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* The packet's own review round, so a question she answered herself in THIS round can satisfy a
+   * gate the resolver has declined to answer for her. Omitting it is fail-closed: every question
+   * then reads as unreviewed and the gate behaves exactly as it did before.
+   *
+   * COMPUTED HERE RATHER THAN AT THE CALL SITES, for the reason the block above gives about the
+   * record parameter. answerCarriesCurrentApplicantReview takes a record and a round and returns a
+   * bare boolean, and a bare boolean passed positionally is the easiest argument in this file to
+   * drop, invert or hand the wrong round: doing it once, next to the record it is about, is what
+   * stops a caller silently reverting the declined-resolver fix. */
+  questionsReviewedAt?: string,
 ): boolean {
   return sensitiveQuestionRequiresAttention(
     question.question, question.answer, 'text', ap, jdText, postingCountry, postingCountryCode, question,
+    answerCarriesCurrentApplicantReview(question, questionsReviewedAt),
   );
 }
 
@@ -2524,11 +2619,11 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       consent_permission_granted_at?: unknown;
       answer_confirmed_of?: unknown;
     };
-    const applicantReviewedCurrentAnswer = Boolean(
-      question.answer.trim()
-      && withProvenance.answer_source === 'applicant_review'
-      && typeof withProvenance.answer_reviewed_at === 'string'
-      && withProvenance.answer_reviewed_at === questionsReviewedAt,
+    /* Shared with the sensitive-question gate, so the refresh and the gate cannot disagree about
+     * what counts as her own current-round answer. */
+    const applicantReviewedCurrentAnswer = answerCarriesCurrentApplicantReview(
+      withProvenance,
+      questionsReviewedAt,
     );
     const derivedFrom = typeof withProvenance.answer_option_source === 'string'
       ? withProvenance.answer_option_source
