@@ -141,7 +141,7 @@ import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPac
 import { verifyStoredPacketAuditAcknowledgement } from '../lib/packetAudit';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
-import { refreshResumeContactFromProfile } from '../lib/resumeContactOfRecord';
+import { refreshResumeContactFromProfile, resumeContactStaleness } from '../lib/resumeContactOfRecord';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
@@ -2763,6 +2763,210 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  /* THE MEASURED DEFECT, live on trylitos.com 2026-09-04: every packet built before the applicant
+   * moved still attaches its exact resume PDF with the OLD contact header. Pony.ai (fdcf4ccb),
+   * Belvedere Trading (c4413bff, 6fda0404, 4de84885), Transparent Hiring (6f8524ca) and others were
+   * built while application_profile read "Dubai" / "+971 567417451"; the profile now reads "Los
+   * Angeles" / "+1 213 574 6270", the managed form fills the NEW pair live at submit time (it reads
+   * the same profile row this route does), and the attached PDF still prints the OLD one. The form
+   * and its own attachment disagree, on an axis neither one alone can show her.
+   *
+   * "Tailor resume" was the only existing remedy, and it is the wrong tool for a fact the tailoring
+   * never touches: it spends one of the Free tier's 20 monthly builds, calls the LLM to re-select
+   * and re-word content that was already correct, and (PR #855, open) forks a second Tracker row
+   * for the one application. None of that is what a moved applicant needs.
+   *
+   * THE MECHANISM IS THE ONE THE EDIT-RESUME ROUTE ABOVE ALREADY USES FOR ITS OWN SILENT REFRESH.
+   * That route calls refreshResumeContactFromProfile on every content save so an edit never
+   * reintroduces a stale phone or residence underneath it; this route is that call BY ITSELF,
+   * reachable without touching a bullet, a date, or the LLM. renderResumePdf is the same renderer,
+   * called the same way (no bank argument, so no unused-bullet expansion): the ResumeSpec content
+   * that goes in is byte-identical to what is already on the row, so packetBindings.specSha256
+   * cannot move and this is not a new tailoring. Only the header text changes, so only the rendered
+   * PDF's bytes change - which is deliberately enough to make the packet's audit re-run.
+   *
+   * `_review.packet_audit` and `_review.packet_audit_acknowledgement` are DELIBERATELY left
+   * untouched, exactly as the edit-resume route leaves them. generated_resumes.resume_object_key
+   * moves; `_review.packet_audit.bindings.pdf` does not, so the very next currentPacketAudit /
+   * currentAcknowledgedPacketAudit call - the send gate, and the packet-audit screen - reads
+   * `stored.pdf.objectKey !== currentBindings.pdf.objectKey`, answers 'packet_stale', and refuses
+   * to honour whatever acknowledgement she already gave (see packetAudit.ts,
+   * verifyCurrentPacketAudit). That is the whole immutability rule this route relies on rather than
+   * reimplements: any prior acknowledgement is void the moment the PDF changes, and she re-reviews
+   * the exact packet before it can be sent. `_quality.pdfGenerationBinding` IS updated, on purpose:
+   * leaving it pointed at the old bytes would make hasCurrentGenerationBinding refuse the new PDF
+   * outright ("Generate it again") instead of the graceful, re-reviewable 'packet_stale' this route
+   * means to produce. */
+  fastify.post(
+    '/applications/:id/resume/contact-refresh',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const userId = request.jwtPayload!.userId;
+      const stored = row.spec as StoredSpec;
+      const review = readApplicationReview(stored);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      const storedContact = stored._contact as {
+        full_name?: string;
+        email?: string;
+        phone?: string;
+        location?: string;
+        linkedin_url?: string;
+        github_url?: string;
+        portfolio_url?: string;
+      } | undefined;
+      if (!storedContact?.full_name) {
+        return reply.status(409).send({ error: 'This older resume has no contact header to refresh. Generate it again first.' });
+      }
+      /* Same question PUT /review/answers asks of a saved answer, asked here of a swapped PDF: a
+       * run holds this row, or the row's own evidence says an employer may already have this
+       * packet. Neither state is one this route may write underneath - see
+       * reviewAnswerSaveDisposition for exactly what it refuses and why, including
+       * ready_for_final_approval (the picture she is previewing must not change under her) and
+       * employerMayHoldApplication (an unclaimed row can still carry evidence the employer already
+       * has it). */
+      if (reviewAnswerSaveDisposition(review) !== 'save') {
+        return reply.status(409).send({
+          error: 'This application’s packet cannot be refreshed from its current submission state',
+          code: 'CONTACT_REFRESH_NOT_AVAILABLE',
+        });
+      }
+
+      const [profileRows, applicationProfile] = await Promise.all([
+        db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+        loadApplicationProfileLike(userId),
+      ]);
+      /* Same refusal as the resume edit route, and for the same reason: refreshing phone, location
+       * and links from the current profile is safe, but silently carrying a changed resume email
+       * onto a frozen packet is not - that email is pinned into the applicant-email routing and the
+       * packet audit's resumeContactEmailSha256, both decided at generation time. */
+      const currentResumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
+      if (!resumePacketEmailIsCurrent(storedContact.email, currentResumeEmail)) {
+        return reply.status(409).send({
+          error: 'Your personal resume email changed or is missing. Regenerate this application before refreshing it.',
+          code: 'resume_email_regeneration_required',
+        });
+      }
+
+      const fullContact = { ...storedContact, full_name: storedContact.full_name };
+      // The same comparison GET /applications/:id/submission uses for resume_contact_stale, so the
+      // signal that offers this button and the route behind it can never disagree about whether
+      // there is anything to do.
+      const staleness = resumeContactStaleness(fullContact, applicationProfile as Record<string, unknown>);
+      if (!staleness) {
+        return reply.send({
+          application_id: row.id,
+          review,
+          contact: { before: fullContact, after: fullContact },
+        });
+      }
+      const newContact = staleness.current;
+      if (!hasContactRoute(newContact)) {
+        return reply.status(422).send({ error: 'Litos did not refresh this resume because it would have no way for an employer to reach you.' });
+      }
+
+      let contentSpec: ResumeSpec;
+      try {
+        contentSpec = editableResumeSpec(stored);
+      } catch (error) {
+        return reply.status(409).send({ error: error instanceof Error ? error.message : 'Invalid resume' });
+      }
+      // No LLM call, no jd-alignment re-check, no bank (fourth argument, defaulted): the content is
+      // not moving, only the header is. Same renderer, same no-bank call the edit route above makes.
+      const rendered = await renderResumePdf(contentSpec, newContact, review.jd_text);
+
+      const requestedKey = `users/${userId}/resumes/${row.id}-contact-refresh-${randomUUID()}.pdf`;
+      let blob: Awaited<ReturnType<typeof putObject>>;
+      try {
+        blob = await putObject(requestedKey, rendered.buffer, { contentType: 'application/pdf' });
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(500).send({ error: 'Failed to store the refreshed resume' });
+      }
+
+      const now = new Date().toISOString();
+      // Through settleStall like every other _review writer in this file - a no-op for every status
+      // this route reaches, since none of them are needs_attention with an open stall, but the rule
+      // is "every writer", not "every writer that currently needs it".
+      const finalReview = settleStall({ ...review, updated_at: now });
+      const updatedSpec = {
+        ...stored,
+        _contact: newContact,
+        _quality: {
+          ...(stored._quality as Record<string, unknown> | undefined),
+          pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer, newContact.email ?? ''),
+        },
+        _review: finalReview,
+      };
+
+      const runContactRefreshTransaction = (database: typeof db) => database.transaction(async (tx) => {
+        const changed = await tx
+          .update(generated_resumes)
+          .set({ spec: updatedSpec, resume_object_key: blob.pathname })
+          .where(and(
+            eq(generated_resumes.id, row.id),
+            eq(generated_resumes.user_id, userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+            sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+            sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
+          ))
+          .returning({ id: generated_resumes.id });
+        if (changed.length === 0) return changed;
+        // The same artifact-version carry the edit route above performs, so the canonical artifact
+        // table - which prepareManagedApplication's own-candidate check reads independently of
+        // generated_resumes - never falls out of step with the object key this write just moved.
+        await appendEditedResumeArtifactVersion(tx, {
+          userId,
+          legacyGeneratedResumeId: row.id,
+          structuredContent: updatedSpec,
+          jobContext: row.job_context,
+          renderedObjectKey: blob.pathname,
+          renderedBlobUrl: blob.url,
+        });
+        return changed;
+      });
+
+      let updated: Array<{ id: string }>;
+      try {
+        updated = await withAuthorityRevisionRetry(() => withReadOnlyRetry(
+          () => runContactRefreshTransaction(db),
+          {
+            onRetry: (attempt) => request.log.warn(
+              { attempt, applicationId: row.id },
+              'Contact refresh transaction reached a read-only backend; retrying on a fresh pooled connection',
+            ),
+            onExhausted: () => withDedicatedDatabase((directDb) => {
+              request.log.warn(
+                { applicationId: row.id },
+                'Contact refresh pooled transactions stayed read-only; retrying on the direct database endpoint',
+              );
+              return runContactRefreshTransaction(directDb);
+            }),
+          },
+        ), {
+          onRetry: (attempt) => request.log.warn(
+            { attempt, applicationId: row.id },
+            'Contact refresh transaction hit the authority revision guard; retrying the whole transaction',
+          ),
+        });
+      } catch (error) {
+        await deleteObjects(blob.pathname).catch(() => undefined);
+        throw error;
+      }
+      if (updated.length === 0) {
+        await deleteObjects(blob.pathname).catch(() => undefined);
+        return reply.status(409).send({ error: 'The application state changed before the contact refresh finished' });
+      }
+
+      return reply.send({
+        application_id: row.id,
+        review: finalReview,
+        contact: { before: fullContact, after: newContact },
+      });
+    },
+  );
+
   fastify.put(
     '/applications/:id/review',
     { preHandler: requireAuth },
@@ -3920,6 +4124,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
         handoff_packet_valid = audit.valid;
       }
+      /* THE READ-ONLY HALF OF THE CONTACT-REFRESH SIGNAL, so a client can offer the button on POST
+       * /applications/:id/resume/contact-refresh only when it would do anything. `profile` above is
+       * loadApplicationProfileLike's own shape (loadSensitiveQuestionProfile is a thin alias for
+       * it), which is exactly what resumeContactStaleness and the refresh route both expect - one
+       * profile read, one comparison function, shared by the signal and the write it describes. */
+      const storedContactForStaleness = (row.spec && typeof row.spec === 'object' ? row.spec as Record<string, unknown> : {})._contact as {
+        full_name?: string;
+        email?: string;
+        phone?: string;
+        location?: string;
+        linkedin_url?: string;
+        github_url?: string;
+        portfolio_url?: string;
+      } | undefined;
+      const resumeContactStale = storedContactForStaleness?.full_name
+        ? resumeContactStaleness(
+          { ...storedContactForStaleness, full_name: storedContactForStaleness.full_name },
+          profile as Record<string, unknown>,
+        )
+        : null;
       return reply.send({
         application_id: row.id,
         review: reviewWithoutPassiveHandoffUrl(review),
@@ -3931,6 +4155,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         documents: storedDocuments(row),
         handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
+        // Present only when the header actually would change - see resumeContactStaleness. Absent
+        // is the common case and must stay cheap to read: no PDF fetch, no packet audit, just the
+        // one profile read this route already makes and a handful of string comparisons.
+        ...(resumeContactStale ? { resume_contact_stale: resumeContactStale } : {}),
         /* THE QUESTIONS ONLY SHE CAN CLEAR, NAMED BEFORE SHE PRESSES SEND.
          *
          * Every send gate in this file refuses on these already, and until now that refusal existed

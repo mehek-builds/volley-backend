@@ -83,13 +83,30 @@ export function resumeContactOfRecord(sources: ResumeContactSources): ContactHea
 }
 
 /**
- * Refresh mutable contact facts when an applicant explicitly saves an existing packet again.
+ * The profile-sourced contact fields a stored packet may safely pick up from the CURRENT profile
+ * without becoming a different application. full_name and email are deliberately absent - see the
+ * doc comment on refreshResumeContactFromProfile for why each stays packet-specific.
+ */
+const MUTABLE_CONTACT_FIELDS = ['phone', 'location', 'linkedin_url', 'github_url', 'portfolio_url'] as const;
+
+/**
+ * Refresh mutable contact facts when an applicant explicitly saves an existing packet again, or
+ * explicitly asks Litos to bring an already-built packet's header back in line with her current
+ * profile (POST /applications/:id/resume/contact-refresh).
  *
- * The generated resume remains frozen until the applicant uses the resume edit path. Once they do,
- * preserving an older profile phone or residence would create a newly rendered PDF that disagrees
- * with the current employer-form packet. Name, email, and links remain packet-specific here. They
- * have separate identity and ownership checks, so this helper changes only the two profile facts
- * the managed form also reads live at fill time.
+ * The generated resume remains frozen until one of those two things happens. Once it does,
+ * preserving an older profile phone, residence or link would create a newly rendered PDF that
+ * disagrees with the current employer-form packet: the managed form fills phone and location LIVE
+ * from this same profile row at submit time (see applicationContextForQuestionResolution), and a
+ * stale LinkedIn or portfolio link is simply a stale way to reach her.
+ *
+ * full_name and email remain packet-specific, and neither is in MUTABLE_CONTACT_FIELDS.
+ * full_name is never sourced from the profile at all - resumeContactOfRecord takes it only from
+ * `requested`, because a resume header prints the name she chose to apply under, not a column that
+ * can change for reasons unrelated to any one application. email carries a separate identity: it is
+ * the resume_email that pins the packet's applicant-email routing (see planPacketApplicantEmail)
+ * and the packet audit's resumeContactEmailSha256, so a caller whose account email changed must be
+ * refused upstream (resumePacketEmailIsCurrent) rather than have this helper silently rewrite it.
  */
 export function refreshResumeContactFromProfile(
   stored: ContactHeader,
@@ -97,9 +114,46 @@ export function refreshResumeContactFromProfile(
 ): ContactHeader {
   const phone = text(profile?.['phone']);
   const location = resumeHeaderLocation(profile);
+  const linkedin_url = text(profile?.['linkedin_url']);
+  const github_url = text(profile?.['github_url']);
+  const portfolio_url = text(profile?.['portfolio_url']);
   return {
     ...stored,
     ...(phone ? { phone } : {}),
     ...(location ? { location } : {}),
+    ...(linkedin_url ? { linkedin_url } : {}),
+    ...(github_url ? { github_url } : {}),
+    ...(portfolio_url ? { portfolio_url } : {}),
   };
+}
+
+export type ResumeContactStaleness = {
+  stored: ContactHeader;
+  current: ContactHeader;
+};
+
+/**
+ * Whether refreshResumeContactFromProfile would actually change anything on this packet, and the
+ * exact before/after pair when it would.
+ *
+ * THE ONE COMPARISON BOTH SIDES OF THE FEATURE SHARE. GET /applications/:id/submission calls this
+ * to decide whether to show the applicant a "your resume header is out of date" signal at all, and
+ * POST /applications/:id/resume/contact-refresh calls it to decide whether there is anything worth
+ * spending a PDF render and a new object key on. A second, differently-worded comparison in either
+ * place is how a button and the route behind it drift apart - one says stale while the other says
+ * there is nothing to refresh, or the reverse.
+ *
+ * null on a packet with no drift, which MUST be the common case: full_name and email are excluded
+ * from MUTABLE_CONTACT_FIELDS on purpose (see refreshResumeContactFromProfile), so an applicant who
+ * has only ever changed her name or her personal resume email sees no stale signal and the refresh
+ * route touches nothing, exactly as it should - those are refused-or-ignored here, not silently
+ * folded into "stale".
+ */
+export function resumeContactStaleness(
+  stored: ContactHeader,
+  profile: Record<string, unknown> | undefined,
+): ResumeContactStaleness | null {
+  const current = refreshResumeContactFromProfile(stored, profile);
+  const drifted = MUTABLE_CONTACT_FIELDS.some((field) => (current[field] ?? '') !== (stored[field] ?? ''));
+  return drifted ? { stored, current } : null;
 }

@@ -14,6 +14,7 @@ import test, { describe } from 'node:test';
 import {
   refreshResumeContactFromProfile,
   resumeContactOfRecord,
+  resumeContactStaleness,
   resumeHeaderLocation,
 } from './resumeContactOfRecord';
 import { contactLine } from '../engine/resumeRender';
@@ -118,6 +119,95 @@ describe('refreshResumeContactFromProfile', () => {
     };
 
     assert.deepEqual(refreshResumeContactFromProfile(stored, {}), stored);
+  });
+
+  /* THE WIDENED HALF: links move with the profile too, for POST
+   * /applications/:id/resume/contact-refresh, which asks this helper to bring a whole built
+   * packet's header current rather than only the two fields a live form fill reads. */
+  test('current LinkedIn, GitHub and portfolio links replace stale packet links', () => {
+    const refreshed = refreshResumeContactFromProfile({
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      linkedin_url: 'https://www.linkedin.com/in/old-handle',
+      github_url: 'https://github.com/old-handle',
+    }, {
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+      github_url: 'https://github.com/mehek-builds',
+      portfolio_url: 'https://mehek.dev',
+    });
+
+    assert.equal(refreshed.linkedin_url, 'https://www.linkedin.com/in/mehekmandal');
+    assert.equal(refreshed.github_url, 'https://github.com/mehek-builds');
+    assert.equal(refreshed.portfolio_url, 'https://mehek.dev');
+  });
+
+  test('name and email never move, however much the profile disagrees', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+    };
+    const refreshed = refreshResumeContactFromProfile(stored, {
+      full_name: 'A Different Name',
+      email: 'someone-else@example.com',
+      phone: '+1 213 574 6270',
+    });
+    assert.equal(refreshed.full_name, 'Test Applicant');
+    assert.equal(refreshed.email, 'resume@example.com');
+  });
+});
+
+describe('resumeContactStaleness', () => {
+  /* THE MEASURED FIXTURE, PINNED. Packets built while the account read Dubai/+971 still carry that
+   * header after the applicant's profile moved to Los Angeles/+1 - see
+   * litos-a-packet-header-follows-the-profile PR body for the live packet ids this reproduces. */
+  const DUBAI_PACKET_CONTACT = {
+    full_name: 'Test Applicant',
+    email: 'resume@example.com',
+    phone: '+971 567417451',
+    location: 'Dubai, Dubai',
+  };
+  const LOS_ANGELES_PROFILE = {
+    phone: '+1 213 574 6270',
+    address_city: 'Los Angeles',
+    address_state: 'California',
+  };
+
+  test('a moved applicant is reported stale, with the exact before/after pair', () => {
+    const staleness = resumeContactStaleness(DUBAI_PACKET_CONTACT, LOS_ANGELES_PROFILE);
+    assert.ok(staleness);
+    assert.deepEqual(staleness.stored, DUBAI_PACKET_CONTACT);
+    assert.equal(staleness.current.phone, '+1 213 574 6270');
+    assert.equal(staleness.current.location, 'Los Angeles, California');
+    // Untouched fields ride along on `current` too, so a client can render the whole header.
+    assert.equal(staleness.current.full_name, 'Test Applicant');
+    assert.equal(staleness.current.email, 'resume@example.com');
+  });
+
+  test('a packet already matching the current profile is not stale', () => {
+    const current = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, California',
+    };
+    assert.equal(resumeContactStaleness(current, LOS_ANGELES_PROFILE), null);
+  });
+
+  test('no profile on file at all is not stale - there is nothing to refresh to', () => {
+    assert.equal(resumeContactStaleness(DUBAI_PACKET_CONTACT, {}), null);
+    assert.equal(resumeContactStaleness(DUBAI_PACKET_CONTACT, undefined), null);
+  });
+
+  /* A changed name or personal email is real drift, but it is not THIS drift: neither field is in
+   * MUTABLE_CONTACT_FIELDS, so it must never trip the resume-header-is-stale signal, which exists
+   * for the phone/location/link mismatch a live form fill would silently paper over. */
+  test('a changed name or email alone is not reported as contact staleness', () => {
+    const staleness = resumeContactStaleness(DUBAI_PACKET_CONTACT, {
+      full_name: 'A Different Name',
+      email: 'someone-else@example.com',
+    });
+    assert.equal(staleness, null);
   });
 });
 
