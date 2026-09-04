@@ -48,10 +48,10 @@ test('packet audit endpoint is owner scoped and persists only with exact packet 
  * and wrong for exactly one thing: the submission-authority revision guard's 40001. That raise
  * arrives wrapped by drizzle as `Failed query: <the whole UPDATE>\nparams: <every bound value>`, so
  * the catch shipped the audit's statement, its exact-spec predicate and the stored spec itself to a
- * browser, under a code the dashboard treats as a terminal packet failure - features/applications/
- * domain/audit-refusal.ts lists PACKET_AUDIT_FAILED's siblings under AUTOPILOT_CANNOT_CLEAR and
- * REVIEW_RECOVERY_REQUIRED. Measured live 2026-09-04 on Exa packet 73768339: 422 here and 500 out
- * of PUT /review/answers, one condition reported two contradictory ways and neither of them true.
+ * browser - and the dashboard renders exactly that string, because lib/api-error-message.ts builds
+ * its message from the response's `error` key. Measured live 2026-09-04 on Exa packet 73768339: 422
+ * here and 500 out of PUT /review/answers, one condition reported two contradictory ways, and
+ * neither of them the condition.
  *
  * The conflict is rethrown instead, so the global handler answers 503 with Retry-After: 1 and the
  * sentence toPublicError already carries for this SQLSTATE. Pinned on the source because the
