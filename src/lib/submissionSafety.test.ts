@@ -6,6 +6,7 @@ import {
   directPreparationIsSafe,
   preparedRunCanRestart,
   preparedRunHandoffExpired,
+  resumeContactRefreshDisposition,
   resumeEditDisposition,
   submitRequestDisposition,
 } from './submissionSafety';
@@ -173,6 +174,44 @@ test('a not-yet-sent final approval packet can reopen resume editing', () => {
   assert.equal(resumeEditDisposition('ready_for_final_approval', true), 'reject');
   assert.equal(resumeEditDisposition('submitted'), 'reject');
   assert.equal(resumeEditDisposition('submitting'), 'reject');
+});
+
+test('an unclaimed final-approval packet can refresh its contact header, a claimed one cannot', () => {
+  assert.equal(resumeContactRefreshDisposition({ status: 'ready_for_final_approval' }), 'save');
+  assert.equal(resumeContactRefreshDisposition({
+    status: 'ready_for_final_approval',
+    submission_claimed_at: '2026-08-20T10:00:00.000Z',
+  }), 'reject');
+  // Every status reviewAnswerSaveDisposition already saves keeps saving.
+  assert.equal(resumeContactRefreshDisposition({ status: 'ready_to_submit' }), 'save');
+  assert.equal(resumeContactRefreshDisposition({ status: 'needs_attention' }), 'save');
+  // And every status it refuses outright - for a reason that has nothing to do with
+  // ready_for_final_approval - keeps refusing.
+  assert.equal(resumeContactRefreshDisposition({ status: 'submitted' }), 'reject');
+  assert.equal(resumeContactRefreshDisposition({ status: 'filling' }), 'reject');
+});
+
+/* THE BRANCH resumeEditDisposition ALONE WOULD HAVE MISSED. needs_attention with no claim is
+ * 'start' for resumeEditDisposition regardless of what the row's own evidence says, because a run
+ * stopping there is ordinarily safe to retry - but submission_attempted_at with no not_sent
+ * resolution is the unverifiedSubmissionPatch shape, and reviewAnswerSaveDisposition already
+ * refuses it through employerMayHoldApplication. resumeContactRefreshDisposition has to keep
+ * refusing it even though ready_for_final_approval now opens elsewhere. See
+ * resumeContactRefresh.test.ts's 'refused when the row itself says an employer may already hold
+ * this packet' for the live-measured shape this pins at the route level. */
+test('employer-may-hold evidence still refuses, from every status including the one this opens', () => {
+  assert.equal(resumeContactRefreshDisposition({
+    status: 'needs_attention',
+    submission_attempted_at: '2026-08-20T10:00:00.000Z',
+  }), 'reject');
+  assert.equal(resumeContactRefreshDisposition({
+    status: 'ready_for_final_approval',
+    submission_attempted_at: '2026-08-20T10:00:00.000Z',
+  }), 'reject');
+  assert.equal(resumeContactRefreshDisposition({
+    status: 'ready_for_final_approval',
+    security_code: { digits: 6, requested_at: '2026-08-20T10:00:00.000Z', submit_was_authorized: true },
+  }), 'reject');
 });
 
 test('verification handoff prevents automatic submission even without native required markup', () => {

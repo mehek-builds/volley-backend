@@ -323,6 +323,40 @@ export function resumeEditDisposition(
   return 'reject';
 }
 
+/**
+ * Whether a packet's CONTACT HEADER - not its answers, not its content - may be refreshed against
+ * the current profile (POST /applications/:id/resume/contact-refresh).
+ *
+ * NEITHER OF THE TWO EXISTING DISPOSITIONS ANSWERS THIS ON ITS OWN, and each is wrong for its own
+ * reason. reviewAnswerSaveDisposition refuses ready_for_final_approval unconditionally - the right
+ * call for an ANSWER save, since rewriting an answer underneath the preview she is looking at would
+ * change what that preview means, but wrong here: a header refresh does not touch the preview's
+ * answers, and the packet-audit path already voids her acknowledgement the moment the PDF's bytes
+ * move (see the route's own comment on packet_stale). resumeEditDisposition opens exactly that
+ * status for exactly that reason - it is the resume-edit route's own door back in from final
+ * approval - but it does so by deferring to submitRequestDisposition for every OTHER status, which
+ * answers 'start' for an unclaimed needs_attention row with no look at whether the row's own
+ * evidence says an employer may already hold the application. That is precisely the shape
+ * unverifiedSubmissionPatch writes (submission_attempted_at set, the claim released, no resolution
+ * recorded), and reviewAnswerSaveDisposition already refuses it through employerMayHoldApplication.
+ * A route that swapped in resumeEditDisposition wholesale would silently reopen that refusal for a
+ * PDF write, not merely an in-memory disposition check - see resumeContactRefresh.test.ts's
+ * 'refused when the row itself says an employer may already hold this packet', which pins the exact
+ * row shape this would have let through.
+ *
+ * So this is reviewAnswerSaveDisposition's OWN rule, with its one unconditional refusal narrowed to
+ * the one case resumeEditDisposition already proves safe: unclaimed, and no employer-may-hold
+ * evidence on the row.
+ */
+export function resumeContactRefreshDisposition(
+  review: Pick<ApplicationReviewState, 'status' | 'submission_claimed_at'> & StoredSendEvidence,
+): 'save' | 'reject' {
+  if (review.status === 'ready_for_final_approval') {
+    return !review.submission_claimed_at && !employerMayHoldApplication(review) ? 'save' : 'reject';
+  }
+  return reviewAnswerSaveDisposition(review);
+}
+
 export function directPreparationIsSafe(options: {
   blockerCount: number;
   attentionCount: number;

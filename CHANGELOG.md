@@ -69,6 +69,13 @@
   production inbound webhooks from failing before a fresh proof can be stored.
 - Workable submissions can retain and promote exact same-job receipt evidence across the public
   short-link redirect and the delayed no-click continuation.
+- A packet built before the applicant moved no longer has to be re-tailored just to fix its resume
+  header. `POST /applications/:id/resume/contact-refresh` re-renders the frozen resume content with
+  a header recomputed from the current profile (phone, location, LinkedIn/GitHub/portfolio) - no
+  LLM call, no monthly-build quota spent, no new Tracker row - and voids any packet-audit
+  acknowledgement she already gave the same way a resume edit already does, so she re-reviews the
+  exact packet before it can send. `GET /applications/:id/submission` now carries
+  `resume_contact_stale` so a client can offer the refresh only when the header has actually drifted.
 
 ## [1.1.0] - 2026-08-02
 

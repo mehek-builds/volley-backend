@@ -12,8 +12,11 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import {
+  LEGACY_MUTABLE_CONTACT_FIELDS,
+  MUTABLE_CONTACT_FIELDS,
   refreshResumeContactFromProfile,
   resumeContactOfRecord,
+  resumeContactStaleness,
   resumeHeaderLocation,
 } from './resumeContactOfRecord';
 import { contactLine } from '../engine/resumeRender';
@@ -118,6 +121,239 @@ describe('refreshResumeContactFromProfile', () => {
     };
 
     assert.deepEqual(refreshResumeContactFromProfile(stored, {}), stored);
+  });
+
+  /* THE WIDENED HALF, ASKED FOR BY NAME: links move with the profile too, for POST
+   * /applications/:id/resume/contact-refresh, which passes MUTABLE_CONTACT_FIELDS explicitly to
+   * bring a whole built packet's header current rather than only the two fields a live form fill
+   * reads. Review finding 3: this widening used to be unconditional, which silently pulled links
+   * into PATCH /applications/:id/resume's own unrelated call too - see the narrow-by-default test
+   * directly below for the fix. */
+  test('current LinkedIn, GitHub and portfolio links replace stale packet links when asked for', () => {
+    const refreshed = refreshResumeContactFromProfile({
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      linkedin_url: 'https://www.linkedin.com/in/old-handle',
+      github_url: 'https://github.com/old-handle',
+    }, {
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+      github_url: 'https://github.com/mehek-builds',
+      portfolio_url: 'https://mehek.dev',
+    }, { fields: MUTABLE_CONTACT_FIELDS });
+
+    assert.equal(refreshed.linkedin_url, 'https://www.linkedin.com/in/mehekmandal');
+    assert.equal(refreshed.github_url, 'https://github.com/mehek-builds');
+    assert.equal(refreshed.portfolio_url, 'https://mehek.dev');
+  });
+
+  /* THE REGRESSION THIS FIX CLOSES. PATCH /applications/:id/resume calls this helper on every
+   * content save without naming a `fields` argument, so whatever the default covers is what that
+   * unrelated route silently rewrites. Before review finding 3 the default was the full width, and
+   * a bullet edit would quietly drop a per-packet LinkedIn or portfolio link she set on purpose at
+   * generation time, with no field on the edit form to explain why it changed. The default now is
+   * LEGACY_MUTABLE_CONTACT_FIELDS - exactly the two fields this call site refreshed before links
+   * existed at all - so a bare two-argument call, the shape PATCH's own call site uses, must leave
+   * every link exactly where it was. */
+  test('links do not move on a bare call: PATCH must ask for them by name or not get them', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      linkedin_url: 'https://www.linkedin.com/in/old-handle',
+      github_url: 'https://github.com/old-handle',
+      portfolio_url: 'https://old-portfolio.example.com',
+    };
+    const refreshed = refreshResumeContactFromProfile(stored, {
+      phone: '+1 415 555 0100',
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+      github_url: 'https://github.com/mehek-builds',
+      portfolio_url: 'https://mehek.dev',
+    });
+
+    // The one field LEGACY_MUTABLE_CONTACT_FIELDS does cover still moves...
+    assert.equal(refreshed.phone, '+1 415 555 0100');
+    // ...and every link the profile would have supplied stays exactly as stored.
+    assert.equal(refreshed.linkedin_url, stored.linkedin_url);
+    assert.equal(refreshed.github_url, stored.github_url);
+    assert.equal(refreshed.portfolio_url, stored.portfolio_url);
+
+    // Explicit and default must agree: LEGACY_MUTABLE_CONTACT_FIELDS names exactly this behaviour,
+    // not merely a currently-equivalent one.
+    assert.deepEqual(
+      refreshed,
+      refreshResumeContactFromProfile(stored, {
+        phone: '+1 415 555 0100',
+        linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+        github_url: 'https://github.com/mehek-builds',
+        portfolio_url: 'https://mehek.dev',
+      }, { fields: LEGACY_MUTABLE_CONTACT_FIELDS }),
+    );
+  });
+
+  test('name and email never move, however much the profile disagrees', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+    };
+    const refreshed = refreshResumeContactFromProfile(stored, {
+      full_name: 'A Different Name',
+      email: 'someone-else@example.com',
+      phone: '+1 213 574 6270',
+    });
+    assert.equal(refreshed.full_name, 'Test Applicant');
+    assert.equal(refreshed.email, 'resume@example.com');
+  });
+});
+
+describe('resumeContactStaleness', () => {
+  /* THE MEASURED FIXTURE, PINNED. Packets built while the account read Dubai/+971 still carry that
+   * header after the applicant's profile moved to Los Angeles/+1 - see
+   * litos-a-packet-header-follows-the-profile PR body for the live packet ids this reproduces. */
+  const DUBAI_PACKET_CONTACT = {
+    full_name: 'Test Applicant',
+    email: 'resume@example.com',
+    phone: '+971 567417451',
+    location: 'Dubai, Dubai',
+  };
+  const LOS_ANGELES_PROFILE = {
+    phone: '+1 213 574 6270',
+    address_city: 'Los Angeles',
+    address_state: 'California',
+  };
+
+  test('a moved applicant is reported stale, with the exact before/after pair', () => {
+    const staleness = resumeContactStaleness(DUBAI_PACKET_CONTACT, LOS_ANGELES_PROFILE);
+    assert.ok(staleness);
+    assert.deepEqual(staleness.stored, DUBAI_PACKET_CONTACT);
+    assert.equal(staleness.current.phone, '+1 213 574 6270');
+    assert.equal(staleness.current.location, 'Los Angeles, California');
+    // Untouched fields ride along on `current` too, so a client can render the whole header.
+    assert.equal(staleness.current.full_name, 'Test Applicant');
+    assert.equal(staleness.current.email, 'resume@example.com');
+  });
+
+  test('a packet already matching the current profile is not stale', () => {
+    const current = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, California',
+    };
+    assert.equal(resumeContactStaleness(current, LOS_ANGELES_PROFILE), null);
+  });
+
+  test('no profile on file at all is not stale - there is nothing to refresh to', () => {
+    assert.equal(resumeContactStaleness(DUBAI_PACKET_CONTACT, {}), null);
+    assert.equal(resumeContactStaleness(DUBAI_PACKET_CONTACT, undefined), null);
+  });
+
+  /* A changed name or personal email is real drift, but it is not THIS drift: neither field is in
+   * MUTABLE_CONTACT_FIELDS, so it must never trip the resume-header-is-stale signal, which exists
+   * for the phone/location/link mismatch a live form fill would silently paper over. */
+  test('a changed name or email alone is not reported as contact staleness', () => {
+    const staleness = resumeContactStaleness(DUBAI_PACKET_CONTACT, {
+      full_name: 'A Different Name',
+      email: 'someone-else@example.com',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* THE OTHER END OF REVIEW FINDING 3. refreshResumeContactFromProfile now defaults to the narrow,
+   * PATCH-only field set, and resumeContactStaleness is the one caller that has to opt back into
+   * the full width - GET /applications/:id/submission's stale signal and POST
+   * /applications/:id/resume/contact-refresh both exist to widen this past phone and location, and
+   * a silent regression back to the narrow default here would make both of them stop seeing a
+   * stale LinkedIn or portfolio link with nothing failing loudly to say so. */
+  test('a link-only change is reported as contact staleness too, not only phone and location', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, California',
+      linkedin_url: 'https://www.linkedin.com/in/old-handle',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      ...LOS_ANGELES_PROFILE,
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+    });
+    assert.ok(staleness);
+    assert.equal(staleness.current.linkedin_url, 'https://www.linkedin.com/in/mehekmandal');
+  });
+
+  /* REVIEW FINDING 4. The comparison used to be `!==` on raw strings, so a phone number or a state
+   * re-typed in a different format read as a move the applicant never made and fired the "your
+   * resume header is out of date" signal for nothing.
+   *
+   * PHONE: digits only. "+1 (213) 574-6270" and "+12135746270" are the same number - punctuation a
+   * form control or an OAuth import happens to add or drop is not a move. */
+  test('a phone number re-typed with different punctuation is not reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 (213) 574-6270',
+      location: 'Los Angeles, California',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      phone: '+12135746270',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* LOCATION: the region half, specifically. address_state is free text, and nothing forces it to
+   * hold "CA" over "California" - resumeHeaderLocation just prints whatever is on the row, so a
+   * packet built while it read one way and a profile now reading the other must not look like she
+   * moved. */
+  test('a state spelled out in full instead of abbreviated is not reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, CA',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      phone: '+1 213 574 6270',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* TEXT FIELDS: trim and case only - a link is not a place name, and this module has no
+   * equivalence table for one beyond what a person plausibly re-typed the same URL as. */
+  test('a link that only differs in case is not reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      linkedin_url: 'https://www.LinkedIn.com/in/mehekmandal',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+    });
+    assert.equal(staleness, null);
+  });
+
+  /* THE OTHER HALF OF THE SAME FIX: none of this normalization may swallow a REAL move. A
+   * genuinely different city and a genuinely different number - not merely re-formatted - must
+   * still trip the signal, exactly as 'a moved applicant is reported stale' above already pins,
+   * repeated here beside the cosmetic cases so the two live next to each other. */
+  test('a real move past mere formatting is still reported as stale', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 (213) 574-6270',
+      location: 'Los Angeles, CA',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      phone: '+1 (415) 555-0199',
+      address_city: 'San Francisco',
+      address_state: 'California',
+    });
+    assert.ok(staleness);
+    assert.equal(staleness.current.phone, '+1 (415) 555-0199');
+    assert.equal(staleness.current.location, 'San Francisco, California');
   });
 });
 

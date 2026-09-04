@@ -135,6 +135,9 @@ test('every blob this codebase writes has a retention decision recorded', async 
   const roots = [
     'lib/receiptScreenshot.ts',
     'lib/coverLetterService.ts',
+    // Sixth writer: POST /applications/:id/resume/contact-refresh's own putObject call, alongside
+    // the edit-resume PATCH already counted here for this file - both build the same
+    // users/<id>/resumes/<name>.pdf key shape, so no new classifyUserBlob case is needed.
     'routes/applications.ts',
     'routes/resume.ts',
     // The fifth writer, and the census is why it is listed. It shipped on a branch that never
@@ -149,7 +152,7 @@ test('every blob this codebase writes has a retention decision recorded', async 
   }
   assert.equal(
     writes,
-    5,
+    6,
     'A blob write was added or removed. Classify its key in classifyUserBlob and give it a window '
     + 'in retentionDaysForCategory, then update this count. Unclassified keys are kept forever.',
   );
