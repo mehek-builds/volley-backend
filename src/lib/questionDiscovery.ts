@@ -9021,11 +9021,31 @@ export function resolveKnownAnswer(
         : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
     }
     case 'desired_salary': {
-      resolveSalary(
+      /* THE SALARY ANSWER IS THE ONE resolveSalary COMPUTES, not a blanket refusal.
+       *
+       * resolveSalary was called here and its result thrown away, so every salary control on every
+       * form was surfaced to the applicant even when the answer was fully derivable. That skip was a
+       * silent policy flip: it filled before, and lib/salary.ts (ported verbatim from the extension,
+       * R-031 + R-011) has always been able to answer this from grounded facts alone. The applicant's
+       * standing rule is that a salary field takes the posting's compensation, not that it is left for
+       * her, so the refusal here was the wrong direction for exactly the boards that ask it.
+       *
+       * WHAT IT MAY NOW FILL is only what resolveSalary proves from the posting or the profile: the
+       * median of a range the LABEL states, the median of a range the JOB DESCRIPTION states, or the
+       * applicant's own stored figure when the posting's currency is the stored figure's currency.
+       * resolveSalary NEVER converts across currencies and NEVER invents a number, so a fill here is
+       * always a value the posting or her profile already contained.
+       *
+       * WHAT IT STILL SURFACES is every case resolveSalary flags: no range stated and no stored
+       * figure, a currency it could not confirm, or a stored figure in the wrong currency. Those are
+       * genuinely non-derivable without inventing a number or a conversion, so the field is left for
+       * her, now with resolveSalary's SPECIFIC reason (which currency, which mismatch) rather than a
+       * bare "left for you" - the actionable question the applicant-facing surface is owed. */
+      const salary = resolveSalary(
         { label, field: inputType === 'number' ? 'numeric' : 'freetext', jdText },
         storedSalaryOf(ap),
       );
-      return { skipReason: `salary question left for you: "${label.slice(0, 60)}"` };
+      return salary.action === 'fill' ? { value: salary.value } : { skipReason: salary.reason };
     }
     case 'date_of_birth':
       return ap.date_of_birth ? { value: ap.date_of_birth } : null;
