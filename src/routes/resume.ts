@@ -2129,7 +2129,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return {
         ...row,
         spec: specWithoutDocumentPointers(
-          withPostingDeadlineStatus(refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context)),
+          refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
         ),
         ...(submissionAuthorityEnvelope ? { submission_authority: submissionAuthorityEnvelope } : {}),
         ...(resumeContactStale ? { resume_contact_stale: resumeContactStale } : {}),
@@ -2139,6 +2139,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           : undefined,
       };
     });
-    return reply.status(200).send({ resumes });
+    /* THE DEADLINE HALF OF THE SAME PROJECTION (see withPostingDeadlineStatus above), applied here
+     * as its own pass over the finished rows rather than folded into the `spec` composition above.
+     * portalSupport.test.ts pins that composition verbatim - specWithoutDocumentPointers wrapping
+     * refreshedHistorySpec wrapping repairedHistorySpec - to prove the REPAIRED spec, not row.spec,
+     * is what reaches the wire; a repair nothing serializes is a repair that did not happen. Running
+     * this after that composition (rather than nested inside it) keeps that proof intact while still
+     * running "last": every row above has already been through repairedHistorySpec, so this still
+     * sees whatever is_active verdict it wrote to _review.posting_status before a stated deadline
+     * gets to weigh in. */
+    return reply.status(200).send({
+      resumes: resumes.map((entry) => ({ ...entry, spec: withPostingDeadlineStatus(entry.spec) })),
+    });
   });
 }
