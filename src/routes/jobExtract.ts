@@ -6,6 +6,7 @@ import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
 import { canonicalMonitoredPortalUrl } from '../lib/portalSubmission';
+import { fetchRecruiteeJobDescription } from '../lib/recruiteeJobDescription';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs } from '../db/schema';
 
@@ -278,7 +279,9 @@ export async function findMonitoredJobDescription(
 export async function jobExtractRoutes(fastify: FastifyInstance) {
   // POST /jobs/extract - given a posting URL, first answer from the monitored jobs inventory when
   // the URL canonically matches a posting the monitor already holds (see
-  // findMonitoredJobDescription above); otherwise render it in the managed browser (the same
+  // findMonitoredJobDescription above); then, for a Recruitee offer specifically, try its own
+  // structured data over plain HTTP (see fetchRecruiteeJobDescription in
+  // lib/recruiteeJobDescription.ts); otherwise render it in the managed browser (the same
   // provider used for portal submission) and return its visible text as a starting point for the
   // job description field. This exists so "New application" can go from a pasted URL to a
   // reviewable packet without the operator hand-copying text out of a separate tab: the dashboard
@@ -356,6 +359,63 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       fastify.log.warn(
         { userId, job_url: body.job_url, monitored_job_id: monitored.jobId },
         'monitored inventory description states no requirement; falling back to browser extraction',
+      );
+    }
+
+    /* RECRUITEE, STRUCTURED SOURCE BEFORE THE BROWSER. Measured live 2026-09-04: a Recruitee
+       posting (gpr.recruitee.com/o/software-engineer-intern) 502ed here with "could not find a
+       stated requirement", the same guard applied below. Recruitee career pages are a heavy
+       SSR/hydration app - see recruiteeJobDescription.ts's header for what was measured on other
+       live tenants once gpr's own hosted page stopped resolving - and whatever runManagedBrowser's
+       `extract: 'body'` does with that DOM is not this codebase's to control. Recruitee publishes
+       the same posting as structured data through two first-party, unauthenticated channels this
+       route did not previously use: the page's own JSON-LD JobPosting block, or failing that its
+       public /api/offers/<slug> endpoint (already used by this repo's board-monitoring poller, see
+       normalizeRecruiteeJobs in lib/jobMonitor.ts). Plain HTTP, no browser, no render race.
+
+       Sits ahead of the runner-config check on purpose, exactly like the monitored-inventory lookup
+       above: a deployment without a managed browser can still answer for a Recruitee posting. Runs
+       unconditionally after the inventory check (not only when it missed) because a monitored row
+       whose OWN stored description states no requirement is no reason to skip a second, independent
+       best-effort source before paying for a browser render.
+
+       Best-effort by the same rule as findMonitoredJobDescription: a URL that is not a Recruitee
+       offer, any fetch failure, or a result that itself states no requirement returns undefined and
+       execution falls through to the unchanged browser path below. This may only ever
+       short-circuit with a GOOD result, never introduce a new failure a URL would not already have
+       hit. */
+    let recruitee: Awaited<ReturnType<typeof fetchRecruiteeJobDescription>>;
+    try {
+      recruitee = await fetchRecruiteeJobDescription(body.job_url);
+    } catch (err) {
+      fastify.log.warn(
+        { err, userId, job_url: body.job_url },
+        'recruitee structured extraction failed; falling back to browser extraction',
+      );
+      recruitee = undefined;
+    }
+    if (recruitee) {
+      const recruiteeJdText = clipJdText(recruitee.jdText);
+      if (leadRequirementCandidates(recruiteeJdText).length > 0) {
+        fastify.log.info(
+          {
+            userId,
+            job_url: body.job_url,
+            title: recruitee.pageTitle,
+            textLen: recruiteeJdText.length,
+          },
+          'job description served from recruitee structured source',
+        );
+        return reply.status(200).send({
+          jd_text: recruiteeJdText,
+          page_title: recruitee.pageTitle || undefined,
+          company: recruitee.companyName || undefined,
+          role: recruitee.pageTitle || undefined,
+        });
+      }
+      fastify.log.warn(
+        { userId, job_url: body.job_url },
+        'recruitee structured description states no requirement; falling back to browser extraction',
       );
     }
 
