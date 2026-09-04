@@ -391,6 +391,39 @@ test('legacy multiline option-read failures remain evidence gaps', async () => {
   ]), ['evidence_gap']);
 });
 
+/* ---- a closed or past-deadline posting is its own category, across all three detectors ---- */
+
+test('a monitor-detected take-down is categorised as posting_closed', async () => {
+  const { attentionCategoriesForReasons } = await import('../lib/submissionTerminalCause');
+  const { POSTING_CLOSED_BY_MONITOR_REASON } = await import('../lib/applicationPortalRepair');
+  assert.deepEqual(attentionCategoriesForReasons([POSTING_CLOSED_BY_MONITOR_REASON]), ['posting_closed']);
+});
+
+test('a live-scraped take-down (postingClosedReason) is also posting_closed, not unknown', async () => {
+  /* Before this branch existed, submissionRunner.ts's own postingClosedReason sentences fell all
+   * the way through attentionCategoriesForReasons to 'unknown' - the exact gap this feature's
+   * design trace measured. Both of postingClosedReason's two sentences are covered. */
+  const { attentionCategoriesForReasons } = await import('../lib/submissionTerminalCause');
+  assert.deepEqual(attentionCategoriesForReasons([
+    'The employer has taken this posting down: the page says "This position is no longer active". '
+    + 'There is no application form any more, nothing was filled in and nothing was sent. '
+    + 'There is nothing left to do on this one.',
+  ]), ['posting_closed']);
+  assert.deepEqual(attentionCategoriesForReasons([
+    'The employer’s application page no longer exists: it says "The page you were looking for '
+    + 'doesn’t exist". The posting has most likely closed or moved, so nothing was filled in and '
+    + 'nothing was sent. Check the posting itself if you want to be sure.',
+  ]), ['posting_closed']);
+});
+
+test('a stated-deadline sentence is categorised as posting_closed', async () => {
+  const { attentionCategoriesForReasons } = await import('../lib/submissionTerminalCause');
+  assert.deepEqual(attentionCategoriesForReasons([
+    'This posting’s stated deadline (August 31, 2026) has passed. Litos will not send it unless '
+    + 'you confirm the employer still accepts applications.',
+  ]), ['posting_closed']);
+});
+
 /* ---- an expired packet is a promise being kept, and must be categorised as one ---- */
 
 test('an expired packet is categorised as packet_expired, not as a document the employer wants', () => {

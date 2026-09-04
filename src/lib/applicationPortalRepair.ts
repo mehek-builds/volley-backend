@@ -10,6 +10,93 @@ import {
   isPortalSupported,
 } from './portalSubmission';
 
+/* THE POSTING THE MONITOR STOPPED SEEING, told in postingClosedReason's own sentence style
+ * (submissionRunner.ts) without importing from it: that file is a route module, this one is lib/
+ * and other lib/ files (applicationStall.ts's withTerminalCause) already cannot import a route
+ * module, so this stays a sibling sentence rather than a shared export. Deliberately does not
+ * quote a scraped page banner the way postingClosedReason does - there is no page text here, only
+ * the monitor's own is_active flip - so the opening clause names the monitor instead. */
+export const POSTING_CLOSED_BY_MONITOR_REASON =
+  'The employer has taken this posting down: Litos\u2019 job monitor stopped seeing this listing '
+  + 'during its regular check. There is no application form any more, nothing was filled in and '
+  + 'nothing was sent. There is nothing left to do on this one.';
+
+/**
+ * Statuses where a browser or an employer may already be MID-ACTION on this exact packet.
+ *
+ * Shared by BOTH posting_status derivers - this file's own monitor-inactive check and
+ * postingDeadline.ts's derivePostingDeadlineStatus - because the argument is identical for each:
+ * this is read-time evidence about the POSTING, not about what THIS RUN already did, and the run's
+ * own facts always outrank it. A managed fill that is mid-flight, or a submission already claimed,
+ * sitting on a security code, or filed, must not be relitigated because the posting happened to go
+ * inactive, or its stated deadline happened to pass, in the middle - see keepUsedPortal above for
+ * the identical argument about the URL itself. Before derivePostingDeadlineStatus read this too, a
+ * packet already 'submitted' (sent, done) whose jd_text names a deadline that has since passed -
+ * true of nearly every submitted packet with a deadline sentence at all, since sending necessarily
+ * happens before it - had its OWN attention_reason overwritten with the deadline-passed sentence on
+ * every read of GET /resume/history and /applications/:id/submission. Left completely untouched
+ * (not even portal_url is refreshed) rather than partially patched, because a run in one of these
+ * statuses reads its own review moments after this runs and must see exactly what it wrote, not a
+ * new posting_status wedged in beside it.
+ */
+export const POSTING_STATUS_MID_RUN_STATUSES: ReadonlySet<ApplicationReviewState['status']> = new Set([
+  'submitting',
+  'submission_claimed',
+  'awaiting_security_code',
+  'submitted',
+]);
+
+/**
+ * The read-time verdict once a monitored posting's own row says is_active = false, shared by both
+ * repair variants below (the live DB-query one and the /resume/history batched one) so a packet
+ * reads identically from either projection.
+ *
+ * portal_url and ats_name are RESTORED here, same as the ordinary success path, deliberately not
+ * withheld: monitoredPortalProofUnavailable reads `!current.portal_url` as "no verified destination
+ * at all" and answers the generic job_not_available 409 everywhere it is checked (submit-request,
+ * packet-audit, the runner's own prepare). A closed posting is a MORE specific fact than that - Litos
+ * knows exactly where it was and that it is gone - so keeping the URL lets every one of those call
+ * sites reach postingStatusBlocksSend's specific refusal instead of falling into the generic one.
+ */
+function closedPostingReview(
+  current: ApplicationReviewState,
+  applyUrl: string,
+  observedAt: Date | string | null | undefined,
+): ApplicationReviewState {
+  if (POSTING_STATUS_MID_RUN_STATUSES.has(current.status)) return current;
+  const observed = observedAt instanceof Date
+    ? observedAt.toISOString()
+    : typeof observedAt === 'string' && observedAt.trim()
+      ? observedAt
+      : new Date().toISOString();
+  return {
+    ...current,
+    portal_url: applyUrl,
+    ats_name: detectPortal(applyUrl),
+    portal_supported: false,
+    posting_status: { state: 'closed', reason: 'monitor_inactive', observed_at: observed },
+    attention_reason: POSTING_CLOSED_BY_MONITOR_REASON,
+    attention_categories: ['posting_closed'],
+  };
+}
+
+/**
+ * Whether posting_status, as it stands on this exact read, means Litos must refuse to send this
+ * packet - the same predicate checked everywhere monitoredPortalProofUnavailable already is
+ * (submit-request, the runner's own prepare, packet-audit), so a closed or unconfirmed-expired
+ * posting is refused at every one of those gates rather than only hidden from the dashboard.
+ *
+ * 'closed' always blocks - there is no confirmation route for a take-down, on purpose (see
+ * PostingStatus's own doc comment). 'deadline_passed' blocks UNLESS she has confirmed the employer
+ * still accepts applications, which is the one thing that can turn this back on.
+ */
+export function postingStatusBlocksSend(review: Pick<ApplicationReviewState, 'posting_status'>): boolean {
+  const status = review.posting_status;
+  if (!status) return false;
+  if (status.state === 'closed') return true;
+  return status.state === 'deadline_passed' && !status.confirmed_open_at;
+}
+
 type ResumeRow = typeof generated_resumes.$inferSelect;
 
 function jobContextJobId(row: ResumeRow): string | null {
@@ -99,6 +186,10 @@ export type MonitoredHistoryPortal = {
   role: string;
   description: string;
   jdHash: string;
+  /** monitored_jobs.is_active, batched in by GET /resume/history alongside the rest of this map. */
+  isActive: boolean;
+  /** monitored_jobs.last_seen_at - the monitor's own last sighting, carried into posting_status.observed_at. */
+  lastSeenAt: Date | string | null;
 };
 
 export function repairHistoryReviewPortalFromMonitoredJob(
@@ -121,6 +212,13 @@ export function repairHistoryReviewPortalFromMonitoredJob(
     return keepUsedPortal(current) ?? withoutPortal(current);
   }
   try {
+    // THE SAME THIRD RULE AS THE READ PATH BELOW: once identity agrees, is_active is checked
+    // before restoring an ordinary sendable URL, so the Tracker board and the packet detail screen
+    // never disagree about whether a posting has closed either.
+    // Strict === false, not a falsy check: is_active is NOT NULL in the schema and always true or
+    // false in production, but a fixture built before this field existed (or a caller that never
+    // populated it) must read as "unknown", not as "closed".
+    if (job.isActive === false) return closedPostingReview(current, job.applyUrl, job.lastSeenAt);
     return {
       ...current,
       portal_url: job.applyUrl,
@@ -158,6 +256,8 @@ export async function repairReviewPortalFromMonitoredJob(
     company_name: monitored_jobs.company_name,
     title: monitored_jobs.title,
     description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+    is_active: monitored_jobs.is_active,
+    last_seen_at: monitored_jobs.last_seen_at,
   })
     .from(monitored_jobs)
     .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
@@ -177,6 +277,12 @@ export async function repairReviewPortalFromMonitoredJob(
   if (!applyUrl) return keepUsedPortal(current) ?? withoutPortal(current);
   if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return keepUsedPortal(current) ?? withoutPortal(current);
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return keepUsedPortal(current) ?? withoutPortal(current);
+  /* THE MONITOR'S OWN VERDICT, checked once identity is established and before the ordinary
+   * restore below - a posting that is still this packet's posting but that the monitor's regular
+   * sweep has stopped seeing is closed, not merely unproven. See closedPostingReview. */
+  // Strict === false, not a falsy check - see the identical comment on the /resume/history variant
+  // above for why an absent value must read as "unknown" rather than "closed".
+  if (job.is_active === false) return closedPostingReview(current, applyUrl, job.last_seen_at);
   /* THE POSTING'S PROSE IS NOT ITS IDENTITY. Company and title agree and the source owns a
    * canonical URL for this job id; a refreshed description changes the hash and nothing about where
    * the application goes. The source-owned URL is RESTORED - always, never merely kept - so a

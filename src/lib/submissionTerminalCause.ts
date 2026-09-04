@@ -117,6 +117,19 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
          branch above matches a clause: an employer's own field label reaching a blocker line
          ("\"Resume\" is required and is still empty") must not be read as a retention deletion. */
       categories.add('packet_expired');
+    } else if (/employer has taken this posting down|employer.s application page no longer exists|stated deadline \(.+\) has passed|confirm the employer still accepts applications/.test(normalized)) {
+      /* THE POSTING, NOT THE PACKET - and unifying THREE separate detectors' prose under one
+       * category, not just the two this feature added. "employer has taken this posting down" and
+       * "employer's application page no longer exists" are postingClosedReason's own sentences in
+       * submissionRunner.ts, matched live on a page during a fill attempt; before this branch
+       * existed they fell all the way through to 'unknown' because nothing here recognised them
+       * (see the module-level comment on TERMINAL_RUN_STATUSES for how that gap was found). The
+       * other two clauses are applicationPortalRepair.ts's monitor-inactive check and
+       * postingDeadline.ts's stated-deadline check. All three write attention_categories directly
+       * already; this arm exists so a caller that only ever passes the REASON through (or a review
+       * whose categories were dropped and are being re-derived by withTerminalCause) still lands
+       * here rather than in 'unknown'. */
+      categories.add('posting_closed');
     } else if (/\b(?:transcripts?|uploads?|uploaded|uploading|attach(?:es|ed|ing|ment|ments)?|files?|documents?|documentation)\b/.test(normalized)) {
       /* WORD BOUNDARIES, BECAUSE `file` LIVES INSIDE `profile`.
        *

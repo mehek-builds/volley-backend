@@ -286,6 +286,44 @@ function assertEveryQuestionFieldIsPacketVisibleOrProvenance(
 ): void { void _classified; }
 assertEveryQuestionFieldIsPacketVisibleOrProvenance(true);
 
+/**
+ * What Litos knows about the POSTING, as opposed to the packet, from a source outside the
+ * applicant's own answers: the job monitor's own sweep, or a deadline sentence in the employer's
+ * own description. See applicationPortalRepair.ts (the 'closed' half, from monitored_jobs.is_active)
+ * and postingDeadline.ts (the 'deadline_passed' half, parsed from jd_text).
+ *
+ * A SEPARATE FIELD FROM attention_reason/attention_categories ON PURPOSE, even though a closed or
+ * expired posting always writes both. Free-text prose cannot tell a client which specific sentence
+ * it is looking at, and 'posting_closed' alone cannot tell it whether a confirm-open action ever
+ * applies (it does for a stated deadline, never for a take-down - see confirmed_open_at below).
+ * This is the structured fact the two derived text fields describe.
+ *
+ * COMPUTED FRESH ON EVERY READ, never trusted from a stale write. Both derivers - repair for
+ * 'closed', derivePostingDeadlineStatus for 'deadline_passed' - are pure functions of the packet's
+ * OWN CURRENT evidence (the monitored row's is_active today, or a parse of jd_text against `now`),
+ * so a row is never stuck showing yesterday's verdict.
+ */
+export type PostingStatus = {
+  state: 'closed' | 'deadline_passed';
+  /* 'monitor_inactive' pairs only with 'closed': the job monitor's regular sweep stopped seeing
+   * this listing. 'stated_deadline' pairs only with 'deadline_passed': the posting's own text names
+   * a date that has passed. Kept apart from `state` as its own field because a client showing why
+   * (for logs, for a tooltip) should not have to re-derive it from the state name. */
+  reason: 'monitor_inactive' | 'stated_deadline';
+  /** When 'closed': the monitored row's own last_seen_at - the last time Litos actually saw it. */
+  observed_at?: string;
+  /** When 'deadline_passed': the exact UTC instant postingDeadline.ts computed. */
+  deadline?: string;
+  /**
+   * THE APPLICANT'S OWN WORD that the employer still accepts applications, past a stated deadline.
+   * Only ever meaningful for reason 'stated_deadline' - a take-down has no confirmation route,
+   * because Litos does not ask her to override what the employer's own missing posting already
+   * proved (see ApplicationReviewState.posting_confirmed_open_at, the field this is copied from).
+   * Once set, this reason stops blocking a send: see derivePostingDeadlineStatus.
+   */
+  confirmed_open_at?: string;
+};
+
 export type ApplicationAttentionCategory =
   | 'captcha'
   /* The portal will not expose an application form until the applicant signs in, creates an
@@ -341,6 +379,14 @@ export type ApplicationAttentionCategory =
    * only regenerating does. It is also the one attention state that is a promise being kept rather
    * than a defect, so it has to be countable separately from the defects. */
   | 'packet_expired'
+  /* The posting itself, not the packet, is why nothing more will happen here: either the employer
+   * has taken it down (measured live, Genovice a6c39c87: "This job posting is no longer
+   * available") or its own text names a stated deadline that has passed (measured live, Mercari's
+   * Workable posting: "Application Deadline: August 31, 2026, 23:59 (JST)", read while Workable's
+   * public API still answered `state: published` for it - not a take-down, a date). Both write
+   * this category; only the second is reversible, by the applicant's own confirmation that the
+   * employer still accepts applications. See ApplicationReviewState.posting_status. */
+  | 'posting_closed'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
@@ -1153,6 +1199,21 @@ export type ApplicationReviewState = {
   };
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
+  /* COMPUTED, NOT AUTHORED - see PostingStatus's own doc comment. Present only when a repair or a
+   * deadline check on THIS read found the posting closed or past its stated deadline; absent means
+   * neither derivation found anything, not that either one is stale. Round-trips through a stored
+   * write (submissionRunner.ts's prepare, when a run is actually withheld on it) so a caller that
+   * reads the raw row without re-running either deriver still sees the last verdict a real attempt
+   * measured, but every GET projection re-derives it fresh regardless. */
+  posting_status?: PostingStatus;
+  /* THE ONE FACT ABOUT posting_status THAT IS PERSISTED RATHER THAN RE-DERIVED: her own word, typed
+   * once through POST /applications/:id/posting-status/confirm-open, that the employer still
+   * accepts applications past a stated deadline. Everything else about posting_status is computed
+   * fresh on every read (see PostingStatus above); this survives across reads because it is not a
+   * measurement of the posting, it is a decision she made about it. derivePostingDeadlineStatus
+   * copies it onto posting_status.confirmed_open_at wherever it applies. Meaningless, and never
+   * read, for a 'closed' take-down - there is no confirm route for one. */
+  posting_confirmed_open_at?: string;
   /**
    * Exact employer-question metadata that the latest complete form read could not prove.
    *

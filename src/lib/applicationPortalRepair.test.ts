@@ -3,6 +3,8 @@ import { mock, test } from 'node:test';
 import { db } from '../db/index';
 import type { ApplicationReviewState } from './applicationReview';
 import {
+  POSTING_CLOSED_BY_MONITOR_REASON,
+  postingStatusBlocksSend,
   repairHistoryReviewPortalFromMonitoredJob,
   repairReviewPortalFromMonitoredJob,
 } from './applicationPortalRepair';
@@ -155,6 +157,8 @@ test('history rebinds a job-bound supported URL before preserving generic portal
       role: 'Software Engineer',
       description: DESCRIPTION,
       jdHash: monitoredDescriptionHash(DESCRIPTION),
+      isActive: true,
+      lastSeenAt: new Date('2026-09-01T12:00:00.000Z'),
     }]]),
   );
   assert.equal(repaired.portal_url, 'https://jobs.ashbyhq.com/acme/ashby-job-1/application');
@@ -250,6 +254,118 @@ test('a submit request alone is not "used": an unavailable row still strips a ru
     const stripped = await repairReviewPortalFromMonitoredJob(row(jobContext()), requested as ApplicationReviewState);
     assert.equal(stripped.portal_url, undefined);
     assert.equal(stripped.portal_supported, false);
+  } finally {
+    select.mock.restore();
+  }
+});
+
+/* THE MONITOR'S OWN VERDICT, is_active = false: the posting still names this exact packet (company
+ * and title both agree) but the regular sweep has stopped seeing it. Measured live, Genovice
+ * a6c39c87 - "The employer has taken this posting down: the page says 'This job posting is no
+ * longer available'" - except there this was only discovered because a fill run happened to open
+ * the page; the point of this check is to know it from the monitor alone, before any run tries. */
+test('a monitored job the sweep stopped seeing reads posting_status closed and is not sendable', async () => {
+  const select = mockMonitoredJob([{
+    external_id: 'lever-job-1',
+    apply_url: 'https://jobs.lever.co/acme/lever-job-1',
+    ats_name: 'lever',
+    board_token: 'acme',
+    company_name: 'Acme',
+    title: 'Software Engineer',
+    description: DESCRIPTION,
+    is_active: false,
+    last_seen_at: new Date('2026-09-01T12:00:00.000Z'),
+  }]);
+  try {
+    const repaired = await repairReviewPortalFromMonitoredJob(
+      row(jobContext()),
+      review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever'),
+    );
+    assert.deepEqual(repaired.posting_status, {
+      state: 'closed',
+      reason: 'monitor_inactive',
+      observed_at: '2026-09-01T12:00:00.000Z',
+    });
+    assert.equal(repaired.attention_reason, POSTING_CLOSED_BY_MONITOR_REASON);
+    assert.deepEqual(repaired.attention_categories, ['posting_closed']);
+    assert.equal(repaired.portal_supported, false);
+    // The URL itself is kept (not stripped) so a caller reading portal_url still knows where the
+    // posting was, and monitoredPortalProofUnavailable's generic 409 does not shadow this specific
+    // one - see closedPostingReview's own doc comment.
+    assert.equal(repaired.portal_url, 'https://jobs.lever.co/acme/lever-job-1/apply');
+    assert.equal(postingStatusBlocksSend(repaired), true);
+  } finally {
+    select.mock.restore();
+  }
+});
+
+test('the same monitor verdict is read identically on the /resume/history projection', () => {
+  const repaired = repairHistoryReviewPortalFromMonitoredJob(
+    row(jobContext()),
+    review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever'),
+    new Map([[JOB_ID, {
+      applyUrl: 'https://jobs.lever.co/acme/lever-job-1',
+      company: 'Acme',
+      role: 'Software Engineer',
+      description: DESCRIPTION,
+      jdHash: monitoredDescriptionHash(DESCRIPTION),
+      isActive: false,
+      lastSeenAt: new Date('2026-09-01T12:00:00.000Z'),
+    }]]),
+  );
+  assert.equal(repaired.posting_status?.state, 'closed');
+  assert.equal(repaired.portal_supported, false);
+  assert.equal(postingStatusBlocksSend(repaired), true);
+});
+
+/* A run mid-flight, or one already with the employer, must not be relitigated just because the
+ * monitor's sweep happened to flip is_active in the middle of it - see
+ * POSTING_CLOSED_MID_RUN_STATUSES's own doc comment for why this has to hold even for a status
+ * that has nothing to do with a browser being open right now (submission_claimed,
+ * awaiting_security_code, submitted). */
+for (const midRunStatus of ['submitting', 'submission_claimed', 'awaiting_security_code', 'submitted'] as const) {
+  test(`a "${midRunStatus}" row is left completely untouched when its posting goes inactive mid-run`, async () => {
+    const select = mockMonitoredJob([{
+      external_id: 'lever-job-1',
+      apply_url: 'https://jobs.lever.co/acme/lever-job-1',
+      ats_name: 'lever',
+      board_token: 'acme',
+      company_name: 'Acme',
+      title: 'Software Engineer',
+      description: DESCRIPTION,
+      is_active: false,
+      last_seen_at: new Date('2026-09-01T12:00:00.000Z'),
+    }]);
+    try {
+      const inFlight = { ...review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever'), status: midRunStatus };
+      const repaired = await repairReviewPortalFromMonitoredJob(row(jobContext()), inFlight as ApplicationReviewState);
+      assert.deepEqual(repaired, inFlight);
+      assert.equal(repaired.posting_status, undefined);
+    } finally {
+      select.mock.restore();
+    }
+  });
+}
+
+test('an explicit is_active: true is unaffected, same as an absent value', async () => {
+  const select = mockMonitoredJob([{
+    external_id: 'lever-job-1',
+    apply_url: 'https://jobs.lever.co/acme/lever-job-1',
+    ats_name: 'lever',
+    board_token: 'acme',
+    company_name: 'Acme',
+    title: 'Software Engineer',
+    description: DESCRIPTION,
+    is_active: true,
+    last_seen_at: new Date('2026-09-01T12:00:00.000Z'),
+  }]);
+  try {
+    const repaired = await repairReviewPortalFromMonitoredJob(
+      row(jobContext()),
+      review('https://jobs.lever.co/acme/lever-job-1/apply', 'lever'),
+    );
+    assert.equal(repaired.posting_status, undefined);
+    assert.equal(repaired.portal_supported, true);
   } finally {
     select.mock.restore();
   }

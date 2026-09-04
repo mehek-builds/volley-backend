@@ -319,6 +319,8 @@ import {
 } from '../lib/coverLetterService';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { monitoredPortalProofUnavailable } from '../lib/applicationPortalRepair';
+import { postingStatusBlocksSend } from '../lib/applicationPortalRepair';
+import { derivePostingDeadlineStatus } from '../lib/postingDeadline';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
 import {
@@ -9271,6 +9273,30 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       status: 'needs_attention',
       attention_reason: 'This job is no longer available from its verified company source. Nothing was opened or sent.',
       attention_categories: ['evidence_gap'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
+  /* THE LAST LINE OF DEFENSE FOR A CLOSED OR PAST-DEADLINE POSTING, and it has to be here rather
+   * than only at the routes that lead here: this is the one function every trigger funnels through
+   * before a browser is ever booked (a manual submit-request, a security-code continuation, an
+   * unattended retry). submit-request's own copy of this same check exists only to fail fast and
+   * synchronously for the common case; this one is what actually stops a send regardless of how the
+   * run was started. A take-down never clears here; a stated deadline does, the moment
+   * posting_confirmed_open_at is set by POST /applications/:id/posting-status/confirm-open. */
+  current = derivePostingDeadlineStatus(current);
+  if (postingStatusBlocksSend(current)) {
+    fastify.log.warn(
+      { applicationId: row.id, postingStatus: current.posting_status?.state },
+      'Application preparation withheld because its posting is closed or past its stated deadline',
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      attention_reason: current.attention_reason
+        ?? 'This posting is no longer accepting applications through Litos. Nothing was opened or sent.',
+      attention_categories: ['posting_closed'],
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,

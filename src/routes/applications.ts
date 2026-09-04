@@ -43,6 +43,8 @@ import {
 } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { monitoredPortalProofUnavailable } from '../lib/applicationPortalRepair';
+import { postingStatusBlocksSend } from '../lib/applicationPortalRepair';
+import { derivePostingDeadlineStatus } from '../lib/postingDeadline';
 import { browserDeliveryRuntimeIdentity, connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
@@ -3515,6 +3517,73 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  /**
+   * HER OWN WORD THAT A POSTING PAST ITS STATED DEADLINE STILL ACCEPTS APPLICATIONS.
+   *
+   * The one action that can turn a 'deadline_passed' posting_status back into a sendable review -
+   * see postingStatusBlocksSend and derivePostingDeadlineStatus. Deliberately narrow: it writes
+   * exactly one timestamp (posting_confirmed_open_at) and nothing else, so the actual "is this
+   * safe to send" question is answered fresh, every time, by re-deriving posting_status from it -
+   * never by trusting a snapshot minted at confirmation time that a later read could disagree with.
+   *
+   * REFUSED FOR A 'closed' TAKE-DOWN, on purpose. There is no confirmation route for one: Litos
+   * does not ask her to override what the employer's own missing posting already proved, the way
+   * it does ask for a stated deadline that Workable (Mercari's own case) may still be honouring.
+   * Also refused when neither derivation finds anything to confirm - most often because she is
+   * confirming a packet that has since gone back to normal on its own (the parsed deadline moved,
+   * or the posting text changed), in which case there is nothing left for this to do.
+   */
+  fastify.post(
+    '/applications/:id/posting-status/confirm-open',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const current = readApplicationReview(row.spec as StoredSpec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      const todaysVerdict = derivePostingDeadlineStatus(await repairReviewPortalFromMonitoredJob(row, current));
+      if (todaysVerdict.posting_status?.state !== 'deadline_passed') {
+        return reply.status(409).send({
+          error: 'This application has no stated deadline waiting on your confirmation.',
+          code: 'posting_status_not_confirmable',
+        });
+      }
+      const next = applyReviewPatch(current, {
+        posting_confirmed_open_at: new Date().toISOString(),
+      });
+      const saved = await conditionalWriteRows(() => db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        ))
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'posting-status confirm-open hit the authority revision guard; retrying',
+        ),
+        onLostToGuard: () => request.log.warn(
+          { applicationId: row.id },
+          'posting-status confirm-open lost the authority revision guard for its whole window; answering 202',
+        ),
+      });
+      if (saved.length === 0) {
+        // Same discriminator as attention-acks and the answers route: a run wrote under this
+        // confirmation, so it did not land and must not be retried blind against a fresher report.
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        const review = readApplicationReview(refreshed.spec);
+        return reply.status(202).send({ application_id: row.id, review: review ?? current, saved: false });
+      }
+      return reply.send({
+        application_id: row.id,
+        review: derivePostingDeadlineStatus(await repairReviewPortalFromMonitoredJob(row, next)),
+        saved: true,
+      });
+    },
+  );
+
   fastify.post(
     '/applications/:id/submit-request',
     { preHandler: requireAuth },
@@ -3540,6 +3609,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({
           error: 'Current verified posting not found',
           code: 'job_not_available',
+        });
+      }
+      /* THE POSTING ITSELF REFUSES A SEND HERE, before a claim is minted or a browser is booked -
+       * the fast, synchronous half of the same refusal prepare() in submissionRunner.ts repeats as
+       * its own last line of defense for any caller that reaches a run without going through this
+       * route (a retried unattended cycle, a security-code continuation). A take-down never clears;
+       * a stated deadline clears the moment she confirms the employer still accepts applications
+       * through POST /applications/:id/posting-status/confirm-open. */
+      current = derivePostingDeadlineStatus(current);
+      if (postingStatusBlocksSend(current)) {
+        return reply.status(409).send({
+          error: current.attention_reason
+            ?? 'This posting is no longer accepting applications through Litos.',
+          code: 'posting_not_sendable',
+          posting_status: current.posting_status,
         });
       }
       const disposition = submitRequestDisposition(
@@ -4238,6 +4322,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
+      // The deadline half of the same projection - see resume.ts's refreshedHistorySpec, and
+      // derivePostingDeadlineStatus's own doc comment, for why it has to run after the monitor's
+      // is_active repair (just above) rather than before it.
+      review = derivePostingDeadlineStatus(review);
       const profile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       review = {
         ...review,

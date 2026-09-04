@@ -78,7 +78,9 @@ import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState }
 import {
   repairHistoryReviewPortalFromMonitoredJob,
   repairReviewPortalFromMonitoredJob,
+  type MonitoredHistoryPortal,
 } from '../lib/applicationPortalRepair';
+import { derivePostingDeadlineStatus } from '../lib/postingDeadline';
 import {
   canonicalMonitoredPortalUrl,
   canonicalSupportedPortalUrl,
@@ -251,7 +253,7 @@ export function canonicalApplicationPortalUrlFor(
 
 function repairedHistorySpec(
   row: typeof generated_resumes.$inferSelect,
-  monitoredJobs: ReadonlyMap<string, { applyUrl: string; company: string; role: string; description: string; jdHash: string }>,
+  monitoredJobs: ReadonlyMap<string, MonitoredHistoryPortal>,
 ): unknown {
   const review = readApplicationReview(row.spec);
   const spec = row.spec;
@@ -264,6 +266,19 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
   const review = readApplicationReview(spec);
   if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
   const asOf = new Date();
+  /* THE DEADLINE HALF OF THE SAME PROJECTION, folded in here rather than as a later pass over the
+   * built rows, so it can be inside the one composition documentResponseContract.test.ts and
+   * portalSupport.test.ts pin verbatim - a spec leaving this route has to go through
+   * specWithoutDocumentPointers with nothing appended after it, and a second `.map()` right before
+   * `reply.send` answered with `spec: withPostingDeadlineStatus(entry.spec)`, which is a spec that
+   * never passes through the stripper at all. Reading it HERE, before this function's own `_review`
+   * spread below, is also what keeps the ordering derivePostingDeadlineStatus itself requires: `spec`
+   * at this point is repairedHistorySpec's OUTPUT, so `review` already carries whatever the monitor's
+   * is_active verdict wrote to _review.posting_status, and a take-down outranks a stated deadline
+   * only when the deadline check runs after that, not before it. Reads jd_text alone, so this flags a
+   * packet built before this shipped exactly as well as one built after - no monitored_jobs join, no
+   * rebuild. */
+  const reviewWithPostingStatus = derivePostingDeadlineStatus(review, asOf);
   const normalize = (questions: typeof review.questions) => review.portal_url && isPortalSupported(review.portal_url)
     ? normalizeStoredPortalQuestions(questions, detectPortal(review.portal_url))
     : questions;
@@ -277,7 +292,7 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
   return {
     ...(spec as Record<string, unknown>),
     _review: {
-      ...review,
+      ...reviewWithPostingStatus,
       // Same context every live fill resolves against; see applicationContextForQuestionResolution.
       questions: packetQuestionFixpoint(
         normalize(review.questions),
@@ -1962,6 +1977,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         company_name: monitored_jobs.company_name,
         title: monitored_jobs.title,
         description: sql<string>`left(${monitored_jobs.description}, 60000)`,
+        is_active: monitored_jobs.is_active,
+        last_seen_at: monitored_jobs.last_seen_at,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
@@ -1988,6 +2005,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           role: job.title,
           description: job.description,
           jdHash: monitoredDescriptionHash(job.description),
+          isActive: job.is_active,
+          lastSeenAt: job.last_seen_at,
         }] as const),
     );
     const [profile, base] = await Promise.all([
