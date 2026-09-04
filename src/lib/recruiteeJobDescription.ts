@@ -62,7 +62,21 @@
  * PORTAL_URL IS NEVER TOUCHED HERE. Exactly like jobDescriptionSourceUrl's own rule: this reads the
  * posting for extraction only. The caller's original pasted URL is what gets stored and submitted
  * against; nothing in this module rewrites or returns it.
+ *
+ * BOTH FETCHES BELOW ARE SSRF-SAFE (2026-09-04 review round 1, finding 1), routed through
+ * jobSourceLogoVerification.ts's fetchPublic rather than the global `fetch`: every redirect hop is
+ * re-resolved and re-checked against private/reserved IP ranges and a static blocklist before it is
+ * followed, and the body is bounded while streaming. This module never needed a host allowlist the
+ * way jsonLdJobDescription.ts's generalized reader now does - recruiteeOfferUrlParts already accepts
+ * only `*.recruitee.com` tenant hosts - but the same spy-fetch probe that reached
+ * 169.254.169.254/127.0.0.1/localhost unblocked through the old direct `fetch` applies equally here:
+ * a redirect or a DNS answer under attacker influence could still have pointed this process at
+ * internal infrastructure while believing it was still talking to Recruitee.
  */
+
+import {
+  fetchPublic, safeHttpsUrl, defaultResolveHost, MAX_HTML_BYTES, type ResolveHost,
+} from './jobSourceLogoVerification';
 
 export type RecruiteeOfferUrlParts = {
   /** The tenant subdomain label, e.g. `gpr` for `gpr.recruitee.com`. */
@@ -222,28 +236,45 @@ function offerFromApiPayload(payload: unknown): RecruiteeOfferApiPayload | undef
   return { description, requirements, title, companyName };
 }
 
-// Generous enough for a plain unauthenticated GET, short enough that a slow/hanging tenant cannot
-// meaningfully delay the existing managed-browser fallback this sits in front of.
-const RECRUITEE_FETCH_TIMEOUT_MS = 6_000;
-const RECRUITEE_FETCH_USER_AGENT = 'LitosJobExtract/1.0';
-
-/** `undefined` on ANY failure - network error, timeout, non-2xx, or a signal-ignoring test double -
- *  never a thrown error, so callers can treat this as pure best-effort without their own try/catch
- *  for this step specifically. */
-async function fetchText(url: string, fetchImpl: typeof fetch, accept: string): Promise<string | undefined> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RECRUITEE_FETCH_TIMEOUT_MS);
+/** `undefined` on ANY failure - network error, timeout, non-2xx, blocked/non-public host, oversize
+ *  body, or a signal-ignoring test double - never a thrown error, so callers can treat this as pure
+ *  best-effort without their own try/catch for this step specifically.
+ *
+ *  Routed through jobSourceLogoVerification.ts's fetchPublic (2026-09-04 review round 1, finding 1)
+ *  rather than calling `fetch` directly - see this file's header for why. `fetchImpl` left undefined
+ *  (the production default - see fetchRecruiteeJobDescription below) connects over a DNS-pinned
+ *  socket rather than a bare `fetch`, generous enough for a plain unauthenticated GET and short
+ *  enough that a slow/hanging tenant cannot meaningfully delay the managed-browser fallback this
+ *  sits in front of (fetchPublic's own REQUEST_TIMEOUT_MS, applied per redirect hop). */
+async function fetchText(
+  rawUrl: string,
+  fetchImpl: typeof fetch | undefined,
+  resolveHost: ResolveHost,
+  accept: string,
+): Promise<string | undefined> {
+  let url: URL;
   try {
-    const response = await fetchImpl(url, {
-      headers: { Accept: accept, 'User-Agent': RECRUITEE_FETCH_USER_AGENT },
-      signal: controller.signal,
-    });
-    if (!response.ok) return undefined;
-    return await response.text();
+    url = safeHttpsUrl(rawUrl);
   } catch {
     return undefined;
-  } finally {
-    clearTimeout(timer);
+  }
+  try {
+    const { bytes } = await fetchPublic(
+      url,
+      accept,
+      MAX_HTML_BYTES,
+      fetchImpl,
+      resolveHost,
+      undefined,
+      // Overrides jobSourceLogoVerification.ts's own blockedHostname denylist, which refuses
+      // recruitee.com for that file's own, different reason (see this parameter's own doc comment on
+      // publicAddresses) - RECRUITEE_OFFER_HOST is checked on every hop instead, including a
+      // redirect target, so a redirect can never leave Recruitee's own tenant host space.
+      (hostname) => RECRUITEE_OFFER_HOST.test(hostname),
+    );
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    return undefined;
   }
 }
 
@@ -258,16 +289,23 @@ export type RecruiteeJobDescription = {
  * not a Recruitee offer, when neither source is reachable, or when what both sources returned still
  * states no requirement - every one of those is the caller's cue to fall through to the existing
  * managed-browser extraction unchanged, exactly as findMonitoredJobDescription already does above.
+ *
+ * `fetchImpl` and `resolveHost` are left undefined by every real caller (jobExtract.ts calls this
+ * with just `rawUrl`): fetchText then routes through fetchPublic with no overrides, which is what
+ * selects its DNS-pinned, redirect-and-byte-bounded transport rather than a bare `fetch`. Both
+ * parameters exist only so tests can inject a fetch spy and a fixed DNS answer without a real
+ * network call - see this file's header for why both fetches now go through fetchPublic at all.
  */
 export async function fetchRecruiteeJobDescription(
   rawUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
+  resolveHost: ResolveHost = defaultResolveHost,
 ): Promise<RecruiteeJobDescription | undefined> {
   const parts = recruiteeOfferUrlParts(rawUrl);
   if (!parts) return undefined;
 
   const postingUrl = `https://${parts.tenant}.recruitee.com/o/${parts.slug}`;
-  const html = await fetchText(postingUrl, fetchImpl, 'text/html');
+  const html = await fetchText(postingUrl, fetchImpl, resolveHost, 'text/html');
   if (html) {
     const jsonLd = jsonLdJobPostingFromHtml(html);
     if (jsonLd) {
@@ -283,7 +321,7 @@ export async function fetchRecruiteeJobDescription(
   }
 
   const apiUrl = `https://${parts.tenant}.recruitee.com/api/offers/${parts.slug}`;
-  const apiBody = await fetchText(apiUrl, fetchImpl, 'application/json');
+  const apiBody = await fetchText(apiUrl, fetchImpl, resolveHost, 'application/json');
   if (!apiBody) return undefined;
   let payload: unknown;
   try {

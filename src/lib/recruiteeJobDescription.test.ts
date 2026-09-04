@@ -6,7 +6,14 @@ import {
   recruiteeHtmlToText,
   fetchRecruiteeJobDescription,
 } from './recruiteeJobDescription';
+import { MAX_HTML_BYTES } from './jobSourceLogoVerification';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
+
+// A fixed, always-public-looking DNS answer, exactly like jobSourceLogoVerification.test.ts's own
+// `publicDns` - fetchRecruiteeJobDescription now routes through that file's fetchPublic (2026-09-04
+// review round 1, finding 1), which resolves and IP-checks a hostname before ever calling the
+// injected fetch spy, so every test below that expects its spy to be reached must also supply this.
+const publicDns = async () => ['93.184.216.34'];
 
 /* Fixtures below are a REAL, LIVE Recruitee posting - greenflux.recruitee.com's "Senior /
  * Principal Software Engineer" - fetched 2026-09-04 via:
@@ -201,6 +208,7 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     assert.ok(result);
     assert.equal(result!.pageTitle, 'Senior / Principal Software Engineer');
@@ -225,6 +233,7 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     assert.ok(result);
     assert.equal(result!.pageTitle, 'Senior / Principal Software Engineer');
@@ -247,6 +256,7 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     assert.ok(result);
     assert.ok(leadRequirementCandidates(result!.jdText).length > 0);
@@ -257,6 +267,7 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://gpr.recruitee.com/o/software-engineer-intern',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     assert.equal(result, undefined);
   });
@@ -279,6 +290,7 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://gpr.recruitee.com/o/software-engineer-intern',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     assert.equal(result, undefined);
   });
@@ -297,6 +309,7 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     assert.equal(result, undefined);
   });
@@ -315,9 +328,55 @@ describe('fetchRecruiteeJobDescription', () => {
     const result = await fetchRecruiteeJobDescription(
       'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
       fetchImpl as unknown as typeof fetch,
+      publicDns,
     );
     // Falls through to the API fixture rather than stopping on the non-JobPosting block.
     assert.ok(result);
     assert.equal(result!.companyName, 'GreenFlux');
+  });
+
+  /* SSRF (2026-09-04 review round 1, finding 1): fetchText now routes through
+   * jobSourceLogoVerification.ts's fetchPublic instead of the global `fetch` - see this module's own
+   * header for why a Recruitee-only host restriction was not protection enough on its own. */
+  describe('SSRF hardening', () => {
+    test('refuses a redirect from the posting page to a blocked host, without ever fetching the redirect target', async () => {
+      const fetchImpl = mock.fn(async (input: string | URL) => {
+        const url = input.toString();
+        if (url === 'https://greenflux.recruitee.com/o/senior-principal-software-engineer') {
+          return new Response(null, { status: 302, headers: { location: 'https://internal/metadata' } });
+        }
+        if (url === 'https://greenflux.recruitee.com/api/offers/senior-principal-software-engineer') {
+          return new Response('not found', { status: 404 });
+        }
+        // In particular, the blocked redirect target (https://internal/metadata) must never reach
+        // here - if it did, this branch is what would catch it.
+        throw new Error(`unexpected fetch, must not reach the blocked redirect target: ${url}`);
+      });
+      const result = await fetchRecruiteeJobDescription(
+        'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
+        fetchImpl as unknown as typeof fetch,
+        publicDns,
+      );
+      assert.equal(result, undefined);
+      // Exactly two calls: the posting page (redirect refused before it could be followed) and the
+      // best-effort API fallback that still runs afterward - never a third call to the blocked host.
+      assert.equal(fetchImpl.mock.callCount(), 2);
+    });
+
+    test('refuses an oversize posting-page response body rather than buffering it in full', async () => {
+      const fetchImpl = mock.fn(async (input: string | URL) => {
+        const url = input.toString();
+        if (url === 'https://greenflux.recruitee.com/o/senior-principal-software-engineer') {
+          return new Response('x'.repeat(MAX_HTML_BYTES + 1), { status: 200, headers: { 'content-type': 'text/html' } });
+        }
+        return new Response('not found', { status: 404 });
+      });
+      const result = await fetchRecruiteeJobDescription(
+        'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
+        fetchImpl as unknown as typeof fetch,
+        publicDns,
+      );
+      assert.equal(result, undefined);
+    });
   });
 });

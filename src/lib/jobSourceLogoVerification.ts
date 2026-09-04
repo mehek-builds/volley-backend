@@ -26,7 +26,21 @@ export type LogoVerificationResult =
   }
   | { verified: false; reason: string };
 
-type ResolveHost = (hostname: string) => Promise<string[]>;
+/* ResolveHost, defaultResolveHost, safeHttpsUrl, MAX_HTML_BYTES and fetchPublic are exported
+   (2026-09-04 review round 1, finding 1) so lib/jsonLdJobDescription.ts and
+   lib/recruiteeJobDescription.ts can fetch a job posting page through the SAME SSRF-safe transport
+   this file already built for an arbitrary employer homepage - DNS-resolved and re-checked against
+   ipBlocked/blockedHostname before every connection (including each redirect hop, via
+   fetchPinnedHttps's pinned-IP connection or, when a test fetcher is supplied, publicAddresses run
+   ahead of it), body streamed through readBounded under a fixed byte cap, redirects followed
+   manually up to MAX_REDIRECTS. Both of those readers used to call the global `fetch` directly on
+   any `https://` URL a caller pasted, with no DNS/IP check and no byte bound - confirmed live by a
+   spy fetch that reached 169.254.169.254 (the cloud metadata address), 127.0.0.1:6379, and
+   localhost:9200 unblocked. Reusing this module's already-reviewed transport, rather than
+   re-deriving the same redirect/DNS/byte-cap composition a second time, is the fix at the right
+   altitude: a second hand-rolled copy is exactly the kind of drift this file's own HOSTS-export
+   precedent (see portalSubmission.ts's PORTAL_FAMILIES) warns about. */
+export type ResolveHost = (hostname: string) => Promise<string[]>;
 
 type VerificationOptions = {
   fetcher?: typeof fetch;
@@ -43,7 +57,9 @@ type VerificationOptions = {
 const USER_AGENT = 'LitosCompanyLogoVerifier/1.0';
 const REQUEST_TIMEOUT_MS = 8_000;
 const MAX_REDIRECTS = 4;
-const MAX_HTML_BYTES = 200_000;
+// Exported (2026-09-04, finding 1) so the JSON-LD and Recruitee HTML fetchers share this exact
+// bound rather than inventing their own - see the ResolveHost comment above.
+export const MAX_HTML_BYTES = 200_000;
 const MAX_IMAGE_BYTES = 1_000_000;
 const BARE_DOMAIN_RE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/;
 
@@ -92,7 +108,7 @@ function ipBlocked(address: string): boolean {
     || normalized.startsWith('2001:db8:');
 }
 
-const defaultResolveHost: ResolveHost = async (hostname) => (
+export const defaultResolveHost: ResolveHost = async (hostname) => (
   await lookup(hostname, { all: true, verbatim: true })
 ).map((entry) => entry.address);
 
@@ -106,8 +122,17 @@ async function publicAddresses(
   hostname: string,
   resolveHost: ResolveHost,
   signal?: AbortSignal,
+  /* Overrides blockedHostname (2026-09-04 review round 1, finding 1), for a caller whose OWN
+     allowlist answers "may this hostname be fetched" more precisely than this file's denylist can.
+     BLOCKED_HOSTS mixes two different concerns: genuine SSRF-sensitive bare names ('localhost',
+     'internal') and vendor domains that are wrong ANSWERS to THIS file's own question ("is this
+     really the employer's own homepage?" - no employer's homepage is greenhouse.io or recruitee.com)
+     but are exactly the RIGHT hosts for a reader whose job is fetching a posting page FROM one of
+     those same ATS vendors. Left undefined, behavior for every existing caller is unchanged. */
+  isHostAllowed?: (hostname: string) => boolean,
 ): Promise<string[]> {
-  if (blockedHostname(hostname) || isIP(hostname)) throw new Error('blocked_host');
+  const hostnameOk = isHostAllowed ? isHostAllowed(hostname) : !blockedHostname(hostname);
+  if (!hostnameOk || isIP(hostname)) throw new Error('blocked_host');
   signal?.throwIfAborted();
   const lookupPromise = resolveHost(hostname);
   const addresses = signal
@@ -125,7 +150,7 @@ async function publicAddresses(
   return addresses;
 }
 
-function safeHttpsUrl(raw: string): URL {
+export function safeHttpsUrl(raw: string): URL {
   const url = new URL(raw);
   if (url.protocol !== 'https:' || url.username || url.password || url.port) throw new Error('unsafe_url');
   return url;
@@ -241,20 +266,24 @@ async function fetchPinnedHttps(
   });
 }
 
-async function fetchPublic(
+export async function fetchPublic(
   initialUrl: URL,
   accept: string,
   maxBytes: number,
   fetcher: typeof fetch | undefined,
   resolveHost: ResolveHost,
   signal?: AbortSignal,
+  // See publicAddresses's own parameter of the same name: an allowlist caller-supplied instead of
+  // this file's own blockedHostname denylist. Applied to every hop, including redirects, so a
+  // caller's allowlisted host cannot be redirected somewhere its own allowlist would refuse.
+  isHostAllowed?: (hostname: string) => boolean,
 ): Promise<{ bytes: Uint8Array; contentType: string; finalUrl: URL }> {
   let url = initialUrl;
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     const requestSignal = signal
       ? AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), signal])
       : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-    const addresses = await publicAddresses(url.hostname, resolveHost, requestSignal);
+    const addresses = await publicAddresses(url.hostname, resolveHost, requestSignal, isHostAllowed);
     const response = fetcher
       ? await (async () => {
         const fetched = await fetcher(url, {

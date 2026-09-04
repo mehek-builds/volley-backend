@@ -1,9 +1,18 @@
 /**
- * Host-agnostic job description sourcing for POST /jobs/extract: any `https://` posting URL whose
- * page carries a schema.org `JobPosting` JSON-LD block, read the same way Recruitee's own step
- * (recruiteeJobDescription.ts) already reads Recruitee's - generalized because the JSON-LD block
- * itself is not a Recruitee invention, and a SECOND ATS was measured hitting the exact same defect
- * this session.
+ * Job description sourcing for POST /jobs/extract from an ALLOWLISTED hosted-ATS `https://` posting
+ * URL (see ALLOWED_JSON_LD_HOSTS below) whose page carries a schema.org `JobPosting` JSON-LD block,
+ * read the same way Recruitee's own step (recruiteeJobDescription.ts) already reads Recruitee's -
+ * generalized because the JSON-LD block itself is not a Recruitee invention, and a SECOND ATS was
+ * measured hitting the exact same defect this session.
+ *
+ * NO LONGER HOST-AGNOSTIC (2026-09-04 review round 1, finding 1). This module fetched any `https://`
+ * URL a caller pasted, straight through the global `fetch`, until a spy fetch proved that reached
+ * 169.254.169.254 (the cloud metadata address), 127.0.0.1:6379 and localhost:9200 unblocked - real
+ * SSRF, not a hypothetical one. The rest of this header still describes the JSON-LD reading logic
+ * accurately; only how far this module reaches to fetch a page has changed. See
+ * ALLOWED_JSON_LD_HOSTS and fetchJsonLdJobDescription's own docstring below for what changed and why
+ * a company-hosted page outside the allowlist is not a regression: it still gets read, by the
+ * existing managed-browser path, which runs in an isolated remote browser rather than this process.
  *
  * MEASURED LIVE 2026-09-04. The dashboard's "Read job" refused a Teamtailor posting
  * (`https://sendsafely.teamtailor.com/jobs/1593900-software-development-internship`) with the
@@ -69,6 +78,9 @@
  */
 
 import { recruiteeHtmlToText as htmlToText, decodeHtmlEntities } from './recruiteeJobDescription';
+import {
+  fetchPublic, safeHttpsUrl, defaultResolveHost, MAX_HTML_BYTES, type ResolveHost,
+} from './jobSourceLogoVerification';
 
 /**
  * Escapes bare control characters (U+0000-U+001F) found INSIDE a JSON string literal, leaving
@@ -290,29 +302,102 @@ export function selectJobPostingForUrl(
   return candidates.find((candidate) => jobPostingMatchesRequestedUrl(candidate, requestedUrl));
 }
 
-// Generous enough for a plain unauthenticated GET, short enough that a slow/hanging host cannot
-// meaningfully delay the existing fallback steps this sits in front of. Same value
-// recruiteeJobDescription.ts uses for the same reason; kept as this file's own constant (rather than
-// imported) because this step is not Recruitee-specific and should not read as if it were.
-const JSON_LD_FETCH_TIMEOUT_MS = 6_000;
-const JSON_LD_FETCH_USER_AGENT = 'LitosJobExtract/1.0';
+/**
+ * Hosted ATS SaaS domains this step may fetch server-side (2026-09-04 review round 1, finding 1).
+ * An arbitrary company-hosted career page is deliberately NOT on this list: this step used to accept
+ * ANY `https://` URL a caller pasted, fetch it with the global `fetch`, follow redirects, and read an
+ * unbounded body - a spy fetch proved requests to 169.254.169.254 (the cloud metadata address),
+ * 127.0.0.1:6379, localhost:9200 and other internal hostnames were all attempted, unblocked. Every
+ * entry below is a multi-tenant ATS vendor whose OWN infrastructure serves every tenant's posting
+ * under a shared vendor domain - an employer never controls the DNS or the server behind, say,
+ * `*.recruitee.com` - which is what makes "any subdomain of this vendor" a safe pattern where
+ * "any domain a caller pastes" is not. A posting on a host not listed here still works exactly as it
+ * did before this fix: it falls through to the unchanged managed-browser path, which reads it inside
+ * an isolated remote browser rather than this process.
+ *
+ * A SMALL, hand-kept list on purpose, not an import of portalSubmission.ts's own (unexported) HOSTS
+ * map: that map is not exported, pulling it in would couple this lightweight best-effort reader to a
+ * 700KB+ submission-engine file for a handful of regexes, and its entries answer a DIFFERENT question
+ * (which host may Litos SUBMIT an application to - several of its entries are pinned to one or two
+ * exact customer tenants for reasons specific to that ATS's own product surface, e.g. its
+ * oraclecloud/bullhorn entries). This list only answers "is this a hosted ATS vendor's own domain", a
+ * strictly looser bar, so it stays intentionally short: Recruitee and Teamtailor (measured live, see
+ * this file's header), the three other families jobDescriptionSourceUrl already reads a JSON-LD-style
+ * posting page from in jobExtract.ts (SEPARATE_FORM_ROUTES: Pinpoint, Breezy, Crelate), and the five
+ * other hosted boards most commonly seen publishing this exact schema.org markup on their own posting
+ * pages (Greenhouse, Lever, Ashby, SmartRecruiters, Workable) - every one of which portalSubmission.ts
+ * already trusts with the STRICTER capability of an autofilled submission, so trusting the same host
+ * with a read-only GET here grants nothing new. An ATS missing from this list is a candidate for a
+ * follow-up, not a reason to widen it on a guess now.
+ */
+const ALLOWED_JSON_LD_HOSTS: readonly RegExp[] = [
+  // One tenant label only, matching jobDescriptionSourceUrl's own SEPARATE_FORM_ROUTES predicates in
+  // jobExtract.ts: excludes each vendor's own www/app/api hosts, and Teamtailor's regional tenants
+  // (<tenant>.na.teamtailor.com) are real career sites, same as the bare <tenant>.teamtailor.com
+  // shape - both measured live (this file's header).
+  /^(?!(?:www|app|api)\.)[a-z0-9-]+\.recruitee\.com$/i,
+  /^(?!(?:www|app|api)\.)[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/i,
+  /^(?!(?:www|app|api)\.)[a-z0-9-]+\.pinpointhq\.com$/i,
+  /^(?!(?:www|app|api)\.)[a-z0-9-]+\.breezy\.hr$/i,
+  /^jobs\.crelate\.com$/i,
+  // The remaining five match portalSubmission.ts's own HOSTS entries for the same vendors exactly
+  // (independently written here, not imported - see this constant's own header for why) - each
+  // already trusted there with the STRICTER capability of an autofilled submission.
+  /(^|\.)greenhouse\.io$/i,
+  /(^|\.)lever\.co$/i,
+  /(^|\.)ashbyhq\.com$/i,
+  /^jobs\.smartrecruiters\.com$/i,
+  /^apply\.workable\.com$/i,
+];
 
-/** `undefined` on ANY failure - network error, timeout, or non-2xx - never a thrown error, matching
- *  fetchText in recruiteeJobDescription.ts so this step is pure best-effort for its caller too. */
-async function fetchHtml(url: string, fetchImpl: typeof fetch): Promise<string | undefined> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), JSON_LD_FETCH_TIMEOUT_MS);
+function isAllowedJsonLdHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return ALLOWED_JSON_LD_HOSTS.some((pattern) => pattern.test(host));
+}
+
+/** `undefined` on ANY failure - network error, timeout, non-2xx, blocked/non-public host, oversize
+ *  body, or a non-HTML content type - never a thrown error, matching fetchText in
+ *  recruiteeJobDescription.ts so this step is pure best-effort for its caller too.
+ *
+ *  Routed through jobSourceLogoVerification.ts's fetchPublic (2026-09-04 review round 1, finding 1)
+ *  rather than calling `fetch` directly: every redirect hop is re-resolved and re-checked against
+ *  private/reserved IP ranges and a static blocklist before it is followed, the body is bounded to
+ *  MAX_HTML_BYTES while streaming rather than after the fact, and `fetchImpl` left undefined (the
+ *  production default - see fetchJsonLdJobDescription below) connects over a DNS-pinned socket that
+ *  closes the gap between checking an address and a separate resolver connecting to a different one. */
+async function fetchHtml(
+  rawUrl: string,
+  fetchImpl: typeof fetch | undefined,
+  resolveHost: ResolveHost,
+): Promise<string | undefined> {
+  let url: URL;
   try {
-    const response = await fetchImpl(url, {
-      headers: { Accept: 'text/html', 'User-Agent': JSON_LD_FETCH_USER_AGENT },
-      signal: controller.signal,
-    });
-    if (!response.ok) return undefined;
-    return await response.text();
+    url = safeHttpsUrl(rawUrl);
   } catch {
     return undefined;
-  } finally {
-    clearTimeout(timer);
+  }
+  try {
+    const { bytes, contentType } = await fetchPublic(
+      url,
+      'text/html,application/xhtml+xml',
+      MAX_HTML_BYTES,
+      fetchImpl,
+      resolveHost,
+      undefined,
+      // Overrides jobSourceLogoVerification.ts's own blockedHostname denylist, which refuses several
+      // of these exact ATS vendor domains for that file's own, different reason (see this parameter's
+      // own doc comment on publicAddresses) - isAllowedJsonLdHost is checked on every hop instead,
+      // including a redirect target, so an allowed host cannot be redirected somewhere this reader's
+      // own allowlist would refuse.
+      isAllowedJsonLdHost,
+    );
+    // The Accept header above asks for HTML; a server that answers with something else (an API
+    // error page, a JSON body, an image) is not a page this reader can find a <script> block on, and
+    // decoding it as text risks treating arbitrary bytes as HTML for no benefit.
+    if (!contentType.includes('html')) return undefined;
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    return undefined;
   }
 }
 
@@ -323,23 +408,36 @@ export type JsonLdJobDescription = {
 };
 
 /**
- * Best-effort structured job description for ANY `https://` posting URL, sourced from a schema.org
- * `JobPosting` JSON-LD block on the page itself. Host-agnostic by design: not a hand-maintained list
- * of ATS families, and deliberately sits ahead of any ATS-specific step (Recruitee's own, below it
- * in jobExtract.ts) for the same reason the monitored-inventory lookup sits ahead of everything -
+ * Best-effort structured job description for an ALLOWLISTED `https://` posting URL (see
+ * ALLOWED_JSON_LD_HOSTS above), sourced from a schema.org `JobPosting` JSON-LD block on the page
+ * itself. Deliberately sits ahead of any ATS-specific step (Recruitee's own, below it in
+ * jobExtract.ts) for the same reason the monitored-inventory lookup sits ahead of everything -
  * cheaper and more general than what follows, so a deployment without a managed browser can still
- * answer here first.
+ * answer here first, for every hosted ATS family this step knows rather than only Recruitee.
+ *
+ * NOT HOST-AGNOSTIC, as of 2026-09-04 review round 1, finding 1 - it read this shape from any host a
+ * caller pasted until then, which a spy fetch proved reached 169.254.169.254, 127.0.0.1:6379 and
+ * localhost:9200 unblocked. An arbitrary company-hosted page still gets its job description read;
+ * it now does so by falling through to the existing managed-browser path below, which runs in an
+ * isolated remote browser rather than fetching from this process.
+ *
+ * `fetchImpl` and `resolveHost` are left undefined by every real caller (jobExtract.ts calls this
+ * with just `rawUrl`): fetchHtml then routes through jobSourceLogoVerification.ts's fetchPublic with
+ * no overrides, which is what selects its DNS-pinned, redirect-and-byte-bounded transport rather than
+ * a bare `fetch`. Both parameters exist only so tests can inject a fetch spy and a fixed DNS answer
+ * without a real network call, exactly like verifyCatalogSourceLogo's own test suite already does.
  *
  * `undefined` covers every non-good outcome, exactly like fetchRecruiteeJobDescription and
- * findMonitoredJobDescription: not HTTPS, unparseable URL, fetch failure, no JobPosting block on the
- * page, or an ambiguous multi-JobPosting page with no match for this URL. The caller applies
- * leadRequirementCandidates itself (same guard, same place, for every structured source this route
- * has) - this function's job is only to produce the best text the page's own JSON-LD states, never
- * to judge whether that text states a requirement.
+ * findMonitoredJobDescription: not HTTPS, a host outside the allowlist, unparseable URL, fetch
+ * failure, no JobPosting block on the page, or an ambiguous multi-JobPosting page with no match for
+ * this URL. The caller applies leadRequirementCandidates itself (same guard, same place, for every
+ * structured source this route has) - this function's job is only to produce the best text the
+ * page's own JSON-LD states, never to judge whether that text states a requirement.
  */
 export async function fetchJsonLdJobDescription(
   rawUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
+  resolveHost: ResolveHost = defaultResolveHost,
 ): Promise<JsonLdJobDescription | undefined> {
   let url: URL;
   try {
@@ -348,8 +446,9 @@ export async function fetchJsonLdJobDescription(
     return undefined;
   }
   if (url.protocol !== 'https:') return undefined;
+  if (!isAllowedJsonLdHost(url.hostname)) return undefined;
 
-  const html = await fetchHtml(rawUrl, fetchImpl);
+  const html = await fetchHtml(rawUrl, fetchImpl, resolveHost);
   if (!html) return undefined;
 
   const chosen = selectJobPostingForUrl(jobPostingCandidatesFromHtml(html), rawUrl);

@@ -10,7 +10,15 @@ import {
   fetchJsonLdJobDescription,
   type JsonLdJobPostingCandidate,
 } from './jsonLdJobDescription';
+import { MAX_HTML_BYTES } from './jobSourceLogoVerification';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
+
+// A fixed, always-public-looking DNS answer, exactly like jobSourceLogoVerification.test.ts's own
+// `publicDns` - fetchJsonLdJobDescription now routes through that file's fetchPublic (2026-09-04
+// review round 1, finding 1), which resolves and IP-checks a hostname before ever calling the
+// injected fetch spy, so every test below that expects its spy to be reached must also supply this
+// (or a test-specific resolver) or the real system DNS resolver would run in its place.
+const publicDns = async () => ['93.184.216.34'];
 
 /* Fixture below is a REAL, LIVE, PUBLIC Teamtailor posting - SendSafely's "Software Development
  * Internship" - fetched 2026-09-04 via plain `curl` (no auth, no application action) against:
@@ -277,19 +285,19 @@ describe('fetchJsonLdJobDescription', () => {
 
   test('returns undefined when the fetch itself fails', async () => {
     const fetchImpl = mock.fn(async () => { throw new Error('network error'); });
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/1', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/1', fetchImpl as unknown as typeof fetch, publicDns);
     assert.equal(result, undefined);
   });
 
   test('returns undefined on a non-2xx response', async () => {
     const fetchImpl = mock.fn(async () => new Response('not found', { status: 404 }));
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/1', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/1', fetchImpl as unknown as typeof fetch, publicDns);
     assert.equal(result, undefined);
   });
 
   test('returns undefined when the page has no JSON-LD at all', async () => {
     const fetchImpl = mock.fn(async () => htmlResponse('<!doctype html><html><body>nothing here</body></html>'));
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/1', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/1', fetchImpl as unknown as typeof fetch, publicDns);
     assert.equal(result, undefined);
   });
 
@@ -298,7 +306,7 @@ describe('fetchJsonLdJobDescription', () => {
       assert.equal(input.toString(), TEAMTAILOR_FIXTURE.sourceUrl);
       return htmlResponse(TEAMTAILOR_FIXTURE.html);
     });
-    const result = await fetchJsonLdJobDescription(TEAMTAILOR_FIXTURE.sourceUrl, fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription(TEAMTAILOR_FIXTURE.sourceUrl, fetchImpl as unknown as typeof fetch, publicDns);
     assert.ok(result, 'expected a structured result from the real Teamtailor posting');
     assert.equal(result!.pageTitle, 'Software Development Internship');
     assert.equal(result!.companyName, 'SendSafely');
@@ -318,7 +326,7 @@ describe('fetchJsonLdJobDescription', () => {
       SAMPLE_JOB_POSTING,
     ]);
     const fetchImpl = mock.fn(async () => htmlResponse(html));
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/backend-engineer', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/backend-engineer', fetchImpl as unknown as typeof fetch, publicDns);
     assert.ok(result);
     assert.equal(result!.pageTitle, 'Backend Engineer');
     assert.ok(leadRequirementCandidates(result!.jdText).length > 0);
@@ -333,30 +341,100 @@ describe('fetchJsonLdJobDescription', () => {
       ],
     });
     const fetchImpl = mock.fn(async () => htmlResponse(html));
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/backend-engineer', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/backend-engineer', fetchImpl as unknown as typeof fetch, publicDns);
     assert.ok(result);
     assert.equal(result!.companyName, 'Example Co');
   });
 
   test('refuses an ambiguous page with two JobPostings, neither matching the requested URL', async () => {
-    const other = { ...SAMPLE_JOB_POSTING, title: 'Frontend Engineer', url: 'https://example.com/jobs/frontend-engineer' };
-    const html = htmlWithTwoJsonLdBlocks(SAMPLE_JOB_POSTING, other);
+    const backend = { ...SAMPLE_JOB_POSTING, url: 'https://acme.teamtailor.com/jobs/backend-engineer' };
+    const other = { ...SAMPLE_JOB_POSTING, title: 'Frontend Engineer', url: 'https://acme.teamtailor.com/jobs/frontend-engineer' };
+    const html = htmlWithTwoJsonLdBlocks(backend, other);
     const fetchImpl = mock.fn(async () => htmlResponse(html));
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/something-else-entirely', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/something-else-entirely', fetchImpl as unknown as typeof fetch, publicDns);
     assert.equal(result, undefined);
   });
 
   test('picks the correct one of two JobPostings by url match rather than refusing outright', async () => {
+    const backend = { ...SAMPLE_JOB_POSTING, url: 'https://acme.teamtailor.com/jobs/backend-engineer' };
     const other = {
       ...SAMPLE_JOB_POSTING,
       title: 'Frontend Engineer',
-      url: 'https://example.com/jobs/frontend-engineer',
+      url: 'https://acme.teamtailor.com/jobs/frontend-engineer',
       description: '<p>Frontend work.</p><ul><li>2+ years of React experience</li></ul>',
     };
-    const html = htmlWithTwoJsonLdBlocks(SAMPLE_JOB_POSTING, other);
+    const html = htmlWithTwoJsonLdBlocks(backend, other);
     const fetchImpl = mock.fn(async () => htmlResponse(html));
-    const result = await fetchJsonLdJobDescription('https://example.com/jobs/frontend-engineer', fetchImpl as unknown as typeof fetch);
+    const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/frontend-engineer', fetchImpl as unknown as typeof fetch, publicDns);
     assert.ok(result);
     assert.equal(result!.pageTitle, 'Frontend Engineer');
+  });
+
+  /* SSRF (2026-09-04 review round 1, finding 1). Before this fix, this function fetched ANY
+   * `https://` URL a caller pasted straight through the global `fetch`, following redirects and
+   * reading an unbounded body. A spy fetch proved it would attempt every one of the four requests
+   * below, unblocked. */
+  describe('SSRF hardening', () => {
+    const SPY_PROBE_URLS = [
+      'https://169.254.169.254/latest/meta-data/',
+      'https://127.0.0.1:6379/',
+      'https://localhost:9200/',
+      'https://payroll.internal/jobs/1',
+    ];
+
+    for (const probeUrl of SPY_PROBE_URLS) {
+      test(`never attempts the fetch for ${probeUrl} (measured live as a reachable SSRF target before this fix)`, async () => {
+        const fetchImpl = mock.fn(async () => { throw new Error('should not be called'); });
+        const result = await fetchJsonLdJobDescription(probeUrl, fetchImpl as unknown as typeof fetch, publicDns);
+        assert.equal(result, undefined);
+        assert.equal(fetchImpl.mock.callCount(), 0);
+      });
+    }
+
+    test('refuses a host outside the hosted-ATS allowlist without fetching anything, keeping the managed-browser path for it', async () => {
+      const fetchImpl = mock.fn(async () => { throw new Error('should not be called'); });
+      const result = await fetchJsonLdJobDescription('https://careers.example.com/jobs/backend-engineer', fetchImpl as unknown as typeof fetch, publicDns);
+      assert.equal(result, undefined);
+      assert.equal(fetchImpl.mock.callCount(), 0);
+    });
+
+    test('fetches an allowlisted hosted-ATS host', async () => {
+      const fetchImpl = mock.fn(async () => htmlResponse(htmlWithJsonLd(SAMPLE_JOB_POSTING)));
+      const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/backend-engineer', fetchImpl as unknown as typeof fetch, publicDns);
+      assert.ok(result, 'an allowlisted host must still be read');
+      assert.equal(fetchImpl.mock.callCount(), 1);
+    });
+
+    test('refuses a redirect from an allowed host to a blocked host, without ever fetching the redirect target', async () => {
+      const fetchImpl = mock.fn(async (input: string | URL) => {
+        const url = input.toString();
+        if (url === 'https://acme.teamtailor.com/jobs/1') {
+          return new Response(null, { status: 302, headers: { location: 'https://internal/metadata' } });
+        }
+        throw new Error(`should not be reached: ${url}`);
+      });
+      const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/1', fetchImpl as unknown as typeof fetch, publicDns);
+      assert.equal(result, undefined);
+      // Only the first, allowed hop was ever attempted.
+      assert.equal(fetchImpl.mock.callCount(), 1);
+    });
+
+    test('refuses an oversize response body rather than buffering it in full', async () => {
+      const fetchImpl = mock.fn(async () => new Response('x'.repeat(MAX_HTML_BYTES + 1), {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }));
+      const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/1', fetchImpl as unknown as typeof fetch, publicDns);
+      assert.equal(result, undefined);
+    });
+
+    test('refuses a non-HTML response rather than scanning arbitrary bytes for a script tag', async () => {
+      const fetchImpl = mock.fn(async () => new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+      const result = await fetchJsonLdJobDescription('https://acme.teamtailor.com/jobs/1', fetchImpl as unknown as typeof fetch, publicDns);
+      assert.equal(result, undefined);
+    });
   });
 });
