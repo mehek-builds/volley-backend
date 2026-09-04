@@ -297,6 +297,7 @@ import {
   questionMetadataBlockerReason,
   questionLabelIsGenericAnswerControl,
   reopenUnfitClosedChoiceQuestions,
+  snapStoredAnswersToProfileFieldOptions,
   type QuestionMetadataBlocker,
 } from '../lib/questionMetadata';
 import {
@@ -9035,7 +9036,15 @@ export function resolvePacketAuditQuestionFixpoint(
         postingCountryCode,
         asOf,
       );
-      return normalize(packetMayBeWithEmployer ? refreshed : reopenUnfitClosedChoiceQuestions(refreshed));
+      /* Snapped between the refresh and the re-open, and INSIDE this transform rather than once
+       * before the fixpoint starts - see snapStoredAnswersToProfileFieldOptions's own header for
+       * why that placement is load-bearing (the un-snapped value is a stable fixed point of
+       * refresh+reopen alone, so a snap applied only to the fixpoint's initial input is undone on
+       * the first pass). Skipped once the packet may already be with the employer, same as the
+       * re-open: a sent record keeps its stored answers verbatim. */
+      return normalize(packetMayBeWithEmployer
+        ? refreshed
+        : reopenUnfitClosedChoiceQuestions(snapStoredAnswersToProfileFieldOptions(refreshed)));
     },
   );
 }
