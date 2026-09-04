@@ -6,6 +6,8 @@ import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
 import { canonicalMonitoredPortalUrl } from '../lib/portalSubmission';
+import { fetchRecruiteeJobDescription } from '../lib/recruiteeJobDescription';
+import { fetchJsonLdJobDescription } from '../lib/jsonLdJobDescription';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs } from '../db/schema';
 
@@ -275,21 +277,64 @@ export async function findMonitoredJobDescription(
   return undefined;
 }
 
-export async function jobExtractRoutes(fastify: FastifyInstance) {
+/**
+ * Every out-of-process step POST /jobs/extract reaches, overridable for tests (2026-09-04 review
+ * round 1, finding 5). Every real caller (src/index.ts's own `fastify.register(jobExtractRoutes)`)
+ * passes no second argument, so every default below - the real requireAuth, the real allowHourly,
+ * the real fetchJsonLdJobDescription/fetchRecruiteeJobDescription/runManagedBrowser - is exactly
+ * what runs in production; this parameter changes nothing about that.
+ *
+ * WHY THIS EXISTS AT ALL rather than a test mocking the imported functions directly: this project
+ * runs its TypeScript as genuine ESM (confirmed live 2026-09-04 - a namespace import's own exported
+ * bindings are non-configurable accessor properties, `Object.getOwnPropertyDescriptor` shows a
+ * getter with no `value`), so `mock.method` - which reads a plain data-property `value` - cannot
+ * patch a bare function export the way it already patches `db.select` elsewhere in this codebase's
+ * own tests (`db` is a mutable OBJECT VALUE; mutating one of its properties is unrelated to the
+ * import BINDING immutability ESM actually enforces). `mock.module` is the newer API built for
+ * exactly this, but it requires `--experimental-test-module-mocks`, a flag neither this repo's own
+ * `npm test` script nor this task's own test command passes. A small, optional, additive
+ * dependency-injection seam - the same shape fetchJsonLdJobDescription and
+ * fetchRecruiteeJobDescription already use for their own `fetchImpl`/`resolveHost` test-only
+ * overrides (finding 1) - sidesteps the whole question rather than fighting it.
+ */
+export type JobExtractRouteDependencies = {
+  requireAuthHook?: typeof requireAuth;
+  allowHourlyFn?: typeof allowHourly;
+  fetchJsonLdJobDescriptionFn?: typeof fetchJsonLdJobDescription;
+  fetchRecruiteeJobDescriptionFn?: typeof fetchRecruiteeJobDescription;
+  runManagedBrowserFn?: typeof runManagedBrowser;
+  isBrowserbaseConfiguredFn?: typeof isBrowserbaseConfigured;
+  isManagedStratusProviderFn?: typeof isManagedStratusProvider;
+};
+
+export async function jobExtractRoutes(fastify: FastifyInstance, deps: JobExtractRouteDependencies = {}) {
+  const {
+    requireAuthHook = requireAuth,
+    allowHourlyFn = allowHourly,
+    fetchJsonLdJobDescriptionFn = fetchJsonLdJobDescription,
+    fetchRecruiteeJobDescriptionFn = fetchRecruiteeJobDescription,
+    runManagedBrowserFn = runManagedBrowser,
+    isBrowserbaseConfiguredFn = isBrowserbaseConfigured,
+    isManagedStratusProviderFn = isManagedStratusProvider,
+  } = deps;
   // POST /jobs/extract - given a posting URL, first answer from the monitored jobs inventory when
   // the URL canonically matches a posting the monitor already holds (see
-  // findMonitoredJobDescription above); otherwise render it in the managed browser (the same
-  // provider used for portal submission) and return its visible text as a starting point for the
-  // job description field. This exists so "New application" can go from a pasted URL to a
-  // reviewable packet without the operator hand-copying text out of a separate tab: the dashboard
-  // is the one surface, per the 2026-07-24 product decision to stop treating JD-sourcing as a
-  // side-channel step. Genuinely best-effort, confirmed live: server-rendered boards (Greenhouse,
-  // SmartRecruiters, plain company career pages) come back clean. At least one heavily
+  // findMonitoredJobDescription above); then, host-agnostically, try a `JobPosting` JSON-LD block
+  // on the page itself (see fetchJsonLdJobDescription in lib/jsonLdJobDescription.ts - covers
+  // Recruitee, Teamtailor, and any other ATS that publishes the same schema.org markup); then, for
+  // a Recruitee offer specifically, its own public offers API as a second attempt (see
+  // fetchRecruiteeJobDescription in lib/recruiteeJobDescription.ts); otherwise render it in the
+  // managed browser (the same provider used for portal submission) and return its visible text as
+  // a starting point for the job description field. This exists so "New application" can go from
+  // a pasted URL to a reviewable packet without the operator hand-copying text out of a separate
+  // tab: the dashboard is the one surface, per the 2026-07-24 product decision to stop treating
+  // JD-sourcing as a side-channel step. Genuinely best-effort, confirmed live: server-rendered
+  // boards (Greenhouse, SmartRecruiters, plain company career pages) come back clean. At least one
   // client-rendered board (Ashby) returned a correct page title but empty text even after forcing
   // several seconds of render delay before extracting - some SPA renders this run cannot reach
   // (shadow DOM, virtualization, or something else opaque to the managed browser). Callers MUST
   // treat a 502 here as "fall back to the manual paste field," not as a bug to keep chasing.
-  fastify.post('/jobs/extract', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.post('/jobs/extract', { preHandler: requireAuthHook }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
     let body: z.infer<typeof jobExtractBodySchema>;
@@ -304,7 +349,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Job URL must use HTTPS' });
     }
 
-    if (!(await allowHourly(userId, 'jobExtract', LIMITS.perHour.jobExtract))) {
+    if (!(await allowHourlyFn(userId, 'jobExtract', LIMITS.perHour.jobExtract))) {
       return rateLimitedReply(reply);
     }
 
@@ -359,7 +404,131 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       );
     }
 
-    if (!isBrowserbaseConfigured() && !isManagedStratusProvider()) {
+    /* JSON-LD JOB POSTING, HOST-AGNOSTIC, BEFORE ANY ATS-SPECIFIC FALLBACK. Generalizes the
+       Recruitee-only step below: schema.org's `JobPosting` JSON-LD block is not a Recruitee
+       invention, and a SECOND ATS was measured hitting the exact same 502 this session - Teamtailor
+       (sendsafely.teamtailor.com/jobs/1593900-software-development-internship, measured live
+       2026-09-04, identical guard sentence). Teamtailor's posting page carries the same schema.org
+       markup Recruitee's does; unlike Recruitee it has no reliable public JSON API for a SINGLE
+       arbitrary posting - its tenant-wide `/jobs.json` JSON Feed (jsonfeed.org, a real published
+       spec) measured live 2026-09-04 on this exact tenant does NOT list this posting at all (nor
+       does the tenant's own server-rendered `/jobs` page - it is a real, live, unauthenticated
+       posting simply absent from both of the tenant's own indexes), so JSON-LD read directly off
+       the posting page is the only reliable structured source for Teamtailor. See
+       jsonLdJobDescription.ts's header for the rest of what was measured, including a raw,
+       unescaped control character inside Teamtailor's own JSON-LD string - invalid JSON by RFC
+       8259, tolerated here rather than treated as "no JobPosting block."
+
+       Sits ahead of the Recruitee-specific step (and the runner-config check) for the same reason
+       the monitored-inventory lookup does: cheaper and more general than what follows, so a
+       deployment without a managed browser can still answer from it. Runs unconditionally after the
+       inventory check, same as the Recruitee step below - a monitored row whose OWN stored
+       description states no requirement is no reason to skip a further best-effort source before
+       paying for a browser render.
+
+       Recruitee's own step below still runs afterward on purpose: its bespoke /api/offers/<slug>
+       fallback (combining `description` AND `requirements`) is real coverage this generic reader
+       cannot provide, since a page's JSON-LD is the only thing this step ever reads. For a
+       Recruitee posting whose JSON-LD already answers, this step returns first and the Recruitee
+       step below never runs at all - no double fetch in the common case.
+
+       Best-effort by the same rule as every step above: not HTTPS, no fetch, no JobPosting block,
+       an ambiguous multi-JobPosting page with no match for this URL, or a result that itself states
+       no requirement all return undefined/fall through to the next step unchanged. Never rewrites
+       body.job_url; nothing here is ever what gets stored as portal_url. */
+    let jsonLdJobPosting: Awaited<ReturnType<typeof fetchJsonLdJobDescription>>;
+    try {
+      jsonLdJobPosting = await fetchJsonLdJobDescriptionFn(body.job_url);
+    } catch (err) {
+      fastify.log.warn(
+        { err, userId, job_url: body.job_url },
+        'JSON-LD job posting extraction failed; falling back to the next extraction step',
+      );
+      jsonLdJobPosting = undefined;
+    }
+    if (jsonLdJobPosting) {
+      const jsonLdJdText = clipJdText(jsonLdJobPosting.jdText);
+      if (leadRequirementCandidates(jsonLdJdText).length > 0) {
+        fastify.log.info(
+          {
+            userId,
+            job_url: body.job_url,
+            title: jsonLdJobPosting.pageTitle,
+            textLen: jsonLdJdText.length,
+          },
+          'job description served from JSON-LD JobPosting source',
+        );
+        return reply.status(200).send({
+          jd_text: jsonLdJdText,
+          page_title: jsonLdJobPosting.pageTitle || undefined,
+          company: jsonLdJobPosting.companyName || undefined,
+          role: jsonLdJobPosting.pageTitle || undefined,
+        });
+      }
+      fastify.log.warn(
+        { userId, job_url: body.job_url },
+        'JSON-LD job posting description states no requirement; falling back to the next extraction step',
+      );
+    }
+
+    /* RECRUITEE, STRUCTURED SOURCE BEFORE THE BROWSER. Measured live 2026-09-04: a Recruitee
+       posting (gpr.recruitee.com/o/software-engineer-intern) 502ed here with "could not find a
+       stated requirement", the same guard applied below. Recruitee career pages are a heavy
+       SSR/hydration app - see recruiteeJobDescription.ts's header for what was measured on other
+       live tenants once gpr's own hosted page stopped resolving - and whatever runManagedBrowser's
+       `extract: 'body'` does with that DOM is not this codebase's to control. Recruitee publishes
+       the same posting as structured data through two first-party, unauthenticated channels this
+       route did not previously use: the page's own JSON-LD JobPosting block, or failing that its
+       public /api/offers/<slug> endpoint (already used by this repo's board-monitoring poller, see
+       normalizeRecruiteeJobs in lib/jobMonitor.ts). Plain HTTP, no browser, no render race.
+
+       Sits ahead of the runner-config check on purpose, exactly like the monitored-inventory lookup
+       above: a deployment without a managed browser can still answer for a Recruitee posting. Runs
+       unconditionally after the inventory check (not only when it missed) because a monitored row
+       whose OWN stored description states no requirement is no reason to skip a second, independent
+       best-effort source before paying for a browser render.
+
+       Best-effort by the same rule as findMonitoredJobDescription: a URL that is not a Recruitee
+       offer, any fetch failure, or a result that itself states no requirement returns undefined and
+       execution falls through to the unchanged browser path below. This may only ever
+       short-circuit with a GOOD result, never introduce a new failure a URL would not already have
+       hit. */
+    let recruitee: Awaited<ReturnType<typeof fetchRecruiteeJobDescription>>;
+    try {
+      recruitee = await fetchRecruiteeJobDescriptionFn(body.job_url);
+    } catch (err) {
+      fastify.log.warn(
+        { err, userId, job_url: body.job_url },
+        'recruitee structured extraction failed; falling back to browser extraction',
+      );
+      recruitee = undefined;
+    }
+    if (recruitee) {
+      const recruiteeJdText = clipJdText(recruitee.jdText);
+      if (leadRequirementCandidates(recruiteeJdText).length > 0) {
+        fastify.log.info(
+          {
+            userId,
+            job_url: body.job_url,
+            title: recruitee.pageTitle,
+            textLen: recruiteeJdText.length,
+          },
+          'job description served from recruitee structured source',
+        );
+        return reply.status(200).send({
+          jd_text: recruiteeJdText,
+          page_title: recruitee.pageTitle || undefined,
+          company: recruitee.companyName || undefined,
+          role: recruitee.pageTitle || undefined,
+        });
+      }
+      fastify.log.warn(
+        { userId, job_url: body.job_url },
+        'recruitee structured description states no requirement; falling back to browser extraction',
+      );
+    }
+
+    if (!isBrowserbaseConfiguredFn() && !isManagedStratusProviderFn()) {
       return reply.status(503).send({
         error: 'Job description extraction is not configured on this deployment.',
         code: 'PORTAL_RUNNER_NOT_CONFIGURED',
@@ -380,7 +549,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       // A selector that can never match forces waitForSelector to burn its FULL timeout before
       // 'optional' lets the run continue - a deterministic render-delay that does not depend on
       // guessing any site's heading markup.
-      result = await runManagedBrowser(extractionUrl, [
+      result = await runManagedBrowserFn(extractionUrl, [
         { type: 'waitForSelector', selector: '.litos-jd-extract-render-delay-noop', timeout: 5000, optional: true },
         { type: 'extract', selector: 'body' },
       ]);

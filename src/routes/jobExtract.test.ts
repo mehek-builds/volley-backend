@@ -2,6 +2,7 @@ import { test, describe, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyReply } from 'fastify';
 import {
   jobExtractBodySchema,
   clipJdText,
@@ -9,16 +10,31 @@ import {
   monitoredInventoryLookupKeys,
   monitoredJobDescriptionMatch,
   findMonitoredJobDescription,
+  jobExtractRoutes,
   MAX_JD_TEXT_CHARS,
   type MonitoredInventoryJob,
+  type JobExtractRouteDependencies,
 } from './jobExtract';
 import { leadRequirementCandidates } from '../engine/leadAlignment';
 import { db } from '../db/index';
 
 // POST /jobs/extract lets "New application" go from a pasted URL to a reviewable JD without a
 // side-channel copy-paste step (2026-07-24 product decision). No live network/DB in the test env
-// per this repo's convention, so these pin the two pure pieces: the request schema and the
+// per this repo's convention, so most of these pin the pure pieces: the request schema and the
 // text-bounding helper the route applies to whatever the managed browser returns.
+//
+// The 'jobExtractRoutes (POST /jobs/extract)' describe block below (2026-09-04 review round 1,
+// finding 5) is the exception: real fastify-handler tests, built on jobExtractRoutes's own
+// JobExtractRouteDependencies seam (see jobExtract.ts's doc comment on it) rather than
+// dashboardBootstrap.test.ts's mock.method-on-`db` style: this project runs as genuine ESM, where a
+// namespace import's bindings are non-configurable accessor properties (confirmed live 2026-09-04),
+// so mock.method - which patches a plain data-property `value` - cannot intercept a bare function
+// export like fetchJsonLdJobDescription or runManagedBrowser the way it already patches `db.select`
+// (a mutable property of an object VALUE) in this exact file's own findMonitoredJobDescription tests
+// below. requireAuth and allowHourly are stubbed via the same seam, rather than
+// dashboardBootstrap.test.ts's real-signed-JWT dance, because these tests exist to pin the JSON-LD /
+// Recruitee / managed-browser ordering and short-circuit behavior, not auth or quota correctness,
+// which already have their own dedicated coverage elsewhere.
 
 describe('jobExtractBodySchema', () => {
   test('accepts a valid https URL', () => {
@@ -276,7 +292,7 @@ describe('a form-only page is refused rather than frozen into a packet', () => {
   test('the route serves a monitored inventory match before ever paying for a browser run', () => {
     const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
     assert.ok(
-      route.indexOf('findMonitoredJobDescription(body.job_url)') < route.indexOf('runManagedBrowser(extractionUrl'),
+      route.indexOf('findMonitoredJobDescription(body.job_url)') < route.indexOf('runManagedBrowserFn(extractionUrl'),
       'the inventory lookup must sit ahead of the managed-browser run',
     );
     // The lookup may only short-circuit with a GOOD result: a lookup error or a stored description
@@ -628,5 +644,163 @@ describe('monitoredJobDescriptionMatch carries the posting identity', () => {
     assert.ok(match);
     assert.equal(match.pageTitle, 'Software Engineer, Intern');
     assert.equal(match.companyName, 'Acme');
+  });
+});
+
+/* FASTIFY-HANDLER TESTS (2026-09-04 review round 1, finding 5). Everything above this point tests
+ * jobExtract.ts's exported pure pieces, or the route's SOURCE TEXT, never the registered handler
+ * itself. These three instead build a real Fastify instance, register jobExtractRoutes with a fake
+ * JobExtractRouteDependencies, and inject a real HTTP request through it - the ordering and
+ * short-circuit behavior of the JSON-LD, Recruitee, and managed-browser steps is exactly the kind of
+ * thing a source-text match cannot prove, only running the handler can. */
+
+/** Wraps every dependency in mock.fn (a standalone trackable function - unlike mock.method, this
+ *  does not require patching an existing object, so it works uniformly for a plain async function
+ *  override or this helper's own default) so every test can read `.mock.callCount()` off `deps`
+ *  regardless of whether it supplied that dependency or took the default. The monitored-inventory
+ *  db.select is mocked exactly like this file's own mockInventory helper above, returning no
+ *  candidates so every test here falls straight through to the steps under test. */
+function installJobExtractMocks(overrides: JobExtractRouteDependencies) {
+  const dbSelect = mock.method(db, 'select', (() => ({
+    from: () => ({
+      innerJoin: () => ({
+        where: () => ({
+          orderBy: () => ({
+            limit: async () => [],
+          }),
+        }),
+      }),
+    }),
+  })) as unknown as typeof db.select);
+  const deps = {
+    requireAuthHook: mock.fn(overrides.requireAuthHook ?? (async (request: FastifyRequest, _reply: FastifyReply) => {
+      request.jwtPayload = {
+        userId: 'test-user',
+        isGuest: false,
+        authMethod: 'password',
+        sessionVersion: 0,
+        authenticatedAt: Date.now(),
+      };
+    })),
+    allowHourlyFn: mock.fn(overrides.allowHourlyFn ?? (async () => true)),
+    fetchJsonLdJobDescriptionFn: mock.fn(overrides.fetchJsonLdJobDescriptionFn ?? (async () => undefined)),
+    fetchRecruiteeJobDescriptionFn: mock.fn(overrides.fetchRecruiteeJobDescriptionFn ?? (async () => undefined)),
+    isBrowserbaseConfiguredFn: mock.fn(overrides.isBrowserbaseConfiguredFn ?? (() => true)),
+    isManagedStratusProviderFn: mock.fn(overrides.isManagedStratusProviderFn ?? (() => false)),
+    runManagedBrowserFn: mock.fn(
+      overrides.runManagedBrowserFn
+        ?? (async () => { throw new Error('runManagedBrowserFn should not run in this test'); }),
+    ),
+  };
+  return { deps, dbSelect };
+}
+
+async function withJobExtractApp(
+  overrides: JobExtractRouteDependencies,
+  fn: (ctx: { app: FastifyInstance; deps: ReturnType<typeof installJobExtractMocks>['deps'] }) => Promise<void>,
+): Promise<void> {
+  const { deps, dbSelect } = installJobExtractMocks(overrides);
+  const app = Fastify({ logger: false });
+  try {
+    await app.register(jobExtractRoutes, deps);
+    await app.ready();
+    await fn({ app, deps });
+  } finally {
+    await app.close();
+    dbSelect.mock.restore();
+  }
+}
+
+describe('jobExtractRoutes (POST /jobs/extract)', () => {
+  test('the JSON-LD step short-circuits the managed-browser path and returns its company/role/jd_text', async () => {
+    const jsonLdJdText = ['What we look for:', 'You have 3+ years of experience with distributed systems', 'You are comfortable with an on-call rotation'].join('\n');
+    assert.ok(leadRequirementCandidates(jsonLdJdText).length > 0, 'fixture must itself pass the real guard');
+
+    await withJobExtractApp(
+      {
+        fetchJsonLdJobDescriptionFn: async () => ({
+          jdText: jsonLdJdText,
+          pageTitle: 'Backend Engineer',
+          companyName: 'Acme Co',
+        }),
+      },
+      async ({ app, deps }) => {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/jobs/extract',
+          payload: { job_url: 'https://acme.teamtailor.com/jobs/backend-engineer' },
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json();
+        assert.equal(body.jd_text, jsonLdJdText);
+        assert.equal(body.company, 'Acme Co');
+        assert.equal(body.role, 'Backend Engineer');
+        assert.equal(body.page_title, 'Backend Engineer');
+        assert.equal(deps.fetchRecruiteeJobDescriptionFn.mock.callCount(), 0, 'Recruitee must not run once JSON-LD already answered');
+        assert.equal(deps.runManagedBrowserFn.mock.callCount(), 0, 'the managed browser must never run once JSON-LD already answered');
+      },
+    );
+  });
+
+  test('a failing guard on every structured source falls all the way through to the managed-browser path', async () => {
+    const noRequirementText = 'Welcome to our careers page.';
+    assert.deepEqual(leadRequirementCandidates(noRequirementText), [], 'fixture must itself fail the real guard');
+    const browserJdText = ['What we look for:', 'You have hands-on experience with Kubernetes', 'You are comfortable pairing with teammates across time zones'].join('\n');
+    assert.ok(leadRequirementCandidates(browserJdText).length > 0, 'fixture must itself pass the real guard');
+
+    await withJobExtractApp(
+      {
+        fetchJsonLdJobDescriptionFn: async () => ({ jdText: noRequirementText, pageTitle: 'X', companyName: 'Y' }),
+        fetchRecruiteeJobDescriptionFn: async () => ({ jdText: noRequirementText, pageTitle: 'X', companyName: 'Y' }),
+        runManagedBrowserFn: async () => ({
+          title: 'Platform Engineer',
+          url: 'https://example.com/jobs/platform-engineer',
+          text: browserJdText,
+        }),
+      },
+      async ({ app }) => {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/jobs/extract',
+          payload: { job_url: 'https://example.com/jobs/platform-engineer' },
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json();
+        assert.equal(body.jd_text, browserJdText);
+        assert.equal(body.page_title, 'Platform Engineer');
+        // Only the structured sources carry company/role; the managed-browser response shape does not.
+        assert.equal(body.company, undefined);
+        assert.equal(body.role, undefined);
+      },
+    );
+  });
+
+  test('the Recruitee step runs after JSON-LD and before the managed browser', async () => {
+    const recruiteeJdText = ['What we look for:', 'You have 2+ years of React experience', 'You are comfortable owning a feature end to end'].join('\n');
+    assert.ok(leadRequirementCandidates(recruiteeJdText).length > 0, 'fixture must itself pass the real guard');
+    const callOrder: string[] = [];
+
+    await withJobExtractApp(
+      {
+        fetchJsonLdJobDescriptionFn: async () => { callOrder.push('json-ld'); return undefined; },
+        fetchRecruiteeJobDescriptionFn: async () => {
+          callOrder.push('recruitee');
+          return { jdText: recruiteeJdText, pageTitle: 'Frontend Engineer', companyName: 'Greenflux' };
+        },
+      },
+      async ({ app, deps }) => {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/jobs/extract',
+          payload: { job_url: 'https://greenflux.recruitee.com/o/frontend-engineer' },
+        });
+        assert.equal(response.statusCode, 200);
+        const body = response.json();
+        assert.equal(body.jd_text, recruiteeJdText);
+        assert.equal(body.company, 'Greenflux');
+        assert.deepEqual(callOrder, ['json-ld', 'recruitee']);
+        assert.equal(deps.runManagedBrowserFn.mock.callCount(), 0, 'the managed browser must never run once Recruitee already answered');
+      },
+    );
   });
 });
