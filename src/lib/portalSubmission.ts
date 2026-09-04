@@ -8953,8 +8953,33 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   ultipro: /^recruiting\.ultipro\.com$/i,
   // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
   recruitee: /^(?!www\.)[^.]+\.recruitee\.com$/i,
-  // career.teamtailor.com is Teamtailor's own public tenant. Product, API, and docs hosts are out.
-  teamtailor: /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i,
+  // career.teamtailor.com (singular) is a real, live third-party tenant - "detects two unrelated
+  // live Teamtailor tenants" in recruiteeTeamtailorPortal.test.ts pins it as one of exactly two
+  // measured examples - so it is deliberately NOT excluded below, whatever the vendor itself hosts
+  // at that name. "careers" (plural, Teamtailor's own hiring-for-itself page) IS excluded: nothing
+  // in this codebase has ever matched that exact shape, so refusing it costs no existing tenant its
+  // recognition.
+  //
+  // THE OPTIONAL REGION LABEL, added 2026-09-05. MEASURED LIVE the same day, account
+  // mehekmandal05@gmail.com: "Fill application" -> "Tailor resume first" against
+  // https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance built a packet
+  // whose portal_url matched NO entry in this map at all - the regex before this comment took
+  // exactly one label before ".teamtailor.com", and a REGIONAL tenant puts the region between the
+  // tenant and the vendor domain as a second label. detectPortal threw, POST /resume/generate
+  // stored the packet portal_supported: false, and GET /applications/:id/submission 500'd on the
+  // unguarded call this same PR fixes in submissionRunner.ts's normalizedPacketAuditQuestions.
+  // Teamtailor serves at least two live regional shapes (<tenant>.na.teamtailor.com and
+  // <tenant>.eu.teamtailor.com); a 2-4 lowercase-letter bound admits both plus headroom for one not
+  // yet measured, without opening this entry to an arbitrary third-party subdomain that happens to
+  // be short.
+  //
+  // THE EXCLUSION STILL COVERS A REGIONAL HOST, with no separate check needed: `^(?!...)` anchors
+  // to the very START of the whole hostname, so "api.na.teamtailor.com" (api as tenant, na as
+  // region) fails the same negative lookahead that "api.teamtailor.com" (api as tenant, no region)
+  // always failed - the lookahead only ever looks at the label immediately after `^`, never at what
+  // follows it, so it excludes a reserved word in the tenant position whether or not a region comes
+  // after.
+  teamtailor: /^(?!(?:www|app|api|partner|docs|support|careers)\.)[^.]+(?:\.[a-z]{2,4})?\.teamtailor\.com$/i,
   // Personio tenants use {tenant}.jobs.personio.de or .com. Requiring the jobs label prevents a
   // company or employee product on another Personio host from being mistaken for an application.
   personio: /^[a-z0-9-]+\.jobs\.personio\.(?:de|com)$/i,

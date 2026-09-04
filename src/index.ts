@@ -491,9 +491,30 @@ export async function buildApp(options: BuildAppOptions = {}) {
    * Pinned in src/index.test.ts, on the source rather than through an injected request, because the
    * ordering is the whole mechanism and nothing injected can see it: a plugin a test registers after
    * buildApp() returns inherits this handler under EITHER ordering, which is exactly why the defect
-   * survived a suite that exercises these routes constantly. */
-  fastify.setErrorHandler((error, _request, reply) => {
-    fastify.log.error(error);
+   * survived a suite that exercises these routes constantly.
+   *
+   * THE SERVER LOG, NOT JUST THE CLIENT RESPONSE. toPublicError intentionally throws away a bare
+   * Error's own message for the CLIENT - "Internal server error" is the whole point, so a stack
+   * trace or a raw SQL statement never reaches a browser - which makes the server-side log line the
+   * ONLY place that message ever exists. MEASURED LIVE 2026-09-04, account
+   * mehekmandal05@gmail.com: GET /applications/:id/submission 500'd on detectPortal's throw for a
+   * regional Teamtailor tenant (see normalizedPacketAuditQuestions in routes/submissionRunner.ts),
+   * and finding the cause meant reproducing it from scratch rather than reading it off, because
+   * `fastify.log.error(error)` logged against the ROOT logger with the request parameter unused
+   * (`_request`) - pino's own err-object fast path DOES capture the message and stack, so that part
+   * was never missing, but nothing tied the line to a ROUTE or a single REQUEST. A root-logger error
+   * line is indistinguishable from every other request's in flight at the same moment, on a
+   * serverless platform running many at once, which made this exact 500 as hard to find in the logs
+   * as it was easy to reproduce once someone did. request.log is Fastify's per-request child logger
+   * (see requestPathForCardGate in middleware/auth.ts for the same routeOptions-over-raw-url
+   * reasoning applied to a different route set): it stamps every line with reqId for free, and
+   * routeOptions.url is the registered TEMPLATE ('/applications/:id/submission', never the literal
+   * application id), which is what keeps this free of PII without a denylist to maintain. */
+  fastify.setErrorHandler((error, request, reply) => {
+    request.log.error(
+      { err: error, route: request.routeOptions?.url ?? request.url ?? '/', method: request.method },
+      error instanceof Error ? error.message : 'Unhandled error',
+    );
     const publicError = toPublicError(error);
     if (publicError.retryAfterSeconds !== undefined) {
       reply.header('Retry-After', String(publicError.retryAfterSeconds));

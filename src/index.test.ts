@@ -128,6 +128,45 @@ test('the global error handler is installed before any route plugin is registere
   assert.ok(source.indexOf('await fastify.register(multipart,') < handlerAt);
 });
 
+/* THE LOG LINE HAS TO NAME WHICH REQUEST, or a bare Error's message - the only place it exists,
+ * since toPublicError deliberately throws it away for the client - is unfindable among every other
+ * request's log lines on a serverless platform running many at once.
+ *
+ * MEASURED LIVE 2026-09-04: GET /applications/:id/submission 500'd on detectPortal's throw for a
+ * regional Teamtailor tenant, and `fastify.log.error(error)` against the app-level logger, with the
+ * handler's own request parameter unused (`_request`), left nothing to search the log stream by -
+ * pino's own err-object handling DOES capture message and stack (confirmed against this exact
+ * repo's pino version before this test was written), so the message was never the missing half.
+ *
+ * ASSERTED ON THE SOURCE, same technique and same reason as the ordering test above: a per-request
+ * reqId is exactly the thing an injected test request cannot distinguish from a global logger
+ * call - both reach a route and both can 500 - so the only place this property is checkable at all
+ * is the handler's own text. */
+test('the global error handler logs through the per-request logger, with the route and no unused request param', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync('src/index.ts', 'utf8');
+
+  const handlerAt = source.indexOf('fastify.setErrorHandler(');
+  assert.ok(handlerAt > 0, 'the global error handler must still exist');
+  const handlerBody = source.slice(handlerAt, handlerAt + 600);
+
+  assert.match(
+    handlerBody,
+    /fastify\.setErrorHandler\(\(error, request, reply\)/,
+    'the request parameter must be bound (and used), not discarded as `_request`',
+  );
+  assert.match(
+    handlerBody,
+    /request\.log\.error\(/,
+    'the per-request child logger, not the app-level fastify.log, is what stamps reqId onto this line',
+  );
+  assert.match(
+    handlerBody,
+    /request\.routeOptions\?\.url/,
+    'the route TEMPLATE (never a literal id in the URL) has to be in the log line for it to be findable by route',
+  );
+});
+
 const ATS_ORIGIN = 'https://job-boards.greenhouse.io';
 const EVIL_ORIGIN = 'https://evil.example.com';
 const SITE_ORIGIN = 'https://trylitos.com';

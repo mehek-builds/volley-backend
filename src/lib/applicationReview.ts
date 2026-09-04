@@ -1758,10 +1758,26 @@ export function readApplicationReview(spec: unknown): ApplicationReviewState | n
   const review = (spec as Record<string, unknown>)._review;
   if (!review || typeof review !== 'object' || Array.isArray(review)) return null;
   const state = review as ApplicationReviewState;
-  // Derived here, at the one choke point every caller already goes through, so a packet stored
-  // before portal_supported existed still answers the question correctly and no backfill migration
-  // is needed. A stored value always wins: this only fills a gap, it never overrides a decision.
-  if (state.portal_supported === undefined && state.portal_url) {
+  /* Derived here, at the one choke point every caller already goes through, so a packet stored
+   * before portal_supported existed still answers the question correctly and no backfill migration
+   * is needed.
+   *
+   * A STORED `true` ALWAYS WINS, and is the only value this leaves alone. Everything else -
+   * `undefined` (never computed) and `false` (computed unsupported, once) - gets a fresh look on
+   * every read. That second case is new as of 2026-09-05: MEASURED LIVE the same day, account
+   * mehekmandal05@gmail.com, POST /resume/generate stored portal_supported: false for
+   * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance because
+   * HOSTS.teamtailor in lib/portalSubmission.ts did not yet recognise a regional Teamtailor tenant
+   * (see that map's own comment). Widening the host regex fixes every NEW packet at generate time,
+   * but a stored `false` from before the fix does not become true by itself - `state.portal_url`
+   * never changes, so nothing else here would ever ask the detector again, and the dashboard would
+   * keep routing an account holding the Teamtailor consent grant to the extension handoff forever
+   * for a posting Litos can now send. Re-deriving is cheap (a handful of regexes, no I/O) and safe
+   * in this direction: a stale false correcting to true here is the read this whole function
+   * exists to give, and a detector that regresses genuinely-supported to unsupported is a separate,
+   * worse bug this cannot cause - retrying downward is exactly the trap applyApplicationReviewEdit's
+   * own comment names, which is why a stored `true` is still never revisited. */
+  if (state.portal_supported !== true && state.portal_url) {
     return { ...state, portal_supported: isPortalSupported(state.portal_url) };
   }
   return state;

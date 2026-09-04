@@ -50,6 +50,20 @@ import type { ApplicationReviewState } from '../lib/applicationReview';
  * GET /resume/history's refreshedHistorySpec (routes/resume.ts) already carries for its own
  * equivalent call - see submissionRunner.test.ts for the function-level pin of that fix.
  *
+ * ROUND 2, 2026-09-05: HOSTS.teamtailor now recognises exactly this regional shape
+ * ("<tenant>.<region>.teamtailor.com" - see that map's own comment in lib/portalSubmission.ts), so
+ * detectPortal no longer throws for this URL at all and isPortalSupported(PORTAL_URL) is true. The
+ * ROOT CAUSE paragraph above stays as it was measured - host recognition is what was missing that
+ * day - but the first test below now exercises the SECOND half of the fix instead of the guard: the
+ * packet was generated (and its row seeded here) BEFORE the host-recognition fix, so it still
+ * carries the stale portal_supported: false POST /resume/generate wrote before HOSTS.teamtailor
+ * knew this shape. That stale value has to heal on its own the moment the account reopens the
+ * dashboard, without a resume rebuild - see readApplicationReview in lib/applicationReview.ts,
+ * which now recomputes portal_supported from the current detector whenever the stored value is not
+ * already `true`. A THIRD test below reseeds the same packet on a host that genuinely still cannot
+ * be classified, so the route's "never 500, whatever detectPortal does" guarantee - the reason this
+ * file exists in the first place - stays covered by a fixture that actually exercises it.
+ *
  * This file pins the fix at the route the dashboard actually calls: seed a packet/application pair
  * shaped exactly like POST /resume/generate's own transaction produces for this scenario, then call
  * the real GET handlers with fastify.inject.
@@ -130,9 +144,13 @@ async function seedFreshTailoredPacket(userId: string = USER_ID, overrides: Part
     role: 'Intern, Finance',
     portal_url: PORTAL_URL,
     ats_name: 'teamtailor',
-    // isPortalSupported(PORTAL_URL) is false: HOSTS.teamtailor matches only a single label before
-    // ".teamtailor.com", so this regional tenant is never "supported" fill/audit automation - see
-    // this file's header comment and lib/portalSubmission.test.ts.
+    // DELIBERATELY STALE, matching exactly what POST /resume/generate wrote for this URL before
+    // HOSTS.teamtailor recognised the regional shape (this file's header, "ROUND 2"):
+    // isPortalSupported(PORTAL_URL) is true today, but the stored value never updates itself, so a
+    // packet generated before that fix landed keeps carrying false until something re-derives it.
+    // That is exactly what the first test below is for - see readApplicationReview in
+    // lib/applicationReview.ts for the read-time heal, and pass `{ portal_url: ... }` in
+    // `overrides` for a packet that should stay genuinely unsupported instead.
     portal_supported: false,
     status: 'ready_to_submit',
     edited_terms: [],
@@ -171,7 +189,7 @@ async function seedFreshTailoredPacket(userId: string = USER_ID, overrides: Part
   return { packetId, canonicalApplicationId };
 }
 
-test('GET /applications/:id/submission returns 200 for a fresh packet on a portal detectPortal cannot classify', async () => {
+test('GET /applications/:id/submission returns 200 and heals a stale portal_supported: false once the regional host is recognized', async () => {
   const { packetId } = await seedFreshTailoredPacket();
   const res = await app.inject({
     method: 'GET',
@@ -182,8 +200,34 @@ test('GET /applications/:id/submission returns 200 for a fresh packet on a porta
   const body = res.json();
   assert.equal(body.application_id, packetId);
   assert.equal(body.review.status, 'ready_to_submit');
-  assert.equal(body.review.portal_supported, false);
+  // The row was seeded with the stale portal_supported: false a pre-fix POST /resume/generate
+  // wrote (see seedFreshTailoredPacket's own comment). readApplicationReview re-derives it from
+  // the current detector on every read because the stored value is not `true`, and HOSTS.teamtailor
+  // now recognises this regional tenant - so the dashboard sees `true` on this very next load, with
+  // no resume rebuild and no separate repair endpoint.
+  assert.equal(body.review.portal_supported, true);
   assert.deepEqual(body.sensitive_questions_requiring_confirmation, []);
+});
+
+/* THE GUARD ITSELF, STILL PROVEN, on a host that genuinely is not any recognised family - the
+ * property #951 exists for ("a bare Error from detectPortal must not 500 this route") stops being
+ * demonstrated by the test above the moment its fixture host is recognised, so it is demonstrated
+ * here instead. detectPortal throws for this host today and portal_supported has to stay exactly
+ * what was stored, since isPortalSupported agrees with it - nothing to heal, unlike the test above. */
+test('GET /applications/:id/submission still returns 200 for a packet on a portal detectPortal genuinely cannot classify', async () => {
+  const { packetId } = await seedFreshTailoredPacket(USER_ID, {
+    portal_url: 'https://apply.not-a-recognized-ats.example.com/careers/apply',
+    ats_name: 'other',
+  });
+  const res = await app.inject({
+    method: 'GET',
+    url: `/applications/${packetId}/submission`,
+    headers: { authorization: `Bearer ${await token()}` },
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json();
+  assert.equal(body.application_id, packetId);
+  assert.equal(body.review.portal_supported, false);
 });
 
 test('GET /applications/:id/submission/channels still reports the teamtailor channel as unavailable', async () => {
