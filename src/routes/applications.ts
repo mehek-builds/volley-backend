@@ -2886,6 +2886,25 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // not moving, only the header is. Same renderer, same no-bank call the edit route above makes.
       const rendered = await renderResumePdf(contentSpec, newContact, review.jd_text);
 
+      /* THE LONGER HEADER CAN COST A BULLET. planResumeLayout fits the page against whatever the
+       * header takes up, so a header that grew - a state spelled out in full, a third link that
+       * was not there before - can trim content that fit under the old, shorter one. rendered.spec
+       * is the only spec that is true of these bytes, which is why it is what gets stored below
+       * rather than contentSpec, and why it has to clear the same one-page checks
+       * PATCH /applications/:id/resume runs after every edit, for the same reason: a PDF nobody
+       * validated is not one this route may hand back labelled "refreshed". */
+      const visual = validateResumeVisualLayout(rendered.layout);
+      const parsedPdf = await extractPdfText(rendered.buffer);
+      const pdfIssues = [
+        ...visual.issues,
+        ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
+        ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
+        ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, newContact),
+      ];
+      if (pdfIssues.length > 0) {
+        return reply.status(422).send({ error: 'Litos could not refresh this resume’s header without breaking its one-page layout.', issues: pdfIssues });
+      }
+
       const requestedKey = `users/${userId}/resumes/${row.id}-contact-refresh-${randomUUID()}.pdf`;
       let blob: Awaited<ReturnType<typeof putObject>>;
       try {
@@ -2912,8 +2931,17 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // is "every writer", not "every writer that currently needs it".
       const finalReview = settleStall({ ...review, status: statusAfterRefresh, updated_at: now });
       const updatedSpec = {
-        ...stored,
+        // rendered.spec, NOT stored: this is the content that actually produced these PDF bytes,
+        // and it is what pdfGenerationBindingIsCurrent recomputes specSha256 from on every later
+        // read. Storing the pre-render spec here while binding to the rendered one is how a header
+        // that trims a bullet fails closed as PACKET_PDF_INVALID - "Generate it again" - on a
+        // packet nothing was wrong with.
+        ...rendered.spec,
         _contact: newContact,
+        // Every stored key this route does not recompute, from the one list that names them - see
+        // preservedApplicationSpecKeys. Before _review and _quality because those two ARE
+        // recomputed and have to win.
+        ...preservedApplicationSpecKeys(stored),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
           pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer, newContact.email ?? ''),

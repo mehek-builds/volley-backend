@@ -54,6 +54,8 @@ import {
   verifyCurrentPacketAudit,
   type CreatePacketAuditInput,
 } from '../lib/packetAudit';
+import { pdfGenerationBindingIsCurrent } from '../lib/pdfGenerationBinding';
+import { readObject } from '../lib/objectStorage';
 
 const JWT_SIGNING_SECRET = 'contact-refresh-route-test-secret';
 const ENCRYPTION_KEY = 'contact-refresh-route-test-key-0123456789ab';
@@ -85,20 +87,34 @@ const JD_TEXT = 'A posting that asks for TypeScript service experience.';
 
 /* Content that renders and audits cleanly on its own, with nothing in it that depends on the
  * JD-matching pipeline: createPacketAudit's own clauses/terms are supplied pre-scored (see
- * packetAudit.test.ts's validInput), so a single unscoreable clause is enough here. */
+ * packetAudit.test.ts's validInput), so a single unscoreable clause is enough here.
+ *
+ * Three bullets, not one: validatePdfLayout's ATS-readability floor (resumeValidate.ts, extracted
+ * text under 400 characters) is now part of what this route's own post-render checks run (review
+ * finding 2), and a one-bullet resume never clears it - this fixture does, comfortably, for both
+ * STALE_CONTACT and REFRESHED_CONTACT, with no trimming and no layout issues either way. */
 const RESUME_SPEC: ResumeSpec = {
   school: 'Example University',
   degree: 'Bachelor of Science in Computer Science',
   grad_date: '2026',
-  coursework: 'Distributed Systems',
+  coursework: 'Distributed Systems, Operating Systems, Algorithms',
   experience: [{
     type: 'job',
     org: 'Northwind Labs',
     title: 'Software Engineer',
+    // Present and empty, not absent: normalizeSpec (llm/resumeSpec.ts) always produces this key on
+    // every entry, and rendered.spec is now what gets stored (review finding 2) - so the "content
+    // untouched" comparison below has to compare against the shape normalizeSpec actually produces,
+    // the same way a hand-typed fixture without it would fail against any other normalized read.
+    location: '',
     date_range: '2024 - Present',
-    bullets: ['Built TypeScript services for operations teams and reduced response time by 30 percent'],
+    bullets: [
+      'Built TypeScript services for operations teams and reduced response time by 30 percent',
+      'Designed and shipped a caching layer that cut database load during peak traffic hours',
+      'Mentored two incoming interns on the team codebase, testing practices and review process',
+    ],
   }],
-  skills: ['TypeScript'],
+  skills: ['TypeScript', 'React', 'Node.js', 'PostgreSQL', 'AWS'],
 };
 
 /* THE MEASURED FIXTURE. A packet built while the account read Dubai/+971, exactly as pinned in
@@ -117,6 +133,72 @@ const REFRESHED_CONTACT = {
   email: 'resume@example.test',
   phone: '+1 213 574 6270',
   location: 'Los Angeles, California',
+};
+
+/* THE FIXTURE FOR THE SPEC-BINDING REGRESSION (review finding 2). A resume dense enough that
+ * planResumeLayout's fit loop is doing real work: four entries at the three-bullet ceiling, with
+ * enough skills text that adding the widened header's extra lines (a spelled-out state, three
+ * links) tips the compact-design fit estimate over the one-page ceiling where the bare stored
+ * header did not. Measured directly against renderResumePdf while building this fixture -
+ * TRIM_STORED_CONTACT keeps all twelve bullets and clears every layout check with room to spare,
+ * TRIM_REFRESHED_CONTACT trims exactly one bullet and still clears every layout check - so this is
+ * pinned behaviour, not a hope that some header is "probably long enough". */
+const TRIM_BULLET = (n: number) =>
+  `Led cross functional initiative ${n} that measurably improved throughput and reliability for `
+  + 'the whole organization across every single quarter that was carefully measured over the past year';
+
+const TRIM_RESUME_SPEC: ResumeSpec = {
+  school: 'Example University',
+  degree: 'Bachelor of Science in Computer Science',
+  grad_date: '2026',
+  coursework: 'Distributed Systems, Operating Systems, Algorithms and Data Structures, Machine '
+    + 'Learning, Computer Networks, Database Systems, Software Engineering Principles, Computer '
+    + 'Architecture, Discrete Mathematics, Probability and Statistics',
+  experience: [
+    { type: 'job', org: 'Northwind Labs', title: 'Software Engineer Intern', date_range: 'Summer 2025',
+      bullets: [TRIM_BULLET(1), TRIM_BULLET(2), TRIM_BULLET(3)] },
+    { type: 'job', org: 'Acme Corp', title: 'Software Engineer Intern', date_range: 'Summer 2024',
+      bullets: [TRIM_BULLET(4), TRIM_BULLET(5), TRIM_BULLET(6)] },
+    { type: 'job', org: 'Globex Inc', title: 'Teaching Assistant', date_range: 'Fall 2024 - Spring 2025',
+      bullets: [TRIM_BULLET(7), TRIM_BULLET(8), TRIM_BULLET(9)] },
+    { type: 'job', org: 'Initech', title: 'Research Assistant', date_range: 'Fall 2023 - Spring 2024',
+      bullets: [TRIM_BULLET(10), TRIM_BULLET(11), TRIM_BULLET(12)] },
+  ],
+  skills: [
+    'TypeScript and Modern Asynchronous JavaScript', 'Python for Scalable Backend Services',
+    'Go for High Performance Systems Programming', 'React and Reusable Component Architecture',
+    'Node.js Microservice Development', 'Distributed Systems Design and Architecture',
+    'PostgreSQL Schema Design and Query Tuning', 'MySQL Replication and Query Optimization',
+    'MongoDB Document Modeling and Indexing', 'Redis Caching and Pub/Sub Strategies',
+    'Amazon Web Services (AWS) Cloud Infrastructure', 'Google Cloud Platform (GCP) Deployment',
+    'Microsoft Azure Fundamentals and Deployment', 'Docker Containerization and Image Builds',
+    'Kubernetes Cluster Operations and Scaling', 'Terraform Infrastructure as Code Modules',
+    'GraphQL API Design and Schema Federation', 'RESTful API Development and Versioning',
+    'Apache Kafka Event Streaming Pipelines', 'Jenkins Continuous Integration Pipelines',
+    'Elasticsearch Full Text Search and Indexing', 'Nginx Reverse Proxy Configuration',
+    'Linux Systems Administration and Scripting', 'Automated Test Driven Development Practices',
+    'Continuous Delivery and Release Engineering', 'Site Reliability Engineering Fundamentals',
+    'Object Oriented Design Patterns and Practices', 'Functional Programming Concepts in Practice',
+    'Agile Software Development Methodologies', 'Cross Functional Team Collaboration Skills',
+  ],
+};
+
+/** Bare enough that the packet, as originally built, never had to trim anything. */
+const TRIM_STORED_CONTACT = {
+  full_name: 'Trim Applicant',
+  email: 'trim-resume@example.test',
+};
+
+/** What the profile below produces: every mutable field moves, and the header grows by three
+ * links and a spelled-out city/state - the exact shape that costs a bullet at render time. */
+const TRIM_REFRESHED_CONTACT = {
+  full_name: 'Trim Applicant',
+  email: 'trim-resume@example.test',
+  phone: '+1 213 574 6270',
+  location: 'Los Angeles, California',
+  linkedin_url: 'https://www.linkedin.com/in/test-applicant-example',
+  github_url: 'https://github.com/test-applicant-example',
+  portfolio_url: 'https://test-applicant-example-portfolio.dev',
 };
 
 function baseReview(overrides: Partial<ApplicationReviewState> = {}): ApplicationReviewState {
@@ -168,16 +250,43 @@ function getSubmission(applicationId: string) {
   });
 }
 
+// Keyed by request path (bucket + key, since OBJECT_STORAGE_URL_STYLE is 'path'), so a GET for a
+// key a PUT never wrote still 404s the way real S3 would. Module-scoped rather than per-test: the
+// object store itself is one long-lived fake server for the whole file, exactly like the real one.
+const fakeObjectStoreBytes = new Map<string, Buffer>();
+
 function startFakeObjectStore(): Promise<Server> {
   return new Promise((resolve) => {
     const server = createServer((req, res) => {
-      req.resume();
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
-        // PutObjectCommand -> PUT <bucket>/<key>. The route never reads these bytes back, so an
-        // empty 200 is a faithful enough stand-in for what S3 itself returns.
+        const body = Buffer.concat(chunks);
+        // The AWS SDK tags every request with its own `?x-id=PutObject` / `?x-id=GetObject` query
+        // parameter, so the same key's PUT and GET otherwise never share a map entry - only the
+        // path (bucket + key) identifies the object, exactly as S3 itself keys it.
+        const path = (req.url ?? '').split('?')[0];
+        // PutObjectCommand -> PUT <bucket>/<key>. Most callers never read these bytes back (an
+        // empty 200 is a faithful enough stand-in for what S3 itself returns), but the bytes are
+        // kept anyway so a GET issued later in the same test - readObject, proving a stored
+        // generation binding is current against the ACTUAL rendered PDF - has something real to
+        // read rather than a second, unrelated render.
         if (req.method === 'PUT') {
+          fakeObjectStoreBytes.set(path, body);
           res.writeHead(200, { etag: '"fake-etag"' });
           res.end();
+          return;
+        }
+        // GetObjectCommand -> GET <bucket>/<key>.
+        if (req.method === 'GET') {
+          const bytes = fakeObjectStoreBytes.get(path);
+          if (!bytes) {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/pdf', 'content-length': String(bytes.length) });
+          res.end(bytes);
           return;
         }
         // DeleteObjectsCommand -> POST <bucket>/?delete, expecting an XML DeleteResult body back.
@@ -499,4 +608,77 @@ test('GET /applications/:id/submission signals staleness only when there is drif
   assert.equal(currentResponse.statusCode, 200, currentResponse.body);
   assert.equal(currentResponse.json().resume_contact_stale, undefined,
     'no drift means no signal, so a client offers no button for nothing to do');
+});
+
+/* REVIEW FINDING 2. renderResumePdf's returned spec is what actually produced the PDF bytes; the
+ * pre-render content spec is not, whenever a header this much longer makes planResumeLayout trim
+ * a bullet to keep the page at one. Storing the wrong one of those two while binding the OTHER to
+ * the rendered bytes is how a packet nothing is wrong with fails closed as PACKET_PDF_INVALID
+ * ("Generate it again") the next time anything reads pdfGenerationBindingIsCurrent. A second,
+ * dedicated user/profile: this fixture needs LinkedIn, GitHub and portfolio links on the profile,
+ * and adding those to the shared fixture's profile would leak links into every other test in this
+ * file that asserts what resumeContactStaleness does and does not report. */
+test('a header long enough to trim a bullet still yields a current PDF generation binding', async () => {
+  const [account] = await db.insert(schema.users).values({ email: 'contact-refresh-trim@example.test' }).returning();
+  const trimUserId = account.id;
+  await db.insert(schema.profiles).values({
+    user_id: trimUserId,
+    parsed_json: { resume_email: TRIM_STORED_CONTACT.email },
+  });
+  await db.insert(schema.application_profile).values({
+    user_id: trimUserId,
+    phone: TRIM_REFRESHED_CONTACT.phone,
+    address_city: 'Los Angeles',
+    address_state: 'California',
+    linkedin_url: TRIM_REFRESHED_CONTACT.linkedin_url,
+    github_url: TRIM_REFRESHED_CONTACT.github_url,
+    portfolio_url: TRIM_REFRESHED_CONTACT.portfolio_url,
+  });
+  const trimToken = await new SignJWT({
+    userId: trimUserId,
+    email: 'contact-refresh-trim@example.test',
+    isGuest: false,
+    authMethod: 'password',
+    sessionVersion: 0,
+  })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .setExpirationTime('1h')
+    .sign(new TextEncoder().encode(JWT_SIGNING_SECRET));
+
+  const objectKey = `users/${trimUserId}/resumes/${crypto.randomUUID()}.pdf`;
+  const [row] = await db.insert(schema.generated_resumes).values({
+    user_id: trimUserId,
+    job_context: { company: 'Northwind Labs', role: 'Software Engineer' },
+    spec: { ...TRIM_RESUME_SPEC, _contact: TRIM_STORED_CONTACT, _review: baseReview() },
+    resume_object_key: objectKey,
+  }).returning({ id: schema.generated_resumes.id });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: `/applications/${row.id}/resume/contact-refresh`,
+    headers: { authorization: `Bearer ${trimToken}` },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(response.json().contact.after, TRIM_REFRESHED_CONTACT);
+
+  const stored = await storedRow(row.id);
+  assert.notEqual(stored.resume_object_key, objectKey);
+  const spec = stored.spec as Record<string, unknown>;
+
+  // THE TRIM ACTUALLY HAPPENED - otherwise this fixture proves nothing about the bug it targets.
+  const totalBullets = (spec.experience as Array<{ bullets: string[] }>)
+    .reduce((total, entry) => total + entry.bullets.length, 0);
+  assert.equal(totalBullets, 11, 'the longer header must have cost exactly one bullet, or this fixture is not exercising the layout trim');
+
+  // THE FIX ITSELF: a binding computed from the bytes actually on the row, checked against the
+  // spec actually stored beside it - the same comparison pdfGenerationBindingIsCurrent runs on
+  // every later packet-audit or send-gate read of this row.
+  const pdfBytes = await readObject(stored.resume_object_key);
+  assert.ok(pdfBytes, 'the refreshed PDF must be readable back from storage');
+  const binding = (spec._quality as Record<string, unknown> | undefined)?.pdfGenerationBinding;
+  assert.ok(
+    pdfGenerationBindingIsCurrent(binding, stored.spec, stored.resume_object_key, pdfBytes!, TRIM_REFRESHED_CONTACT.email),
+    'the stored spec must be the one the PDF was actually rendered from, or a valid packet fails closed as PACKET_PDF_INVALID',
+  );
 });
