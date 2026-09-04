@@ -87,7 +87,24 @@ export function resumeContactOfRecord(sources: ResumeContactSources): ContactHea
  * without becoming a different application. full_name and email are deliberately absent - see the
  * doc comment on refreshResumeContactFromProfile for why each stays packet-specific.
  */
-const MUTABLE_CONTACT_FIELDS = ['phone', 'location', 'linkedin_url', 'github_url', 'portfolio_url'] as const;
+export const MUTABLE_CONTACT_FIELDS = ['phone', 'location', 'linkedin_url', 'github_url', 'portfolio_url'] as const;
+
+export type MutableContactField = (typeof MUTABLE_CONTACT_FIELDS)[number];
+
+/**
+ * What PATCH /applications/:id/resume has refreshed since before POST
+ * /applications/:id/resume/contact-refresh - or the other three MUTABLE_CONTACT_FIELDS - existed.
+ *
+ * refreshResumeContactFromProfile's `fields` option defaults to this narrow set, on purpose: that
+ * route calls the helper unconditionally, as a side effect of every content save, on a route whose
+ * subject is the resume body rather than the header. Widening what an UNCONDITIONAL call silently
+ * rewrites is a different, unreviewed change from widening what an applicant explicitly asked to
+ * refresh - a per-packet LinkedIn or portfolio link she set deliberately at generation time would
+ * start disappearing under an edited bullet with no field on the form to explain why. The wider set
+ * is something a caller now has to ask for by name (see MUTABLE_CONTACT_FIELDS), not something it
+ * gets by omitting an argument.
+ */
+export const LEGACY_MUTABLE_CONTACT_FIELDS: readonly MutableContactField[] = ['phone', 'location'];
 
 /**
  * Refresh mutable contact facts when an applicant explicitly saves an existing packet again, or
@@ -100,23 +117,30 @@ const MUTABLE_CONTACT_FIELDS = ['phone', 'location', 'linkedin_url', 'github_url
  * from this same profile row at submit time (see applicationContextForQuestionResolution), and a
  * stale LinkedIn or portfolio link is simply a stale way to reach her.
  *
- * full_name and email remain packet-specific, and neither is in MUTABLE_CONTACT_FIELDS.
- * full_name is never sourced from the profile at all - resumeContactOfRecord takes it only from
- * `requested`, because a resume header prints the name she chose to apply under, not a column that
- * can change for reasons unrelated to any one application. email carries a separate identity: it is
- * the resume_email that pins the packet's applicant-email routing (see planPacketApplicantEmail)
- * and the packet audit's resumeContactEmailSha256, so a caller whose account email changed must be
- * refused upstream (resumePacketEmailIsCurrent) rather than have this helper silently rewrite it.
+ * full_name and email remain packet-specific, and neither is ever in `fields`. full_name is never
+ * sourced from the profile at all - resumeContactOfRecord takes it only from `requested`, because a
+ * resume header prints the name she chose to apply under, not a column that can change for reasons
+ * unrelated to any one application. email carries a separate identity: it is the resume_email that
+ * pins the packet's applicant-email routing (see planPacketApplicantEmail) and the packet audit's
+ * resumeContactEmailSha256, so a caller whose account email changed must be refused upstream
+ * (resumePacketEmailIsCurrent) rather than have this helper silently rewrite it.
+ *
+ * `fields` defaults to LEGACY_MUTABLE_CONTACT_FIELDS - see that constant for why the narrower set,
+ * not the full one, is what a caller gets for free. POST /applications/:id/resume/contact-refresh
+ * asks for the wider set explicitly, through resumeContactStaleness below.
  */
 export function refreshResumeContactFromProfile(
   stored: ContactHeader,
   profile: Record<string, unknown> | undefined,
+  options: { fields?: readonly MutableContactField[] } = {},
 ): ContactHeader {
-  const phone = text(profile?.['phone']);
-  const location = resumeHeaderLocation(profile);
-  const linkedin_url = text(profile?.['linkedin_url']);
-  const github_url = text(profile?.['github_url']);
-  const portfolio_url = text(profile?.['portfolio_url']);
+  const fields = options.fields ?? LEGACY_MUTABLE_CONTACT_FIELDS;
+  const wants = (field: MutableContactField) => fields.includes(field);
+  const phone = wants('phone') ? text(profile?.['phone']) : undefined;
+  const location = wants('location') ? resumeHeaderLocation(profile) : undefined;
+  const linkedin_url = wants('linkedin_url') ? text(profile?.['linkedin_url']) : undefined;
+  const github_url = wants('github_url') ? text(profile?.['github_url']) : undefined;
+  const portfolio_url = wants('portfolio_url') ? text(profile?.['portfolio_url']) : undefined;
   return {
     ...stored,
     ...(phone ? { phone } : {}),
@@ -143,6 +167,11 @@ export type ResumeContactStaleness = {
  * place is how a button and the route behind it drift apart - one says stale while the other says
  * there is nothing to refresh, or the reverse.
  *
+ * THE ONE CALLER THAT ASKS FOR THE FULL WIDTH, explicitly. refreshResumeContactFromProfile's own
+ * default is the narrow, pre-existing set (see LEGACY_MUTABLE_CONTACT_FIELDS) - this is the one
+ * caller for which that default would be wrong, since both routes on the other end of this
+ * comparison were built to widen the signal to links, not to leave it at phone and location.
+ *
  * null on a packet with no drift, which MUST be the common case: full_name and email are excluded
  * from MUTABLE_CONTACT_FIELDS on purpose (see refreshResumeContactFromProfile), so an applicant who
  * has only ever changed her name or her personal resume email sees no stale signal and the refresh
@@ -153,7 +182,7 @@ export function resumeContactStaleness(
   stored: ContactHeader,
   profile: Record<string, unknown> | undefined,
 ): ResumeContactStaleness | null {
-  const current = refreshResumeContactFromProfile(stored, profile);
+  const current = refreshResumeContactFromProfile(stored, profile, { fields: MUTABLE_CONTACT_FIELDS });
   const drifted = MUTABLE_CONTACT_FIELDS.some((field) => (current[field] ?? '') !== (stored[field] ?? ''));
   return drifted ? { stored, current } : null;
 }

@@ -12,6 +12,8 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import {
+  LEGACY_MUTABLE_CONTACT_FIELDS,
+  MUTABLE_CONTACT_FIELDS,
   refreshResumeContactFromProfile,
   resumeContactOfRecord,
   resumeContactStaleness,
@@ -121,10 +123,13 @@ describe('refreshResumeContactFromProfile', () => {
     assert.deepEqual(refreshResumeContactFromProfile(stored, {}), stored);
   });
 
-  /* THE WIDENED HALF: links move with the profile too, for POST
-   * /applications/:id/resume/contact-refresh, which asks this helper to bring a whole built
-   * packet's header current rather than only the two fields a live form fill reads. */
-  test('current LinkedIn, GitHub and portfolio links replace stale packet links', () => {
+  /* THE WIDENED HALF, ASKED FOR BY NAME: links move with the profile too, for POST
+   * /applications/:id/resume/contact-refresh, which passes MUTABLE_CONTACT_FIELDS explicitly to
+   * bring a whole built packet's header current rather than only the two fields a live form fill
+   * reads. Review finding 3: this widening used to be unconditional, which silently pulled links
+   * into PATCH /applications/:id/resume's own unrelated call too - see the narrow-by-default test
+   * directly below for the fix. */
+  test('current LinkedIn, GitHub and portfolio links replace stale packet links when asked for', () => {
     const refreshed = refreshResumeContactFromProfile({
       full_name: 'Test Applicant',
       email: 'resume@example.com',
@@ -134,11 +139,55 @@ describe('refreshResumeContactFromProfile', () => {
       linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
       github_url: 'https://github.com/mehek-builds',
       portfolio_url: 'https://mehek.dev',
-    });
+    }, { fields: MUTABLE_CONTACT_FIELDS });
 
     assert.equal(refreshed.linkedin_url, 'https://www.linkedin.com/in/mehekmandal');
     assert.equal(refreshed.github_url, 'https://github.com/mehek-builds');
     assert.equal(refreshed.portfolio_url, 'https://mehek.dev');
+  });
+
+  /* THE REGRESSION THIS FIX CLOSES. PATCH /applications/:id/resume calls this helper on every
+   * content save without naming a `fields` argument, so whatever the default covers is what that
+   * unrelated route silently rewrites. Before review finding 3 the default was the full width, and
+   * a bullet edit would quietly drop a per-packet LinkedIn or portfolio link she set on purpose at
+   * generation time, with no field on the edit form to explain why it changed. The default now is
+   * LEGACY_MUTABLE_CONTACT_FIELDS - exactly the two fields this call site refreshed before links
+   * existed at all - so a bare two-argument call, the shape PATCH's own call site uses, must leave
+   * every link exactly where it was. */
+  test('links do not move on a bare call: PATCH must ask for them by name or not get them', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      linkedin_url: 'https://www.linkedin.com/in/old-handle',
+      github_url: 'https://github.com/old-handle',
+      portfolio_url: 'https://old-portfolio.example.com',
+    };
+    const refreshed = refreshResumeContactFromProfile(stored, {
+      phone: '+1 415 555 0100',
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+      github_url: 'https://github.com/mehek-builds',
+      portfolio_url: 'https://mehek.dev',
+    });
+
+    // The one field LEGACY_MUTABLE_CONTACT_FIELDS does cover still moves...
+    assert.equal(refreshed.phone, '+1 415 555 0100');
+    // ...and every link the profile would have supplied stays exactly as stored.
+    assert.equal(refreshed.linkedin_url, stored.linkedin_url);
+    assert.equal(refreshed.github_url, stored.github_url);
+    assert.equal(refreshed.portfolio_url, stored.portfolio_url);
+
+    // Explicit and default must agree: LEGACY_MUTABLE_CONTACT_FIELDS names exactly this behaviour,
+    // not merely a currently-equivalent one.
+    assert.deepEqual(
+      refreshed,
+      refreshResumeContactFromProfile(stored, {
+        phone: '+1 415 555 0100',
+        linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+        github_url: 'https://github.com/mehek-builds',
+        portfolio_url: 'https://mehek.dev',
+      }, { fields: LEGACY_MUTABLE_CONTACT_FIELDS }),
+    );
   });
 
   test('name and email never move, however much the profile disagrees', () => {
@@ -208,6 +257,28 @@ describe('resumeContactStaleness', () => {
       email: 'someone-else@example.com',
     });
     assert.equal(staleness, null);
+  });
+
+  /* THE OTHER END OF REVIEW FINDING 3. refreshResumeContactFromProfile now defaults to the narrow,
+   * PATCH-only field set, and resumeContactStaleness is the one caller that has to opt back into
+   * the full width - GET /applications/:id/submission's stale signal and POST
+   * /applications/:id/resume/contact-refresh both exist to widen this past phone and location, and
+   * a silent regression back to the narrow default here would make both of them stop seeing a
+   * stale LinkedIn or portfolio link with nothing failing loudly to say so. */
+  test('a link-only change is reported as contact staleness too, not only phone and location', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, California',
+      linkedin_url: 'https://www.linkedin.com/in/old-handle',
+    };
+    const staleness = resumeContactStaleness(stored, {
+      ...LOS_ANGELES_PROFILE,
+      linkedin_url: 'https://www.linkedin.com/in/mehekmandal',
+    });
+    assert.ok(staleness);
+    assert.equal(staleness.current.linkedin_url, 'https://www.linkedin.com/in/mehekmandal');
   });
 });
 

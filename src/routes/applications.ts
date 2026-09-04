@@ -142,7 +142,7 @@ import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPac
 import { verifyStoredPacketAuditAcknowledgement } from '../lib/packetAudit';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
-import { refreshResumeContactFromProfile, resumeContactStaleness } from '../lib/resumeContactOfRecord';
+import { LEGACY_MUTABLE_CONTACT_FIELDS, refreshResumeContactFromProfile, resumeContactStaleness } from '../lib/resumeContactOfRecord';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
@@ -2574,6 +2574,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const contact = refreshResumeContactFromProfile(
         { ...storedContact, full_name: storedContact.full_name },
         applicationProfile as Record<string, unknown>,
+        // Named explicitly, not the wider default a bare two-argument call would now reach for:
+        // this route calls the helper unconditionally on every content save, so widening what it
+        // silently rewrites would start dropping a per-packet LinkedIn or portfolio link she set
+        // deliberately at generation time under an edited bullet - see
+        // LEGACY_MUTABLE_CONTACT_FIELDS.
+        { fields: LEGACY_MUTABLE_CONTACT_FIELDS },
       );
       const parsed = profileRows[0]?.parsed_json as {
         school?: string;
