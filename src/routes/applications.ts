@@ -171,7 +171,7 @@ import {
 } from '../lib/authoritativeSubmissionProjection';
 import { submissionAuthorityEnvelopeForUnattemptedPacket } from './resume';
 import { submissionAuthorityPublicationForPacket } from '../lib/submissionAuthorityEnvelope';
-import { conditionalWriteRows, withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
+import { conditionalWriteRows, isAuthorityRevisionConflictError, withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
@@ -1370,6 +1370,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         };
         return reply.status(200).send(response);
       } catch (error) {
+        /* A WRITE CONFLICT IS NOT A VERDICT ABOUT THE PACKET, and this catch was publishing it as
+         * one - with the statement attached.
+         *
+         * Every OTHER throw reaching here is an authored sentence about this application, written
+         * to be read: "The stored resume is not a verified PDF", "The stored resume PDF is not bound
+         * to this exact saved resume. Generate it again." Echoing `error.message` at 422 is right
+         * for those and only for those. The submission-authority revision guard's 40001 is not one
+         * of them: drizzle-orm wraps the pg error in a DrizzleQueryError whose message is `Failed
+         * query: <the whole UPDATE>\nparams: <every bound value>`, so this line shipped the audit's
+         * update, its predicate and its parameter shape to the browser under a code that says the
+         * packet failed verification. Measured live 2026-09-04 on packet 73768339, alongside the
+         * same statement's 500 out of PUT /review/answers - two paths, two status codes, one
+         * condition, and neither of them the condition.
+         *
+         * Rethrown so it reaches the global handler, which answers 503 with Retry-After: 1 and the
+         * sentence toPublicError already carries for this SQLSTATE. Nothing was written, the packet
+         * is unchanged, and the only true instruction is "try again in a moment". */
+        if (isAuthorityRevisionConflictError(error)) {
+          request.log.warn(
+            { applicationId: row.id },
+            'Packet audit lost the authority revision guard; answering 503 rather than a packet verdict',
+          );
+          throw error;
+        }
         request.log.warn({ error, applicationId: row.id }, 'Packet audit could not verify the saved application');
         return reply.status(422).send({
           error: error instanceof Error ? error.message : 'The saved application could not be audited',
@@ -1423,12 +1447,23 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         acknowledged_at: new Date().toISOString(),
       };
       const next: ApplicationReviewState = { ...review, packet_audit_acknowledgement: acknowledgement };
-      const updated = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
-        eq(generated_resumes.id, row.id),
-        eq(generated_resumes.user_id, request.jwtPayload!.userId),
-        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-      )).returning({ id: generated_resumes.id });
+      /* Retried on the authority guard's 40001, and NOT collapsed into the zero-row branch, for the
+       * same reason createAndPersistPacketAudit is not: the refusal below is PACKET_AUDIT_STALE,
+       * which the dashboard treats as terminal and answers by throwing away her acknowledgement and
+       * sending her back to re-review the packet. A lock held for a few milliseconds by a poll must
+       * not cost her that. An exhausted window propagates and answers 503 with Retry-After. */
+      const updated = await withAuthorityRevisionRetry(() => db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) }).where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+        )).returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'packet audit acknowledgement hit the authority revision guard; retrying',
+        ),
+      });
       if (!updated.length) {
         return reply.status(409).send({
           error: 'The saved application changed before the acknowledgement was recorded.',
@@ -4361,7 +4396,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         submission_claim_id: undefined,
         updated_at: now,
       };
-      const approved = await db.update(generated_resumes)
+      /* Retried on the authority guard's 40001 - the applicant pressing Send while her own dashboard
+       * polls the authority projection is the ordinary case, and this statement's BEFORE trigger
+       * refuses rather than waits. NOT collapsed into the zero-row branch: this route's 202 is the
+       * same body a STARTED send answers with, so reporting a write that never happened as one would
+       * tell the dashboard a submission is under way when nothing was claimed. An exhausted window
+       * propagates instead and answers 503 with Retry-After, which is the only true reading of a
+       * statement that aborted before it touched the row. */
+      const approved = await withAuthorityRevisionRetry(() => db.update(generated_resumes)
         .set({ spec: approvedReviewSpec(next, now) })
         .where(and(
           eq(generated_resumes.id, row.id),
@@ -4370,7 +4412,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
         ))
-        .returning({ id: generated_resumes.id });
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'final approval hit the authority revision guard; retrying',
+        ),
+      });
       if (approved.length === 0) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
