@@ -264,6 +264,58 @@ test('a stored answer already on the control\'s list is never touched', () => {
   assert.deepEqual(snapStoredAnswersToProfileFieldOptions([fit]), [fit]);
 });
 
+/* ── snapStoredAnswersToProfileFieldOptions: the fast path's own equivalence (review finding 2) ──
+ *
+ * THE DEFECT A REVIEW CAUGHT BEFORE THIS PR LANDED. The "already on the list" fast path compared
+ * under comparableOption, which folds apostrophes/hyphens/punctuation - a LOOSER equivalence than
+ * reviewedAnswerIsAnOfferedOption and storedAnswerMatchesNoExactOption use for this same family of
+ * question. Reproduced: stored "Bachelor's Degree" against an offered "Bachelors Degree" fold to the
+ * same comparableOption key, so the fast path used to call them already equal and return early with
+ * nothing written - and reopenUnfitClosedChoiceQuestions then judged the identical row by the
+ * stricter byte equality every other matcher here uses, found no exact match, and blanked it
+ * (answer: "", answer_draft: "Bachelor's Degree"). A row this function believed needed no help was
+ * the very next thing re-opened out from under it. */
+const BACHELORS_LABEL = 'What degree are you currently pursuing?';
+const BACHELORS_OPTIONS = ['Bachelors Degree', "Master's Degree", 'PhD', 'Other'];
+
+const bachelorsQuestion = (overrides: Partial<ApplicationReviewQuestion> = {}): ApplicationReviewQuestion => ({
+  id: 'degree-punctuation-drift',
+  question: BACHELORS_LABEL,
+  answer: "Bachelor's Degree",
+  kind: 'required',
+  required: true,
+  portal_input_type: 'select-one',
+  options: [...BACHELORS_OPTIONS],
+  ...overrides,
+});
+
+test('REVIEWER SCENARIO: punctuation-only drift is snapped to the control\'s exact spelling, not waved through as "already fits"', () => {
+  const stored = bachelorsQuestion();
+  // The bug's premise, pinned: the fast path's old comparableOption equivalence would have called
+  // this row already on the list, while the strict byte equivalence the re-open gate uses says it
+  // is genuinely unfit as stored. Both cannot be right, and the re-open gate is the one that governs
+  // what actually reaches the employer.
+  assert.equal(
+    storedAnswerMatchesNoExactOption(stored),
+    true,
+    'precondition: the control does not offer this exact string, so the row is genuinely unfit as stored',
+  );
+  const [snapped] = snapStoredAnswersToProfileFieldOptions([stored]);
+  assert.equal(snapped.answer, 'Bachelors Degree', 'the control\'s own spelling is written, not left as her apostrophe');
+  assert.equal(snapped.answer_option_source, "Bachelor's Degree", 'the pre-snap string is recorded');
+});
+
+test('REVIEWER SCENARIO: the snapped spelling survives the re-open pass that follows it in every call site', () => {
+  const stored = bachelorsQuestion();
+  const [reopened] = reopenUnfitClosedChoiceQuestions(snapStoredAnswersToProfileFieldOptions([stored]));
+  assert.equal(
+    reopened.answer,
+    'Bachelors Degree',
+    'without the fix this was blanked here: answer "", answer_draft "Bachelor\'s Degree"',
+  );
+  assert.equal('answer_draft' in reopened, false, 'a fit answer never grows a draft');
+});
+
 test('a stored answer with no alias on this list is left exactly as it stands', () => {
   const noMatch = gradQuestion({ options: ['2030 or later', '2031 or later'] });
   assert.deepEqual(

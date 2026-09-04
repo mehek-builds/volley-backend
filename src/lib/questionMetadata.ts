@@ -505,9 +505,23 @@ export function snapStoredAnswersToProfileFieldOptions<T extends StoredClosedCho
     if (!REVIEWED_PICK_EXACT_OPTION_TYPE.test(controlType)) return question;
     const offered = usableOptions(question.options);
     if (offered.length === 0) return question;
-    const answerKey = comparableOption(answer);
-    // Already on the list under the control's own equivalence: nothing to snap.
-    if (offered.some((option) => comparableOption(option) === answerKey)) return question;
+    /* Already on the list VERBATIM - trim + lowercase, the SAME equivalence
+     * reviewedAnswerIsAnOfferedOption and storedAnswerMatchesNoExactOption use, and deliberately NOT
+     * comparableOption's punctuation fold - so nothing to snap.
+     *
+     * A review finding against this PR: comparableOption folds apostrophes/hyphens/punctuation, so a
+     * stored "Bachelor's Degree" against an offered "Bachelors Degree" used to compare equal here and
+     * this fast path called it "already on the list" and returned early, leaving the apostrophe
+     * mismatch standing on the record. storedAnswerMatchesNoExactOption then judged that same row by
+     * the stricter byte equality every other matcher in this family uses, found no exact match, and
+     * reopenUnfitClosedChoiceQuestions blanked an answer this function had just declared fine -
+     * exactly the deadlock this whole mechanism exists to prevent, self-inflicted by its own
+     * optimization. This fast path is only ever a shortcut for an answer that is ALREADY the
+     * control's exact spelling; anything else must fall through to the alias loop below, whose own
+     * comparableOption match still finds "Bachelors Degree" and writes the control's exact spelling
+     * onto the record, same as any other alias. */
+    const answerLower = answer.toLowerCase();
+    if (offered.some((option) => option.trim().toLowerCase() === answerLower)) return question;
     const label = normalizeReviewQuestionLabel(question.question);
     if (!label || !isProfileBackedKey(profileFieldIntent(label))) return question;
     for (const alias of profileAnswerAliases(label, answer)) {
