@@ -124,7 +124,7 @@ function describeCause(error: unknown): string | undefined {
   if (cause === undefined || cause === null) return undefined;
   if (cause instanceof Error) {
     const code = (cause as Error & { code?: unknown }).code;
-    return (typeof code === 'string' || typeof code === 'number' ? String(code) + ' ' : '') + cause.message.slice(0, 200);
+    return (typeof code === 'string' || typeof code === 'number' ? String(code) + ' ' : '') + String(cause.message ?? '').slice(0, 200);
   }
   return String(cause).slice(0, 200);
 }
