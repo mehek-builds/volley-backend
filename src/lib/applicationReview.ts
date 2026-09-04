@@ -424,7 +424,51 @@ export function normalizeApplicationReviewQuestions(
       };
     }
   }
-  return normalized;
+  return withoutOptionsCapturedAsQuestions(normalized);
+}
+
+/* AN OPTION IS NOT A QUESTION.
+ *
+ * MEASURED LIVE 2026-09-04, Belvedere Trading (lever) packet c4413bff-5a08-423f-852c-5d60bd360f3b.
+ * The form's radio group `cards[…][field8]` asks "What degree are you currently pursuing?" and
+ * offers High School Diploma / Associate Degree / Bachelor Degree / Masters/PhD. Discovery kept that
+ * question (answered "Bachelor Degree", all four options attached) AND minted a second, required
+ * question "high school diploma" on the SAME selector - one of the group's radio labels read as a
+ * question of its own - which the resolver then answered "Yes". The fill could only report
+ * `no option matched "Yes"` on a group that has no such option, the packet reached the applicant as
+ * "1 required question before Litos can send this", and the review screen offered nothing she could
+ * press on it: it is not a question anyone asked, so there is no right answer to give. Every fresh
+ * read re-minted it, because the label dedupe above keys on wording and these two are worded
+ * differently.
+ *
+ * The identity is the CONTROL, not the words: two stored questions on one exact portal selector are
+ * one control, and when that control's own option list contains the other record's whole label, the
+ * other record is an option that was promoted to a question. It is dropped, and only then - a label
+ * that is not one of the sibling's options stays (two questions genuinely sharing a control is a
+ * discovery defect this rule has no evidence to adjudicate), a record with options of its own stays
+ * (it IS the group), and a temporary discovery selector never joins anything (it names a position in
+ * one read, not a control). Same wording on a different selector is a different control and stays. */
+function withoutOptionsCapturedAsQuestions(
+  questions: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const optionKeysBySelector = new Map<string, Set<string>>();
+  for (const question of questions) {
+    const selector = question.portal_selector?.trim();
+    if (!selector || isTemporaryPortalSelector(selector) || !question.options?.length) continue;
+    const keys = optionKeysBySelector.get(selector) ?? new Set<string>();
+    for (const option of question.options) {
+      const key = questionKey(option);
+      if (key) keys.add(key);
+    }
+    optionKeysBySelector.set(selector, keys);
+  }
+  if (optionKeysBySelector.size === 0) return [...questions];
+  return questions.filter((question) => {
+    const selector = question.portal_selector?.trim();
+    if (!selector || question.options?.length) return true;
+    const siblingOptions = optionKeysBySelector.get(selector);
+    return !siblingOptions?.has(questionKey(question.question));
+  });
 }
 
 /* A SUBMITTED QUESTION MAY CARRY ONE THING A STORED QUESTION NEVER DOES: the applicant's explicit

@@ -301,6 +301,53 @@ describe('application review metadata', () => {
     );
   });
 
+  /* MEASURED 2026-09-04 on Belvedere Trading (lever) c4413bff: the degree radio group's option
+   * "High School Diploma" was minted as its own required question on the group's selector, answered
+   * "Yes" by the resolver, and blocked the send forever with `no option matched "Yes"`. The control
+   * is the identity: a record whose whole label is one of the options of the question sharing its
+   * exact selector is an option, not a question, and is dropped. Different selector, or a label that
+   * is not one of the sibling's options, or a record carrying options of its own, all stay. */
+  test('an option captured as its own question is dropped from the control that lists it', () => {
+    const selector = '[name="cards[6d127747-2d17-402b-87d6-b1f4045ad776][field8]"]';
+    const degree: ApplicationReviewQuestion = {
+      id: 'degree',
+      question: 'what degree are you currently pursuing? ✱',
+      answer: 'Bachelor Degree',
+      kind: 'required',
+      required: true,
+      portal_selector: selector,
+      portal_input_type: 'radio',
+      options: ['High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD'],
+    };
+    const optionAsQuestion: ApplicationReviewQuestion = {
+      id: 'phantom',
+      question: 'high school diploma',
+      answer: 'Yes',
+      kind: 'required',
+      required: true,
+      portal_selector: selector,
+      portal_input_type: 'radio',
+    };
+    assert.deepEqual(normalizeApplicationReviewQuestions([optionAsQuestion, degree]), [degree]);
+    assert.deepEqual(normalizeApplicationReviewQuestions([degree, optionAsQuestion]), [degree]);
+
+    // The same wording on a DIFFERENT control is a different question and stays.
+    const elsewhere = { ...optionAsQuestion, id: 'elsewhere', portal_selector: '[name="cards[6d127747][field21]"]' };
+    assert.deepEqual(normalizeApplicationReviewQuestions([degree, elsewhere]), [degree, elsewhere]);
+
+    // A sibling on the same control whose label is not one of the options is not adjudicated here.
+    const notAnOption = { ...optionAsQuestion, id: 'notes', question: 'degree notes' };
+    assert.deepEqual(normalizeApplicationReviewQuestions([degree, notAnOption]), [degree, notAnOption]);
+
+    // A temporary discovery selector names a position in one read, never a control, so it joins nothing.
+    const temporary = { ...degree, id: 'temp-degree', portal_selector: '[data-litos-discovered-4]' };
+    const temporaryPhantom = { ...optionAsQuestion, id: 'temp-phantom', portal_selector: '[data-litos-discovered-4]' };
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([temporary, temporaryPhantom]),
+      [temporary, temporaryPhantom],
+    );
+  });
+
   test('normalization keeps non-empty local answers when a later duplicate is blank', () => {
     assert.deepEqual(
       normalizeApplicationReviewQuestions([
