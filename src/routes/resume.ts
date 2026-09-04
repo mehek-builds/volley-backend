@@ -8,6 +8,10 @@ import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
 import { submissionAuthorityEnvelopeForUnattemptedPacket } from '../lib/submissionAuthorityEnvelope';
 import {
+  healAbandonedPreBoundaryAttemptsForRead,
+  retrySafetyLooksLikeClosableCandidate,
+} from '../lib/abandonedAttemptClosure';
+import {
   applications,
   application_artifacts,
   artifact_versions,
@@ -2013,9 +2017,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * exactly as fail-closed at the gate as it is today. This can only free a genuinely un-attempted
      * packet; it can never turn a sent one sendable. On a projection read error the whole page also
      * degrades to no envelopes, i.e. today's blocked behaviour, never to an authorised send. */
-    const submissionAuthority = await (async () => {
+    const packetIdsForAuthority = rows.map((row) => row.id);
+    const loadSubmissionAuthority = async () => {
       try {
-        return await authoritativeSubmissionProjection({ userId, packetIds: rows.map((row) => row.id) });
+        return await authoritativeSubmissionProjection({ userId, packetIds: packetIdsForAuthority });
       } catch (error) {
         request.log.warn(
           { err: error },
@@ -2023,7 +2028,49 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         );
         return null;
       }
-    })();
+    };
+    let submissionAuthority = await loadSubmissionAuthority();
+    /* A READ CAN HEAL WHAT A SEND ALREADY WOULD. Full mechanism and safety argument on
+     * healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts) - in short,
+     * the exact same proof a send-path POST already uses, tried with a lock that never waits, and
+     * paid for only when at least one packet on this page would otherwise stay blocked by a phantom
+     * attempt the ledger already disproves. Every other page - every packet with an envelope
+     * already, every packet blocked for a real reason - costs nothing beyond the read above.
+     *
+     * RE-PROJECTS THE WHOLE PAGE RATHER THAN JUST THE HEALED PACKETS, deliberately: this route
+     * publishes one `revision` for every row, and a second, narrower projection call would hand
+     * some rows a newer revision than others on the same response. Re-running the same batched read
+     * that already ran above keeps that invariant instead of relying on a reader to reconcile two
+     * revisions itself. Skipped when nothing actually closed, so a contended lock or a genuinely
+     * unclosable attempt costs exactly the one heal attempt and nothing more. */
+    const candidatePacketIds = submissionAuthority
+      ? packetIdsForAuthority.filter((packetId) => {
+        const retrySafety = submissionAuthority!.retrySafetyByPacketId.get(packetId);
+        if (!retrySafetyLooksLikeClosableCandidate(retrySafety)) return false;
+        return !submissionAuthorityEnvelopeForUnattemptedPacket({
+          packetId,
+          projectionState: submissionAuthority!.byPacketId.get(packetId)?.state,
+          retrySafety,
+          revision: submissionAuthority!.revision,
+        });
+      })
+      : [];
+    if (candidatePacketIds.length > 0) {
+      // SCOPED TO THIS PAGE'S CANDIDATES - REVIEW ROUND 1, 2026-09-05. Same list already computed
+      // above for the logContext, now also bounding what the heal touches - see
+      // healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts) for the
+      // whole-ledger stall this closes off.
+      const healed = await healAbandonedPreBoundaryAttemptsForRead({
+        userId,
+        log: request.log,
+        logContext: { route: 'GET /resume/history', candidatePacketIds },
+        packetIds: candidatePacketIds,
+        trigger: 'read_heal',
+      });
+      if (healed.closedAttemptIds.length > 0) {
+        submissionAuthority = (await loadSubmissionAuthority()) ?? submissionAuthority;
+      }
+    }
     const revision = submissionAuthority?.revision;
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;

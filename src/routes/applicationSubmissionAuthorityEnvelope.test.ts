@@ -51,8 +51,11 @@ test('the helper is fail-closed: same envelope builder as /resume/history, nothi
   // Delegates the none/no_evidence-only decision to the one shared builder, so this route family
   // can never mint an envelope shape the history route would not.
   assert.match(helper, /submissionAuthorityEnvelopeForUnattemptedPacket\(\{/);
-  // A projection read failure attaches nothing rather than throwing the whole response away.
-  assert.match(helper, /catch \(error\) \{[\s\S]*?return \{\};/);
+  // A projection read failure attaches only its own diagnostic - never an envelope, and never
+  // throws the whole response away. `no_projection` is retrySafetyDiagnosticForAbsentEnvelope's
+  // sibling reason for exactly this case (lib/abandonedAttemptClosure.ts): the projection could not
+  // be read at all, as distinct from a real, readable block.
+  assert.match(helper, /catch \(error\) \{[\s\S]*?return \{ retry_safety_diagnostic: 'no_projection' \};/);
   // And an absent envelope attaches nothing, so a packet with attempt history is untouched.
   assert.match(helper, /if \(envelope\) return \{ submission_authority: envelope \};/);
   /* THE REFUSAL IS NAMED, NOT SWALLOWED, AND STILL CHANGES NOTHING ON THE WIRE.
