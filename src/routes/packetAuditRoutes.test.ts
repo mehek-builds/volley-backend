@@ -349,12 +349,22 @@ test('resume edit transaction retries read-only pool failures on the direct writ
   const upload = editRoute.indexOf('const blob = await putObject(');
   const transaction = editRoute.indexOf('const runResumeEditTransaction =');
   const transactionEnd = editRoute.indexOf('\n\n      let updated:', transaction);
-  const retry = editRoute.indexOf('updated = await withReadOnlyRetry(');
+  /* TWO RETRIES NOW WRAP THIS TRANSACTION, AND THEY ARE NOT INTERCHANGEABLE. withReadOnlyRetry
+     answers a pooled backend that came up READ-ONLY, and its exhaustion path moves to a dedicated
+     writer endpoint. withAuthorityRevisionRetry answers the submission-authority revision guard's
+     40001, which is a lock the account's own dashboard poll holds for milliseconds and which no
+     change of endpoint can fix - so it sits OUTSIDE, retrying the whole transaction, because that
+     raise aborts the transaction entirely and a statement retried inside it cannot succeed. The
+     property this test has always protected is unchanged and still asserted: the upload happens
+     once, before either retry, and the single blob is cleaned up after the final failure. */
+  const authorityRetry = editRoute.indexOf('updated = await withAuthorityRevisionRetry(');
+  const retry = editRoute.indexOf('withReadOnlyRetry(', authorityRetry);
   const directFallback = editRoute.indexOf('withDedicatedDatabase((directDb) =>');
   const directTransaction = editRoute.indexOf('runResumeEditTransaction(directDb)');
   const cleanup = editRoute.indexOf('await deleteObjects(blob.pathname).catch', retry);
 
-  assert.ok(upload >= 0 && transaction > upload && transactionEnd > transaction && retry > transactionEnd
+  assert.ok(upload >= 0 && transaction > upload && transactionEnd > transaction
+    && authorityRetry > transactionEnd && retry > authorityRetry
     && directFallback > retry && directTransaction > directFallback && cleanup > directTransaction,
   'one uploaded PDF must be reused across the database-only retries and cleaned up after final failure');
   assert.match(editRoute, /withReadOnlyRetry\(\s*\(\) => runResumeEditTransaction\(db\)/);
