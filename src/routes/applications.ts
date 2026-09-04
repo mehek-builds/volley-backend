@@ -820,8 +820,21 @@ async function repairStalledFillRun(
     /* TRY, NEVER WAIT, for the reason its neighbour states: waiting on this lock is what let a 280s
      * managed provider call hold a route open on every dashboard poll. The lock is taken at all
      * because claimSubmission takes the same one, so holding it means no attempt can be opened
-     * between the ledger read below and the write. */
-    if (!await tryLockSubmissionAttemptUser(tx, userId)) return null;
+     * between the ledger read below and the write.
+     *
+     * BUT IT SAYS SO WHEN IT LOSES, which is why this arm is no longer a bare `return null`.
+     * Measured 2026-09-04: two packets sat in `filling` for 6 hours and 3 days, this release was
+     * wired into GET /applications/:id/submission (the 2.5s poll) and into packet-audit, the
+     * packet page was open for 40+ seconds, and nothing happened and nothing was logged. This is
+     * the arm that was losing. The projection read behind that very poll held this same key
+     * account-wide and exclusively for the length of a whole-account snapshot, so a poll arriving
+     * while the previous one was still reading found the key taken and gave up silently - forever,
+     * on an account big enough that the snapshot outran the poll interval.
+     *
+     * The holder is fixed where it is caused (readers now take the key shared), and the silence is
+     * fixed here: a repair that declines has to be distinguishable from a repair that had nothing
+     * to do, or the next person measures 40 seconds of nothing and cannot tell which. */
+    if (!await tryLockSubmissionAttemptUser(tx, userId)) return 'lock_contended' as const;
     const [locked] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, userId),
@@ -847,6 +860,13 @@ async function repairStalledFillRun(
     if (!updated) return null;
     return { row: locked, review: released, stalledStatus: current.status, retrySafety: retrySafety.kind };
   });
+  if (result === 'lock_contended') {
+    log.warn(
+      { applicationId: row.id },
+      'Stalled fill release skipped: another actor on this account holds the submission attempt lock',
+    );
+    return null;
+  }
   if (!result) return null;
   log.info(
     {

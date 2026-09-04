@@ -41,27 +41,56 @@ function revisionFromResult(
   return parseSubmissionAuthorityRevision(raw);
 }
 
+/* How a caller holds the ledger key while it reads.
+ *
+ * `exclusive` - a writer, or a reader inside a writer's critical section. The default.
+ * `snapshot`  - NO LOCK. For a read whose transaction is REPEATABLE READ, which gets a consistent
+ *               (revision, snapshot) pair from MVCC instead of from mutual exclusion. This is what
+ *               the passive projection read uses, so that a reader can never make a write on the
+ *               account fail. See authoritativeSubmissionProjection's passive branch.
+ */
+export type SubmissionAuthorityLockMode = 'exclusive' | 'snapshot';
+
 /**
  * Read the revision while owning the same transaction lock as the authority snapshot.
  * The executor must be an active transaction. The lock is reentrant for callers that acquired it
  * before reading the projection, which is the required ordering for a passive snapshot.
+ *
+ * `lockMode: 'snapshot'` is for a caller that only READS, inside a REPEATABLE READ transaction: it
+ * takes no lock and seeds nothing, because one MVCC snapshot already makes the revision and the
+ * rows it describes agree. That is what stops a page render from being able to fail a write.
  */
 export async function readSubmissionAuthorityRevision(
   userId: string,
   executor: SubmissionAuthorityRevisionExecutor,
+  options: { lockMode?: SubmissionAuthorityLockMode } = {},
 ): Promise<SubmissionAuthorityRevision> {
-  await lockSubmissionAttemptUser(executor, userId);
-  await executor.execute(sql`
-    insert into submission_authority_revisions (user_id, schema_version, revision)
-    values (${userId}::uuid, ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}, 0)
-    on conflict (user_id) do nothing
-  `);
+  const lockMode = options.lockMode ?? 'exclusive';
+  if (lockMode === 'exclusive') await lockSubmissionAttemptUser(executor, userId);
+  /* THE SEED IS A WRITE, so a snapshot read must not do it - its transaction is read only, and
+   * Postgres would refuse the statement outright rather than let a page render take a row lock.
+   *
+   * Skipping it answers the identical revision. The seed only ever materialized revision 0 for a
+   * user who had none, and an absent row means exactly that: no covered write has ever happened
+   * for this account. The migration backfills every existing user at 0, and `users` is itself a
+   * covered table, so a user created afterwards gets its row from the bump trigger. So "absent"
+   * and "present at 0" are the same fact, and 0 is what this read returned before either way. */
+  if (lockMode !== 'snapshot') {
+    await executor.execute(sql`
+      insert into submission_authority_revisions (user_id, schema_version, revision)
+      values (${userId}::uuid, ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}, 0)
+      on conflict (user_id) do nothing
+    `);
+  }
   const result = await executor.execute(sql`
     select revision::text as revision
     from submission_authority_revisions
     where user_id = ${userId}::uuid
       and schema_version = ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}
   `);
+  if (lockMode === 'snapshot' && result.rows[0] === undefined) {
+    return parseSubmissionAuthorityRevision('0');
+  }
   return revisionFromResult(result);
 }
 
@@ -128,7 +157,7 @@ function catalogRowsAreReady(rows: readonly { kind: unknown; name: unknown; defi
   }
 
   const functionContract = new Map<string, RegExp>([
-    ['lock_submission_authority_revision_user', /pg_try_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*if acquired is not true.*errcode = '40001'/u],
+    ['lock_submission_authority_revision_user', /set lock_timeout to '900ms'.*pg_try_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*if acquired is not true.*perform pg_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*lock_not_available or deadlock_detected.*errcode = '40001'/u],
     ['bump_submission_authority_revision', /revision = submission_authority_revisions\.revision \+ 1/u],
     ['enforce_submission_authority_revision_monotonicity', /new\.revision <= old\.revision/u],
     ['submission_authority_application_artifact_owner', /application artifact ownership mismatch/u],

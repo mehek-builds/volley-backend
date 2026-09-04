@@ -664,7 +664,24 @@ test('package catalog exposes the additive migration without production side eff
   );
 });
 
-test('row-first legacy writes fail fast instead of waiting on the authority lock', () => {
+/* ROW-FIRST LEGACY WRITES STILL CANNOT DEADLOCK, WHICH IS WHY THE BOUND IS THE ASSERTION.
+ *
+ * This test used to forbid waiting outright. The hazard it was defending is real: a
+ * single-statement write takes the ROW lock and only then fires this BEFORE trigger, while a
+ * transactional writer takes the authority key first and the row second, so a wait long enough to
+ * reach deadlock detection could deadlock - with Postgres choosing the victim, possibly a managed
+ * run mid-send.
+ *
+ * Failing INSTANTLY was not the only way to buy that, and it cost too much: any concurrent holder,
+ * including a dashboard poll's own authority read that would have released microseconds later,
+ * became 40001 -> 503 for the applicant. Measured live 2026-09-04 on mehekmandal05@gmail.com,
+ * POST /applications/:id/packet-audit answered that on four attempts 20-40s apart, permanently.
+ *
+ * Bounding the wait strictly below deadlock_timeout buys the same guarantee: the waiter always
+ * cancels itself before any deadlock can be detected, so a row-first write still fails rather than
+ * deadlocking - just 900ms later, which is long enough for the reads that were failing it. The
+ * bound is therefore the invariant, and this test pins it numerically. */
+test('the authority lock waits, but never long enough for a row-first write to deadlock', () => {
   const migration = readFileSync('scripts/apply-submission-authority-revision-schema.mjs', 'utf8');
   const lockFunction = migration.slice(
     migration.indexOf('create or replace function lock_submission_authority_revision_user'),
@@ -673,5 +690,19 @@ test('row-first legacy writes fail fast instead of waiting on the authority lock
   assert.match(lockFunction, /pg_try_advisory_xact_lock/u);
   assert.match(lockFunction, /if acquired is not true/u);
   assert.match(lockFunction, /errcode = '40001'/u);
-  assert.doesNotMatch(lockFunction, /perform pg_advisory_xact_lock/u);
+  // It waits only after the non-blocking attempt fails, so an uncontended or reentrant write pays
+  // neither a wait nor the subtransaction the exception handler opens.
+  assert.ok(
+    lockFunction.indexOf('pg_try_advisory_xact_lock') < lockFunction.indexOf('perform pg_advisory_xact_lock'),
+    'the non-blocking attempt must come first',
+  );
+  assert.match(lockFunction, /exception when lock_not_available or deadlock_detected then/u);
+
+  const bound = /set lock_timeout = '(\d+)ms'/u.exec(lockFunction);
+  assert.ok(bound, 'the wait must carry an explicit bound');
+  assert.ok(
+    Number(bound[1]) < 1000,
+    `lock_timeout must stay under the 1s default deadlock_timeout, or a row-first write can be `
+    + `chosen as a deadlock victim; found ${bound[1]}ms`,
+  );
 });

@@ -238,7 +238,7 @@ async function assertCatalog(client) {
     normalizedDefinition(row.definition),
   ]));
   const functionContract = new Map([
-    ['lock_submission_authority_revision_user', /pg_try_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*if acquired is not true.*errcode = '40001'/u],
+    ['lock_submission_authority_revision_user', /set lock_timeout to '900ms'.*pg_try_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*if acquired is not true.*perform pg_advisory_xact_lock\(\s*hashtextextended\('submission-attempt:' \|\| p_user_id::text, 0::bigint\)\s*\).*lock_not_available or deadlock_detected.*errcode = '40001'/u],
     ['bump_submission_authority_revision', /revision = submission_authority_revisions\.revision \+ 1/u],
     ['enforce_submission_authority_revision_monotonicity', /new\.revision <= old\.revision/u],
     ['submission_authority_application_artifact_owner', /application artifact ownership mismatch/u],
@@ -453,9 +453,47 @@ async function main() {
       on conflict (user_id) do nothing
     `);
 
+    /* IT WAITS A LITTLE BEFORE IT REFUSES, and that is the difference between "somebody else is
+     * writing" and "this account is read-only".
+     *
+     * The try stays FIRST, and it is what almost every call answers: a writer that already took
+     * the key re-enters it, and an uncontended write acquires it outright. Neither pays a
+     * subtransaction, so bulk writes cost exactly what they cost before.
+     *
+     * Only a genuinely contended write reaches the wait. Before this it did not wait at all - it
+     * raised instantly - so ANY concurrent holder, including a dashboard poll's authority read
+     * that would have released microseconds later, turned into 40001 -> 503 "This account changed
+     * at the same time" for the applicant. Measured live 2026-09-04 on
+     * mehekmandal05@gmail.com: POST /applications/:id/packet-audit answered that on four attempts
+     * spaced 20-40s apart, permanently, because the account's own 2.5s poll never left the key
+     * free for the length of one instantaneous try.
+     *
+     * 900ms, AND THE EXACT VALUE IS THE INVARIANT - it must stay strictly below deadlock_timeout
+     * (1s by default). That is what keeps 'row-first legacy writes fail fast instead of waiting on
+     * the authority lock' true, which is a real hazard and not a style preference: a
+     * single-statement write takes the ROW lock and only THEN fires this BEFORE trigger, while a
+     * transactional writer takes this key first and the row second. Those are opposite lock
+     * orders, so a wait long enough to reach deadlock detection could genuinely deadlock - and
+     * Postgres, not us, would pick the victim, which could be a managed run mid-send. Timing out
+     * first means the waiter always cancels ITSELF before any deadlock is ever detected: the
+     * row-first write still fails rather than deadlocking, just 900ms later instead of instantly.
+     *
+     * lock_timeout is a FUNCTION ATTRIBUTE, so it is scoped to this call and restored on exit - it
+     * cannot leak onto the caller's statement, and a waiting connection is charged well under the
+     * 10s pool checkout ceiling.
+     *
+     * Both failure modes map back to the same SQLSTATE and the same sentence, so #925's 503 +
+     * Retry-After contract and every withAuthorityRevisionRetry caller keep working byte for byte:
+     *   lock_not_available (55P03) - the wait timed out; somebody holds it longer than the bound.
+     *   deadlock_detected  (40P01) - unreachable while deadlock_timeout keeps its default, and
+     *     caught anyway so that lowering that GUC degrades to the old answer instead of a 500.
+     * Nothing committed in either case - the raise is from a BEFORE trigger - so "retry the
+     * request" remains true, which is the whole premise the retry helpers rest on. */
     await client.query(`
       create or replace function lock_submission_authority_revision_user(p_user_id uuid)
-      returns void language plpgsql as $function$
+      returns void language plpgsql
+      set lock_timeout = '900ms'
+      as $function$
       declare acquired boolean;
       begin
         if p_user_id is null then
@@ -465,8 +503,14 @@ async function main() {
           hashtextextended('submission-attempt:' || p_user_id::text, 0::bigint)
         ) into acquired;
         if acquired is not true then
-          raise exception 'submission authority changed concurrently; retry the request'
-            using errcode = '40001';
+          begin
+            perform pg_advisory_xact_lock(
+              hashtextextended('submission-attempt:' || p_user_id::text, 0::bigint)
+            );
+          exception when lock_not_available or deadlock_detected then
+            raise exception 'submission authority changed concurrently; retry the request'
+              using errcode = '40001';
+          end;
         end if;
       end
       $function$

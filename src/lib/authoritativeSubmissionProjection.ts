@@ -49,6 +49,7 @@ import {
 import {
   readSubmissionAuthorityRevision,
   SUBMISSION_AUTHORITY_SCHEMA_VERSION,
+  type SubmissionAuthorityLockMode,
   type SubmissionAuthorityRevision,
 } from './submissionAuthorityRevision';
 import { unsupportedEmailConfirmationEvidenceMatches } from './unsupportedEmailReceipt';
@@ -1835,28 +1836,55 @@ export async function authoritativeSubmissionProjection(input: {
   executor?: ProjectionExecutor;
   /** A revision read after acquiring this user's lock in this exact transaction. */
   lockedRevision?: SubmissionAuthorityRevision;
+  /* How this call holds the account key. Never set it from outside: the passive branch below is
+   * the only thing that may choose one, and it chooses `snapshot` - no lock at all. A caller that
+   * hands us its own executor is inside a critical section and keeps the exclusive default. */
+  lockMode?: SubmissionAuthorityLockMode;
 }): Promise<AuthoritativeSubmissionProjectionResult> {
   if (!input.executor) {
     if (input.lockedRevision !== undefined) {
       throw new Error('A locked submission authority revision requires its transaction executor');
     }
+    /* THE PASSIVE READER PATH ONLY, and only here: a caller that hands us its own executor is
+     * inside a critical section whose lock waits are its own to bound.
+     *
+     * THIS READ TAKES NO ACCOUNT LOCK, and that is the 2026-09-04 read-only-dashboard fix.
+     *
+     * It used to take `submission-attempt:<userId>` EXCLUSIVELY for the whole of
+     * projectionSnapshot, which loads the entire account - every application, every packet (201
+     * rows on the measured account), every attempt event, every canonical receipt, every email
+     * message, every artifact and version. The packet page issues this read on a 2.5-SECOND POLL.
+     * Once one pass outran the poll interval the passes overlapped and, being mutually exclusive,
+     * QUEUED: the key was then held without interruption, the revision trigger's try failed every
+     * single-statement write on the account, and POST /applications/:id/packet-audit answered 503
+     * "This account changed at the same time" for minutes on end. Opening the packet page is what
+     * sustained it.
+     *
+     * Merely making the reader SHARED is not sufficient, and it is worth being precise about why:
+     * shared readers stop queueing behind each other, but a read that outlasts the poll interval
+     * still produces UNBROKEN shared coverage - poll N+1 starts before poll N finishes - and
+     * shared still blocks the exclusive lock the guard needs. The account would stay read-only.
+     *
+     * So the reader stops participating in the lock entirely. What it actually needs is a
+     * consistent (revision, snapshot) pair, and REPEATABLE READ gives it a strictly better one:
+     * every statement in this transaction reads one instant, so the revision and the rows it
+     * describes cannot disagree, with no lock and therefore no writer ever waiting on a reader.
+     * MVCC shows only data committed as of that instant, which is exactly the guarantee the lock
+     * was bought for. Readers can no longer make any write on the account fail, at any duration.
+     *
+     * lock_timeout stays as a floor: nothing here takes a lock now, and if that ever changes a
+     * 55P03 out of this transaction is caught by the caller, which degrades to no envelopes - the
+     * direction resume.ts already declares safe, since a packet without an envelope stays
+     * fail-closed at the send gate. */
     return db.transaction(async (tx) => {
-      /* THE PASSIVE READER PATH ONLY, and only here: a caller that hands us its own executor is
-       * inside a critical section whose lock waits are its own to bound.
-       *
-       * This branch is a read for a page render - /resume/history, and the envelope read every
-       * first send pays. Measured 2026-09-02 it could queue behind a whole managed provider call,
-       * holding a pool client the entire time, which is how a 280s fill turned into a 25s
-       * /resume/history and 7.7s on every unrelated route. A 55P03 out of this transaction is
-       * caught by the caller, which degrades to no envelopes - the direction resume.ts already
-       * declares safe, since a packet without an envelope stays fail-closed at the send gate. */
       await tx.execute(sql`set local lock_timeout = '5000ms'`);
-      return authoritativeSubmissionProjection({ ...input, executor: tx });
-    });
+      return authoritativeSubmissionProjection({ ...input, executor: tx, lockMode: 'snapshot' });
+    }, { isolationLevel: 'repeatable read', accessMode: 'read only' });
   }
-  await lockSubmissionAttemptUser(input.executor, input.userId);
+  const lockMode: SubmissionAuthorityLockMode = input.lockMode ?? 'exclusive';
+  if (lockMode === 'exclusive') await lockSubmissionAttemptUser(input.executor, input.userId);
   const revision = input.lockedRevision
-    ?? await readSubmissionAuthorityRevision(input.userId, input.executor);
+    ?? await readSubmissionAuthorityRevision(input.userId, input.executor, { lockMode });
   const packetIds = uniqueStrings(input.packetIds);
   const applicationIds = uniqueStrings(input.applicationIds);
   if (packetIds.length === 0 && applicationIds.length === 0) {

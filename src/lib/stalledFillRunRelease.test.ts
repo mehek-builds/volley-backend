@@ -372,9 +372,17 @@ describe('the route', () => {
     assert.match(helper, /stalledFillRunReleaseIsAdmissible\(current, retrySafety, databaseNow\.getTime\(\)\)/);
     assert.match(helper, /submissionAttemptRetrySafetyForPacketEvents\(events\)/);
     assert.match(helper, /submissionAttemptEventsForPacket\(userId, locked\.id, \{ executor: tx \}\)/);
-    // TRY-locked, never waiting: a managed provider call can hold this user's ledger key for 280s,
-    // and this helper runs on every dashboard poll.
-    assert.match(helper, /if \(!await tryLockSubmissionAttemptUser\(tx, userId\)\) return null;/);
+    /* TRY-locked, never waiting: a managed provider call can hold this user's ledger key for 280s,
+     * and this helper runs on every dashboard poll.
+     *
+     * AND LOSING IT IS REPORTED, not silent. Measured 2026-09-04: the authority projection read
+     * behind that same poll held this key account-wide and exclusively for a whole-account
+     * snapshot, so on a large account every poll found it taken and this arm lost every time - for
+     * six hours on one packet and three days on another. A bare `return null` here is why 40+
+     * seconds of watching the packet page produced no release AND no explanation. */
+    assert.match(helper, /if \(!await tryLockSubmissionAttemptUser\(tx, userId\)\) return 'lock_contended' as const;/);
+    assert.match(helper, /log\.warn\(/,
+      'a repair that declines must be distinguishable from one that had nothing to do');
     assert.ok(!/await lockSubmissionAttemptUser\(/u.test(helper));
     assert.match(helper, /\.limit\(1\)\.for\('update'\)/);
     // Exact-spec CAS, and null on a miss: a concurrent writer wins and the stored gates keep
