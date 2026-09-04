@@ -36,7 +36,6 @@ import {
   packetAuditTextSha256,
 } from './packetAudit';
 import { planPacketApplicantEmail, type PacketApplicantEmailPlan } from './packetApplicantEmail';
-import { parseStatedApplicationDeadline } from './postingDeadline';
 import { createPdfGenerationBinding } from './pdfGenerationBinding';
 import { detectPortal, portalApplicationUrl, type SubmissionPacket } from './portalSubmission';
 import { resumeEmailForUpload } from './resumeEmail';
@@ -469,7 +468,6 @@ export async function prepareManagedApplication(
       location: monitored_jobs.location,
       applyUrl: monitored_jobs.apply_url,
       active: monitored_jobs.is_active,
-      postingDeadline: monitored_jobs.posting_deadline,
       sourceEnabled: career_page_sources.enabled,
       sourceFamily: career_page_sources.ats_name,
     }).from(monitored_jobs)
@@ -497,21 +495,12 @@ export async function prepareManagedApplication(
   const jdText = posting.description.trim();
   if (!jdText) return prepareError(422, 'managed_job_description_missing', 'This job has no description to review.');
   const destination = normalizedSecureDestination(posting.applyUrl, posting.sourceFamily);
-  /* THE MONITOR'S OWN COLUMN FIRST, A LIVE PARSE ONLY AS FALLBACK. posting.postingDeadline is
-   * whatever the ingest poll (jobMonitor.ts) computed against the freshest description this row
-   * has ever carried; parseStatedApplicationDeadline(jdText) is the SAME parser run against the
-   * exact text this packet is freezing, which covers a job whose row has not been repolled since
-   * the column shipped (or since a deadline sentence was added to its posting). Frozen once, here,
-   * exactly like jd_hash beside it - a later edit to the live posting must not silently move a
-   * deadline this packet was already built against. */
-  const postingDeadline = posting.postingDeadline ?? parseStatedApplicationDeadline(jdText)?.deadlineUtc ?? null;
   const jobContext = {
     company: posting.companyName,
     role: posting.role,
     jd_hash: packetAuditTextSha256(jdText).slice(0, 16),
     job_id: posting.id,
     ...(posting.location?.trim() ? { location: posting.location.trim() } : {}),
-    ...(postingDeadline ? { posting_deadline: postingDeadline.toISOString() } : {}),
   };
 
   const canonical = await dependencies.upsertCanonicalApplication({

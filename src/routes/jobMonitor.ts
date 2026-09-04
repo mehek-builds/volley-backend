@@ -62,7 +62,6 @@ import { resumeSpecText } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { rankingCacheKey, readRankingShared, writeRankingShared } from '../lib/rankingCache';
 import { buildDescriptionDigest } from '../lib/descriptionDigest';
-import { parseStatedApplicationDeadline } from '../lib/postingDeadline';
 import {
   buildJobCertificationFingerprint,
   normalizeEmployerCertificationIdentity,
@@ -2784,15 +2783,6 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
                Recomputed on every poll rather than kept from the first sighting, because employers
                edit requirements into and out of a live posting. */
             description_digest: buildDescriptionDigest(job.description),
-            /* THE EMPLOYER'S OWN STATED DEADLINE, when this description names one - see
-               src/lib/postingDeadline.ts for what counts. Recomputed on every poll, same reasoning
-               as sponsorship_status and description_digest right above: an employer edits or clears
-               a deadline sentence on a live posting, and a value kept from the first sighting would
-               go stale in either direction. Not read by this feature's send-time check today (see
-               the column's own comment in schema.ts) - that check parses a PACKET's own frozen
-               jd_text lazily instead, which needs no join and covers a packet built before this
-               column existed. This is forward-looking storage for a future SQL-level filter. */
-            posting_deadline: parseStatedApplicationDeadline(job.description)?.deadlineUtc ?? null,
             /* Existing schema-compatible review metadata, not a new column. The exact ATS country
                must survive the poll so resume generation can freeze it into job_context. A coarse
                `job_country = non_us` cannot distinguish London from Toronto, and therefore cannot
@@ -2825,7 +2815,6 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             sponsorship_status: sql`excluded.sponsorship_status`,
             sponsorship_scope: sql`excluded.sponsorship_scope`,
             description_digest: sql`excluded.description_digest`,
-            posting_deadline: sql`excluded.posting_deadline`,
             job_country: sql`excluded.job_country`,
             raw_json: sql`excluded.raw_json`,
             /* Overwritten on every poll, not merged. An employer that REMOVES a published range

@@ -2137,20 +2137,6 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   first_seen_at: timestamp('first_seen_at', { withTimezone: true }).defaultNow().notNull(),
   last_seen_at: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
   is_active: boolean('is_active').default(true).notNull(),
-  /* The employer's OWN STATED deadline for this posting, when its description names one - either
-   * schema.org JSON-LD `validThrough` or a free-text sentence like "Application Deadline: August
-   * 31, 2026" (see src/lib/postingDeadline.ts, the one parser both this column and the read-time
-   * packet check share). Computed at poll time and stored here for the same reason
-   * description_digest is: a per-request regex pass over every pooled row's description is not a
-   * SQL predicate, and this column exists so a future board filter could be one.
-   *
-   * NULLABLE, and null means "the posting states no deadline" exactly as often as it means "this
-   * row predates the column" - there is deliberately no backfill, matching description_digest's
-   * own reasoning. Nothing in this migration reads this column as an enforcement gate yet: the
-   * live send check computes a packet's deadline lazily from its own frozen jd_text
-   * (derivePostingDeadlineStatus), so an existing application flags correctly whether or not its
-   * monitored_jobs row has ever been repolled since this column shipped. */
-  posting_deadline: timestamp('posting_deadline', { withTimezone: true }),
   // What THIS posting's own text says about visa sponsorship: 'offers' | 'refuses' | 'unstated'.
   //
   // Computed at poll time by readPostingSponsorship (src/lib/sponsorship.ts) and stored, rather
