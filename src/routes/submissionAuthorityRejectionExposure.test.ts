@@ -469,9 +469,13 @@ describe('the board payload is untouched', () => {
     assert.doesNotMatch(withoutComments(boardResponse), /rejections:|summary:/, 'the census does not ride along on the board');
   });
 
-  it('leaves the packet review response carrying the envelope and nothing else', () => {
+  it('leaves the packet review response carrying the envelope, or a named diagnostic, and nothing else', () => {
     // The other surface that refuses these packets. It still publishes only the unattempted
-    // builder's envelope; its refusal is readable through the census route instead.
+    // builder's envelope when it can. Since the read-path heal (healAbandonedPreBoundaryAttemptsForRead,
+    // lib/abandonedAttemptClosure.ts), an envelope still absent afterwards rides with exactly one
+    // new field - `retry_safety_diagnostic`, a closed vocabulary named by
+    // retrySafetyDiagnosticForAbsentEnvelope - and nothing else: the raw rejection (branch/field/
+    // shape) stays server-side in the log line above, never on the response.
     const applications = readFileSync('src/routes/applications.ts', 'utf8');
     const helper = applications.slice(
       applications.indexOf('async function unattemptedPacketSubmissionAuthority('),
@@ -480,8 +484,22 @@ describe('the board payload is untouched', () => {
     const afterEnvelope = helper.slice(
       helper.indexOf('if (envelope) return { submission_authority: envelope };'),
     );
-    assert.doesNotMatch(afterEnvelope.slice(60), /submission_authority/, 'no new authority key on the review response');
-    assert.match(afterEnvelope, /return \{\};/);
+    assert.doesNotMatch(afterEnvelope.slice(60), /submission_authority/, 'no SECOND authority key on the review response');
+    assert.match(
+      afterEnvelope,
+      /return \{\s*retry_safety_diagnostic: retrySafetyDiagnosticForAbsentEnvelope\(/,
+      'an unpublished envelope names why, via the shared read-heal diagnostic',
+    );
+    assert.match(
+      afterEnvelope,
+      /return \{ retry_safety_diagnostic: 'no_projection' \};/,
+      'a failed projection read names itself distinctly from a real block',
+    );
+    assert.doesNotMatch(
+      afterEnvelope,
+      /return \{[^}]*rejected/,
+      'the raw rejection never rides on the response, only the log line above it',
+    );
   });
 });
 

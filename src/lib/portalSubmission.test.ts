@@ -157,6 +157,38 @@ test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
 });
 
+/* MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com: "Fill application" -> "Tailor resume
+ * first" against https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance
+ * built a packet whose portal_url matched no HOSTS entry at all, because the regex took exactly one
+ * label before ".teamtailor.com" and a REGIONAL tenant puts the region between the tenant and the
+ * vendor domain as a second label. detectPortal threw for a posting the account's standing consent
+ * grant would otherwise have let Litos send. No test asserted a bare (non-regional) Teamtailor host
+ * detected as 'teamtailor' before this one either - this closes both gaps at once. */
+test('recognizes a regional Teamtailor tenant the same as a bare one, and still refuses the vendor’s own and lookalike hosts', () => {
+  assert.equal(
+    detectPortal('https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance'),
+    'teamtailor',
+  );
+  assert.equal(detectPortal('https://fully.teamtailor.com/jobs/12345-a-role'), 'teamtailor');
+  // A second measured region, so the bound is proven to be "a region label", not "na specifically".
+  assert.equal(
+    detectPortal('https://sometenant.eu.teamtailor.com/jobs/12345-a-role/applications/new'),
+    'teamtailor',
+  );
+
+  for (const url of [
+    'https://www.teamtailor.com/jobs/686133-intern-finance',
+    'https://app.teamtailor.com/jobs/686133-intern-finance',
+    // api as the TENANT label, with a region right after it - the exclusion has to hold in this
+    // shape too, not just the no-region form the map carried before this fix.
+    'https://api.na.teamtailor.com/jobs/686133-intern-finance',
+    'https://evil-teamtailor.com/jobs/686133-intern-finance',
+    'https://teamtailor.com.evil.net/jobs/686133-intern-finance',
+  ]) {
+    assert.throws(() => detectPortal(url), /cannot fill in/, url);
+  }
+});
+
 test('a managed discovery run detects custom questions and cover-letter attachment capability without submitting', () => {
   // R-055 on the managed path: this cheap first call exists only to get the page's custom
   // questions back (stratus-browser-cloud PR #7). It reuses the same fixed-field fills (including
@@ -5421,6 +5453,19 @@ test('every workable_cookie_ label is protected from the budget trim by its pref
   }
 });
 
+/* Same shape, same reason, for Teamtailor's single decline label: only one exists today
+ * (teamtailor_cookie_preflight, pushed at the top of pushFixedFieldActions' teamtailor branch), but
+ * matching it by prefix rather than by name means a future terminal or evidence boundary added under
+ * the same family inherits the protection for free, the way greenhouse's and Workable's already do. */
+test('the teamtailor_cookie_ label is protected from the budget trim by its prefix, not by name', () => {
+  const source = readFileSync('src/lib/portalSubmission.ts', 'utf8');
+  assert.match(source, /workable_phone_\(\?:assertion_capability\|value_visible\|country_visible\)\$\|teamtailor_cookie_\|/,
+    'the protection must match the teamtailor_cookie_ prefix');
+  assert.doesNotMatch(source, /teamtailor_cookie_\(\?:/,
+    'an enumeration of today\'s one label goes stale the moment a second boundary is added');
+  assert.ok('teamtailor_cookie_preflight'.startsWith('teamtailor_cookie_'));
+});
+
 test('Workable clears the consent overlay before its first pointer action on the fill, submit and discovery plans', () => {
   const packet = { ...capturePacket, phone: '+1 213 555 0100' };
   const plans = {
@@ -5510,6 +5555,32 @@ test('the Workable preflight barrier survives every budget trim', () => {
   }
   assert.equal(untrimmed.discovery.some((action) => action.label?.startsWith('workable_cookie_final')), false,
     'a discovery pass has no phone terminal block, so it has no terminal boundary either');
+});
+
+/* THE TRIM ARM HAS TO ACTUALLY TRIM here too - this is the exact risk the teamtailor_cookie_ prefix
+ * (isProtectedManagedAction) was added to close. 300 questions is not a measured Teamtailor packet;
+ * it is chosen to force the SAME generic truncateManagedActionsToBudget path every family shares
+ * (buildManagedPortalActions calls it whenever the raw list still exceeds MANAGED_ACTION_LIMIT after
+ * the question-level trims) to actually remove actions, so this proves the decline survives the
+ * trim rather than merely asserting it sits far enough from the tail to dodge one that never ran. */
+test('the Teamtailor cookie decline survives the generic budget trim', () => {
+  const packet = {
+    ...capturePacket,
+    questions: Array.from({ length: 300 }, (_, index) => ({
+      question: `Why are you interested in area ${index + 1}?`,
+      answer: `Grounded answer ${index + 1}`,
+    })),
+  };
+  const plans = {
+    fill: buildManagedPortalActions('teamtailor', packet),
+    submit: buildManagedPortalActions('teamtailor', packet, true),
+    discovery: buildManagedDiscoveryActions('teamtailor', packet),
+  };
+  for (const [name, actions] of Object.entries(plans)) {
+    assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${name} exceeded the managed action budget`);
+    assert.equal(actions[0]?.label, 'teamtailor_cookie_preflight', `${name} lost or moved the cookie decline`);
+    assert.equal(actions.filter((action) => action.label === 'teamtailor_cookie_preflight').length, 1, name);
+  }
 });
 
 /* The DIRECT (non-managed) path runs the same boundary through the same Playwright twin, in the

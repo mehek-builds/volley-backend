@@ -91,11 +91,86 @@ test('the employer-published schema carries the exact accepted value for each at
     parsed.optionsByLabel[ashbyPublicQuestionLabelKey(CERTIFICATION_LABEL)!],
     ['I confirm I have read the above.'],
   );
-  // A control with no published choices contributes no entry rather than an empty list.
-  assert.equal(
-    ashbyPublicQuestionLabelKey('Are you authorized to work in the country where the job is located?')! in parsed.optionsByLabel,
-    false,
+  // A Boolean control publishes the two answers its type implies - the exact texts of the two
+  // pills Ashby renders for it - because Ashby lists no selectableValues for a yes/no question.
+  assert.deepEqual(
+    parsed.optionsByLabel[ashbyPublicQuestionLabelKey('Are you authorized to work in the country where the job is located?')!],
+    ['Yes', 'No'],
   );
+});
+
+/* MEASURED 2026-09-04 on Sentry's "Software Engineer, Intern (Summer 2027)" (packet 84bf5354): the
+ * three Boolean questions on the form were exactly the three "employer fields stayed untouched -
+ * exact choices not read", while every ValueSelect beside them published normally. A yes/no
+ * question reaches the packet as a closed control, so without its two choices it is a
+ * missing_exact_options blocker the applicant can clear only on the employer's page; with them it
+ * is a question Litos can answer from the profile (sponsorship) or hand to her with both choices
+ * showing. Only the Boolean type gains a list: every other optionless type still publishes nothing. */
+test('a Boolean question publishes Yes and No, and that clears the blocker it used to be', () => {
+  const sentryFixture = {
+    applicationForm: {
+      sections: [
+        { fieldEntries: coreFields().map((f) => ({ field: f, isRequired: true })) },
+        {
+          fieldEntries: [
+            {
+              field: field({
+                path: '0b7b2d1e-6f0d-4b3e-9c2a-2f1c5e8a9d10',
+                title: 'Will you now or in the future require visa sponsorship to work in the location where this job is posted?',
+                type: 'Boolean',
+              }),
+              isRequired: true,
+            },
+            {
+              field: field({ path: '5d2c9a7b-1e4f-4c8d-b3a6-7e9f0c1d2b34', title: 'Have you ever used Sentry before?', type: 'Boolean' }),
+              isRequired: false,
+            },
+            {
+              field: field({ path: '9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c65', title: 'Pronouns', type: 'String' }),
+              isRequired: false,
+            },
+            {
+              field: field({ path: 'c1b2a3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', title: 'When is your expected graduation date?', type: 'Date' }),
+              isRequired: false,
+            },
+          ],
+        },
+      ],
+    },
+  };
+  const parsed = parseAshbyPublicApplicationSchema(sentryFixture);
+  assert.ok(parsed);
+  const sponsorship = 'Will you now or in the future require visa sponsorship to work in the location where this job is posted?';
+  assert.deepEqual(parsed.optionsByLabel[ashbyPublicQuestionLabelKey(sponsorship)!], ['Yes', 'No']);
+  assert.deepEqual(parsed.optionsByLabel[ashbyPublicQuestionLabelKey('Have you ever used Sentry before?')!], ['Yes', 'No']);
+  assert.equal(ashbyPublicQuestionLabelKey('Pronouns')! in parsed.optionsByLabel, false);
+  assert.equal(ashbyPublicQuestionLabelKey('When is your expected graduation date?')! in parsed.optionsByLabel, false);
+  assert.deepEqual(parsed.multiSelectLabels, []);
+
+  /* The same clearing the arbitration test above proves for a published list: a closed control
+   * that reaches the packet with no options is a missing_exact_options blocker, and the SAME control
+   * carrying the two published choices is not. The discovered shape mirrors that test's on purpose,
+   * so the two cannot drift apart on what "a closed control" means. */
+  const discovered = {
+    label: sponsorship,
+    selector: '[data-litos-discovered-7]',
+    durableSelector: null,
+    inputType: 'text',
+    role: 'combobox',
+    options: null as string[] | null,
+    optionsComplete: false,
+    required: true,
+  };
+  const before = questionMetadataBlockerForDiscovered(discovered as never, {
+    closedControlRequiresOptions: true,
+  });
+  assert.equal(before?.kind, 'missing_exact_options');
+  const after = questionMetadataBlockerForDiscovered({
+    ...discovered,
+    options: parsed.optionsByLabel[ashbyPublicQuestionLabelKey(sponsorship)!],
+    optionsComplete: true,
+  } as never, { closedControlRequiresOptions: true });
+  assert.equal(after, null);
 });
 
 /* THE WHOLE POINT OF THE FIX, stated as the behaviour rather than the plumbing: with the published

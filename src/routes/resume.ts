@@ -8,6 +8,10 @@ import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
 import { submissionAuthorityEnvelopeForUnattemptedPacket } from '../lib/submissionAuthorityEnvelope';
 import {
+  healAbandonedPreBoundaryAttemptsForRead,
+  retrySafetyLooksLikeClosableCandidate,
+} from '../lib/abandonedAttemptClosure';
+import {
   applications,
   application_artifacts,
   artifact_versions,
@@ -97,7 +101,7 @@ import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissio
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
-import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
+import { resumeContactOfRecord, resumeContactStaleness } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
 import {
   canonicalCompanyScope,
@@ -2030,9 +2034,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      * exactly as fail-closed at the gate as it is today. This can only free a genuinely un-attempted
      * packet; it can never turn a sent one sendable. On a projection read error the whole page also
      * degrades to no envelopes, i.e. today's blocked behaviour, never to an authorised send. */
-    const submissionAuthority = await (async () => {
+    const packetIdsForAuthority = rows.map((row) => row.id);
+    const loadSubmissionAuthority = async () => {
       try {
-        return await authoritativeSubmissionProjection({ userId, packetIds: rows.map((row) => row.id) });
+        return await authoritativeSubmissionProjection({ userId, packetIds: packetIdsForAuthority });
       } catch (error) {
         request.log.warn(
           { err: error },
@@ -2040,7 +2045,49 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         );
         return null;
       }
-    })();
+    };
+    let submissionAuthority = await loadSubmissionAuthority();
+    /* A READ CAN HEAL WHAT A SEND ALREADY WOULD. Full mechanism and safety argument on
+     * healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts) - in short,
+     * the exact same proof a send-path POST already uses, tried with a lock that never waits, and
+     * paid for only when at least one packet on this page would otherwise stay blocked by a phantom
+     * attempt the ledger already disproves. Every other page - every packet with an envelope
+     * already, every packet blocked for a real reason - costs nothing beyond the read above.
+     *
+     * RE-PROJECTS THE WHOLE PAGE RATHER THAN JUST THE HEALED PACKETS, deliberately: this route
+     * publishes one `revision` for every row, and a second, narrower projection call would hand
+     * some rows a newer revision than others on the same response. Re-running the same batched read
+     * that already ran above keeps that invariant instead of relying on a reader to reconcile two
+     * revisions itself. Skipped when nothing actually closed, so a contended lock or a genuinely
+     * unclosable attempt costs exactly the one heal attempt and nothing more. */
+    const candidatePacketIds = submissionAuthority
+      ? packetIdsForAuthority.filter((packetId) => {
+        const retrySafety = submissionAuthority!.retrySafetyByPacketId.get(packetId);
+        if (!retrySafetyLooksLikeClosableCandidate(retrySafety)) return false;
+        return !submissionAuthorityEnvelopeForUnattemptedPacket({
+          packetId,
+          projectionState: submissionAuthority!.byPacketId.get(packetId)?.state,
+          retrySafety,
+          revision: submissionAuthority!.revision,
+        });
+      })
+      : [];
+    if (candidatePacketIds.length > 0) {
+      // SCOPED TO THIS PAGE'S CANDIDATES - REVIEW ROUND 1, 2026-09-05. Same list already computed
+      // above for the logContext, now also bounding what the heal touches - see
+      // healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts) for the
+      // whole-ledger stall this closes off.
+      const healed = await healAbandonedPreBoundaryAttemptsForRead({
+        userId,
+        log: request.log,
+        logContext: { route: 'GET /resume/history', candidatePacketIds },
+        packetIds: candidatePacketIds,
+        trigger: 'read_heal',
+      });
+      if (healed.closedAttemptIds.length > 0) {
+        submissionAuthority = (await loadSubmissionAuthority()) ?? submissionAuthority;
+      }
+    }
     const revision = submissionAuthority?.revision;
     const resumes = rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
@@ -2053,12 +2100,39 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         retrySafety: submissionAuthority?.retrySafetyByPacketId.get(row.id),
         revision,
       });
+      /* THE SAME SIGNAL GET /applications/:id/submission SENDS, off the SAME comparison
+       * (resumeContactStaleness, lib/resumeContactOfRecord.ts) and the SAME per-request profile read
+       * already above (`profile`, loadApplicationProfileLike - one call, reused for every row here,
+       * never a per-row read). The packet review screen seeds its `submission` state from this row on
+       * a fresh load and never calls GET /applications/:id/submission until an action triggers a poll
+       * (measured on trylitos.com 2026-09-04: Pony.ai fdcf4ccb and Mercari 8b3d8b2d both loaded stale
+       * packets with no submission fetch in the network log), so a client reading resume_contact_stale
+       * only off that route never saw the notice for a row still on this one. contact is row.spec's
+       * OWN _contact, unrefreshed by refreshedHistorySpec below (which only rewrites _review) - the
+       * same frozen header the submission route compares. Absent is the common case and must stay
+       * cheap: no PDF fetch, no packet audit, just this row's already-loaded contact and profile. */
+      const storedContactForStaleness = contact as {
+        full_name?: string;
+        email?: string;
+        phone?: string;
+        location?: string;
+        linkedin_url?: string;
+        github_url?: string;
+        portfolio_url?: string;
+      };
+      const resumeContactStale = storedContactForStaleness.full_name
+        ? resumeContactStaleness(
+          { ...storedContactForStaleness, full_name: storedContactForStaleness.full_name },
+          profile as Record<string, unknown>,
+        )
+        : null;
       return {
         ...row,
         spec: specWithoutDocumentPointers(
           withPostingDeadlineStatus(refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context)),
         ),
         ...(submissionAuthorityEnvelope ? { submission_authority: submissionAuthorityEnvelope } : {}),
+        ...(resumeContactStale ? { resume_contact_stale: resumeContactStale } : {}),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

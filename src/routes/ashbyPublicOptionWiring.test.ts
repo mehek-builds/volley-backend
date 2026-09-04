@@ -51,9 +51,17 @@ test('the Ashby join marks the published list complete', async () => {
   assert.ok(start > 0, 'the Ashby join is gone');
   const join = source.slice(start, source.indexOf('const discoveredForOptionProbe', start));
   assert.match(join, /options\?\.length \? \{ \.\.\.field, options, optionsComplete: true \} : field/);
-  assert.match(join, /ashbySchema\.optionsByLabel\[labelKey\]/);
+  /* The join reads whichever published schema the family's reader produced - Ashby's, or since
+   * 2026-09-04 Lever's - through one `publishedSchema` pair of list and label key, so the Ashby
+   * schema still reaches this exact line: the pair is built from it first. */
+  assert.match(join, /publishedSchema\.optionsByLabel\[labelKey\]/);
+  assert.match(
+    source,
+    /const publishedSchema = ashbySchema\s*\n\s*\? \{ optionsByLabel: ashbySchema\.optionsByLabel, labelKey: ashbyPublicQuestionLabelKey \}/,
+    'the Ashby schema no longer feeds the published-schema join',
+  );
   // Ambiguity guard: one published list is never attached to two identically labelled controls.
-  assert.match(join, /ashbyDiscoveredLabelCounts\.get\(labelKey\) !== 1/);
+  assert.match(join, /publishedDiscoveredLabelCounts\.get\(labelKey\) !== 1/);
   // A list the live page already carried completely is never overwritten by the published one.
   assert.match(join, /if \(field\.options\?\.length && field\.optionsComplete !== false\) return field;/);
 });

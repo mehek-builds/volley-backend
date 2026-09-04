@@ -593,6 +593,17 @@ describe('jobDescriptionSourceUrl on the boards whose form lives on its own rout
       jobDescriptionSourceUrl('https://aplayers.na.teamtailor.com/jobs/690836-senior-software-engineer-frontend/applications/new/'),
       'https://aplayers.na.teamtailor.com/jobs/690836-senior-software-engineer-frontend',
     );
+    // A region longer than the two-letter "na"/"eu" shapes measured so far: the SEPARATE_FORM_ROUTES
+    // host predicate widened from exactly {2} to {2,4} alongside HOSTS.teamtailor (2026-09-05), so a
+    // three- or four-letter region has to rewrite identically rather than fall through untouched.
+    assert.equal(
+      jobDescriptionSourceUrl('https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance/applications/new'),
+      'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance',
+    );
+    assert.equal(
+      jobDescriptionSourceUrl('https://example.apac.teamtailor.com/jobs/123-a-role/applications/new'),
+      'https://example.apac.teamtailor.com/jobs/123-a-role',
+    );
     assert.equal(
       jobDescriptionSourceUrl('https://coforma.pinpointhq.com/en/postings/4a295089-e9c6-4adf-8e7b-be9d2e8ba3c3/applications/new'),
       'https://coforma.pinpointhq.com/en/postings/4a295089-e9c6-4adf-8e7b-be9d2e8ba3c3',

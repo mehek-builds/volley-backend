@@ -361,6 +361,17 @@ export type ApplicationAttentionCategory =
    * something rather than a person fixing something, and because a state this expensive to be in
    * has to be countable. */
   | 'unverified_submission'
+  /* THE EMPLOYER'S OWN SERVER ANSWERED, AND THE ANSWER WAS NO - before anything was filed.
+   *
+   * Deliberately NOT 'unverified_submission': that category means Litos pressed Send and cannot
+   * say what happened, and its whole point is that a PERSON has to go look. Here nothing is
+   * uncertain - the submit request's own response proved the employer refused it (a 4xx on the
+   * exact bound posting's own submit endpoint, corroborated by the employer's rendered refusal
+   * banner or a pre-filing refusal code), so there is nothing to look for and no question to ask.
+   * Deliberately NOT 'run_failed' either: nothing broke, the employer's own server did exactly
+   * what it was asked and said no. See ApplicationReviewState.employer_refusal and
+   * managedSubmitOutcome.ts's employerSubmitRefusalProof for the proof this category records. */
+  | 'employer_refused'
   /* The packet's generated resume passed its 30-day retention window and the file was deleted, so
    * there was nothing to send and nothing was sent. Deliberately NOT 'required_document', which
    * means an EMPLOYER is waiting on a document from the applicant, and deliberately not
@@ -459,7 +470,51 @@ export function normalizeApplicationReviewQuestions(
       };
     }
   }
-  return normalized;
+  return withoutOptionsCapturedAsQuestions(normalized);
+}
+
+/* AN OPTION IS NOT A QUESTION.
+ *
+ * MEASURED LIVE 2026-09-04, Belvedere Trading (lever) packet c4413bff-5a08-423f-852c-5d60bd360f3b.
+ * The form's radio group `cards[…][field8]` asks "What degree are you currently pursuing?" and
+ * offers High School Diploma / Associate Degree / Bachelor Degree / Masters/PhD. Discovery kept that
+ * question (answered "Bachelor Degree", all four options attached) AND minted a second, required
+ * question "high school diploma" on the SAME selector - one of the group's radio labels read as a
+ * question of its own - which the resolver then answered "Yes". The fill could only report
+ * `no option matched "Yes"` on a group that has no such option, the packet reached the applicant as
+ * "1 required question before Litos can send this", and the review screen offered nothing she could
+ * press on it: it is not a question anyone asked, so there is no right answer to give. Every fresh
+ * read re-minted it, because the label dedupe above keys on wording and these two are worded
+ * differently.
+ *
+ * The identity is the CONTROL, not the words: two stored questions on one exact portal selector are
+ * one control, and when that control's own option list contains the other record's whole label, the
+ * other record is an option that was promoted to a question. It is dropped, and only then - a label
+ * that is not one of the sibling's options stays (two questions genuinely sharing a control is a
+ * discovery defect this rule has no evidence to adjudicate), a record with options of its own stays
+ * (it IS the group), and a temporary discovery selector never joins anything (it names a position in
+ * one read, not a control). Same wording on a different selector is a different control and stays. */
+function withoutOptionsCapturedAsQuestions(
+  questions: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const optionKeysBySelector = new Map<string, Set<string>>();
+  for (const question of questions) {
+    const selector = question.portal_selector?.trim();
+    if (!selector || isTemporaryPortalSelector(selector) || !question.options?.length) continue;
+    const keys = optionKeysBySelector.get(selector) ?? new Set<string>();
+    for (const option of question.options) {
+      const key = questionKey(option);
+      if (key) keys.add(key);
+    }
+    optionKeysBySelector.set(selector, keys);
+  }
+  if (optionKeysBySelector.size === 0) return [...questions];
+  return questions.filter((question) => {
+    const selector = question.portal_selector?.trim();
+    if (!selector || question.options?.length) return true;
+    const siblingOptions = optionKeysBySelector.get(selector);
+    return !siblingOptions?.has(questionKey(question.question));
+  });
 }
 
 /* A SUBMITTED QUESTION MAY CARRY ONE THING A STORED QUESTION NEVER DOES: the applicant's explicit
@@ -1357,9 +1412,26 @@ export type ApplicationReviewState = {
    * whatever run took it. Presence of this record proves a release occurred; it is never read as a
    * licence for anything, and a later run that takes a fresh claim leaves it in place as history. */
   claim_released?: {
-    cause: 'attended_handoff_expired' | 'attempt_never_reached_employer';
+    cause: 'attended_handoff_expired' | 'attempt_never_reached_employer' | 'employer_refused_before_filing';
     claim_id?: string;
     released_at: string;
+  };
+  /* THE EMPLOYER'S OWN ANSWER, STRUCTURED SO A QUERY CAN FIND IT WITHOUT GREPPING attention_reason.
+   *
+   * Written only alongside attention_categories including 'employer_refused', and only by
+   * recordManagedAuthorizedAttemptRefused (routes/submissionRunner.ts), which also closes the
+   * ledger attempt with a not_sent_proven/employer_rejected_not_filed fact carrying the same
+   * http_status and code as evidence. See employerSubmitRefusalProof in managedSubmitOutcome.ts for
+   * what has to be true before this is ever set: a 4xx (never a login wall) on the bound posting's
+   * own submit endpoint, with the form still on screen, corroborated by the employer's own rendered
+   * refusal text or by a recognised pre-filing refusal code in the response body.
+   *
+   * `code` is present only when the response body carried a recognised code (today, one of
+   * Greenhouse's own pre-filing refusal codes); a refusal proven by banner text alone omits it. */
+  employer_refusal?: {
+    http_status: number;
+    code?: string;
+    at: string;
   };
   /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
    *
@@ -1819,10 +1891,26 @@ export function readApplicationReview(spec: unknown): ApplicationReviewState | n
   const review = (spec as Record<string, unknown>)._review;
   if (!review || typeof review !== 'object' || Array.isArray(review)) return null;
   const state = review as ApplicationReviewState;
-  // Derived here, at the one choke point every caller already goes through, so a packet stored
-  // before portal_supported existed still answers the question correctly and no backfill migration
-  // is needed. A stored value always wins: this only fills a gap, it never overrides a decision.
-  if (state.portal_supported === undefined && state.portal_url) {
+  /* Derived here, at the one choke point every caller already goes through, so a packet stored
+   * before portal_supported existed still answers the question correctly and no backfill migration
+   * is needed.
+   *
+   * A STORED `true` ALWAYS WINS, and is the only value this leaves alone. Everything else -
+   * `undefined` (never computed) and `false` (computed unsupported, once) - gets a fresh look on
+   * every read. That second case is new as of 2026-09-05: MEASURED LIVE the same day, account
+   * mehekmandal05@gmail.com, POST /resume/generate stored portal_supported: false for
+   * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance because
+   * HOSTS.teamtailor in lib/portalSubmission.ts did not yet recognise a regional Teamtailor tenant
+   * (see that map's own comment). Widening the host regex fixes every NEW packet at generate time,
+   * but a stored `false` from before the fix does not become true by itself - `state.portal_url`
+   * never changes, so nothing else here would ever ask the detector again, and the dashboard would
+   * keep routing an account holding the Teamtailor consent grant to the extension handoff forever
+   * for a posting Litos can now send. Re-deriving is cheap (a handful of regexes, no I/O) and safe
+   * in this direction: a stale false correcting to true here is the read this whole function
+   * exists to give, and a detector that regresses genuinely-supported to unsupported is a separate,
+   * worse bug this cannot cause - retrying downward is exactly the trap applyApplicationReviewEdit's
+   * own comment names, which is why a stored `true` is still never revisited. */
+  if (state.portal_supported !== true && state.portal_url) {
     return { ...state, portal_supported: isPortalSupported(state.portal_url) };
   }
   return state;

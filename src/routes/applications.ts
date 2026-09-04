@@ -84,7 +84,11 @@ import {
   stalledFillRunReleaseIsAdmissible,
 } from '../lib/stalledFillRunRelease';
 import { attemptNeverPressedReason, employerMayHoldApplication } from '../lib/managedSubmitOutcome';
-import { closeAbandonedPreBoundaryAttempts } from '../lib/abandonedAttemptClosure';
+import {
+  healAbandonedPreBoundaryAttemptsForRead,
+  retrySafetyDiagnosticForAbsentEnvelope,
+  retrySafetyLooksLikeClosableCandidate,
+} from '../lib/abandonedAttemptClosure';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
@@ -239,18 +243,58 @@ async function unattemptedPacketSubmissionAuthority(
   packetId: string,
   reviewStatus: string,
   log: FastifyRequest['log'],
-): Promise<{ submission_authority?: ReturnType<typeof submissionAuthorityEnvelopeForUnattemptedPacket> }> {
+): Promise<{
+  submission_authority?: ReturnType<typeof submissionAuthorityEnvelopeForUnattemptedPacket>;
+  /* WHY THE GATE STILL REFUSES, so the next person can see it on the wire instead of measuring it
+   * by hand - see healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts)
+   * for the Pony.ai measurement this answers. `no_projection` names the projection read itself
+   * failing (the catch block below); the other two are retrySafetyDiagnosticForAbsentEnvelope's. */
+  retry_safety_diagnostic?: 'no_projection' | 'blocked_by_attempt' | 'unclosable_attempt';
+}> {
   if (!FIRST_SEND_REVIEW_STATUSES.has(reviewStatus)) return {};
   try {
-    const projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
-    const projection = projections.byPacketId.get(packetId);
-    const retrySafety = projections.retrySafetyByPacketId.get(packetId);
-    const envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
+    let projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
+    let projection = projections.byPacketId.get(packetId);
+    let retrySafety = projections.retrySafetyByPacketId.get(packetId);
+    let envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
       packetId,
       projectionState: projection?.state,
       retrySafety,
       revision: projections.revision,
     });
+    /* A READ CAN HEAL WHAT A SEND ALREADY WOULD. Full mechanism and safety argument on
+     * healAbandonedPreBoundaryAttemptsForRead's doc (lib/abandonedAttemptClosure.ts). Tried only
+     * when the cheap path just above found nothing to publish AND the retry verdict is the one
+     * shape a heal could ever change, so every packet with an envelope already and every packet
+     * blocked for a real reason - pressed, boundary_authorized, confirmed - costs this hot 2.5s
+     * poll nothing beyond what it already paid above.
+     *
+     * SCOPED TO THIS ONE PACKET - REVIEW ROUND 1, 2026-09-05. This route answers for exactly one
+     * packet, so `packetIds: [packetId]` is the whole of what this read could ever need healed;
+     * see healAbandonedPreBoundaryAttemptsForRead's own doc for why an unscoped heal here could
+     * stall a concurrent send on this account's whole backlog instead. */
+    let closedAttemptIds: readonly string[] = [];
+    if (!envelope && retrySafetyLooksLikeClosableCandidate(retrySafety)) {
+      const blockingAttemptId = retrySafety.attemptId;
+      closedAttemptIds = (await healAbandonedPreBoundaryAttemptsForRead({
+        userId,
+        log,
+        logContext: { packetId, route: 'GET /applications/:id/submission' },
+        packetIds: [packetId],
+        trigger: 'read_heal',
+      })).closedAttemptIds;
+      if (closedAttemptIds.includes(blockingAttemptId)) {
+        projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
+        projection = projections.byPacketId.get(packetId);
+        retrySafety = projections.retrySafetyByPacketId.get(packetId);
+        envelope = submissionAuthorityEnvelopeForUnattemptedPacket({
+          packetId,
+          projectionState: projection?.state,
+          retrySafety,
+          revision: projections.revision,
+        });
+      }
+    }
     if (envelope) return { submission_authority: envelope };
     /* THE SCREEN THAT SHOWS THE BANNER LOGGED NOTHING. This helper returned a bare `{}` on every
      * refusal, so the one surface a student actually reads - "Litos cannot start another employer
@@ -265,8 +309,9 @@ async function unattemptedPacketSubmissionAuthority(
      * projection state, so it is read here purely for its refusal - a packet with real history
      * publishes there and refuses here, which is correct on both surfaces and is why only its
      * `published: false` is logged. Calling it cannot change the bytes above; it is pure over data
-     * already in hand and its return value is never returned to the caller. It adds no read: the
-     * projection transaction above already ran, and this classifies what it returned.
+     * already in hand and its return value is never returned to the caller. It adds no read beyond
+     * whatever the heal above already paid for: this classifies the LATEST projection, re-read
+     * after a heal attempt when one ran.
      *
      * THE VOLUME IS DELIBERATE AND SELF-LIMITING. The dashboard polls this route every 2.5s for the
      * ONE packet a student has open, so a blocked packet writes a line every 2.5s for as long as
@@ -294,13 +339,15 @@ async function unattemptedPacketSubmissionAuthority(
         'packet has no publishable submission authority envelope; the send gate stays fail-closed',
       );
     }
-    return {};
+    return {
+      retry_safety_diagnostic: retrySafetyDiagnosticForAbsentEnvelope({ retrySafety, closedAttemptIds }),
+    };
   } catch (error) {
     log.warn(
       { err: error, packetId },
       'submission authority projection unavailable for submission response; packet stays fail-closed at the send gate',
     );
-    return {};
+    return { retry_safety_diagnostic: 'no_projection' };
   }
 }
 const packetAuditAcknowledgementSchema = z.object({
@@ -1137,39 +1184,30 @@ async function refuseDuplicateApplication(
    * not-sent fact the ledger already licenses, and the verdict below is then computed against a
    * ledger that no longer holds a phantom.
    *
-   * ON THE SEND PATH AND NOT A READ PATH. The applicant has just asked to send, which is exactly
-   * when it is right to spend a write resolving what can be resolved. This is deliberately not
-   * inside duplicateApplicationVerdict, which the gates call to ask a question, not to change one.
+   * HERE, AND NOT INSIDE duplicateApplicationVerdict, which the gates call to ask a question, not
+   * to change one. The heal itself now also runs from three GET projections (`unattemptedPacketSubmissionAuthority`
+   * below, GET /resume/history, GET /applications/board) through the same
+   * healAbandonedPreBoundaryAttemptsForRead this call was factored into - a read no longer has to
+   * wait for a send-path POST to see what the ledger already proves. See that function's doc
+   * (lib/abandonedAttemptClosure.ts) for why healing from a GET is safe: same proof, a lock that
+   * never waits, and paid only on the shape this module exists to close.
    *
    * BEST EFFORT, NEVER BLOCKING. A failure here leaves the ledger exactly as it was and the verdict
-   * refuses precisely as it did before, so the worst case is the behaviour that shipped yesterday. */
-  try {
-    const healed = await db.transaction(async (tx) => {
-      /* TRY, NEVER WAIT, the same rule repairExpiredAttendedHandoffClaim states. A lost race for
-       * the user lock means another writer is already moving this user's ledger, and waiting for it
-       * would pin a pool client on the send path. Skipping costs nothing: the verdict below simply
-       * refuses as it would have, and the next send heals. */
-      if (!await tryLockSubmissionAttemptUser(tx, userId)) return { closedAttemptIds: [], failedAttemptIds: [] };
-      return closeAbandonedPreBoundaryAttempts({ userId, executor: tx, log });
-    });
-    if (healed.closedAttemptIds.length > 0) {
-      log.info(
-        { applicationId: row.id, closedAttemptIds: healed.closedAttemptIds },
-        'Closed abandoned pre-boundary attempts the ledger proves never reached an employer',
-      );
-    }
-    if (healed.failedAttemptIds.length > 0) {
-      log.warn(
-        { applicationId: row.id, failedAttemptIds: healed.failedAttemptIds },
-        'Could not close some abandoned pre-boundary attempts; leaving them for the next heal',
-      );
-    }
-  } catch (error) {
-    log.warn(
-      { applicationId: row.id, err: error },
-      'Could not close abandoned pre-boundary attempts; the duplicate verdict is unchanged',
-    );
-  }
+   * refuses precisely as it did before, so the worst case is the behaviour that shipped yesterday.
+   *
+   * DELIBERATELY UNSCOPED - REVIEW ROUND 1, 2026-09-05. Unlike the three GET callers, this send
+   * path has no one packet or page to narrow to: `row.id` is what is being sent, but
+   * duplicateApplicationVerdict right below can refuse it over an abandoned attempt on a DIFFERENT
+   * packet against the same posting, so scoping this heal to `row.id` alone could leave exactly
+   * the cross-packet phantom this module exists to close. It still cannot run unbounded, though -
+   * see READ_HEAL_MAX_CANDIDATES on healAbandonedPreBoundaryAttemptsForRead's doc
+   * (lib/abandonedAttemptClosure.ts) for why the whole-ledger case is now capped too. */
+  await healAbandonedPreBoundaryAttemptsForRead({
+    userId,
+    log,
+    logContext: { applicationId: row.id },
+    trigger: 'send_path',
+  });
   const verdict = await duplicateApplicationVerdict({
     userId,
     applicationId: row.id,

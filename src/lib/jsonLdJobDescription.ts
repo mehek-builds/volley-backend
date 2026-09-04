@@ -294,9 +294,12 @@ const ALLOWED_JSON_LD_HOSTS: readonly RegExp[] = [
   // One tenant label only, matching jobDescriptionSourceUrl's own SEPARATE_FORM_ROUTES predicates in
   // jobExtract.ts: excludes each vendor's own www/app/api hosts, and Teamtailor's regional tenants
   // (<tenant>.na.teamtailor.com) are real career sites, same as the bare <tenant>.teamtailor.com
-  // shape - both measured live (this file's header).
+  // shape - both measured live (this file's header). The region bound is 2-4 letters, not just 2,
+  // matching portalSubmission.ts's own HOSTS.teamtailor widened 2026-09-05 for the same tenants -
+  // this reader and the submission detector must agree on which hosts are Teamtailor's, or a
+  // regional posting reads here but is refused there (or the reverse).
   /^(?!(?:www|app|api)\.)[a-z0-9-]+\.recruitee\.com$/i,
-  /^(?!(?:www|app|api)\.)[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/i,
+  /^(?!(?:www|app|api)\.)[a-z0-9-]+(?:\.[a-z]{2,4})?\.teamtailor\.com$/i,
   /^(?!(?:www|app|api)\.)[a-z0-9-]+\.pinpointhq\.com$/i,
   /^(?!(?:www|app|api)\.)[a-z0-9-]+\.breezy\.hr$/i,
   /^jobs\.crelate\.com$/i,

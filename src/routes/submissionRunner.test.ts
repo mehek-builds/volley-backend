@@ -1046,6 +1046,95 @@ test('CBS legacy Recruitee phone produces one normalized audit and acknowledgeme
   );
 });
 
+/* GET /applications/:id/submission MUST NOT 500 ON A PORTAL detectPortal CANNOT CLASSIFY.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com, packet
+ * c24e48a2-06b1-4a01-989f-b6c2c5719f18: "Fill application" -> "Tailor resume first" against
+ * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance built a packet
+ * with portal_url set and portal_supported: false. HOSTS.teamtailor (lib/portalSubmission.ts)
+ * matched only a single label before ".teamtailor.com" ("fully.teamtailor.com",
+ * "flanks.teamtailor.com"), so this regional Teamtailor tenant's two-label host
+ * ("covenanthouseinternational.na.teamtailor.com") matched no HOSTS entry at all and detectPortal
+ * threw for it - correctly, by isPortalSupported's own header, for the runner. But
+ * normalizedPacketAuditQuestions called detectPortal on every portal_url unconditionally, with no
+ * isPortalSupported guard, and GET /submission's resolvePacketAuditQuestionFixpoint calls it on
+ * every dashboard poll: a routine read of a freshly tailored, never-sent packet turned into a
+ * repeatable 500 the moment the URL happened to be a regional tenant. GET /resume/history's own
+ * equivalent (refreshedHistorySpec, routes/resume.ts) already guards this exact call with
+ * isPortalSupported; this sibling reader had the same call unguarded.
+ *
+ * THE FIXTURE HOST BELOW CHANGED 2026-09-05. HOSTS.teamtailor now recognises exactly the regional
+ * shape measured above (lib/portalSubmission.ts, "<tenant>.<region>.teamtailor.com") - see
+ * portalSubmission.test.ts's own "recognizes a regional Teamtailor tenant" test and
+ * freshTailoredApplicationRead.db.test.ts's "heals to portal_supported: true" test for that packet
+ * now succeeding end to end. That is real coverage gained, not lost: it would be dishonest for
+ * these three tests to keep asserting detectPortal throws for a host it no longer throws for. The
+ * catch-and-fallback GUARD they exist to pin is a general property - a bare Error from detectPortal
+ * must never 500 this route, for WHATEVER host still cannot be classified - so they now exercise it
+ * against api.na.teamtailor.com instead: still a Teamtailor-shaped, two-label regional host, and
+ * still refused on purpose (the reserved "api" vendor-product exclusion applies in the tenant
+ * position whether or not a region follows it - see HOSTS.teamtailor's own comment). */
+test('detectPortal throws for a Teamtailor host reserved for the vendor, region label or not', () => {
+  assert.throws(
+    () => detectPortal('https://api.na.teamtailor.com/jobs/686133-intern-finance'),
+    /cannot fill in this company/,
+  );
+});
+
+test('normalizedPacketAuditQuestions falls back to the stored questions when detectPortal cannot classify the portal', () => {
+  const review: ApplicationReviewState = {
+    jd_text: 'Support the finance team at Covenant House International.',
+    role: 'Intern, Finance',
+    portal_url: 'https://api.na.teamtailor.com/jobs/686133-intern-finance',
+    ats_name: 'teamtailor',
+    portal_supported: false,
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'cover-letter',
+      question: 'Cover letter',
+      answer: '',
+      kind: 'essay',
+      required: false,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  assert.deepEqual(normalizedPacketAuditQuestions(review), review.questions);
+});
+
+test('resolvePacketAuditQuestionFixpoint does not throw for a freshly tailored packet on an unclassifiable portal', () => {
+  const review: ApplicationReviewState = {
+    jd_text: 'Support the finance team at Covenant House International.',
+    role: 'Intern, Finance',
+    portal_url: 'https://api.na.teamtailor.com/jobs/686133-intern-finance',
+    ats_name: 'teamtailor',
+    portal_supported: false,
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'Covenant House International', role: 'Intern, Finance' },
+  } as ResumeRow;
+  const profile = {} as ApplicationProfileLike;
+  let questions: ApplicationReviewQuestion[] | undefined;
+  assert.doesNotThrow(() => {
+    questions = resolvePacketAuditQuestionFixpoint(
+      review,
+      profile,
+      applicationContextForQuestionResolution(row, review),
+      undefined,
+      undefined,
+      new Date('2026-09-04T20:54:00.000Z'),
+    );
+  });
+  assert.deepEqual(questions, []);
+});
+
 /* GET /applications/:id/submission MUST REFLECT A CLOSED-CHOICE ANSWER PUT /review/answers PERSISTED.
  *
  * Measured live on the Mytos Lever packet (application 55de7c9e, generated_resumes row 16f1c744,
@@ -6808,4 +6897,93 @@ test('an optional unmatched select the applicant skipped is not raised again', a
     1,
     'a skip cannot silence a required control the employer will reject as empty',
   );
+});
+
+// ─── An employer refusal proven from the wire, not from an applicant's look ──────────────────
+//
+// SOURCE-LEVEL for the same reason every other test of the giant managed-submit function is:
+// the branch runs inside an unexported function that needs a database, a blob store and a managed
+// browser provider. recordManagedAuthorizedAttemptRefused IS exported, but it still needs a real
+// `db` to run, so what it means to have proven and to have released the claim is pinned
+// behaviourally instead, as two pure functions, in managedSubmitOutcome.test.ts:
+// employerSubmitRefusalProof (via exactManagedSubmitVerdict) and employerRefusalReleasePatch. What
+// only a source read can check here is the WIRING: that the new verdict is actually reached before
+// the pre-existing 'refused' arm, that it calls the new recorder rather than the applicant-facing
+// one, and that the recorder itself appends the ledger's own proof rather than an attestation.
+test('an employer_refused verdict is handled before the DOM-text refused arm, by its own recorder', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const verdictAt = source.indexOf('const verdict = exactManagedSubmitVerdict(receiptResult, applicationUrl);');
+  const employerRefusedAt = source.indexOf("verdict.kind === 'employer_refused'", verdictAt);
+  const refusedAt = source.indexOf("verdict.kind === 'refused'", verdictAt);
+  assert.ok(verdictAt > 0, 'the managed send path must ask the run what it saw');
+  assert.ok(employerRefusedAt > verdictAt);
+  assert.ok(refusedAt > verdictAt);
+  assert.ok(employerRefusedAt < refusedAt,
+    'the wire-proven refusal must be checked ahead of the DOM-text arm it is not built on top of');
+
+  const employerRefusedBranch = source.slice(employerRefusedAt, refusedAt);
+  assert.match(employerRefusedBranch, /await recordManagedAuthorizedAttemptRefused\(row, attemptBinding, \{/,
+    'a proven employer refusal must not go through recordManagedAuthorizedAttemptUnverified');
+  assert.doesNotMatch(employerRefusedBranch, /recordManagedAuthorizedAttemptUnverified/);
+  assert.match(employerRefusedBranch, /employerSubmitRefusalReason\(\{/);
+  assert.match(employerRefusedBranch, /httpStatus: verdict\.httpStatus/);
+});
+
+test('recordManagedAuthorizedAttemptRefused proves the ledger fact and never writes an attestation', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('export async function recordManagedAuthorizedAttemptRefused(');
+  assert.ok(start > 0, 'recordManagedAuthorizedAttemptRefused must exist');
+  const end = source.indexOf('\n/** Persist exact post-call uncertainty', start);
+  assert.ok(end > start);
+  const body = source.slice(start, end);
+
+  // The ledger gets the immutable, evidence-bearing fact - never an applicant attestation kind.
+  assert.match(body, /eventKind: 'not_sent_proven'/);
+  assert.match(body, /proofKind: 'employer_rejected_not_filed'/);
+  assert.doesNotMatch(body, /'applicant_checked_not_sent'/);
+  assert.doesNotMatch(body, /'applicant_checked_all_possible_destinations_not_sent'/);
+
+  // The write is only trusted once the ledger itself agrees the attempt is provably not-sent - the
+  // same belt-and-suspenders discipline POST /applications/:id/submission/unverified uses for her
+  // own look, so a future regression in the fold cannot silently strand a released-looking row
+  // whose ledger attempt still blocks every other gate that reads it.
+  assert.match(body, /submissionAttemptRetrySafety\(resolvedEvents\)/);
+  assert.match(body, /resolvedSafety\.kind !== 'safe_not_sent'/);
+
+  // The review patch is the extracted, pure, separately-tested function - not reimplemented here.
+  assert.match(body, /employerRefusalReleasePatch\(latestReview, \{/);
+  assert.doesNotMatch(body, /unverified_submission:/,
+    'this function must never itself write an unverified_submission record');
+
+  // The per-user ledger lock is taken before anything else in the transaction, the same discipline
+  // writeReviewWithRunnerNotSentFact (this file) and closeAbandonedPreBoundaryAttempts
+  // (lib/abandonedAttemptClosure.ts) use as the first line of their own transactions.
+  assert.match(body, /await lockSubmissionAttemptUser\(tx, row\.user_id\);/);
+
+  // A lost CAS on the final review write must never let the not_sent_proven event committed just
+  // above it stand alone: the row is locked for the width of the transaction, the same way
+  // writeReviewWithRunnerNotSentFact locks it for its own CAS, and a miss on the final write throws
+  // - rolling the whole transaction, ledger event included, back - rather than resolving false and
+  // leaving a closed ledger attempt with no review patch to show for it.
+  assert.match(body, /\)\.limit\(1\)\.for\('update'\);/,
+    'the row read at the top of the transaction must be locked for its width, not just read');
+  assert.match(body, /if \(updated\.length === 0\) throw new Error\('EMPLOYER_REFUSAL_NOT_SENT_REVIEW_WRITE_CONFLICT'\);/,
+    'a lost CAS on the final write must roll back the transaction, not silently resolve false');
+});
+
+test('the ledger admits employer_rejected_not_filed to close an authorized attempt, alongside her own look', () => {
+  const source = readFileSync('src/lib/submissionAttemptLedger.ts', 'utf8');
+  const start = source.indexOf('const AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS = new Set');
+  assert.ok(start > 0);
+  const end = source.indexOf(']);', start);
+  const admissible = source.slice(start, end);
+  assert.match(admissible, /'applicant_checked_not_sent'/);
+  assert.match(admissible, /'applicant_checked_all_possible_destinations_not_sent'/);
+  assert.match(admissible, /'employer_rejected_not_filed'/);
+  // Deliberately not widened to every not-sent proof kind at once - see
+  // submissionAttemptLedger.test.ts for the behavioural regression guard on this.
+  assert.doesNotMatch(admissible, /'provider_definitive_rejection'/);
+  assert.doesNotMatch(admissible, /'employer_verification_pending_not_filed'/);
+
+  assert.match(source, /authorizationContradictsProof = authorized\.length > 0\s*\n\s*&& !\(resolutionProof && AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS\.has\(resolutionProof\)\)/);
 });

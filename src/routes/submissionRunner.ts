@@ -164,7 +164,13 @@ import {
   ashbyPublicQuestionLabelKey,
 } from '../lib/ashbyPublicApplication';
 import {
+  leverPublicApplicationSchema,
+  leverPublicQuestionLabelKey,
+} from '../lib/leverPublicApplication';
+import {
   exactManagedSubmitVerdict,
+  employerRefusalReleasePatch,
+  employerSubmitRefusalReason,
   isManagedRunTimeout,
   managedSubmitVerdict,
   observeManagedReceiptOnce,
@@ -352,6 +358,7 @@ import {
   submissionBoundaryAuthorization,
   submissionAttemptEventId,
   submissionAttemptEventsForPacket,
+  submissionAttemptRetrySafety,
   submissionAttemptsOpenedToday,
   SubmissionAccountDeletionDrainError,
   type SubmissionBoundaryAuthorization,
@@ -1412,6 +1419,111 @@ export async function recordManagedAuthorizedAttemptUnverified(
       spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
     }).where(and(...conditions)).returning({ id: generated_resumes.id });
     return updated.length > 0;
+  });
+}
+
+type ManagedAuthorizedRefusedInput = {
+  httpStatus: number;
+  code?: string;
+  attentionReason: string;
+  previewUrl?: string;
+  cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
+  cleanupQuarantines?: readonly ManagedTerminalCleanupQuarantine[];
+};
+
+/**
+ * Every submit request the employer's own answer proves was refused before anything was filed.
+ *
+ * Sibling to recordManagedAuthorizedAttemptUnverified above, and deliberately NOT built on top of
+ * it: that function's whole contract is "the parent stays an unresolved unverified record", and
+ * this one exists precisely because employerSubmitRefusalProof (lib/managedSubmitOutcome.ts) is
+ * strong enough that the applicant should not have to be asked. Closes the ledger attempt with a
+ * not_sent_proven/employer_rejected_not_filed fact and releases the claim in the SAME transaction
+ * as the review write, so a lost race can never leave one done without the other - the same
+ * discipline writeReviewWithRunnerNotSentFact above uses for the pre-click case. The post-write fold
+ * check mirrors POST /applications/:id/submission/unverified's own belt-and-suspenders assertion:
+ * if submissionAttemptRetrySafety ever disagreed that this fact closed the attempt, writing the
+ * review anyway would strand it unclaimed while every ledger-reading gate kept refusing it.
+ */
+export async function recordManagedAuthorizedAttemptRefused(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  input: ManagedAuthorizedRefusedInput,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    // .for('update') for the same reason writeReviewWithRunnerNotSentFact takes it: this
+    // transaction is about to append an immutable not_sent_proven ledger event and then use THIS
+    // read of spec as the CAS base for the review write that closes it. Without the row lock, a
+    // concurrent writer can land its own update in the gap between this select and that CAS,
+    // which is exactly the shape that let a lost CAS below commit the ledger event with no review
+    // patch to show for it.
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1).for('update');
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview
+      || latestReview.submission_claim_id !== attemptBinding.attemptId
+      || latestReview.submission_run_id !== attemptBinding.submissionRunId) return false;
+    const authorization = await submissionBoundaryAuthorization(
+      row.user_id,
+      attemptBinding.attemptId,
+      { executor: tx },
+    );
+    if (!authorization) return false;
+    const exactEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    if (exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+        || event.event_kind === 'not_sent_proven')) return false;
+    const evidenceCode = input.code
+      ? `employer_refusal_code:${input.code}`
+      : `employer_refusal_status:${input.httpStatus}`;
+    await appendSubmissionAttemptEvent({
+      ...attemptBinding,
+      eventId: submissionAttemptEventId(attemptBinding.attemptId, 'not_sent_proven', 'employer-refused-submit'),
+      eventKind: 'not_sent_proven',
+      proofKind: 'employer_rejected_not_filed',
+      evidenceCode,
+    }, { executor: tx });
+    const resolvedEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    const resolvedSafety = submissionAttemptRetrySafety(resolvedEvents);
+    if (resolvedSafety.kind !== 'safe_not_sent' || resolvedSafety.proofKind !== 'employer_rejected_not_filed') {
+      throw new Error('EMPLOYER_REFUSAL_NOT_SENT_FACT_INCOMPLETE');
+    }
+    const released = nextReview(latestReview, employerRefusalReleasePatch(latestReview, {
+      at: resolvedSafety.resolvedAt,
+      httpStatus: input.httpStatus,
+      ...(input.code ? { code: input.code } : {}),
+      attentionReason: input.attentionReason,
+      ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
+    }));
+    const foldedSpec = specWithManagedTerminalFold(
+      latest.spec,
+      released,
+      input.cleanupMarkers ?? [],
+      input.cleanupQuarantines ?? [],
+    );
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
+    }).where(and(
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+    )).returning({ id: generated_resumes.id });
+    /* Throw rather than return false, exactly as writeReviewWithRunnerNotSentFact does on the same
+     * miss: this point is only reachable after the not_sent_proven event above has already been
+     * appended in this same transaction, so a silent `return false` here would let that ledger
+     * event commit with no review patch to show for it - the attempt permanently closed as
+     * safe_not_sent while the row it was supposed to release keeps whatever stale status it had.
+     * Throwing rolls the whole transaction back, ledger event included, so the caller sees a
+     * failed attempt rather than a half-applied one and the retry starts clean. Left uncaught here
+     * on purpose: submit()'s own try/finally wraps every call site in this function the same way,
+     * so this folds into the same SubmissionExecutionError -> fail() path every other not-sent
+     * writer's conflict already takes, with no special handling needed at the call site. */
+    if (updated.length === 0) throw new Error('EMPLOYER_REFUSAL_NOT_SENT_REVIEW_WRITE_CONFLICT');
+    return true;
   });
 }
 
@@ -7631,6 +7743,30 @@ async function prepareManaged(
       }, 'Could not read the employer-published Ashby form schema, keeping the live DOM read');
     }
   }
+  /* LEVER PUBLISHES ITS FORM TOO, as the server-rendered apply page: every `<select>` with its
+   * options and every radio group with its alternatives is in the HTML, no browser needed. The
+   * live DOM read cannot enumerate Lever's university dropdown - measured 2026-09-04 on Belvedere
+   * Trading's Software Engineer Intern - Summer 2027 (packet c4413bff): "Name of School" carries
+   * 2,965 options and reached the packet as missing_exact_options, so a required control the
+   * profile answers exactly was left blank on every fill. Same join as Ashby's below, same
+   * fail-closed rules (see lib/leverPublicApplication.ts). */
+  let leverSchema: Awaited<ReturnType<typeof leverPublicApplicationSchema>> = null;
+  if (portal === 'lever' || portal === 'controlled_lever') {
+    try {
+      leverSchema = await leverPublicApplicationSchema(applicationUrl);
+      if (leverSchema) {
+        fastify.log.info({
+          applicationId: row.id,
+          publicOptionLabelCount: Object.keys(leverSchema.optionsByLabel).length,
+        }, 'Read the employer-published Lever form schema');
+      }
+    } catch (error) {
+      fastify.log.warn({
+        applicationId: row.id,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }, 'Could not read the employer-published Lever form schema, keeping the live DOM read');
+    }
+  }
   // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
@@ -7706,22 +7842,31 @@ async function prepareManaged(
    *    fields share; this drops one that two DISCOVERED fields share, so a duplicated question on
    *    the page can never take a list that might belong to its twin. Same rule as
    *    attachManagedFieldOptions' refusal to attach one list to two controls sharing a durable id. */
-  const ashbyDiscoveredLabelCounts = new Map<string, number>();
-  if (ashbySchema) {
+  /* One published schema at most: the family decides which reader ran, and each reader keys its
+   * labels with its own normalizer, so the join below reads both through the same pair. Lever's
+   * key strips the required glyph the live DOM keeps in the discovered label ("name of school ✱");
+   * Ashby's is the Greenhouse key unchanged. */
+  const publishedSchema = ashbySchema
+    ? { optionsByLabel: ashbySchema.optionsByLabel, labelKey: ashbyPublicQuestionLabelKey }
+    : leverSchema
+      ? { optionsByLabel: leverSchema.optionsByLabel, labelKey: leverPublicQuestionLabelKey }
+      : null;
+  const publishedDiscoveredLabelCounts = new Map<string, number>();
+  if (publishedSchema) {
     for (const field of normalizedDiscoveredFields) {
-      const labelKey = ashbyPublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
+      const labelKey = publishedSchema.labelKey(normalizeDiscoveredLabel(field.label));
       if (labelKey) {
-        ashbyDiscoveredLabelCounts.set(labelKey, (ashbyDiscoveredLabelCounts.get(labelKey) ?? 0) + 1);
+        publishedDiscoveredLabelCounts.set(labelKey, (publishedDiscoveredLabelCounts.get(labelKey) ?? 0) + 1);
       }
     }
   }
-  const publicSchemaDiscoveredFields = !ashbySchema
+  const publicSchemaDiscoveredFields = !publishedSchema
     ? normalizedDiscoveredFields
     : normalizedDiscoveredFields.map((field) => {
       if (field.options?.length && field.optionsComplete !== false) return field;
-      const labelKey = ashbyPublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
-      if (!labelKey || ashbyDiscoveredLabelCounts.get(labelKey) !== 1) return field;
-      const options = ashbySchema.optionsByLabel[labelKey];
+      const labelKey = publishedSchema.labelKey(normalizeDiscoveredLabel(field.label));
+      if (!labelKey || publishedDiscoveredLabelCounts.get(labelKey) !== 1) return field;
+      const options = publishedSchema.optionsByLabel[labelKey];
       return options?.length ? { ...field, options, optionsComplete: true } : field;
     });
   /* A CONTROL THE BOARD PUBLISHES AS OPEN TEXT IS NEVER PROBED AS A CLOSED LIST.
@@ -9020,7 +9165,28 @@ async function prepareManagedAttendedAccountGate(
  * that says what that packet's questions are. */
 export function normalizedPacketAuditQuestions(review: ApplicationReviewState) {
   if (!review.portal_url) return review.questions;
-  const portal = detectPortal(review.portal_url);
+  /* AN UNSUPPORTED portal_url REACHES THIS FUNCTION TOO, and has to leave it without throwing.
+   *
+   * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com: "Fill application" -> "Tailor resume
+   * first" against https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance
+   * built a packet with portal_url set and portal_supported: false (a regional Teamtailor tenant -
+   * HOSTS.teamtailor in lib/portalSubmission.ts matches only a single label before ".teamtailor.com",
+   * so "covenanthouseinternational.na.teamtailor.com" matches no HOSTS entry at all). GET
+   * /applications/:id/submission calls this unconditionally through
+   * resolvePacketAuditQuestionFixpoint on every dashboard poll, and detectPortal is documented to
+   * THROW on exactly this shape ("correct for the runner but useless everywhere else" - see
+   * isPortalSupported's own header two functions above in lib/portalSubmission.ts): an uncaught
+   * "Litos cannot fill in this company's application page yet" turned a routine read of a freshly
+   * tailored, never-sent packet into a 500 with no portal-specific control shape to normalize
+   * against anyway. GET /resume/history's own equivalent (refreshedHistorySpec in routes/resume.ts)
+   * already guards this exact call with isPortalSupported; this sibling reader had the same call
+   * unguarded. */
+  let portal: SupportedPortal;
+  try {
+    portal = detectPortal(review.portal_url);
+  } catch {
+    return review.questions;
+  }
   return normalizeStoredPortalQuestions(review.questions, portal);
 }
 
@@ -11338,6 +11504,39 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       (receiptResult.blockers ?? []) as readonly string[],
       receiptResult,
     ));
+    /* 'employer_refused' IS PROVEN FROM THE WIRE, NOT FROM THE PAGE, so unlike the 'refused' arm
+     * right below it, it is allowed to machine-close the parent even after authorization. The
+     * verdict already carried its own proof through exactManagedSubmitVerdict
+     * (employerSubmitRefusalProof in lib/managedSubmitOutcome.ts): a 4xx on the exact bound
+     * posting's own submit endpoint, corroborated by the employer's rendered refusal banner or a
+     * recognised pre-filing refusal code. recordManagedAuthorizedAttemptRefused records that as a
+     * not_sent_proven/employer_rejected_not_filed ledger fact - never an applicant attestation -
+     * and releases the claim, so the packet becomes needs_attention and retryable through the
+     * ordinary Review and send path instead of parking on "I found it there / It is not there".
+     * Its return value is deliberately not read: a lost-CAS conflict throws (see its own comment)
+     * rather than resolving false, and that throw is left to fall through this bare await, out
+     * through the try/finally above, into the same SubmissionExecutionError -> fail() path every
+     * other not-sent writer's conflict in this function already takes. */
+    if (verdict.kind === 'employer_refused') {
+      await recordManagedAuthorizedAttemptRefused(row, attemptBinding, {
+        httpStatus: verdict.httpStatus,
+        ...(verdict.code ? { code: verdict.code } : {}),
+        attentionReason: employerSubmitRefusalReason({
+          code: verdict.code,
+          bannerText: verdict.bannerText,
+          securityCodeRecipient: verdict.securityCodeRecipient,
+        }),
+        previewUrl: blob.url,
+        cleanupMarkers: managedCleanupMarkers(),
+      });
+      await acknowledgeManagedCleanupMarkers();
+      fastify.log.warn({
+        applicationId: row.id,
+        httpStatus: verdict.httpStatus,
+        code: verdict.code ?? null,
+      }, 'Employer refused the submit request before filing; released the claim');
+      return;
+    }
     if (verdict.kind === 'refused') {
       const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
         ? 'rejected' as const

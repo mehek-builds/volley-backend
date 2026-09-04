@@ -5105,6 +5105,11 @@ function isProtectedManagedAction(
   // exist today, exactly as greenhouse_cookie_preflight already is: pushWorkableCookieBoundaryActions
   // is the only thing that mints these labels, and a fifth boundary added there must not have to
   // remember to come back and edit a list here to keep its own barrier alive.
+  // teamtailor_cookie_ joins them for the same reason and is a prefix for the same future-proofing,
+  // even though today it mints exactly one label (teamtailor_cookie_preflight): the click sits in
+  // front of every fixed-field fill on every teamtailor posting, so a budget trim dropping it would
+  // silently reopen the modal-covered-form bug measured on fill run e7ffd4c0 (see the constant's own
+  // comment) on any packet whose question count happens to reach MANAGED_ACTION_LIMIT.
   // resume_upload_verify is protected as a required evidence read one step further along: it says
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
@@ -5113,7 +5118,7 @@ function isProtectedManagedAction(
   // they are tolerant corroboration behind the strict pre-upload proofs, and under budget pressure
   // giving one of them up is strictly better than blocking a submit or giving up a reviewed
   // answer. managedResultFilledFields treats their absence as the ordinary remounted-widget case.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_cookie_|teamtailor_resume_upload_complete$)/
     .test(label);
 }
 
@@ -6354,6 +6359,78 @@ const TEAMTAILOR_RESUME_UPLOAD_COMPLETE_SELECTOR =
 // Neither captured Teamtailor form exposed a dedicated cover-letter file input. Never let a broad
 // file selector replace the resume with the cover letter.
 const TEAMTAILOR_COVER_LETTER_SELECTOR = 'input[type="file"][name="teamtailorCoverLetterThatDoesNotExist"]';
+
+/* THE COOKIE DIALOG IS ADDRESSED STRUCTURALLY, the same rule as Workable's: every visible word in it
+ * is the TENANT's rendered copy, not a language this run gets to choose.
+ *
+ * MEASURED 2026-09-04 21:12-21:13Z, production: fill run e7ffd4c0 against Covenant House
+ * International's Teamtailor posting (covenanthouseinternational.na.teamtailor.com/jobs/
+ * 686133-intern-finance, application c24e48a2-06b1-4a01-989f-b6c2c5719f18, family recognized as
+ * teamtailor since #954) recorded `filled_fields: ["resume"]` and `failed_fields: []`. The run's
+ * preview screenshot shows Teamtailor's cookie dialog centered over an entirely empty form - First
+ * name, Last name, Email, Phone, the custom questions and the privacy checkbox all untouched.
+ * Nothing declined it. Resume is the one field type managedUpload drives with setInputFiles, the one
+ * Playwright action that never requires visibility, which is why it is the only one that landed.
+ *
+ * MEASURED 2026-09-05 over curl, four independent tenants - the incident account
+ * (covenanthouseinternational.na.teamtailor.com), a non-regional tenant (fully.teamtailor.com), an
+ * unrelated EU brand (polestar.teamtailor.com), and Teamtailor's own careers site
+ * (career.teamtailor.com): every one serves a native `<dialog data-controller=
+ * "common--cookies--alert">` carrying exactly three Stimulus-wired buttons - accept
+ * (`...#acceptAll`), decline (`...#disableAll`), and a "Cookie preferences" opener
+ * (`...#openPreferences`) for a SECOND dialog (`data-controller="common--cookies--preferences"`)
+ * that only toggles categories and is never a decline. A fourth control lives outside the dialog
+ * entirely, in the page footer - `[data-controller="cookie-preferences"]
+ * [data-action*="cookie-preferences#openCookiePreferences"]`, `aria-label="Manage cookies"` - and is
+ * also never a decline.
+ *
+ * The dialog is SERVER-RENDERED (Rails + Turbo, not a client-booted React shell like Workable's), so
+ * its copy already arrives localized in the HTML Litos receives - `aria-label="This website uses
+ * cookies to ensure you get the best experience."` and the three button labels read byte-identical
+ * across all four fetches, including two made with `Accept-Language: sv-SE`, so no non-English
+ * render was reachable from these four tenants to directly prove the visible text localizes. It does
+ * not need to: `data-action` is a Stimulus controller#method reference compiled into the shared
+ * career-site bundle, not tenant copy, and `common--cookies--alert#disableAll` read byte-identical
+ * across all four accounts regardless of region, brand, or requested locale - the same guarantee
+ * Workable's `data-ui` hooks carry, for the same reason (compiled wiring cannot be translated the
+ * way a label can be). So the decline is selected on that `data-action` alone; no
+ * `button:has-text(...)` fallback is declared because there is nothing here a translation could
+ * break.
+ *
+ * ONE MEASURED DIFFERENCE FROM WORKABLE, and why there is no "cleared" barrier here. Workable's
+ * dialog is a React node that UNMOUNTS - leaves the DOM - the moment it is dismissed, which is what
+ * makes a `body:not(:has(div[role="dialog"]...))` style selector a true "is it gone" test.
+ * Teamtailor's is a native `<dialog>` that Rails always ships in the markup; closing it only drops
+ * the reflected `open` attribute, and the tag itself never leaves the DOM. A gone-from-DOM selector
+ * would therefore never clear, and a REQUIRED wait built on one would fail every Teamtailor run,
+ * dialog or not - worse than the bug this fixes. There is also no measured Teamtailor click-timeout
+ * to size a settle against (unlike Workable's own 30-second history, PRs #737-#742), and the decline
+ * handler does not reload the page on a first-time visit: `cookies-a135f52d0a68c93f4012.js` only
+ * reloads when the newly-set category list REMOVES something the visitor had already granted, which
+ * is impossible before any consent cookie exists. So: one optional decline click, scoped to its own
+ * dialog and requireUnique for the same reason Workable's is, and no barrier invented past what was
+ * measured. `takeover-modal-value` differed between the four tenants read here (`true` on the
+ * measured incident account, `false` on the other three - an account-level display preference, from
+ * its name), but the decline wiring was identical in both modes, so one unconditional click in front
+ * of the fixed-field fills covers either.
+ *
+ * pushFixedFieldActions is shared by buildManagedPortalActions (the real fill+submit run) AND
+ * buildManagedDiscoveryActions (the cheaper first pass that scans for custom questions), so this one
+ * call site covers both. Discovery run 78a9d868 against the same posting family DID surface the
+ * custom questions despite never declining this dialog: `discover` is a DOM walk (see its own
+ * comment above buildManagedDiscoveryActions), and the question markup is present in the document
+ * the moment the page renders - only visually covered, never removed - so a structural read finds it
+ * with or without the dialog in front of it. The ordinary fixed-field fills discovery ALSO attempts
+ * through this same function sit behind the identical modal and would have landed exactly as little
+ * as the fill run's did; discovery's usefulness never depended on those fills succeeding; only the
+ * DOM walk. The generic submit-time readiness reader (fieldLabel.ts's "is required and is still
+ * empty") needs no Teamtailor-specific change either: it is a portal-agnostic scan that only reports
+ * what is empty at the moment it runs, and once the fills upstream of it actually land, it has
+ * nothing left to report.
+ */
+const TEAMTAILOR_COOKIE_DIALOG_SELECTOR = 'dialog[data-controller="common--cookies--alert"]';
+const TEAMTAILOR_COOKIE_DECLINE_SELECTOR =
+  `${TEAMTAILOR_COOKIE_DIALOG_SELECTOR} button[data-action*="common--cookies--alert#disableAll"]`;
 
 // Personio, Pinpoint, and Comeet were captured on two unrelated live tenants per family on
 // 2026-08-09. Only stable platform-owned names and ids are used here. None of the three is allowed
@@ -7936,6 +8013,19 @@ function pushFixedFieldActions(
     managedUpload(actions, RECRUITEE_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // Tenant agreements, SMS consent, and CAPTCHA controls are never mapped.
   } else if (family === 'teamtailor') {
+    // First action, before any fixed-field fill: see TEAMTAILOR_COOKIE_DECLINE_SELECTOR's own
+    // comment for the measured incident (fill run e7ffd4c0 wrote nothing behind this dialog) and the
+    // selector evidence. Optional because Teamtailor omits the dialog once a consent cookie already
+    // exists, and requireUnique for the same reason Workable's decline carries it: an ambiguous
+    // match must refuse before the runner's click branch turns it into a rethrown mutation error.
+    actions.push({
+      type: 'click',
+      selector: TEAMTAILOR_COOKIE_DECLINE_SELECTOR,
+      label: 'teamtailor_cookie_preflight',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      requireUnique: true,
+    });
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, 'input[name="candidate[first_name]"]', parts[0], 'first_name');
     managedFill(actions, 'input[name="candidate[last_name]"]', parts.slice(1).join(' '), 'last_name');
@@ -8953,8 +9043,33 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   ultipro: /^recruiting\.ultipro\.com$/i,
   // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
   recruitee: /^(?!www\.)[^.]+\.recruitee\.com$/i,
-  // career.teamtailor.com is Teamtailor's own public tenant. Product, API, and docs hosts are out.
-  teamtailor: /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i,
+  // career.teamtailor.com (singular) is a real, live third-party tenant - "detects two unrelated
+  // live Teamtailor tenants" in recruiteeTeamtailorPortal.test.ts pins it as one of exactly two
+  // measured examples - so it is deliberately NOT excluded below, whatever the vendor itself hosts
+  // at that name. "careers" (plural, Teamtailor's own hiring-for-itself page) IS excluded: nothing
+  // in this codebase has ever matched that exact shape, so refusing it costs no existing tenant its
+  // recognition.
+  //
+  // THE OPTIONAL REGION LABEL, added 2026-09-05. MEASURED LIVE the same day, account
+  // mehekmandal05@gmail.com: "Fill application" -> "Tailor resume first" against
+  // https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance built a packet
+  // whose portal_url matched NO entry in this map at all - the regex before this comment took
+  // exactly one label before ".teamtailor.com", and a REGIONAL tenant puts the region between the
+  // tenant and the vendor domain as a second label. detectPortal threw, POST /resume/generate
+  // stored the packet portal_supported: false, and GET /applications/:id/submission 500'd on the
+  // unguarded call this same PR fixes in submissionRunner.ts's normalizedPacketAuditQuestions.
+  // Teamtailor serves at least two live regional shapes (<tenant>.na.teamtailor.com and
+  // <tenant>.eu.teamtailor.com); a 2-4 lowercase-letter bound admits both plus headroom for one not
+  // yet measured, without opening this entry to an arbitrary third-party subdomain that happens to
+  // be short.
+  //
+  // THE EXCLUSION STILL COVERS A REGIONAL HOST, with no separate check needed: `^(?!...)` anchors
+  // to the very START of the whole hostname, so "api.na.teamtailor.com" (api as tenant, na as
+  // region) fails the same negative lookahead that "api.teamtailor.com" (api as tenant, no region)
+  // always failed - the lookahead only ever looks at the label immediately after `^`, never at what
+  // follows it, so it excludes a reserved word in the tenant position whether or not a region comes
+  // after.
+  teamtailor: /^(?!(?:www|app|api|partner|docs|support|careers)\.)[^.]+(?:\.[a-z]{2,4})?\.teamtailor\.com$/i,
   // Personio tenants use {tenant}.jobs.personio.de or .com. Requiring the jobs label prevents a
   // company or employee product on another Personio host from being mistaken for an application.
   personio: /^[a-z0-9-]+\.jobs\.personio\.(?:de|com)$/i,
