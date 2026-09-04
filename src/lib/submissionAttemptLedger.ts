@@ -170,6 +170,14 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 export const SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 3 * 60 * 1000;
 export const ORPHAN_ATTRIBUTION_OPENING_EVIDENCE = 'applicant_attributed_orphan_opening';
 export const ORPHAN_ATTRIBUTION_CONFIRMATION_EVIDENCE = 'applicant_attributed_orphan_confirmation';
+/** The shared evidence code for a `not_sent_proven` fact written because the immutable event
+ * vocabulary alone proves an attempt never reached the employer boundary - exactly what
+ * attemptNeverReachedEmployer decides. Two call sites write this fact for two different triggers
+ * (a live claim expiring pre-boundary in repairExpiredAttendedHandoffClaim, and a claim that has
+ * already moved on to a different attempt in abandonedAttemptClosure.ts), and both name the same
+ * evidence so a reader never has to reconcile two spellings of one fact. Their event ids stay
+ * distinct through their own factKey. */
+export const ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE = 'attempt_never_reached_employer';
 
 /** Stable idempotency id for one immutable fact about one attempt. */
 export function submissionAttemptEventId(

@@ -50,6 +50,7 @@ import { generated_resumes } from '../db/schema';
 import { readApplicationReview } from './applicationReview';
 import {
   appendSubmissionAttemptEvent,
+  ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
   attemptNeverReachedEmployer,
   groupByAttempt,
   submissionAttemptBindingFromEvent,
@@ -92,8 +93,8 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
   return true;
 }
 
-/** The immutable fact this closure writes, kept next to the rule that licenses it. */
-export const ABANDONED_ATTEMPT_CLOSURE_EVIDENCE = 'attempt_never_reached_employer';
+/** This closure's own factKey for the shared ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE fact, so its
+ * event id never collides with repairExpiredAttendedHandoffClaim's write of the same evidence. */
 export const ABANDONED_ATTEMPT_CLOSURE_FACT_KEY = 'abandoned-pre-boundary-attempt';
 
 
@@ -155,7 +156,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
       ),
       eventKind: 'not_sent_proven',
       proofKind: 'typed_pre_click_stop',
-      evidenceCode: ABANDONED_ATTEMPT_CLOSURE_EVIDENCE,
+      evidenceCode: ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
     }, { executor: input.executor });
     const reread = (await submissionAttemptEventsForUser(input.userId, { executor: input.executor }))
       .filter((event) => event.attempt_id === attemptId);

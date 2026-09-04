@@ -149,6 +149,7 @@ import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
 import { canonicalApplicationForNewPacketAttempt } from '../lib/canonicalPacketBinding';
 import {
   appendSubmissionAttemptEvent,
+  ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
   attemptNeverReachedEmployer,
   authorizeFinalSubmissionBoundary,
   freezePostingIdentity,
@@ -718,7 +719,7 @@ async function repairExpiredAttendedHandoffClaim(
         eventId: submissionAttemptEventId(opening.attempt_id, 'not_sent_proven', 'never-reached-employer'),
         eventKind: 'not_sent_proven',
         proofKind: 'typed_pre_click_stop',
-        evidenceCode: 'attempt_never_reached_employer',
+        evidenceCode: ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
       }, { executor: tx });
       return { row: locked, review: released, disposition: 'never_reached' as const };
     }
