@@ -9018,7 +9018,28 @@ async function prepareManagedAttendedAccountGate(
  * that says what that packet's questions are. */
 export function normalizedPacketAuditQuestions(review: ApplicationReviewState) {
   if (!review.portal_url) return review.questions;
-  const portal = detectPortal(review.portal_url);
+  /* AN UNSUPPORTED portal_url REACHES THIS FUNCTION TOO, and has to leave it without throwing.
+   *
+   * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com: "Fill application" -> "Tailor resume
+   * first" against https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance
+   * built a packet with portal_url set and portal_supported: false (a regional Teamtailor tenant -
+   * HOSTS.teamtailor in lib/portalSubmission.ts matches only a single label before ".teamtailor.com",
+   * so "covenanthouseinternational.na.teamtailor.com" matches no HOSTS entry at all). GET
+   * /applications/:id/submission calls this unconditionally through
+   * resolvePacketAuditQuestionFixpoint on every dashboard poll, and detectPortal is documented to
+   * THROW on exactly this shape ("correct for the runner but useless everywhere else" - see
+   * isPortalSupported's own header two functions above in lib/portalSubmission.ts): an uncaught
+   * "Litos cannot fill in this company's application page yet" turned a routine read of a freshly
+   * tailored, never-sent packet into a 500 with no portal-specific control shape to normalize
+   * against anyway. GET /resume/history's own equivalent (refreshedHistorySpec in routes/resume.ts)
+   * already guards this exact call with isPortalSupported; this sibling reader had the same call
+   * unguarded. */
+  let portal: SupportedPortal;
+  try {
+    portal = detectPortal(review.portal_url);
+  } catch {
+    return review.questions;
+  }
   return normalizeStoredPortalQuestions(review.questions, portal);
 }
 

@@ -1046,6 +1046,83 @@ test('CBS legacy Recruitee phone produces one normalized audit and acknowledgeme
   );
 });
 
+/* GET /applications/:id/submission MUST NOT 500 ON A PORTAL detectPortal CANNOT CLASSIFY.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com, packet
+ * c24e48a2-06b1-4a01-989f-b6c2c5719f18: "Fill application" -> "Tailor resume first" against
+ * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance built a packet
+ * with portal_url set and portal_supported: false. HOSTS.teamtailor (lib/portalSubmission.ts)
+ * matches only a single label before ".teamtailor.com" ("fully.teamtailor.com",
+ * "flanks.teamtailor.com"), so this regional Teamtailor tenant's two-label host
+ * ("covenanthouseinternational.na.teamtailor.com") matches no HOSTS entry at all and detectPortal
+ * throws for it - correctly, by isPortalSupported's own header, for the runner. But
+ * normalizedPacketAuditQuestions called detectPortal on every portal_url unconditionally, with no
+ * isPortalSupported guard, and GET /submission's resolvePacketAuditQuestionFixpoint calls it on
+ * every dashboard poll: a routine read of a freshly tailored, never-sent packet turned into a
+ * repeatable 500 the moment the URL happened to be a regional tenant. GET /resume/history's own
+ * equivalent (refreshedHistorySpec, routes/resume.ts) already guards this exact call with
+ * isPortalSupported; this sibling reader had the same call unguarded. */
+test('detectPortal throws for a regional Teamtailor tenant HOSTS.teamtailor does not match', () => {
+  assert.throws(
+    () => detectPortal('https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance'),
+    /cannot fill in this company/,
+  );
+});
+
+test('normalizedPacketAuditQuestions falls back to the stored questions when detectPortal cannot classify the portal', () => {
+  const review: ApplicationReviewState = {
+    jd_text: 'Support the finance team at Covenant House International.',
+    role: 'Intern, Finance',
+    portal_url: 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance',
+    ats_name: 'teamtailor',
+    portal_supported: false,
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'cover-letter',
+      question: 'Cover letter',
+      answer: '',
+      kind: 'essay',
+      required: false,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  assert.deepEqual(normalizedPacketAuditQuestions(review), review.questions);
+});
+
+test('resolvePacketAuditQuestionFixpoint does not throw for a freshly tailored packet on an unclassifiable portal', () => {
+  const review: ApplicationReviewState = {
+    jd_text: 'Support the finance team at Covenant House International.',
+    role: 'Intern, Finance',
+    portal_url: 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance',
+    ats_name: 'teamtailor',
+    portal_supported: false,
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'Covenant House International', role: 'Intern, Finance' },
+  } as ResumeRow;
+  const profile = {} as ApplicationProfileLike;
+  let questions: ApplicationReviewQuestion[] | undefined;
+  assert.doesNotThrow(() => {
+    questions = resolvePacketAuditQuestionFixpoint(
+      review,
+      profile,
+      applicationContextForQuestionResolution(row, review),
+      undefined,
+      undefined,
+      new Date('2026-09-04T20:54:00.000Z'),
+    );
+  });
+  assert.deepEqual(questions, []);
+});
+
 /* GET /applications/:id/submission MUST REFLECT A CLOSED-CHOICE ANSWER PUT /review/answers PERSISTED.
  *
  * Measured live on the Mytos Lever packet (application 55de7c9e, generated_resumes row 16f1c744,
