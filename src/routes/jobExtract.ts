@@ -277,7 +277,46 @@ export async function findMonitoredJobDescription(
   return undefined;
 }
 
-export async function jobExtractRoutes(fastify: FastifyInstance) {
+/**
+ * Every out-of-process step POST /jobs/extract reaches, overridable for tests (2026-09-04 review
+ * round 1, finding 5). Every real caller (src/index.ts's own `fastify.register(jobExtractRoutes)`)
+ * passes no second argument, so every default below - the real requireAuth, the real allowHourly,
+ * the real fetchJsonLdJobDescription/fetchRecruiteeJobDescription/runManagedBrowser - is exactly
+ * what runs in production; this parameter changes nothing about that.
+ *
+ * WHY THIS EXISTS AT ALL rather than a test mocking the imported functions directly: this project
+ * runs its TypeScript as genuine ESM (confirmed live 2026-09-04 - a namespace import's own exported
+ * bindings are non-configurable accessor properties, `Object.getOwnPropertyDescriptor` shows a
+ * getter with no `value`), so `mock.method` - which reads a plain data-property `value` - cannot
+ * patch a bare function export the way it already patches `db.select` elsewhere in this codebase's
+ * own tests (`db` is a mutable OBJECT VALUE; mutating one of its properties is unrelated to the
+ * import BINDING immutability ESM actually enforces). `mock.module` is the newer API built for
+ * exactly this, but it requires `--experimental-test-module-mocks`, a flag neither this repo's own
+ * `npm test` script nor this task's own test command passes. A small, optional, additive
+ * dependency-injection seam - the same shape fetchJsonLdJobDescription and
+ * fetchRecruiteeJobDescription already use for their own `fetchImpl`/`resolveHost` test-only
+ * overrides (finding 1) - sidesteps the whole question rather than fighting it.
+ */
+export type JobExtractRouteDependencies = {
+  requireAuthHook?: typeof requireAuth;
+  allowHourlyFn?: typeof allowHourly;
+  fetchJsonLdJobDescriptionFn?: typeof fetchJsonLdJobDescription;
+  fetchRecruiteeJobDescriptionFn?: typeof fetchRecruiteeJobDescription;
+  runManagedBrowserFn?: typeof runManagedBrowser;
+  isBrowserbaseConfiguredFn?: typeof isBrowserbaseConfigured;
+  isManagedStratusProviderFn?: typeof isManagedStratusProvider;
+};
+
+export async function jobExtractRoutes(fastify: FastifyInstance, deps: JobExtractRouteDependencies = {}) {
+  const {
+    requireAuthHook = requireAuth,
+    allowHourlyFn = allowHourly,
+    fetchJsonLdJobDescriptionFn = fetchJsonLdJobDescription,
+    fetchRecruiteeJobDescriptionFn = fetchRecruiteeJobDescription,
+    runManagedBrowserFn = runManagedBrowser,
+    isBrowserbaseConfiguredFn = isBrowserbaseConfigured,
+    isManagedStratusProviderFn = isManagedStratusProvider,
+  } = deps;
   // POST /jobs/extract - given a posting URL, first answer from the monitored jobs inventory when
   // the URL canonically matches a posting the monitor already holds (see
   // findMonitoredJobDescription above); then, host-agnostically, try a `JobPosting` JSON-LD block
@@ -295,7 +334,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
   // several seconds of render delay before extracting - some SPA renders this run cannot reach
   // (shadow DOM, virtualization, or something else opaque to the managed browser). Callers MUST
   // treat a 502 here as "fall back to the manual paste field," not as a bug to keep chasing.
-  fastify.post('/jobs/extract', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.post('/jobs/extract', { preHandler: requireAuthHook }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
 
     let body: z.infer<typeof jobExtractBodySchema>;
@@ -310,7 +349,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Job URL must use HTTPS' });
     }
 
-    if (!(await allowHourly(userId, 'jobExtract', LIMITS.perHour.jobExtract))) {
+    if (!(await allowHourlyFn(userId, 'jobExtract', LIMITS.perHour.jobExtract))) {
       return rateLimitedReply(reply);
     }
 
@@ -399,7 +438,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
        body.job_url; nothing here is ever what gets stored as portal_url. */
     let jsonLdJobPosting: Awaited<ReturnType<typeof fetchJsonLdJobDescription>>;
     try {
-      jsonLdJobPosting = await fetchJsonLdJobDescription(body.job_url);
+      jsonLdJobPosting = await fetchJsonLdJobDescriptionFn(body.job_url);
     } catch (err) {
       fastify.log.warn(
         { err, userId, job_url: body.job_url },
@@ -456,7 +495,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
        hit. */
     let recruitee: Awaited<ReturnType<typeof fetchRecruiteeJobDescription>>;
     try {
-      recruitee = await fetchRecruiteeJobDescription(body.job_url);
+      recruitee = await fetchRecruiteeJobDescriptionFn(body.job_url);
     } catch (err) {
       fastify.log.warn(
         { err, userId, job_url: body.job_url },
@@ -489,7 +528,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       );
     }
 
-    if (!isBrowserbaseConfigured() && !isManagedStratusProvider()) {
+    if (!isBrowserbaseConfiguredFn() && !isManagedStratusProviderFn()) {
       return reply.status(503).send({
         error: 'Job description extraction is not configured on this deployment.',
         code: 'PORTAL_RUNNER_NOT_CONFIGURED',
@@ -510,7 +549,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       // A selector that can never match forces waitForSelector to burn its FULL timeout before
       // 'optional' lets the run continue - a deterministic render-delay that does not depend on
       // guessing any site's heading markup.
-      result = await runManagedBrowser(extractionUrl, [
+      result = await runManagedBrowserFn(extractionUrl, [
         { type: 'waitForSelector', selector: '.litos-jd-extract-render-delay-noop', timeout: 5000, optional: true },
         { type: 'extract', selector: 'body' },
       ]);
