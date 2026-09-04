@@ -17,17 +17,60 @@
  *      happens to quote or discuss a `<script>` tag) - the non-greedy capture truncates there, before
  *      the block's real end, and the truncated prefix is not valid JSON.
  *
- * FIX: match the open tag's `type` attribute with an optional `;`-led suffix, then scan every
- * SUBSEQUENT `</script` occurrence in the document as a CANDIDATE end position (nearest first) and
- * accept the first one whose captured span actually parses as JSON - a strict parse first, then the
- * existing control-character repair (sanitizeControlCharactersInJsonStrings below, needed for
- * Teamtailor's own raw-control-character defect - see jsonLdJobDescription.ts's header) on failure.
- * A block with no candidate span that ever parses is skipped, exactly like the old catch-and-continue
- * behavior - this only widens what counts as a MATCH, it never accepts something invalid.
+ * Round 1's fix for both: match the open tag's `type` attribute with an optional `;`-led suffix, then
+ * treat every SUBSEQUENT `</script` occurrence in the document as a CANDIDATE end position (nearest
+ * first) and accept the first one whose captured span actually parses as JSON - a strict parse first,
+ * then the existing control-character repair (sanitizeControlCharactersInJsonStrings below, needed
+ * for Teamtailor's own raw-control-character defect - see jsonLdJobDescription.ts's header) on
+ * failure. A block with no candidate span that ever parses is skipped, exactly like the old
+ * catch-and-continue behavior - this only widens what counts as a MATCH, it never accepts something
+ * invalid.
+ *
+ * A THIRD DEFECT (2026-09-04, review round 2) in that very fix: "every SUBSEQUENT `</script`
+ * occurrence" is unbounded, and each candidate is JSON.parse-d (twice - see parseJsonLdCandidate)
+ * over an EVER-GROWING slice, so the true cost is worse than quadratic once JSON.parse's own cost is
+ * counted and not just the candidate count. A single open tag followed by one unterminated JSON
+ * string packed with `</script>` repeats turns every repeat into a full re-scan-and-reparse of
+ * everything before it - synchronous, blocking the whole Node process. The route this feeds
+ * (jobExtract, recruiteeJobDescription) accepts a user-supplied URL, so a hostile page controls the
+ * input directly. MEASURED against one MAX_HTML_BYTES (200,000-byte) document built from a single
+ * open tag plus a single unterminated JSON string of `</script>` repeats:
+ *
+ *     50 KB  ->  2.9s
+ *     100 KB -> 23s
+ *     200 KB -> 49.7s
+ *
+ * FIX: a block's real end can be found in ONE forward pass with no re-parsing at all, because valid
+ * JSON never places a bare `<` outside a string - nearestScriptCloseOutsideString below tracks JSON
+ * string/escape state exactly like sanitizeControlCharactersInJsonStrings already does, and returns
+ * the nearest `</script` that occurs OUTSIDE a string. That is provably the block's true end for any
+ * well-formed candidate, found in a single scan, parsed exactly once. Only a block whose one primary
+ * candidate fails to parse - genuinely malformed content, not merely a `</script` sequence quoted
+ * inside a string - falls back to trying a few more literal `</script` occurrences the way round 1
+ * did, but now hard-capped so a hostile document can no longer turn that fallback back into the same
+ * blow-up:
+ *
+ *   - at most MAX_CANDIDATE_ENDS_PER_OPEN_TAG (8) candidate end positions are ever tried for one open
+ *     tag, including the primary one - generous for any real posting, which needs exactly one;
+ *   - at most MAX_OPEN_TAGS_PER_DOCUMENT (32) open tags are ever scanned per document - a real
+ *     posting carries a handful of JSON-LD blocks at most (this file's own tests read live fixtures
+ *     whose JobPosting block is 2.4 KB and 9.5 KB respectively - one block each);
+ *   - a candidate span longer than MAX_CANDIDATE_SPAN_BYTES (50,000) is skipped without ever reaching
+ *     JSON.parse - over five times either real fixture above, and still five times smaller than the
+ *     50 KB input that alone already cost 2.9s under the old algorithm.
+ *
+ * A block with no candidate span that ever parses is still skipped, not thrown, exactly as round 1 -
+ * these caps only bound the COST of looking, they never change which well-formed block is found.
  */
 
 const SCRIPT_OPEN_TAG_RE = /<script\b[^>]*\btype\s*=\s*["']application\/ld\+json(?:\s*;[^"']*)?["'][^>]*>/gi;
 const SCRIPT_CLOSE_TAG_RE = /<\/script\s*>/gi;
+const CLOSE_TAG_WHITESPACE_RE = /\s/;
+
+/** Hard caps closing the round-2 DoS documented above - none is ever reached by a real posting. */
+export const MAX_OPEN_TAGS_PER_DOCUMENT = 32;
+export const MAX_CANDIDATE_ENDS_PER_OPEN_TAG = 8;
+export const MAX_CANDIDATE_SPAN_BYTES = 50_000;
 
 /**
  * Escapes bare control characters (U+0000-U+001F) found INSIDE a JSON string literal, leaving
@@ -102,12 +145,56 @@ function parseJsonLdCandidate(text: string): unknown {
 }
 
 /**
+ * The length of a `</script` close tag - case-insensitively, with any amount of whitespace before
+ * the closing `>`, the same shape SCRIPT_CLOSE_TAG_RE matches - starting EXACTLY at `index`, or
+ * `undefined` if none starts there. Hand-rolled rather than re-testing the shared regex at one
+ * position so the forward scan below never allocates or runs a regex per character.
+ */
+function scriptCloseTagLengthAt(html: string, index: number): number | undefined {
+  if (html[index] !== '<' || html[index + 1] !== '/') return undefined;
+  if (html.slice(index + 2, index + 8).toLowerCase() !== 'script') return undefined;
+  let i = index + 8;
+  while (CLOSE_TAG_WHITESPACE_RE.test(html[i] ?? '')) i += 1;
+  return html[i] === '>' ? i + 1 - index : undefined;
+}
+
+/**
+ * The index of the nearest `</script` close tag at or after `from` and before `limit` that occurs
+ * OUTSIDE a JSON string, or `undefined` if none does. Tracks JSON string/escape state exactly like
+ * sanitizeControlCharactersInJsonStrings above (a `"` toggles the state unless it was itself
+ * escaped), so a `</script` sequence embedded inside the block's own JSON string content - raw, or
+ * backslash-escaped as `<\/script` - is walked straight through rather than mistaken for the block's
+ * end. Because valid JSON never places a bare `<` outside a string, the first such occurrence is
+ * provably the block's real close tag whenever the content between `from` and it is well-formed
+ * JSON - found in one linear pass, with no candidate ever re-tried.
+ */
+function nearestScriptCloseOutsideString(html: string, from: number, limit: number): number | undefined {
+  let inString = false;
+  let escaped = false;
+  const end = Math.min(html.length, limit);
+  for (let i = from; i < end; i += 1) {
+    const ch = html[i];
+    if (inString) {
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '<' && scriptCloseTagLengthAt(html, i) !== undefined) return i;
+  }
+  return undefined;
+}
+
+/**
  * Every successfully parsed `<script type="application/ld+json">` block on `html`, in document
- * order. Each open tag is matched once; for it, every SUBSEQUENT `</script` occurrence in the
- * document is tried as a candidate end position (nearest first) until one parses, so a literal
- * `</script` sequence embedded inside the block's own JSON string content (see this file's header)
- * cannot truncate a real block early. A block with no candidate span that ever parses is skipped, not
- * thrown - the same best-effort contract the two callers already have for a malformed block.
+ * order, up to MAX_OPEN_TAGS_PER_DOCUMENT open tags. For each, nearestScriptCloseOutsideString finds
+ * the block's true end in one linear pass and it is parsed exactly once; only if that fails to parse
+ * does a bounded fallback try a few more literal `</script` occurrences, nearest first, the way
+ * review round 1 did - capped at MAX_CANDIDATE_ENDS_PER_OPEN_TAG total and MAX_CANDIDATE_SPAN_BYTES
+ * per candidate. See this file's header for why (the round-2 DoS) and the measured numbers behind
+ * each cap. A block with no candidate span that ever parses is skipped, not thrown - the same
+ * best-effort contract the two callers already have for a malformed block.
  */
 export function parsedJsonLdScriptBlocks(html: string): unknown[] {
   const results: unknown[] = [];
@@ -116,20 +203,41 @@ export function parsedJsonLdScriptBlocks(html: string): unknown[] {
   // `lastIndex` - the same reason each caller's own former scan built its regex function-locally.
   const openPattern = new RegExp(SCRIPT_OPEN_TAG_RE.source, SCRIPT_OPEN_TAG_RE.flags);
   let openMatch: RegExpExecArray | null;
+  let openTagsSeen = 0;
   // eslint-disable-next-line no-cond-assign -- straightforward regex scan
-  while ((openMatch = openPattern.exec(html))) {
+  while (openTagsSeen < MAX_OPEN_TAGS_PER_DOCUMENT && (openMatch = openPattern.exec(html))) {
+    openTagsSeen += 1;
     const contentStart = openMatch.index + openMatch[0].length;
-    const closePattern = new RegExp(SCRIPT_CLOSE_TAG_RE.source, SCRIPT_CLOSE_TAG_RE.flags);
-    closePattern.lastIndex = contentStart;
-    let closeMatch: RegExpExecArray | null;
+    const spanLimit = contentStart + MAX_CANDIDATE_SPAN_BYTES;
     let matchedEnd: number | undefined;
-    // eslint-disable-next-line no-cond-assign -- straightforward regex scan
-    while ((closeMatch = closePattern.exec(html))) {
-      const parsed = parseJsonLdCandidate(html.slice(contentStart, closeMatch.index));
-      if (parsed !== undefined) {
-        results.push(parsed);
-        matchedEnd = closeMatch.index + closeMatch[0].length;
-        break;
+
+    const primaryClose = nearestScriptCloseOutsideString(html, contentStart, spanLimit);
+    if (primaryClose !== undefined) {
+      const primaryCloseLen = scriptCloseTagLengthAt(html, primaryClose)!;
+      const primaryParsed = parseJsonLdCandidate(html.slice(contentStart, primaryClose));
+      if (primaryParsed !== undefined) {
+        results.push(primaryParsed);
+        matchedEnd = primaryClose + primaryCloseLen;
+      } else {
+        // The one candidate a well-formed block would ever need failed to parse - genuinely
+        // malformed content, not just a `</script` quoted inside a string. Bounded fallback: a few
+        // more literal `</script` occurrences, nearest first, capped so this can no longer become
+        // the round-2 blow-up (see header).
+        const closePattern = new RegExp(SCRIPT_CLOSE_TAG_RE.source, SCRIPT_CLOSE_TAG_RE.flags);
+        closePattern.lastIndex = primaryClose + primaryCloseLen;
+        let candidatesTried = 1; // the primary candidate above already counts as one
+        let closeMatch: RegExpExecArray | null;
+        // eslint-disable-next-line no-cond-assign -- straightforward regex scan
+        while (candidatesTried < MAX_CANDIDATE_ENDS_PER_OPEN_TAG && (closeMatch = closePattern.exec(html))) {
+          if (closeMatch.index > spanLimit) break;
+          candidatesTried += 1;
+          const parsed = parseJsonLdCandidate(html.slice(contentStart, closeMatch.index));
+          if (parsed !== undefined) {
+            results.push(parsed);
+            matchedEnd = closeMatch.index + closeMatch[0].length;
+            break;
+          }
+        }
       }
     }
     // No candidate span ever parsed (or the script block is never closed at all): resume scanning
