@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../db';
-import { lockSubmissionAttemptUser } from './submissionAttemptLedger';
+import { lockSubmissionAttemptUser, lockSubmissionAttemptUserShared } from './submissionAttemptLedger';
 import { DATABASE_PROBE_TIMEOUT_MS } from './healthProbe';
 
 export const SUBMISSION_AUTHORITY_SCHEMA_VERSION = 'submission-authority-v1' as const;
@@ -41,16 +41,27 @@ function revisionFromResult(
   return parseSubmissionAuthorityRevision(raw);
 }
 
+/** How a caller holds the ledger key while it reads. See lockSubmissionAttemptUserShared. */
+export type SubmissionAuthorityLockMode = 'exclusive' | 'shared';
+
 /**
  * Read the revision while owning the same transaction lock as the authority snapshot.
  * The executor must be an active transaction. The lock is reentrant for callers that acquired it
  * before reading the projection, which is the required ordering for a passive snapshot.
+ *
+ * `lockMode: 'shared'` is for a caller that only READS - it still cannot straddle a revision bump,
+ * because shared conflicts with the exclusive form every writer and the revision trigger take, but
+ * it no longer serializes against other readers of the same account. The insert below is an
+ * idempotent `on conflict do nothing` seed of revision 0 on a table the revision trigger does not
+ * cover, so it neither needs exclusivity nor fires the guard.
  */
 export async function readSubmissionAuthorityRevision(
   userId: string,
   executor: SubmissionAuthorityRevisionExecutor,
+  options: { lockMode?: SubmissionAuthorityLockMode } = {},
 ): Promise<SubmissionAuthorityRevision> {
-  await lockSubmissionAttemptUser(executor, userId);
+  if (options.lockMode === 'shared') await lockSubmissionAttemptUserShared(executor, userId);
+  else await lockSubmissionAttemptUser(executor, userId);
   await executor.execute(sql`
     insert into submission_authority_revisions (user_id, schema_version, revision)
     values (${userId}::uuid, ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}, 0)

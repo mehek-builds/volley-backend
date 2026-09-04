@@ -40,6 +40,7 @@ import {
   freezePostingIdentity,
   frozenPostingIdentityFromEvent,
   lockSubmissionAttemptUser,
+  lockSubmissionAttemptUserShared,
   submissionAttemptRetrySafety,
   submissionAttemptRetrySafetyForPacketEvents,
   type SubmissionAttemptRetrySafety,
@@ -49,6 +50,7 @@ import {
 import {
   readSubmissionAuthorityRevision,
   SUBMISSION_AUTHORITY_SCHEMA_VERSION,
+  type SubmissionAuthorityLockMode,
   type SubmissionAuthorityRevision,
 } from './submissionAuthorityRevision';
 import { unsupportedEmailConfirmationEvidenceMatches } from './unsupportedEmailReceipt';
@@ -1835,6 +1837,10 @@ export async function authoritativeSubmissionProjection(input: {
   executor?: ProjectionExecutor;
   /** A revision read after acquiring this user's lock in this exact transaction. */
   lockedRevision?: SubmissionAuthorityRevision;
+  /* SHARED on the passive reader path, exclusive for a caller inside its own critical section.
+   * Never set this from outside: the passive branch below is the only thing that may choose it,
+   * and it chooses shared because it does not write. See lockSubmissionAttemptUserShared. */
+  lockMode?: SubmissionAuthorityLockMode;
 }): Promise<AuthoritativeSubmissionProjectionResult> {
   if (!input.executor) {
     if (input.lockedRevision !== undefined) {
@@ -1849,14 +1855,22 @@ export async function authoritativeSubmissionProjection(input: {
        * holding a pool client the entire time, which is how a 280s fill turned into a 25s
        * /resume/history and 7.7s on every unrelated route. A 55P03 out of this transaction is
        * caught by the caller, which degrades to no envelopes - the direction resume.ts already
-       * declares safe, since a packet without an envelope stays fail-closed at the send gate. */
+       * declares safe, since a packet without an envelope stays fail-closed at the send gate.
+       *
+       * AND IT TAKES THE KEY SHARED, which is the whole of the 2026-09-04 read-only-dashboard fix.
+       * This snapshot reads the entire account, the packet page issues it every 2.5 seconds, and
+       * held exclusively those passes queued behind each other until the key was never free and
+       * every write on the account answered 503. Shared readers do not exclude each other and
+       * still cannot straddle a revision bump. See lockSubmissionAttemptUserShared. */
       await tx.execute(sql`set local lock_timeout = '5000ms'`);
-      return authoritativeSubmissionProjection({ ...input, executor: tx });
+      return authoritativeSubmissionProjection({ ...input, executor: tx, lockMode: 'shared' });
     });
   }
-  await lockSubmissionAttemptUser(input.executor, input.userId);
+  const lockMode: SubmissionAuthorityLockMode = input.lockMode ?? 'exclusive';
+  if (lockMode === 'shared') await lockSubmissionAttemptUserShared(input.executor, input.userId);
+  else await lockSubmissionAttemptUser(input.executor, input.userId);
   const revision = input.lockedRevision
-    ?? await readSubmissionAuthorityRevision(input.userId, input.executor);
+    ?? await readSubmissionAuthorityRevision(input.userId, input.executor, { lockMode });
   const packetIds = uniqueStrings(input.packetIds);
   const applicationIds = uniqueStrings(input.applicationIds);
   if (packetIds.length === 0 && applicationIds.length === 0) {
