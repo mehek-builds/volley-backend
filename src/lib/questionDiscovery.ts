@@ -127,6 +127,15 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   gpa?: string;
   gpa_scale?: string;
   major?: string;
+  /**
+   * NOT ON THE STORED PROFILE TODAY. No onboarding question and no db/schema.ts column populate
+   * this - `major` is the only discipline fact the profile carries (see db/schema.ts, application
+   * profile table). Declared here only so the 'minor' case in resolveKnownAnswer has a real,
+   * typed absence to check rather than an invented one, the same way every other education field
+   * on this type declines when unset. See classifyFieldIntent's MINOR_QUESTION for why a label
+   * naming a minor must never fall through to `school` or `major` instead.
+   */
+  minor?: string;
   languages?: string[] | null;
   skills?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
@@ -3135,6 +3144,12 @@ const CURRENT_ENROLLMENT_QUESTION =
   /\bcurrently\s+enrolled\b|\bcurrent\s+student\b|\benrolled\s+in\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:school|college|university)\b/i;
 const MAJOR_QUESTION =
   /\bmajor\b|field of study|course of study|degree subject|\bdiscipline\b|\bcourse\b[^?]{0,80}\benrolled\b|\benrolled\b[^?]{0,80}\bcourse\b/i;
+/* THE MINOR, WHICH IS NOT THE MAJOR AND IS NOT THE SCHOOL.
+ *
+ * "field of study" is a phrase MAJOR_QUESTION treats as a major synonym, and "field of study -
+ * minor" contains it literally - without a rule ahead of MAJOR_QUESTION that phrasing would be
+ * answered with the stored major. See classifyFieldIntent for where this is consulted and why. */
+const MINOR_QUESTION = /\bminors?\b/i;
 const LANGUAGE_QUESTION =
   /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
 const PROGRAMMING_LANGUAGE_QUESTION =
@@ -3315,7 +3330,7 @@ export const WORK_AUTHORIZATION_DETAIL_QUESTION =
 const FUTURE_OR_OTHER_PROGRAMME_QUESTION =
   /\b(?:plan(?:ning)?\s+to\s+pursue|intend(?:ing)?\s+to\s+pursue|following\s+graduation|after\s+(?:you\s+)?(?:graduat\w+|completing)|further\s+education|additional\s+degree|next\s+degree|potential\s+(?:master|masters|ph\.?d|doctorate))\b/i;
 const CURRENT_PROGRAMME_KEYS = new Set<ProfileKey>([
-  'school', 'degree', 'major', 'graduation_date', 'graduation_month', 'graduation_year',
+  'school', 'degree', 'major', 'minor', 'graduation_date', 'graduation_month', 'graduation_year',
   'education_start_date', 'education_end_date', 'study_year', 'gpa', 'gpa_scale',
 ]);
 // "Please confirm the month and year of your high school graduation" is a DATE request wearing a
@@ -5646,7 +5661,7 @@ export type ProfileKey =
   | 'phone' | 'phone_country' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'other_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'current_employer' | 'most_recent_employer' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
-  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
+  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major' | 'minor'
   | 'education_start_date' | 'education_end_date'
   | 'languages' | 'onsite_commitment' | 'referral_source_default';
 
@@ -6014,6 +6029,29 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (/\bname\s+of\s+(?:the\s+|your\s+)?(?:(?:current(?:ly)?|most\s+recent|latest|last|previous|prior|attending|attended|graduated?|graduating|enrolled)\s+(?:or\s+)?){1,3}(?:school|university|college|institution)\b/i.test(l)
     && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
     && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
+  /* A LABEL NAMING THE MINOR IS NEITHER THE MAJOR NOR THE SCHOOL.
+   *
+   * MEASURED live on api.trylitos.com 2026-09-04, Belvedere Trading "Software Engineer Intern -
+   * Summer 2027" (Lever, packet c4413bff-5a08-423f-852c-5d60bd360f3b, account
+   * mehekmandal05@gmail.com). The discovered questions were, in order, "name of school ✱" and
+   * "school major", both answered correctly, then "school minor" - answered with the stored
+   * UNIVERSITY, stating a minor the applicant does not have. "school minor" matches none of the
+   * explicit school phrasings above (no select verb, no "name of", no participle), so it fell all
+   * the way to the bare-keyword school fallback below: SCHOOL_NOUN matches "school", and nothing
+   * before this line claims the label. The same collision reaches the major rule from the other
+   * side - "field of study - minor" contains the literal phrase MAJOR_QUESTION treats as a major
+   * synonym, so without a check here it would be answered "Computer Science" as if it were the
+   * major.
+   *
+   * Checked ahead of MAJOR_QUESTION and the school bare keyword for the same reason MAJOR_QUESTION
+   * is already checked ahead of that fallback - see "select your college major" above, and
+   * SCHOOL_ATTRIBUTE_QUALIFIER's own note that these two words are only ambiguous beside a school
+   * noun. There is no `minor` field on the stored profile: ApplicationProfileLike carries school,
+   * degree, major, gpa and gpa_scale for education and nothing else (see db/schema.ts - `major` is
+   * the only discipline column). The 'minor' case in resolveKnownAnswer is what actually declines,
+   * on that absence; this rule's only job is to keep every broader rule from guessing at a fact
+   * nobody stored. */
+  if (MINOR_QUESTION.test(l)) return 'minor';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (EDUCATION_ATTENDANCE_DATE_QUESTION.test(l)) {
@@ -6035,6 +6073,19 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
+  /* NOT hardened with SCHOOL_ATTRIBUTE_QUALIFIER the way the two explicit phrasings above are -
+   * tried, and reverted, because this bare keyword is exactly what "high school city", "high
+   * school gpa" and "high school degree" (see questionIsScopedToHighSchool's test) rely on
+   * resolving to 'school' in the first place: classifyField's own wrapper is what nulls them,
+   * by reading CURRENT_PROGRAMME_KEYS + questionIsScopedToHighSchool AFTER this function returns,
+   * and a label this branch refuses never reaches that gate at all. Adding the qualifier here
+   * (SCHOOL_ATTRIBUTE_QUALIFIER matches "city") took that safety net away from "high school city"
+   * and let it fall through to the address_city bare keyword instead - answered "Dubai" from a
+   * university profile that was never asked. MAJOR_QUESTION, the degree pattern and MINOR_QUESTION
+   * above already intercept every major/minor/degree label before it reaches here, which is what
+   * "mirror the major rule" actually means: an earlier, dedicated rule for the attribute, not a
+   * qualifier bolted onto this one. GPA is covered too, but from inside labelNamesProfileField
+   * itself (KEYWORD_SUBJECT_QUALIFIER, shared by every bare keyword in this file). */
   if (labelNamesProfileField(l, SCHOOL_NOUN)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
 
@@ -9001,6 +9052,12 @@ export function resolveKnownAnswer(
         const value = majorAnswer(ap);
         return value ? { value } : null;
       }
+    /* Always null today: `ap.minor` has nowhere to come from (see the field's own comment on
+     * ApplicationProfileLike). That is the decline this whole rule exists to produce - see
+     * MINOR_QUESTION in classifyFieldIntent for what it stops a minor-naming label from being
+     * misread as instead. */
+    case 'minor':
+      return ap.minor ? { value: ap.minor } : null;
     case 'languages':
       return languageAnswer(label, ap);
     default:

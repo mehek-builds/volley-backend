@@ -109,6 +109,13 @@ export type ResolvedProfileField = {
  * Intents whose answer is a fact already stored on the profile. A blocker naming one of these
  * is by definition a Litos defect rather than missing user data, which is what
  * profileBackedBlockerLabels reports on.
+ *
+ * 'minor' is deliberately NOT here despite being a PROFILE_BACKED_KEYS-shaped education intent.
+ * Every other member is a fact onboarding actually asks and db/schema.ts actually stores; a minor
+ * is neither (see ApplicationProfileLike's `minor` field comment in questionDiscovery.ts). Listing
+ * it would tell profileBackedBlockerLabels that an unanswered minor question is Litos's bug to
+ * fix, when it is really a fact Litos has never collected - the same distinction that keeps every
+ * self-declaration in db/schema.ts's onboarding block out of this set.
  */
 export const PROFILE_BACKED_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
   'phone_country',

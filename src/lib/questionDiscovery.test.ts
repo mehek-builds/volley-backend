@@ -4483,6 +4483,43 @@ test('a "select your school" label is classified, and its neighbours still are n
   assert.equal(classifyField('select your college major'), 'major');
 });
 
+/* THE DEFECT: MEASURED live on api.trylitos.com 2026-09-04, Belvedere Trading "Software Engineer
+ * Intern - Summer 2027" (Lever, packet c4413bff-5a08-423f-852c-5d60bd360f3b, account
+ * mehekmandal05@gmail.com). The discovered questions, in order: "name of school ✱" (answered
+ * "University of Southern California, Viterbi School of Engineering" - correct), "school major"
+ * (answered "Computer Science" - correct), then "school minor" (answered "University of Southern
+ * California, Viterbi School of Engineering" - WRONG: the applicant has no minor, and the profile
+ * carries only a school and a major). A school/university alias matched the word "school" before
+ * any rule recognising "minor" existed to decline it. Same class as the 2026-08-26 "name of your
+ * attending or graduated school" fix above, inverted: that one left a real school question
+ * unanswered, this one answers an unrelated question with someone else's field.
+ */
+test('a label naming the minor is never answered from the school or the major', () => {
+  const ap: ApplicationProfileLike = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    major: 'Computer Science',
+  };
+
+  for (const label of ['Minor', 'minor (if any)', 'school minor', 'Field of study - minor']) {
+    assert.equal(classifyField(label), 'minor', label);
+    assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
+  }
+
+  // Its neighbours, discovered on the same packet, are unaffected.
+  assert.equal(classifyField('name of school'), 'school');
+  assert.equal(classifyField('school'), 'school');
+  assert.equal(classifyField('school major'), 'major');
+  assert.deepEqual(resolveKnownAnswer('name of school', 'text', ap, undefined), { value: ap.school });
+  assert.deepEqual(resolveKnownAnswer('school', 'text', ap, undefined), { value: ap.school });
+  assert.deepEqual(resolveKnownAnswer('school major', 'text', ap, undefined), { value: ap.major });
+
+  // The decline is conditional, not hardcoded: a profile that DOES carry a minor is answered from
+  // it, the same shape as every other education field on ApplicationProfileLike. Nothing populates
+  // `minor` today (see its own comment on the type), but the rule itself does not assume that.
+  const withMinor: ApplicationProfileLike = { ...ap, minor: 'Data Science' };
+  assert.deepEqual(resolveKnownAnswer('school minor', 'text', withMinor, undefined), { value: 'Data Science' });
+});
+
 /* ---- one control, one answer, whatever the caller knows about its type ----
  *
  * Teamtailor welds the placeholder and the control's name attributes into the captured label, so
