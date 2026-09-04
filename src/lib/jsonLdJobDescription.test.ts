@@ -123,6 +123,27 @@ describe('unescapeDoubleEncodedHtml', () => {
       'Just plain text, nothing HTML about it.',
     );
   });
+
+  /* Review round 1, finding 2: the reviewer's teaching-prose case. This sentence merely MENTIONS
+   * escaped tags mid-string - it is not a description that was itself HTML-escaped, and the earlier
+   * unanchored pattern could not tell the two apart. Unescaping it would have turned "div" and "span"
+   * into live tags that htmlToText's tag-stripping regexes then delete, corrupting a sentence that
+   * was never markup at all - so the whole sentence, escaped entities included, must survive intact. */
+  test('leaves teaching prose that merely mentions escaped tags untouched, rather than corrupting it (finding 2)', () => {
+    const sentence = 'In HTML, &lt;div&gt; is a block container while &lt;span&gt; is inline.';
+    assert.equal(unescapeDoubleEncodedHtml(sentence), sentence);
+  });
+
+  test('still decodes when the SAME kind of mention opens the description (starts with an escaped tag)', () => {
+    // The one shape that must still decode: an escaped tag at the very start is the signal a
+    // genuinely-escaped fragment gives (Teamtailor's own shape, tested above) - a leading tag mention
+    // in otherwise-plain prose is indistinguishable from that at this function's altitude, and this
+    // pins that this is a deliberate, narrow trade-off rather than an oversight.
+    assert.equal(
+      unescapeDoubleEncodedHtml('&lt;div&gt; is a block container.'),
+      '<div> is a block container.',
+    );
+  });
 });
 
 describe('jobPostingCandidatesFromHtml', () => {

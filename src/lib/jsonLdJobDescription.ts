@@ -138,7 +138,17 @@ export function sanitizeControlCharactersInJsonStrings(raw: string): string {
 }
 
 const RAW_HTML_TAG_PATTERN = /<\/?[a-zA-Z][a-zA-Z0-9]*[\s/>]/;
-const ESCAPED_HTML_TAG_PATTERN = /&lt;\/?[a-zA-Z][a-zA-Z0-9]*(?:&gt;|;|\s)/;
+// Anchored to the START of the text (2026-09-04 review round 1, finding 2): the earlier, unanchored
+// version (`&lt;\/?[a-zA-Z][a-zA-Z0-9]*(?:&gt;|;|\s)/`, tested with `.test()` anywhere in the string)
+// matched ordinary prose that merely MENTIONS an escaped tag - "In HTML, &lt;div&gt; is a block
+// container while &lt;span&gt; is inline." - and decodeHtmlEntities then unescaped the ENTIRE string,
+// turning those two mentions into live `<div>`/`<span>` text. htmlToText's tag-stripping regexes then
+// deleted "div" and "span" as if they were real markup, corrupting a sentence that was never HTML to
+// begin with. A genuinely HTML-escaped description (Teamtailor's own shape - this file's header)
+// STARTS with its outermost escaped tag; prose that only mentions one somewhere in the middle does
+// not. Requiring the match at the very start (allowing only leading whitespace) is what tells the two
+// apart.
+const ESCAPED_FRAGMENT_START_PATTERN = /^\s*&lt;(?:p|div|ul|ol|li|h[1-6]|br|strong|em|span)\b/i;
 
 /**
  * Reveals real HTML in a JSON-LD `description` that was itself HTML-escaped before being placed in
@@ -146,14 +156,19 @@ const ESCAPED_HTML_TAG_PATTERN = /&lt;\/?[a-zA-Z][a-zA-Z0-9]*(?:&gt;|;|\s)/;
  * JobPosting block (this file's header): `&lt;p&gt;...&lt;/p&gt;` literally, not a live `<p>` tag.
  * Handed straight to htmlToText, whose tag-boundary regexes only match a real `<`, that string reads
  * as one giant tagless paragraph - the same shape that made the ORIGINAL managed-browser render
- * fail for Recruitee. Decoding is gated on evidence of exactly this shape - text with a live tag
- * already (Recruitee's own JSON-LD, verified raw HTML on greenflux/envipco/curotec) is returned
- * untouched, and so is plain text with neither pattern - so this never double-decodes a description
- * that did not need it.
+ * fail for Recruitee. Decoding is gated on evidence that the description AS A WHOLE is an escaped
+ * HTML fragment - it starts with an escaped block/inline-structure tag AND carries no live `<` tag
+ * anywhere (RAW_HTML_TAG_PATTERN, checked first) - not merely that it contains an escaped-looking
+ * substring somewhere. Text with a live tag already (Recruitee's own JSON-LD, verified raw HTML on
+ * greenflux/envipco/curotec), plain text with neither pattern, and prose that only MENTIONS an
+ * escaped tag without opening with one (finding 2: "In HTML, &lt;div&gt; is a block container..." is
+ * not a description that was HTML-escaped, it is a sentence that happens to name a tag) are all
+ * returned untouched - so this never double-decodes a description that did not need it, and never
+ * decodes prose that was never markup at all.
  */
 export function unescapeDoubleEncodedHtml(value: string): string {
   if (RAW_HTML_TAG_PATTERN.test(value)) return value;
-  if (!ESCAPED_HTML_TAG_PATTERN.test(value)) return value;
+  if (!ESCAPED_FRAGMENT_START_PATTERN.test(value)) return value;
   return decodeHtmlEntities(value);
 }
 
