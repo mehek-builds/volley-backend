@@ -21,6 +21,7 @@ import {
   abandonedPreBoundaryAttemptIsClosable,
   type AbandonedAttemptClosurePacketReview,
 } from './abandonedAttemptClosure';
+import { STALLED_FILL_RUN_RELEASE_MS } from './stalledFillRunRelease';
 import {
   attemptNeverReachedEmployer,
   type SubmissionAttemptEventKind,
@@ -31,14 +32,30 @@ const ATTEMPT = '7b3c1e88-4a2d-4f19-9c50-2e6a7d41b0c3';
 const OTHER_ATTEMPT = 'e2f4a900-1c6b-4d83-8a17-5b0c93de7f24';
 const PACKET = '1d4c8113-6d99-4df8-9fcb-d6ae638e90bc';
 
+/* Fixtures default to a fixed date safely more than STALLED_FILL_RUN_RELEASE_MS in the past, so
+ * every test that does not care about the time margin (almost all of them) still clears it against
+ * the real clock without saying so. Tests that DO care pass their own created_at/observed_at and
+ * `now` explicitly - see "the time margin" below. */
+const FIXTURE_BASE_MS = new Date('2020-01-01T00:00:00.000Z').getTime();
+let fixtureSequence = 0;
+
 function event(
   kind: SubmissionAttemptEventKind,
   over: Partial<SubmissionAttemptEventRecord> = {},
 ): SubmissionAttemptEventRecord {
+  fixtureSequence += 1;
+  // Distinct and strictly increasing across calls, so submissionAttemptRetrySafety's sort (by
+  // created_at, then by id) and its ordering checks (e.g. "authorized before opened") both have
+  // real values to work with instead of crashing on `undefined.getTime()` / `undefined.localeCompare`.
+  const at = new Date(FIXTURE_BASE_MS + fixtureSequence * 1000);
   return {
+    id: `00000000-0000-0000-0000-${String(fixtureSequence).padStart(12, '0')}`,
     event_kind: kind,
     attempt_id: ATTEMPT,
     packet_id: PACKET,
+    source: 'managed_browser',
+    created_at: at,
+    observed_at: at,
     ...over,
   } as unknown as SubmissionAttemptEventRecord;
 }
@@ -156,6 +173,57 @@ describe('a legacy_backfill opening needs the packet review to prove it too', ()
         packet: { claimId: null, review },
       }),
       false,
+    );
+  });
+});
+
+describe('the time margin: a claim that just moved on could still be a live browser', () => {
+  /* Every other proof holds for this fixture - never reached the employer, packet claim dropped,
+   * benign review - so the bound below is the ONLY thing standing between it and closing. */
+  const OPENED_AT = new Date('2026-09-01T00:00:00.000Z');
+  const JUST_DROPPED = [event('attempt_opened', { created_at: OPENED_AT, observed_at: OPENED_AT })];
+  const AT_BOUND = OPENED_AT.getTime() + STALLED_FILL_RUN_RELEASE_MS;
+
+  test('well within the margin, it is not closable even though every other proof holds', () => {
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: JUST_DROPPED,
+        packet: NO_CLAIM,
+        now: OPENED_AT.getTime() + 60_000,
+      }),
+      false,
+    );
+  });
+
+  test('the edge is pinned in both directions, so the polarity cannot be flipped silently', () => {
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: JUST_DROPPED, packet: NO_CLAIM, now: AT_BOUND }),
+      false,
+      'exactly at the bound is not yet old enough',
+    );
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: JUST_DROPPED,
+        packet: NO_CLAIM,
+        now: AT_BOUND + 1,
+      }),
+      true,
+      'one millisecond past the bound, it is',
+    );
+  });
+
+  test('a legacy_backfill opening days old clears the margin with room to spare', () => {
+    /* The actual target: a migration-written row is days old by the time anything reads it, so this
+     * bound costs the real goal nothing. Uses the module default `now` (the real clock) rather than
+     * an explicit one, the same way every non-time-margin test above does. */
+    const daysOld = [event('attempt_opened', {
+      source: 'legacy_backfill',
+      created_at: new Date('2026-08-27T14:11:35.408Z'),
+      observed_at: new Date('2026-08-27T14:11:35.408Z'),
+    })];
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({ attemptEvents: daysOld, packet: NO_CLAIM }),
+      true,
     );
   });
 });

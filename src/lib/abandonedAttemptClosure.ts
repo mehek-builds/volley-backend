@@ -48,6 +48,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { generated_resumes } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
 import { employerMayHoldApplication, type StoredSendEvidence } from './managedSubmitOutcome';
+import { STALLED_FILL_RUN_RELEASE_MS } from './stalledFillRunRelease';
 import { reviewAnswerSaveDisposition } from './submissionSafety';
 import {
   appendSubmissionAttemptEvent,
@@ -111,10 +112,14 @@ function packetReviewProvesNoEmployerContact(review: AbandonedAttemptClosurePack
  * it - so pass `null` for that, and it refuses, exactly like every other shape this predicate is
  * unsure of. Only a packet the caller actually read - `{ claimId }` - may answer the liveness
  * question below.
+ *
+ * `now` is epoch milliseconds and defaults to the real clock; a caller supplies its own only to
+ * check both sides of the time margin below without waiting three hours for it.
  */
 export function abandonedPreBoundaryAttemptIsClosable(input: {
   attemptEvents: readonly SubmissionAttemptEventRecord[];
   packet: AbandonedAttemptClosurePacket | null;
+  now?: number;
 }): boolean {
   const events = input.attemptEvents;
   if (events.length === 0) return false;
@@ -139,6 +144,19 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
    * enough for a legacy_backfill opening, which carries only `attempt_opened` by construction of
    * the migration that wrote it rather than by observation of this run stopping pre-boundary. */
   if (!packetReviewProvesNoEmployerContact(input.packet.review)) return false;
+  /* THE TIME MARGIN. Dropping the claim only proves the run that opened THIS attempt is no longer
+   * the packet's live claim - it says nothing about whether that run's browser has actually
+   * finished exiting. Closing the instant the claim moves on would be the poll-kills-the-send
+   * defect the liveness discriminator above exists to avoid, reached from the other direction. The
+   * same bound stalledFillRunRelease.ts pays for a claim that is still live is paid here for a claim
+   * that has already gone: the opening has to be older than STALLED_FILL_RUN_RELEASE_MS before its
+   * age alone may stand in for "nothing is still running it". A legacy_backfill row is days old, so
+   * this costs the class of attempt this module exists for nothing. Compared as a deadline against
+   * `now`, matching stalledFillRunIsReleasable's own polarity, so the two cannot silently invert
+   * relative to each other. */
+  const opening = events.find((event) => event.event_kind === 'attempt_opened')!;
+  const now = input.now ?? Date.now();
+  if (!(opening.created_at.getTime() + STALLED_FILL_RUN_RELEASE_MS < now)) return false;
   return true;
 }
 
