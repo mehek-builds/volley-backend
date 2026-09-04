@@ -361,6 +361,52 @@ describe('fetchRecruiteeJobDescription', () => {
     assert.equal(result!.companyName, 'GreenFlux');
   });
 
+  /* Review round 1, finding 4: the shared parsedJsonLdScriptBlocks extractor (jsonLdScriptBlocks.ts)
+   * fixes the same two script-tag-finding defects here as in jsonLdJobDescription.ts, since both
+   * files now go through the one implementation. */
+  test('finds a JSON-LD block whose type attribute carries a charset parameter (finding 4)', async () => {
+    const html = `<!doctype html><html><head><script type="application/ld+json; charset=utf-8">${JSON.stringify(JSON_LD_FIXTURE)}</script></head><body></body></html>`;
+    const fetchImpl = mock.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url === 'https://greenflux.recruitee.com/o/senior-principal-software-engineer') return htmlResponse(html);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const result = await fetchRecruiteeJobDescription(
+      'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
+      fetchImpl as unknown as typeof fetch,
+      publicDns,
+    );
+    assert.ok(result, 'the charset-suffixed block must still be found');
+    assert.equal(result!.companyName, 'GreenFlux');
+    assert.equal(fetchImpl.mock.callCount(), 1, 'the JSON-LD block already answered; the API must not run');
+  });
+
+  test('does not truncate a JSON-LD block at a </script sequence embedded inside its own JSON string (finding 4)', async () => {
+    const postingWithEmbeddedScriptMention = {
+      ...JSON_LD_FIXTURE,
+      description: `${JSON_LD_FIXTURE.description as string}<p>Watch out for a stray </script> tag left in old templates.</p>`,
+    };
+    const html = htmlWithJsonLd(postingWithEmbeddedScriptMention);
+    // Confirms the fixture actually exercises the defect: the OLD non-greedy capture
+    // (`[\s\S]*?<\/script>`) would have stopped at the embedded `</script>` above, well short of the
+    // block's real closing tag, and that truncated prefix is not valid JSON on its own.
+    const naiveMatch = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+    assert.ok(naiveMatch, 'expected the naive pattern to find an (incorrectly truncated) match');
+    assert.throws(() => JSON.parse(naiveMatch![1]), 'the truncated prefix must not itself be valid JSON');
+    const fetchImpl = mock.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url === 'https://greenflux.recruitee.com/o/senior-principal-software-engineer') return htmlResponse(html);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    const result = await fetchRecruiteeJobDescription(
+      'https://greenflux.recruitee.com/o/senior-principal-software-engineer',
+      fetchImpl as unknown as typeof fetch,
+      publicDns,
+    );
+    assert.ok(result, 'the block must still parse past the embedded </script> sequence');
+    assert.ok(leadRequirementCandidates(result!.jdText).length > 0);
+  });
+
   /* SSRF (2026-09-04 review round 1, finding 1): fetchText now routes through
    * jobSourceLogoVerification.ts's fetchPublic instead of the global `fetch` - see this module's own
    * header for why a Recruitee-only host restriction was not protection enough on its own. */

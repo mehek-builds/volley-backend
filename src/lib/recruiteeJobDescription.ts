@@ -77,6 +77,7 @@
 import {
   fetchPublic, safeHttpsUrl, defaultResolveHost, MAX_HTML_BYTES, type ResolveHost,
 } from './jobSourceLogoVerification';
+import { parsedJsonLdScriptBlocks } from './jsonLdScriptBlocks';
 
 export type RecruiteeOfferUrlParts = {
   /** The tenant subdomain label, e.g. `gpr` for `gpr.recruitee.com`. */
@@ -187,20 +188,18 @@ type RecruiteeJsonLdJobPosting = {
   companyName?: string;
 };
 
-/** The `JobPosting` block schema.org markup, if the page carries one with a non-empty description. */
+/**
+ * The `JobPosting` block schema.org markup, if the page carries one with a non-empty description.
+ *
+ * Block-finding and JSON-parsing itself is parsedJsonLdScriptBlocks in jsonLdScriptBlocks.ts (shared
+ * with jsonLdJobDescription.ts's own reader, 2026-09-04 review round 1, finding 4) - this function's
+ * own job is only turning each parsed value into a JobPosting, first match wins. This reader gains
+ * the shared extractor's control-character repair as a side effect of sharing it (previously only
+ * jsonLdJobDescription.ts's own scan had it): a strictly wider net, never a narrower one, since that
+ * repair is a no-op for anything that already parses strictly.
+ */
 function jsonLdJobPostingFromHtml(html: string): RecruiteeJsonLdJobPosting | undefined {
-  // Function-local (not module-level) specifically because it carries `g` + `.exec` state: a
-  // shared regex here would let two concurrent requests interleave through the same `lastIndex`.
-  const scriptPattern = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-  let match: RegExpExecArray | null;
-  // eslint-disable-next-line no-cond-assign -- straightforward regex scan
-  while ((match = scriptPattern.exec(html))) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(match[1]);
-    } catch {
-      continue;
-    }
+  for (const parsed of parsedJsonLdScriptBlocks(html)) {
     const candidates = Array.isArray(parsed) ? parsed : [parsed];
     for (const candidate of candidates) {
       if (!candidate || typeof candidate !== 'object') continue;

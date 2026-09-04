@@ -81,61 +81,14 @@ import { recruiteeHtmlToText as htmlToText, decodeHtmlEntities } from './recruit
 import {
   fetchPublic, safeHttpsUrl, defaultResolveHost, MAX_HTML_BYTES, type ResolveHost,
 } from './jobSourceLogoVerification';
+import { parsedJsonLdScriptBlocks, sanitizeControlCharactersInJsonStrings } from './jsonLdScriptBlocks';
 
-/**
- * Escapes bare control characters (U+0000-U+001F) found INSIDE a JSON string literal, leaving
- * everything outside a string untouched - such bytes are already just insignificant whitespace
- * between tokens under the JSON grammar (RFC 8259 S2), including the ordinary newlines any
- * pretty-printed JSON-LD block uses between object members.
- *
- * MEASURED LIVE 2026-09-04 (see this file's header): Teamtailor's own JobPosting block contains a
- * literal, unescaped newline inside its `description` string. Both Node's and every browser's
- * native `JSON.parse` reject that verbatim - not a parser bug, the document is malformed JSON by
- * spec - which is why callers try a strict parse first and only reach for this on failure: it
- * performs the same narrow repair a lenient consumer would, and cannot alter meaning anywhere a
- * strict parser would have accepted the input unchanged.
- *
- * A small hand-rolled string-boundary scan rather than a regex, specifically so an ESCAPED quote
- * (`\"`) inside a string can never be mistaken for the string's end - the one detail that makes a
- * regex-based version of this unsafe.
- */
-export function sanitizeControlCharactersInJsonStrings(raw: string): string {
-  let result = '';
-  let inString = false;
-  let escaped = false;
-  for (let i = 0; i < raw.length; i += 1) {
-    const ch = raw[i];
-    const code = raw.charCodeAt(i);
-    if (inString && escaped) {
-      result += ch;
-      escaped = false;
-      continue;
-    }
-    if (inString && ch === '\\') {
-      result += ch;
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      result += ch;
-      continue;
-    }
-    if (inString && code < 0x20) {
-      switch (ch) {
-        case '\n': result += '\\n'; break;
-        case '\r': result += '\\r'; break;
-        case '\t': result += '\\t'; break;
-        case '\b': result += '\\b'; break;
-        case '\f': result += '\\f'; break;
-        default: result += `\\u${code.toString(16).padStart(4, '0')}`;
-      }
-      continue;
-    }
-    result += ch;
-  }
-  return result;
-}
+// Re-exported for backward compatibility: this function's canonical home is now
+// jsonLdScriptBlocks.ts (2026-09-04 review round 1, finding 4 - shared with
+// recruiteeJobDescription.ts's own JSON-LD reader, which gained the same control-character repair as
+// part of sharing ONE script-block extractor), but existing importers of it from this file (this
+// file's own test suite included) keep working unchanged.
+export { sanitizeControlCharactersInJsonStrings };
 
 const RAW_HTML_TAG_PATTERN = /<\/?[a-zA-Z][a-zA-Z0-9]*[\s/>]/;
 // Anchored to the START of the text (2026-09-04 review round 1, finding 2): the earlier, unanchored
@@ -228,29 +181,14 @@ function flattenJsonLdValue(value: unknown): Record<string, unknown>[] {
  * Every JobPosting this page's JSON-LD states, across every `<script type="application/ld+json">`
  * block on it - never just the first match, because selectJobPostingForUrl's mismatch-refusal rule
  * needs the FULL set to know whether more than one candidate exists at all.
+ *
+ * Block-finding and JSON-parsing itself is parsedJsonLdScriptBlocks in jsonLdScriptBlocks.ts (shared
+ * with recruiteeJobDescription.ts's own reader, 2026-09-04 review round 1, finding 4); this function's
+ * own job is only turning each parsed value into JobPosting candidates.
  */
 export function jobPostingCandidatesFromHtml(html: string): JsonLdJobPostingCandidate[] {
-  // Function-local (not module-level) specifically because it carries `g` + `.exec` state: a shared
-  // regex here would let two concurrent requests interleave through the same `lastIndex`, exactly
-  // like jsonLdJobPostingFromHtml's own scan in recruiteeJobDescription.ts.
-  const scriptPattern = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   const candidates: JsonLdJobPostingCandidate[] = [];
-  let match: RegExpExecArray | null;
-  // eslint-disable-next-line no-cond-assign -- straightforward regex scan
-  while ((match = scriptPattern.exec(html))) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(match[1]);
-    } catch {
-      // Strict parse failed - retry once against the control-character-sanitized text (see its own
-      // header for why this is needed at all, measured live on Teamtailor) before giving up on this
-      // block. A block that is malformed for any OTHER reason still falls through to `continue`.
-      try {
-        parsed = JSON.parse(sanitizeControlCharactersInJsonStrings(match[1]));
-      } catch {
-        continue;
-      }
-    }
+  for (const parsed of parsedJsonLdScriptBlocks(html)) {
     for (const record of flattenJsonLdValue(parsed)) {
       const candidate = jobPostingCandidateFromRecord(record);
       if (candidate) candidates.push(candidate);

@@ -221,6 +221,43 @@ describe('jobPostingCandidatesFromHtml', () => {
   test('returns an empty list for a page with no JSON-LD at all', () => {
     assert.deepEqual(jobPostingCandidatesFromHtml('<!doctype html><html><body>nothing here</body></html>'), []);
   });
+
+  /* Review round 1, finding 4, case 1: a charset (or any other) parameter on the type attribute.
+   * The old exact-string match (["']application\/ld\+json["']) demanded the attribute value end
+   * right after "json", so this page's block was previously read as carrying no JSON-LD at all. */
+  test('finds a JSON-LD block whose type attribute carries a charset parameter', () => {
+    const html = `<!doctype html><html><head><script type="application/ld+json; charset=utf-8">${JSON.stringify(SAMPLE_JOB_POSTING)}</script></head><body></body></html>`;
+    const candidates = jobPostingCandidatesFromHtml(html);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].title, 'Backend Engineer');
+  });
+
+  /* Review round 1, finding 4, case 2: a literal `</script` sequence embedded inside the block's own
+   * JSON string content (here, inside `description`, which legitimately carries the posting's own
+   * HTML and can quote or discuss a <script> tag - note this is the RAW, unescaped byte sequence, not
+   * the HTML-escaped "&lt;/script&gt;", which would never confuse a byte-level regex scan in the
+   * first place). The old non-greedy capture stopped at this FIRST `</script`, truncating the block
+   * before its real end - the truncated prefix is not valid JSON, so a real posting was read as
+   * carrying no JobPosting at all. The fix scans every SUBSEQUENT `</script` occurrence as a
+   * candidate end position until one actually parses. */
+  test('does not truncate a JSON-LD block at a </script sequence embedded inside its own JSON string (finding 4)', () => {
+    const postingWithEmbeddedScriptMention = {
+      ...SAMPLE_JOB_POSTING,
+      description: '<p>Build things.</p><p>Watch out for a stray </script> tag left in old templates.</p>'
+        + '<ul><li>3+ years of experience with distributed systems</li></ul>',
+    };
+    const html = `<!doctype html><html><head><script type="application/ld+json">${JSON.stringify(postingWithEmbeddedScriptMention)}</script></head><body></body></html>`;
+    // Confirms the fixture actually exercises the defect: the OLD non-greedy capture
+    // (`[\s\S]*?<\/script>`) would have stopped at the embedded `</script>` above, well short of the
+    // block's real closing tag, and that truncated prefix is not valid JSON on its own.
+    const naiveMatch = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i.exec(html);
+    assert.ok(naiveMatch, 'expected the naive pattern to find an (incorrectly truncated) match');
+    assert.throws(() => JSON.parse(naiveMatch![1]), 'the truncated prefix must not itself be valid JSON');
+    const candidates = jobPostingCandidatesFromHtml(html);
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].title, 'Backend Engineer');
+    assert.ok(candidates[0].description.includes('stray </script> tag'));
+  });
 });
 
 describe('jobPostingMatchesRequestedUrl', () => {
