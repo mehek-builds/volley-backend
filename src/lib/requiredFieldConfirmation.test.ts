@@ -1786,8 +1786,10 @@ test('a post-press refusal is an unknown outcome, never a released packet', () =
   /* submit_transport_release_failed is the sharpest case: the runner MATCHED the native request and
      replayed it to the network, and only the release confirmation went missing. The employer very
      likely has the application. */
+  let checked = 0;
   for (const reason of MANAGED_BLOCKER_REASONS) {
     if (MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason)) continue;
+    checked += 1;
     const error = thrownBy(boundRefusal(reason));
     assert.ok(
       error instanceof ManagedConfirmationUnprovenError,
@@ -1795,6 +1797,14 @@ test('a post-press refusal is an unknown outcome, never a released packet', () =
     );
     assert.ok(!(error instanceof NoSubmitControlError), `${reason} must not read as a pre-click stop`);
   }
+  /* A `continue` loop over two sets asserts NOTHING if the sets ever become equal, and would then
+     report success on the exact merge that reintroduces the bug. Count what was actually tried. */
+  assert.equal(
+    checked,
+    MANAGED_BLOCKER_REASONS.size - MANAGED_PRE_PRESS_BLOCKER_REASONS.size,
+    'every reason outside the pre-press set must have been exercised',
+  );
+  assert.ok(checked > 0, 'the post-press set is not empty');
 });
 
 test('a pre-press refusal still releases, so the fix costs the honest stops nothing', () => {
@@ -1807,9 +1817,28 @@ test('a pre-press refusal still releases, so the fix costs the honest stops noth
   }
 });
 
-test('every pre-press reason is a reason the runner can actually name', () => {
+test('every pre-press reason is a reason the runner can actually name', { skip: RUNNER_SOURCE_ABSENT }, () => {
   for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
     assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} is not in the runner's vocabulary`);
+  }
+  /* MEMBERSHIP IS BY RUNNER SITE, and until this assertion existed nothing checked that. The single
+     post-click assignment is `blockerReason = gateResult.reason || ...`, so every reason the gate
+     can produce is post-press by construction: finalizeActivation's own reasons, everything
+     blockActivation and unchanged() witness, and everything decideSubmitTransportGate names. If a
+     future runner routes one of those through the pre-press sites instead, that is a decision to
+     make deliberately, not one to discover from a duplicate application. */
+  const source = readFileSync(RUNNER_SOURCE_PATH, 'utf8');
+  const gateSlice = source.slice(
+    source.indexOf('const decideSubmitTransportGate = '),
+    source.indexOf('const finishSubmitTransportGate = '),
+  );
+  assert.ok(gateSlice.length > 0, 'the submit transport gate still decides the post-click reason');
+  const postClick = new Set([...gateSlice.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!));
+  for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
+    assert.ok(
+      !postClick.has(reason),
+      `${reason} is named by the post-click transport gate, so it cannot prove the press never happened`,
+    );
   }
   /* Assigned on BOTH sides of the click in managed-browser.js, so neither can prove a no-send. The
      two names read as though they belong here, which is exactly why they are pinned as absent. */
