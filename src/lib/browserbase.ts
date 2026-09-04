@@ -416,7 +416,19 @@ export type ManagedBrowserResult = {
         | 'submit_destination_changed' // the observed request's URL differed from the bound one
         | 'submit_enctype_changed' // the observed request's enctype differed from the bound one
         | 'submit_payload_changed' // the observed request's payload differed from the bound one
-        | 'submit_transport_release_failed'; // the matched request could not be released to the network
+        | 'submit_transport_release_failed' // the matched request could not be released to the network
+        /* The activation guard's own witnesses, reported through `unchanged()` rather than by
+         * assigning blockerReason. The first five names are built at runtime as
+         * `eventType(event) + '_binding_changed'`, so they exist as literals nowhere in the runner
+         * and a scan for literals cannot find them. All eight are post-press. */
+        | 'pointerdown_binding_changed' // a pointerdown listener saw the binding change mid-activation
+        | 'mousedown_binding_changed' // a mousedown listener saw the binding change mid-activation
+        | 'focus_binding_changed' // a focus listener saw the binding change mid-activation
+        | 'click_binding_changed' // a click listener saw the binding change mid-activation
+        | 'activation_binding_changed' // same, when the event's type could not be read
+        | 'submit_capture_binding_changed' // the capture-phase submit witness saw the binding change
+        | 'submit_document_bubble_binding_changed' // the document-bubble witness saw the binding change
+        | 'submit_window_bubble_binding_changed'; // the window-bubble witness saw the binding change
     }>;
   } | null;
 };
