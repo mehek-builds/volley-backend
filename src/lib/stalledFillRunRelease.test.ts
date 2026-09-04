@@ -22,12 +22,16 @@ import { describe, test } from 'node:test';
 import type { ApplicationReviewState } from './applicationReview';
 import type { SubmissionAttemptRetrySafety } from './submissionAttemptLedger';
 import {
+  MANAGED_FILL_PAGE_OPEN_STAGE,
   STALLED_FILL_RUN_ATTENTION_REASON,
+  STALLED_FILL_RUN_PAGE_OPEN_ATTENTION_REASON,
+  STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS,
   STALLED_FILL_RUN_RELEASE_MS,
   releaseStalledFillRun,
   stalledFillRunIsReleasable,
   stalledFillRunLastActivityAt,
   stalledFillRunLedgerProvesNoEmployerContact,
+  stalledFillRunReleaseBoundMs,
   stalledFillRunReleaseIsAdmissible,
 } from './stalledFillRunRelease';
 import { submitRequestDisposition } from './submissionSafety';
@@ -290,6 +294,161 @@ describe('the clock is read off the run, and taking the later stamp can only del
   });
 });
 
+/* ---- The page-open stage: measured Celerant/Paylocity, still stuck at 9 minutes and counting ---- */
+
+/** Approved 2026-09-04 22:21:47Z; still byte-for-byte identical, per the measurement, at 22:30:53Z. */
+const CELERANT_APPROVED_AT = '2026-09-04T22:21:47.000Z';
+const CELERANT_APPROVED_MS = Date.parse(CELERANT_APPROVED_AT);
+const CELERANT_NINE_MINUTES_LATER_MS = Date.parse('2026-09-04T22:30:53.000Z');
+
+const pageOpenRow = (over: Partial<ApplicationReviewState> = {}): ApplicationReviewState => stalledRow({
+  jd_text: 'Loss Prevention Analyst, Celerant Technologies',
+  ats_name: 'paylocity',
+  updated_at: CELERANT_APPROVED_AT,
+  progress_updated_at: CELERANT_APPROVED_AT,
+  progress_stage: MANAGED_FILL_PAGE_OPEN_STAGE,
+  submission_run_id: 'd471dcf1-0000-0000-0000-000000000000',
+  ...over,
+});
+
+const PAGE_OPEN_PAST_BOUND = CELERANT_APPROVED_MS + STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS + 1;
+const PAGE_OPEN_AT_BOUND = CELERANT_APPROVED_MS + STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS;
+
+describe('the page-open stage gets its own, much tighter bound', () => {
+  test('the measured Celerant/Paylocity row is exactly this shape: filling, no claim, page-open', () => {
+    const row = pageOpenRow();
+    assert.equal(row.status, 'filling');
+    assert.equal(row.progress_stage, 'Opening the company form');
+    assert.equal(row.submission_claimed_at, undefined);
+    assert.equal(row.submission_claim_id, undefined);
+  });
+
+  test('the bound is at least an order of magnitude tighter than the general one', () => {
+    /* Guards against the two constants quietly being set equal, which would silently undo the
+     * entire point of keying the bound off the stage. */
+    assert.ok(STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS * 10 <= STALLED_FILL_RUN_RELEASE_MS);
+  });
+
+  test('stalledFillRunReleaseBoundMs picks the tight bound only for filling+page-open', () => {
+    assert.equal(stalledFillRunReleaseBoundMs(pageOpenRow()), STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS);
+    // preparing never carries this progress_stage, and the general bound still governs it.
+    assert.equal(
+      stalledFillRunReleaseBoundMs({ status: 'preparing', progress_stage: undefined }),
+      STALLED_FILL_RUN_RELEASE_MS,
+    );
+    // A later stage of the same status keeps the general bound - this rule is about the ONE
+    // stage whose own citable ceiling is known, not about `filling` as a whole.
+    for (const progress_stage of ['Reading the company questions', 'Filling your answers', undefined]) {
+      assert.equal(
+        stalledFillRunReleaseBoundMs({ status: 'filling', progress_stage }),
+        STALLED_FILL_RUN_RELEASE_MS,
+        `progress_stage ${String(progress_stage)} must not get the page-open bound`,
+      );
+    }
+  });
+
+  test('the stage match is exact, not a loose or case-insensitive one', () => {
+    for (const progress_stage of ['opening the company form', 'Opening the company form ', 'Opening']) {
+      assert.equal(
+        stalledFillRunReleaseBoundMs({ status: 'filling', progress_stage }),
+        STALLED_FILL_RUN_RELEASE_MS,
+        `"${progress_stage}" must fall through to the general bound, not match loosely`,
+      );
+    }
+  });
+
+  test('the measured row is released once 15 minutes pass with nothing heard - not at 9', () => {
+    /* THE LIVE DEFECT, PINNED DIRECTLY. At the exact 9-minute mark this measurement caught, the
+     * row was not yet releasable under this bound either - the fix is a bound, not a guarantee of
+     * instant release - but it is releasable at 15 minutes, where the old 3-hour bound would have
+     * left it reading "Still working" for nearly three more hours. */
+    const boundMs = stalledFillRunReleaseBoundMs(pageOpenRow());
+    assert.equal(
+      stalledFillRunReleaseIsAdmissible(pageOpenRow(), NO_EVIDENCE, CELERANT_NINE_MINUTES_LATER_MS, boundMs),
+      false,
+    );
+    assert.equal(
+      stalledFillRunReleaseIsAdmissible(pageOpenRow(), NO_EVIDENCE, PAGE_OPEN_PAST_BOUND, boundMs),
+      true,
+    );
+  });
+
+  test('the edge is pinned in both directions', () => {
+    const boundMs = stalledFillRunReleaseBoundMs(pageOpenRow());
+    assert.equal(stalledFillRunIsReleasable(pageOpenRow(), PAGE_OPEN_AT_BOUND, boundMs), false);
+    assert.equal(stalledFillRunIsReleasable(pageOpenRow(), PAGE_OPEN_AT_BOUND + 1, boundMs), true);
+  });
+
+  test('the same evidence and claim rules still apply - only the clock moved', () => {
+    const boundMs = stalledFillRunReleaseBoundMs(pageOpenRow());
+    assert.equal(
+      stalledFillRunIsReleasable(
+        pageOpenRow({ submission_claim_id: '2f1a9d20-6c33-4c7e-9a51-8de0f4b62a17' }),
+        PAGE_OPEN_PAST_BOUND,
+        boundMs,
+      ),
+      false,
+    );
+    assert.equal(
+      stalledFillRunReleaseIsAdmissible(pageOpenRow(), {
+        kind: 'blocked_unverified',
+        attemptId: '5c8e1b44-2a70-4f36-9d18-6b3ac0f72e91',
+        at: CELERANT_APPROVED_AT,
+        reason: 'opened',
+      }, PAGE_OPEN_PAST_BOUND, boundMs),
+      false,
+    );
+  });
+
+  test('releases to a sentence that says the form was never reached, not the generic run_failed one', () => {
+    const released = releaseStalledFillRun(pageOpenRow(), '2026-09-04T22:37:00.000Z');
+    assert.equal(released.status, 'needs_attention');
+    assert.equal(released.attention_reason, STALLED_FILL_RUN_PAGE_OPEN_ATTENTION_REASON);
+    assert.match(released.attention_reason!, /never reached the application form/);
+    assert.match(released.attention_reason!, /15 minutes/);
+    assert.ok(!/could not finish this application/.test(released.attention_reason!));
+    /* Derived, not asserted by hand, for the same reason the generic case is: the sentence has to
+     * contain the clause attentionCategoriesForReasons matches or the packet lands in a bucket
+     * with no next step. form_not_reached, not run_failed - the two are mutually exclusive by the
+     * comment on STALLED_FILL_RUN_ATTENTION_REASON itself. */
+    assert.deepEqual(released.attention_categories, ['form_not_reached']);
+    assert.deepEqual(attentionCategoriesForReasons([STALLED_FILL_RUN_PAGE_OPEN_ATTENTION_REASON]), ['form_not_reached']);
+  });
+
+  test('a filling row past the page-open stage still gets the generic sentence, not this one', () => {
+    const released = releaseStalledFillRun(
+      pageOpenRow({ progress_stage: 'Filling your answers' }),
+      '2026-09-04T22:37:00.000Z',
+    );
+    assert.equal(released.attention_reason, STALLED_FILL_RUN_ATTENTION_REASON);
+    assert.deepEqual(released.attention_categories, ['run_failed']);
+  });
+
+  test('a preparing row still gets the generic sentence: it never carries this progress_stage', () => {
+    const released = releaseStalledFillRun(
+      pageOpenRow({ status: 'preparing', progress_stage: undefined, progress_updated_at: undefined }),
+      '2026-09-04T22:37:00.000Z',
+    );
+    assert.equal(released.attention_reason, STALLED_FILL_RUN_ATTENTION_REASON);
+  });
+
+  test('never claims the employer was reached, same as the generic release', () => {
+    const released = releaseStalledFillRun(pageOpenRow(), '2026-09-04T22:37:00.000Z');
+    assert.equal(released.submitted_at, undefined);
+    assert.equal(released.submission_attempted_at, undefined);
+    assert.match(released.attention_reason!, /Nothing has been sent/);
+  });
+
+  test('is idempotent: the released row no longer matches the page-open shape', () => {
+    const released = releaseStalledFillRun(pageOpenRow(), '2026-09-04T22:37:00.000Z');
+    assert.equal(stalledFillRunReleaseBoundMs(released), STALLED_FILL_RUN_RELEASE_MS);
+    assert.equal(
+      stalledFillRunReleaseIsAdmissible(released, NO_EVIDENCE, PAGE_OPEN_PAST_BOUND + 365 * 24 * 3600_000),
+      false,
+    );
+  });
+});
+
 describe('the released review', () => {
   const released = releaseStalledFillRun(stalledRow(), '2026-09-04T10:00:00.000Z');
 
@@ -362,14 +521,17 @@ describe('the route', () => {
     assert.ok(route.indexOf('repairStalledFillRun(row') >= 0);
   });
 
-  test('calls the composed gate, and calls it with the database clock', () => {
+  test('calls the composed gate, and calls it with the database clock and the stage-aware bound', () => {
     /* THE ROUTE HAS TO CALL THE RULE, NOT MERELY AGREE WITH IT. Every behavioural test above
      * reaches the gate through the library; none reaches it through the route, so an inline
      * re-implementation here would leave the whole suite green. The clock argument is inside the
      * pin for the same reason: a stamp captured before the row read cannot be substituted
-     * silently. */
+     * silently. The bound argument joined it for the same reason again: a route that computed its
+     * own literal instead of calling stalledFillRunReleaseBoundMs could drift from the library's
+     * page-open case while every test that calls the library directly stayed green. */
     const helper = routeSlice('async function repairStalledFillRun', 'function editableResumeSpec');
-    assert.match(helper, /stalledFillRunReleaseIsAdmissible\(current, retrySafety, databaseNow\.getTime\(\)\)/);
+    assert.match(helper, /const boundMs = stalledFillRunReleaseBoundMs\(current\);/);
+    assert.match(helper, /stalledFillRunReleaseIsAdmissible\(current, retrySafety, databaseNow\.getTime\(\), boundMs\)/);
     assert.match(helper, /submissionAttemptRetrySafetyForPacketEvents\(events\)/);
     assert.match(helper, /submissionAttemptEventsForPacket\(userId, locked\.id, \{ executor: tx \}\)/);
     /* TRY-locked, never waiting: a managed provider call can hold this user's ledger key for 280s,

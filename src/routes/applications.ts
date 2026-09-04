@@ -79,6 +79,7 @@ import {
 } from '../lib/expiredHandoffClaimRelease';
 import {
   releaseStalledFillRun,
+  stalledFillRunReleaseBoundMs,
   stalledFillRunReleaseIsAdmissible,
 } from '../lib/stalledFillRunRelease';
 import { attemptNeverPressedReason, employerMayHoldApplication } from '../lib/managedSubmitOutcome';
@@ -897,7 +898,11 @@ async function repairStalledFillRun(
     if (Number.isNaN(databaseNow.getTime())) throw new Error('Database reconciliation clock was unavailable');
     const events = await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
     const retrySafety = submissionAttemptRetrySafetyForPacketEvents(events);
-    if (!stalledFillRunReleaseIsAdmissible(current, retrySafety, databaseNow.getTime())) return null;
+    /* Tight at the page-open stage, loose everywhere else this rule reaches - see
+     * stalledFillRunReleaseBoundMs. A row stuck on "Opening the company form" no longer waits out
+     * the same three-hour bound as a row that is genuinely mid-draft or mid-option-probe. */
+    const boundMs = stalledFillRunReleaseBoundMs(current);
+    if (!stalledFillRunReleaseIsAdmissible(current, retrySafety, databaseNow.getTime(), boundMs)) return null;
     const released = releaseStalledFillRun(current, databaseNow.toISOString());
     const [updated] = await tx.update(generated_resumes)
       .set({ spec: reviewSpec(released) })

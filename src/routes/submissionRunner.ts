@@ -346,6 +346,7 @@ import {
 } from '../lib/documentStore';
 import { duplicateApplicationVerdict, type DuplicateApplicationVerdict } from '../lib/duplicateApplication';
 import { withProviderCallFence } from '../lib/submissionAccountFence';
+import { MANAGED_FILL_PAGE_OPEN_STAGE } from '../lib/stalledFillRunRelease';
 import {
   authorizeFinalSubmissionBoundary,
   appendSubmissionAttemptEvent,
@@ -7572,7 +7573,7 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
     progress_screenshot_url: undefined,
-    progress_stage: 'Opening the company form',
+    progress_stage: MANAGED_FILL_PAGE_OPEN_STAGE,
     progress_updated_at: new Date().toISOString(),
   }));
   // Neither document goes on the discovery pass. It runs before anything is known about the form,

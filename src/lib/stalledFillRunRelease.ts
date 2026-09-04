@@ -118,6 +118,60 @@ export const STALLED_FILL_RUN_ATTENTION_REASON =
   + 'way through and never came back, and it stopped before anything was sent. Nothing has gone to '
   + 'the employer. You can try this one again from your dashboard.';
 
+/**
+ * The exact `progress_stage` prepareManaged writes before it ever calls stratus for the first time
+ * (submissionRunner.ts). Shared here so the writer and this reader cannot drift on the literal - the
+ * bound below is meaningless if a rename on one side silently stops matching the other.
+ */
+export const MANAGED_FILL_PAGE_OPEN_STAGE = 'Opening the company form';
+
+/**
+ * How long a `filling` row may sit at the PAGE-OPEN stage specifically before its run is treated as
+ * abandoned - far tighter than STALLED_FILL_RUN_RELEASE_MS, and deliberately so.
+ *
+ * THIS ONE STAGE HAS A KNOWN, NARROW CEILING, unlike the run as a whole. prepareManaged writes
+ * `progress_stage: 'Opening the company form'` and then makes exactly ONE stratus call - the
+ * discovery pass - before its next progress write (`'Reading the company questions'`). That call
+ * carries MANAGED_PREPARE_SCAN_OPTIONS, whose scanDeadlineMs is MANAGED_PREPARE_FILL_DEADLINE_MS,
+ * 280 seconds (browserbase.ts). A run cannot legitimately sit at this exact stage past one 280s
+ * provider call plus one plausible queued sibling call behind the same per-user provider-call fence
+ * (withProviderCallFence / lockSubmissionProviderCallUser, submissionAccountFence.ts) - at most
+ * roughly 2x280s. 15 minutes is better than 3x that, so a single slow-but-live call, even queued
+ * behind one other, is never mistaken for a stall; it is also less than a sixth of the general
+ * three-hour bound below, which exists for the later stages this one is not.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com. Celerant Technologies, Paylocity,
+ * packet 4b66641d-d12c-4b56-b9c1-850fd1e20a1d: fill run d471dcf1 approved 22:21:47Z, `status:
+ * "filling"`, `progress_stage: "Opening the company form"`, no `submission_error`, no
+ * `submission_stop`, and still byte-for-byte identical at 22:30:53Z - 9 minutes with zero heartbeat,
+ * and nothing on record says it ever moved again. The dashboard's own poll read "STARTING - Opening
+ * the company form / Still working" for the entire window. Under STALLED_FILL_RUN_RELEASE_MS this
+ * packet had almost three more hours to wait for a sentence that says so; under this bound it gets
+ * one at the 15-minute mark, still five minutes past the worst legitimate case reasoned above.
+ *
+ * NOT applied to `preparing`, and not applied to `filling` at any later stage: this bound is keyed
+ * to the exact stage string via stalledFillRunReleaseBoundMs, which falls back to
+ * STALLED_FILL_RUN_RELEASE_MS everywhere else, including a `filling` row whose progress_stage is
+ * undefined (a shape this bound has no measurement for).
+ */
+export const STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS = 15 * 60 * 1000;
+
+/**
+ * The sentence for a run that never got past opening the employer's own page, written to be true of
+ * THIS narrower state and no other.
+ *
+ * It has to contain "never reached the application form" because that clause is what
+ * attentionCategoriesForReasons matches to reach `form_not_reached` - the one category that says
+ * plainly that no employer page was ever opened, which is exactly and only what this bound proves.
+ * `run_failed` (STALLED_FILL_RUN_ATTENTION_REASON's own bucket) would be wrong here: that sentence's
+ * own comment states the form WAS reached, which is false at this stage by construction.
+ */
+const STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MINUTES = STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS / 60_000;
+export const STALLED_FILL_RUN_PAGE_OPEN_ATTENTION_REASON =
+  `Litos could not open the company's form within ${STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MINUTES} `
+  + 'minutes, so the run never reached the application form. Nothing has been sent. You can try '
+  + 'this one again from your dashboard.';
+
 /** The two in-flight statuses a managed prepare can die in and never be moved out of again. */
 const RELEASABLE_IN_FLIGHT_STATUSES: ReadonlySet<ApplicationReviewState['status']> = new Set([
   'preparing',
@@ -221,6 +275,26 @@ export function stalledFillRunLedgerProvesNoEmployerContact(
 }
 
 /**
+ * WHICH BOUND APPLIES TO THIS ROW, tight at the page-open stage and loose everywhere else this rule
+ * covers.
+ *
+ * A `filling` row parked at exactly MANAGED_FILL_PAGE_OPEN_STAGE has made, at most, one bounded
+ * provider call since its last progress write (see STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS for the
+ * arithmetic); every other shape this rule admits - `preparing`, or `filling` at a later stage - can
+ * legitimately be mid-option-probe or mid-draft for much longer, so it keeps the general bound. A
+ * `filling` row with no progress_stage at all is not the measured page-open shape either and falls
+ * through to the general bound, which is the direction that can only ever make a release wait
+ * longer.
+ */
+export function stalledFillRunReleaseBoundMs(
+  review: Pick<ApplicationReviewState, 'status' | 'progress_stage'>,
+): number {
+  return review.status === 'filling' && review.progress_stage === MANAGED_FILL_PAGE_OPEN_STAGE
+    ? STALLED_FILL_RUN_PAGE_OPEN_RELEASE_MS
+    : STALLED_FILL_RUN_RELEASE_MS;
+}
+
+/**
  * THE WHOLE GATE, in one place that can be asserted directly rather than mirrored by a test.
  *
  * Composed here and not inline at the call site for the reason #912's extraction gives: a gate
@@ -264,11 +338,21 @@ export function stalledFillRunReleaseIsAdmissible(
  * approval was spent on a send that never happened, and authorizationValidAtClick honours that
  * source without re-asking. Same reasoning, and the same field, as
  * releaseAttemptThatNeverReachedEmployer.
+ *
+ * THE REASON IS CHOSEN BY THE SAME STAGE CHECK stalledFillRunReleaseBoundMs uses, not by which bound
+ * the caller happened to pass: the two must never disagree about which shape a row is, or a row
+ * released under the tight page-open bound could still be told the generic `run_failed` sentence
+ * that spends a whole paragraph on a form this row never reached.
  */
 export function releaseStalledFillRun(
   review: ApplicationReviewState,
   nowIso: string = new Date().toISOString(),
 ): ApplicationReviewState {
+  const neverOpenedTheForm = review.status === 'filling'
+    && review.progress_stage === MANAGED_FILL_PAGE_OPEN_STAGE;
+  const attentionReason = neverOpenedTheForm
+    ? STALLED_FILL_RUN_PAGE_OPEN_ATTENTION_REASON
+    : STALLED_FILL_RUN_ATTENTION_REASON;
   return {
     ...review,
     status: 'needs_attention',
@@ -280,8 +364,8 @@ export function releaseStalledFillRun(
     handoff_expires_at: undefined,
     browser_context_id: undefined,
     submission_authorization: undefined,
-    attention_reason: STALLED_FILL_RUN_ATTENTION_REASON,
-    attention_categories: attentionCategoriesForReasons([STALLED_FILL_RUN_ATTENTION_REASON]),
+    attention_reason: attentionReason,
+    attention_categories: attentionCategoriesForReasons([attentionReason]),
     updated_at: nowIso,
   };
 }
