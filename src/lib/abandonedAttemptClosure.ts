@@ -54,6 +54,7 @@ import {
   ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
   attemptNeverReachedEmployer,
   groupByAttempt,
+  lockSubmissionAttemptUser,
   submissionAttemptBindingFromEvent,
   submissionAttemptEventId,
   submissionAttemptEventsForUser,
@@ -240,17 +241,30 @@ export type AbandonedAttemptClosureLog = {
  * blocked while this function reported it healed, which is the failure the caller cannot see. It is
  * folded LOCALLY rather than re-read from the user's whole ledger: appendSubmissionAttemptEvent
  * already returns the exact row it wrote (or the exact existing row a replay found), and the user
- * advisory lock this function's caller holds for the whole transaction rules out a concurrent writer
+ * advisory lock this function holds for its own whole call (see below) rules out a concurrent writer
  * changing the answer between the append and a re-read.
  *
- * The caller must supply its write transaction. appendSubmissionAttemptEvent takes the user
- * advisory lock, which is reentrant when the caller already holds it.
+ * The caller must supply its write transaction.
+ *
+ * THIS FUNCTION TAKES THE USER ADVISORY LOCK ITSELF, on `input.executor` directly, before any
+ * candidate's own savepoint opens - REVIEW ROUND 2, 2026-09-04. appendSubmissionAttemptEvent also
+ * takes it, but on whatever executor IT is given, which inside the loop below is a per-candidate
+ * savepoint. A Postgres transaction-level advisory lock acquired for the FIRST time inside a
+ * savepoint is released by ROLLBACK TO SAVEPOINT, same as an ordinary row lock taken there - so if
+ * nothing had locked `input.executor` before the loop, the first candidate to fail would roll back
+ * its savepoint AND silently drop this user's ledger serialization for every candidate still to
+ * come in the same call, the one property this function's docs above promise. Locking here removes
+ * that dependence on the caller: it always runs before the loop touches a single savepoint. Taking
+ * it again inside a savepoint costs nothing - Postgres advisory xact locks are reentrant within one
+ * session - so production's own caller (refuseDuplicateApplication's tryLockSubmissionAttemptUser)
+ * pre-locking the same way stays exactly as harmless as it always was.
  */
 export async function closeAbandonedPreBoundaryAttempts(input: {
   userId: string;
   executor: SubmissionAttemptLedgerExecutor;
   log?: AbandonedAttemptClosureLog;
 }): Promise<{ closedAttemptIds: string[]; failedAttemptIds: string[] }> {
+  await lockSubmissionAttemptUser(input.executor, input.userId);
   const events = await submissionAttemptEventsForUser(input.userId, { executor: input.executor });
   const grouped = groupByAttempt(events);
   /* Only an attempt the fold already treats as a block is worth reading a packet row for. Every
