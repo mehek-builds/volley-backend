@@ -202,6 +202,16 @@ test('the repair is ledger-aware, owner-locked, and persists with an exact-spec 
   assert.match(helper, /submissionAttemptEventsForPacket\(userId, locked\.id, \{ executor: tx \}\)/);
   assert.match(helper, /expiredAlternateSubmissionReview\(current, events, databaseNow\)/);
   assert.match(helper, /expiredAttendedHandoffClaimIsReleasable\(current, databaseNow\.getTime\(\)\)/);
+  /* THE ROUTE HAS TO CALL THE RULE, NOT MERELY AGREE WITH IT.
+   *
+   * Every behavioural test above reaches neverReachedEmployerReleaseIsAdmissible through the
+   * library. None of them reaches it through the route, so reverting this call site to the
+   * pre-#912 gate deletes the stalled-submitting exit from production and leaves the whole suite
+   * and the typechecker green: measured at 6359 pass, 0 fail, tsc exit 0. That is the same
+   * vacuity the extraction was supposed to close, moved one layer out. Pinned by source text for
+   * the same reason the sibling arm above is, and the clock argument is inside the pin so a stamp
+   * captured before the row read cannot be substituted silently either. */
+  assert.match(helper, /neverReachedEmployerReleaseIsAdmissible\(current, claimEvents, databaseNow\.getTime\(\)\)/);
   assert.match(helper, /eq\(applications\.legacy_generated_resume_id, locked\.id\)/);
   assert.match(helper, /if \(canonicalEvent\) return null;/);
   assert.match(helper, /JSON\.stringify\(locked\.spec\)/);

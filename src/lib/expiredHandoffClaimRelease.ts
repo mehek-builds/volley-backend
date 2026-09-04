@@ -46,6 +46,10 @@ import { and, eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_submission_events, applications } from '../db/schema';
 import type { ApplicationReviewState } from './applicationReview';
+import {
+  attemptNeverReachedEmployer,
+  type SubmissionAttemptEventRecord,
+} from './submissionAttemptLedger';
 import { employerMayHoldApplication } from './managedSubmitOutcome';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
 
@@ -164,11 +168,37 @@ export function attemptNeverReachedEmployerIsReleasable(
     | 'security_code' | 'unverified_submission' | 'submission_run_id'
   >,
 ): boolean {
-  if (!review.submission_claimed_at || !review.submission_claim_id) return false;
-  /* The parked, human-facing state is the only one this releases. A run still in flight holds
+  /* The parked, human-facing state is the only one THIS arm releases. A run still in flight holds
    * `submitting` or `submission_claimed` and carries `attempt_opened` alone until it authorizes the
-   * boundary; releasing it here is exactly the poll-kills-the-send defect this guard forecloses. */
+   * boundary; releasing it here is exactly the poll-kills-the-send defect this guard forecloses.
+   * stalledSubmittingClaimIsReleasable below answers the `submitting` half on a clock, which is the
+   * discriminator this arm does not have and cannot borrow. */
   if (review.status !== 'needs_attention') return false;
+  return attemptNeverReachedEmployerEvidenceIsClear(review);
+}
+
+/**
+ * The stored evidence that must be absent before EITHER release arm may close an attempt, asked in
+ * one place so the two cannot drift apart.
+ *
+ * Deliberately NOT employerMayHoldApplication. The two facts that predicate also reads,
+ * unverified_submission and submission_attempted_at, are precisely what these releases erase, so
+ * asking it would let a fabricated record veto its own repair, which is the trap the wedged row is
+ * already in.
+ *
+ * This function proves nothing about the employer boundary and does not try to. It rules out
+ * evidence that something OTHER than this attempt reached an employer. What proves the boundary was
+ * never crossed is attemptNeverReachedEmployer over the exact attempt's immutable events, which is
+ * the caller's separate question and is required by both arms.
+ */
+export function attemptNeverReachedEmployerEvidenceIsClear(
+  review: Pick<
+    ApplicationReviewState,
+    'submission_claim_id' | 'submission_claimed_at' | 'submitted_at' | 'receipt'
+    | 'security_code' | 'unverified_submission' | 'submission_run_id'
+  >,
+): boolean {
+  if (!review.submission_claimed_at || !review.submission_claim_id) return false;
   if (review.submitted_at || review.receipt || review.security_code) return false;
   const unverified = review.unverified_submission;
   if (unverified) {
@@ -179,6 +209,136 @@ export function attemptNeverReachedEmployerIsReleasable(
     if (unverified.submission_run_id !== review.submission_run_id) return false;
   }
   return true;
+}
+
+/* THE SEND THAT STOPPED WITHOUT SAYING SO, AND THE CLOCK THAT IS ALLOWED TO NOTICE.
+ *
+ * DSI Innovations, packet a34e5ce2, measured live 2026-09-03: a managed send claimed the row at
+ * 19:25:08.450Z, opened its ledger attempt, and then nothing. Status `submitting`,
+ * submission_claimed_at set, submission_claim_id set, no boundary_authorized event, no press, no
+ * receipt, submission_run_id unchanged and progress_updated_at still on the previous day. The
+ * process that held the claim is gone. The row has no way to know that.
+ *
+ * EVERY EXIT WAS CLOSED AT ONCE, each one correct in isolation:
+ *   - the runner's cron selects `submitting` rows that are UNCLAIMED, or claimed rows that carry a
+ *     `boundary_authorized` event with source managed_browser. This row is claimed and has no
+ *     boundary, so it matches neither arm and is never picked up again.
+ *   - submitRequestDisposition answers `in_flight` for `submitting` unconditionally, so every Try
+ *     again returns 409 "This application already has an active submission".
+ *   - preparedRunCanRestart covers ready_for_final_approval only.
+ *   - repairExpiredAttendedHandoffClaim DOES run on this row on every 2.5s dashboard poll, and all
+ *     three of its arms decline: expiredAlternateSubmissionReview needs an expired boundary,
+ *     attemptNeverReachedEmployerIsReleasable above needs `needs_attention`, and the legacy arm
+ *     returns as soon as the attempt has any events at all.
+ * Nothing anywhere compared submission_claimed_at to a clock, so the row could sit like this
+ * forever, and 50 packets behind it could not be sent either once the same wedge caught them.
+ *
+ * WHY A CLOCK HERE AND NOT A STATUS. The arm above uses status as its discriminator BECAUSE a live
+ * pre-boundary send is indistinguishable from a dead one by evidence alone: both carry
+ * `attempt_opened` and nothing else, for the whole of buildPacket, the drift assert and the remote
+ * captcha probe. That is a true statement about evidence, and it is exactly why this arm cannot
+ * borrow the same trick. What separates a slow run from a dead one is elapsed time, so elapsed time
+ * is what this measures, and nothing else about it is loosened.
+ *
+ * THE BOUND IS DERIVED, NOT PICKED. MANAGED_PREPARE_FILL_DEADLINE_MS is 280s, the largest
+ * employer-action window stratus can service. A send may legitimately spend one of those filling
+ * before it authorizes the boundary, and another if it re-reads the form, which is about 9.5
+ * minutes of honest pre-boundary work. Twenty minutes is a little over twice that: a run that is
+ * merely slow is never torn down, and an applicant who is genuinely wedged is not asked to wait out
+ * a shift for a send that already died.
+ *
+ * MEASURED FROM THE LAST THING THE RUN ITSELF DID, WHICH IS NOT updated_at. updated_at moves
+ * whenever anything writes the review, including this repair and any unrelated edit, so a row could
+ * be held artificially fresh by writes that say nothing about whether the run is alive. Reading it
+ * here would be measuring our own activity and calling it the employer's. submission_claimed_at is
+ * when this run took the row; progress_updated_at is the only field the fill loop advances as it
+ * works. The LATER of the two is the last moment the run demonstrably existed, so a run that died
+ * before writing any progress is measured from its claim and one that died mid-fill from its last
+ * frame.
+ *
+ * WHAT IS NOT RELAXED. This predicate proves nothing about the employer boundary. The caller pairs
+ * it with attemptNeverReachedEmployer over the exact attempt's immutable events, exactly as the
+ * needs_attention arm does, so a packet whose ledger holds a boundary_authorized, a press_observed,
+ * a submission_confirmed or an existing not_sent_proven is refused there and is never released into
+ * a second send. The stored-evidence gates are the same ones the arm above uses, asked through the
+ * same function.
+ */
+export const STALLED_SUBMITTING_CLAIM_RELEASE_MS = 20 * 60 * 1000;
+
+/**
+ * The last moment this run demonstrably existed, in epoch milliseconds, or null when the row cannot
+ * say. The later of the claim and the fill loop's own progress stamp. Never updated_at: see above.
+ */
+export function stalledSubmittingClaimLastActivityAt(
+  review: Pick<ApplicationReviewState, 'submission_claimed_at' | 'progress_updated_at'>,
+): number | null {
+  const claimedAt = Date.parse(review.submission_claimed_at ?? '');
+  if (!Number.isFinite(claimedAt)) return null;
+  const progressAt = Date.parse(review.progress_updated_at ?? '');
+  return Number.isFinite(progressAt) ? Math.max(claimedAt, progressAt) : claimedAt;
+}
+
+/**
+ * Whether a `submitting` row's claim guards a run that has stopped without saying so.
+ *
+ * `now` has no default ON PURPOSE. The caller must pass a clock read AFTER it has taken the lock
+ * and read the row, inside the same transaction, so the comparison cannot be made against a stamp
+ * captured before the work that might have moved the row. repairExpiredAttendedHandoffClaim passes
+ * its clock_timestamp() read for exactly that reason.
+ */
+export function stalledSubmittingClaimIsReleasable(
+  review: Pick<
+    ApplicationReviewState,
+    'status' | 'submission_claim_id' | 'submission_claimed_at' | 'submitted_at' | 'receipt'
+    | 'security_code' | 'unverified_submission' | 'submission_run_id' | 'progress_updated_at'
+  >,
+  now: number,
+  boundMs: number = STALLED_SUBMITTING_CLAIM_RELEASE_MS,
+): boolean {
+  if (review.status !== 'submitting') return false;
+  if (!attemptNeverReachedEmployerEvidenceIsClear(review)) return false;
+  const lastActivityAt = stalledSubmittingClaimLastActivityAt(review);
+  if (lastActivityAt === null) return false;
+  /* POLARITY, and it is checked against its sibling rather than assumed to match.
+   * expiredAttendedHandoffClaimIsReleasable releases when its window is in the PAST (`expiresAt <
+   * now`). This releases when the last activity plus the bound is in the past, which is the same
+   * direction. Written as a deadline compared to now, not as an elapsed-time subtraction, so both
+   * assertions in this file read the same way round and a later edit cannot quietly invert one. */
+  return lastActivityAt + boundMs < now;
+}
+
+/**
+ * THE WHOLE GATE for the release arm, in one place that can be asserted directly.
+ *
+ * The route composes this inside a transaction, and while it was written inline there was no way to
+ * test the composition itself: a test could only mirror it, and a mirror keeps passing after the
+ * real arm has been changed. Both halves matter and neither implies the other, so both live here:
+ *
+ *   - `attemptNeverReachedEmployer` over the EXACT attempt's immutable events is the proof that this
+ *     attempt never crossed the employer boundary. Nothing else in this file proves that, and no
+ *     amount of elapsed time substitutes for it.
+ *   - one of the two row predicates says the row is in a state whose claim may be lifted: the parked
+ *     needs_attention wedge, or a `submitting` row whose run has demonstrably stopped.
+ *
+ * `nowMs` has no default, for the reason stalledSubmittingClaimIsReleasable states: the caller must
+ * pass a clock read after it has taken the lock and read the row.
+ */
+export function neverReachedEmployerReleaseIsAdmissible(
+  review: Pick<
+    ApplicationReviewState,
+    'status' | 'submission_claim_id' | 'submission_claimed_at' | 'submitted_at' | 'receipt'
+    | 'security_code' | 'unverified_submission' | 'submission_run_id' | 'progress_updated_at'
+  >,
+  claimEvents: readonly SubmissionAttemptEventRecord[],
+  nowMs: number,
+): boolean {
+  /* Redundant with the line below, which answers false for an empty array, and kept because this
+   * gate reads as a list of things that must be true and "there is an attempt to talk about" is one
+   * of them. A mutation run confirms it is unreachable on its own, so it is documentation. */
+  if (claimEvents.length === 0) return false;
+  if (!attemptNeverReachedEmployer(claimEvents)) return false;
+  return attemptNeverReachedEmployerIsReleasable(review)
+    || stalledSubmittingClaimIsReleasable(review, nowMs);
 }
 
 /**
