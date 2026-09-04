@@ -1518,7 +1518,7 @@ describe('the submit network record', () => {
     })?.network, null);
   });
 
-  test('body_excerpt, content_type and transport_disposition are read defensively when present', () => {
+  test('body_excerpt, content_type, body_unavailable_reason and transport_disposition are read defensively when present', () => {
     const outcome = readManagedSubmitOutcome({
       submitOutcome: {
         pressed: true, state: 'unknown', source: null, evidence: null, message: null,
@@ -1529,6 +1529,7 @@ describe('the submit network record', () => {
           status: 428,
           body_excerpt: '{"code":"captcha-retry"}',
           content_type: 'application/json; charset=utf-8',
+          body_unavailable_reason: 'body_capture_limit_exceeded',
           transport_disposition: 'completed',
         }],
       },
@@ -1539,11 +1540,40 @@ describe('the submit network record', () => {
       status: 428,
       body_excerpt: '{"code":"captcha-retry"}',
       content_type: 'application/json; charset=utf-8',
+      body_unavailable_reason: 'body_capture_limit_exceeded',
       transport_disposition: 'completed',
     }]);
   });
 
-  test('a run from before the sibling stratus PR carries none of the three, and that is fine', () => {
+  test('an entry missing all four sibling-PR fields still parses, with none of the four fabricated', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: [{ method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 428 }],
+      },
+    });
+    assert.deepEqual(outcome?.network, [
+      { method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 428 },
+    ]);
+  });
+
+  test('body_unavailable_reason is bounded and dropped when not a string', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: [
+          { method: 'POST', url: 'https://x.test/a', status: 500, body_unavailable_reason: 'x'.repeat(200) },
+          { method: 'POST', url: 'https://x.test/b', status: 500, body_unavailable_reason: 12345 },
+        ],
+      },
+    });
+    assert.equal(outcome?.network?.[0].body_unavailable_reason, 'x'.repeat(120));
+    assert.equal(outcome?.network?.[1].body_unavailable_reason, undefined);
+  });
+
+  test('a run from before the sibling stratus PR carries none of the four, and that is fine', () => {
     const outcome = readManagedSubmitOutcome({
       submitOutcome: {
         pressed: true, state: 'unknown', source: null, evidence: null, message: null,

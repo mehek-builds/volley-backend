@@ -234,18 +234,21 @@ export type SubmitNetworkEntry = {
   url: string;
   status: number | null;
   failure?: string;
-  /* THREE FIELDS A SIBLING STRATUS PR IS ADDING to the same network entries, read defensively here
+  /* FOUR FIELDS A SIBLING STRATUS PR IS ADDING to the same network entries, read defensively here
    * because that deploy has its own cadence: every run older than it, and every run on a request
-   * this module has no reason to describe, carries none of the three. Nothing below may require any
+   * this module has no reason to describe, carries none of the four. Nothing below may require any
    * of them to reach a verdict a status code alone cannot already prove.
    *
    * body_excerpt is the response body, or the start of it - genuinely an excerpt, so it may be cut
    * mid-object and fail to parse as JSON, which is read as "no code" rather than an error.
    * content_type is the response's own Content-Type header, used only to skip parsing a body that
-   * already says it is not JSON. transport_disposition is carried for debugging and read by nothing
-   * in this file. */
+   * already says it is not JSON. body_unavailable_reason is why body_excerpt is absent even though
+   * a response came back (streamed past the capture limit, redacted, not text) - read by nothing in
+   * this file today, carried through only so a future reader is not left guessing at a silent gap.
+   * transport_disposition is carried for debugging and read by nothing in this file. */
   body_excerpt?: string;
   content_type?: string;
+  body_unavailable_reason?: string;
   transport_disposition?: string;
 };
 
@@ -263,6 +266,9 @@ const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
       ...(typeof value.failure === 'string' ? { failure: value.failure.slice(0, 120) } : {}),
       ...(typeof value.body_excerpt === 'string' ? { body_excerpt: value.body_excerpt.slice(0, 2_000) } : {}),
       ...(typeof value.content_type === 'string' ? { content_type: value.content_type.slice(0, 100) } : {}),
+      ...(typeof value.body_unavailable_reason === 'string'
+        ? { body_unavailable_reason: value.body_unavailable_reason.slice(0, 120) }
+        : {}),
       ...(typeof value.transport_disposition === 'string'
         ? { transport_disposition: value.transport_disposition.slice(0, 60) }
         : {}),
