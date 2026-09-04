@@ -46,6 +46,7 @@ let app: FastifyInstance;
 let backendDb: any;
 let backendPool: { end(): Promise<void> };
 let ledger: typeof import('../lib/submissionAttemptLedger');
+let abandonedAttemptClosure: typeof import('../lib/abandonedAttemptClosure');
 
 async function token(userId: string = USER_ID) {
   return new SignJWT({ userId, isGuest: false, sessionVersion: 0, authMethod: 'password' })
@@ -71,8 +72,19 @@ before(async () => {
   process.env.JWT_SIGNING_SECRET = JWT_SECRET;
   process.env.ENCRYPTION_KEY = 'submission-authority-read-heal-test-key-32';
 
+  // Every one of these is a DYNAMIC import, deliberately, and abandonedAttemptClosure joins them
+  // for the same reason: it statically imports `../db`, which constructs its module-level
+  // connection pool from `process.env.DATABASE_URL` the FIRST time anything imports it. A static
+  // top-level `import` of this module would resolve before this file's own top-level code runs -
+  // before DATABASE_URL above is set - and permanently bind that pool to pg's hardcoded default
+  // (127.0.0.1:5432) for the rest of the process, breaking every query after it with an
+  // ECONNREFUSED that has nothing to do with whatever test happened to run next. Importing it here,
+  // after DATABASE_URL is set and after `../db` itself has already been imported once on the line
+  // above, is what every other route module below already does and is the only ordering that
+  // leaves the pool pointed at the PGlite socket.
   ({ db: backendDb, pool: backendPool } = await import('../db'));
   ledger = await import('../lib/submissionAttemptLedger');
+  abandonedAttemptClosure = await import('../lib/abandonedAttemptClosure');
   const { applicationRoutes } = await import('./applications');
   const { resumeRoutes } = await import('./resume');
   const { jdMatchRoutes } = await import('./jdMatch');
@@ -106,8 +118,12 @@ function freeze() {
 /** A packet shaped like the measured Pony.ai one: a real ApplicationReviewState the routes' own
  * machinery (question resolution, sensitive-question labels, resume-contact staleness) can read
  * without crashing, `status: 'failed'` by default, and no claim, receipt or unverified_submission -
- * exactly the emptiness abandonedPreBoundaryAttemptIsClosable's second proof needs. */
-async function seedPacket(review: Partial<ApplicationReviewState> = {}): Promise<string> {
+ * exactly the emptiness abandonedPreBoundaryAttemptIsClosable's second proof needs.
+ *
+ * `userId` defaults to the shared USER_ID every other test in this file uses; the cap test below
+ * passes its own isolated user so its candidate count cannot be perturbed by another test's packets
+ * sharing the one ledger. */
+async function seedPacket(review: Partial<ApplicationReviewState> = {}, userId: string = USER_ID): Promise<string> {
   const packetId = randomUUID();
   const fullReview: ApplicationReviewState = {
     jd_text: 'Build autonomy software at Pony.ai.',
@@ -124,7 +140,7 @@ async function seedPacket(review: Partial<ApplicationReviewState> = {}): Promise
   };
   await backendDb.insert(schema.generated_resumes).values({
     id: packetId,
-    user_id: USER_ID,
+    user_id: userId,
     job_context: { company: 'Pony.ai', role: 'Software Engineer' },
     spec: {
       _contact: { full_name: 'Test Applicant', email: 'applicant@example.com' },
@@ -135,14 +151,28 @@ async function seedPacket(review: Partial<ApplicationReviewState> = {}): Promise
   return packetId;
 }
 
+/** A second, fully isolated user - its own row, its own ledger - so a test counting how many
+ * candidates a single heal call closes is never perturbed by another test's packets sharing the
+ * module-wide USER_ID's ledger. */
+async function seedUser(): Promise<string> {
+  const userId = randomUUID();
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `read-heal-${userId}@example.com`,
+    password_hash: 'x',
+  });
+  return userId;
+}
+
 /** Opens an attempt through the real ledger API - never a raw insert - so its binding, evidence
  * code and event id are exactly what production writes. `createdAt` is the one thing every test
- * below varies: it is what abandonedPreBoundaryAttemptIsClosable's time margin reads. */
-async function openAttempt(packetId: string, createdAt: Date): Promise<string> {
+ * below varies: it is what abandonedPreBoundaryAttemptIsClosable's time margin reads. `userId`
+ * defaults to the shared USER_ID; see seedPacket's own doc for why the cap test overrides it. */
+async function openAttempt(packetId: string, createdAt: Date, userId: string = USER_ID): Promise<string> {
   const attemptId = randomUUID();
   await ledger.appendSubmissionAttemptEvent({
     attemptId,
-    userId: USER_ID,
+    userId,
     packetId,
     source: 'legacy_backfill',
     operation: 'initial_submission',
@@ -270,4 +300,148 @@ test('a packet whose review says an employer may already hold something is not h
   assert.equal(body.submission_authority, undefined);
   assert.equal(body.retry_safety_diagnostic, 'unclosable_attempt');
   assert.equal(await notSentProvenCount(attemptId), 0);
+});
+
+/* REVIEW ROUND 1, 2026-09-05 - the three tests below pin the fixes made in response to review.
+ * See lib/abandonedAttemptClosure.ts (READ_HEAL_MAX_CANDIDATES, the `dependencies` test seam) for
+ * the mechanism each one is pinning. */
+
+test('a heal failure inside the ledger leaves all three read routes fail-closed, never a 500', async () => {
+  // dependencies.closeAbandonedPreBoundaryAttempts is the seam healAbandonedPreBoundaryAttemptsForRead
+  // calls through instead of the bare function, exactly so a test can force the one failure mode
+  // that matters here without a module-mocking flag this repo's plain `node --test` invocation does
+  // not carry: the write inside the heal's own transaction throwing. The outer try/catch on
+  // healAbandonedPreBoundaryAttemptsForRead is supposed to absorb that unconditionally; this proves
+  // it, on the real route handlers, rather than trusting the reading of the source.
+  const packetId = await seedPacket();
+  const attemptId = await openAttempt(packetId, OLD);
+
+  const original = abandonedAttemptClosure.dependencies.closeAbandonedPreBoundaryAttempts;
+  abandonedAttemptClosure.dependencies.closeAbandonedPreBoundaryAttempts = async () => {
+    throw new Error('simulated heal failure - stubbed for this test only');
+  };
+  try {
+    const submission = await app.inject({
+      method: 'GET',
+      url: `/applications/${packetId}/submission`,
+      headers: { authorization: `Bearer ${await token()}` },
+    });
+    assert.equal(submission.statusCode, 200, submission.body);
+    const submissionBody = submission.json();
+    assert.equal(submissionBody.submission_authority, undefined, 'no envelope when the heal itself throws');
+    // The one route that carries this diagnostic field at all - see retrySafetyDiagnosticForAbsentEnvelope.
+    assert.equal(submissionBody.retry_safety_diagnostic, 'unclosable_attempt');
+
+    const history = await app.inject({
+      method: 'GET',
+      url: '/resume/history',
+      headers: { authorization: `Bearer ${await token()}` },
+    });
+    assert.equal(history.statusCode, 200, history.body);
+    const row = history.json().resumes.find((resume: { id: string }) => resume.id === packetId);
+    assert.ok(row, 'the seeded packet is still on the page');
+    assert.equal(row.submission_authority, undefined, 'a throwing heal must never surface as a published envelope');
+
+    const board = await app.inject({
+      method: 'GET',
+      url: '/applications/board',
+      headers: { authorization: `Bearer ${await token()}` },
+    });
+    assert.equal(board.statusCode, 200, board.body);
+    const card = board.json().cards.find((candidate: { id: string }) => candidate.id === packetId);
+    assert.ok(card, 'the seeded packet is still on the board');
+    // Unlike the submission GET and /resume/history, the board publishes a real envelope for a
+    // blocked_unverified/opened card even with no heal at all (see jdMatchRoutes' own doc on
+    // GET /applications/board) - a throwing heal must leave it at that TRUTHFUL blocked shape,
+    // never silently upgraded to sendable and never silently dropped.
+    assert.ok(card.submission_authority, 'the board still publishes the truthful blocked envelope');
+    assert.equal(card.submission_authority.state, 'unverified');
+    assert.equal(card.submission_authority.retry_safety.kind, 'blocked_unverified');
+    assert.equal(card.submission_authority.retry_safety.reason, 'opened');
+
+    // No route wrote anything: the try/catch discards the failure, it does not retry into a
+    // partial write, on any of the three calls above.
+    assert.equal(await notSentProvenCount(attemptId), 0, 'a heal that only ever throws must write nothing');
+  } finally {
+    abandonedAttemptClosure.dependencies.closeAbandonedPreBoundaryAttempts = original;
+  }
+});
+
+test('two concurrent reads of the same packet close its abandoned attempt exactly once', async () => {
+  const packetId = await seedPacket();
+  const attemptId = await openAttempt(packetId, OLD);
+  const headers = { authorization: `Bearer ${await token()}` };
+
+  // Both requests race the SAME advisory lock (submission-attempt:<userId>) and the same
+  // deterministic not_sent_proven event id; tryLockSubmissionAttemptUser's try-never-wait contract
+  // means at most one of them actually runs the close, and appendSubmissionAttemptEvent's
+  // onConflictDoNothing means even a second writer that DID get the lock (after the first already
+  // committed) replays into the existing row rather than a duplicate.
+  const [first, second] = await Promise.all([
+    app.inject({ method: 'GET', url: `/applications/${packetId}/submission`, headers }),
+    app.inject({ method: 'GET', url: `/applications/${packetId}/submission`, headers }),
+  ]);
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(second.statusCode, 200, second.body);
+  assert.equal(
+    await notSentProvenCount(attemptId),
+    1,
+    'a concurrent pair of reads on the same packet must write the not-sent fact exactly once',
+  );
+});
+
+test('a backlog past READ_HEAL_MAX_CANDIDATES closes in capped batches, oldest attempt first', async () => {
+  // An isolated user, not the shared USER_ID every other test in this file writes to: this test
+  // counts exactly how many candidates one call closes, and that count would be meaningless if it
+  // shared a ledger with another test's own never-closed packets (the "recent" and "employer may
+  // already hold something" fixtures above are deliberately permanent candidates-in-shape).
+  const userId = await seedUser();
+  const candidateCount = abandonedAttemptClosure.READ_HEAL_MAX_CANDIDATES + 2;
+  // Comfortably past the 3-hour margin, spaced a second apart so each attempt's created_at is
+  // strictly ordered - closeAbandonedPreBoundaryAttempts attempts candidates in the same oldest-
+  // first order submissionAttemptEventsForUser already returns them in.
+  const base = Date.now() - STALLED_FILL_RUN_RELEASE_MS - 2 * 60 * 60_000;
+  const attempts: { packetId: string; attemptId: string }[] = [];
+  for (let i = 0; i < candidateCount; i += 1) {
+    const packetId = await seedPacket({}, userId);
+    const attemptId = await openAttempt(packetId, new Date(base + i * 1_000), userId);
+    attempts.push({ packetId, attemptId });
+  }
+
+  const first = await app.inject({
+    method: 'GET',
+    url: '/applications/board',
+    headers: { authorization: `Bearer ${await token(userId)}` },
+  });
+  assert.equal(first.statusCode, 200, first.body);
+
+  const closedAfterFirst = await Promise.all(attempts.map(({ attemptId }) => notSentProvenCount(attemptId)));
+  const closedCountAfterFirst = closedAfterFirst.filter((count) => count === 1).length;
+  assert.equal(
+    closedCountAfterFirst,
+    abandonedAttemptClosure.READ_HEAL_MAX_CANDIDATES,
+    'one read must close at most the cap, even with more candidates on the page',
+  );
+  // Oldest first: the earliest `candidateCount - 2` attempts (indices before the cap) are the ones
+  // closed; the two newest are exactly what is left for the next read.
+  for (let i = 0; i < candidateCount; i += 1) {
+    assert.equal(
+      closedAfterFirst[i],
+      i < abandonedAttemptClosure.READ_HEAL_MAX_CANDIDATES ? 1 : 0,
+      `attempt ${i} (created ${i}s after the oldest) closed out of the expected oldest-first order`,
+    );
+  }
+
+  const second = await app.inject({
+    method: 'GET',
+    url: '/applications/board',
+    headers: { authorization: `Bearer ${await token(userId)}` },
+  });
+  assert.equal(second.statusCode, 200, second.body);
+
+  const closedAfterSecond = await Promise.all(attempts.map(({ attemptId }) => notSentProvenCount(attemptId)));
+  assert.ok(
+    closedAfterSecond.every((count) => count === 1),
+    'a second read must finish closing whatever the cap deferred on the first one',
+  );
 });

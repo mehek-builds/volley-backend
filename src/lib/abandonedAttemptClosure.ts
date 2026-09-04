@@ -493,6 +493,17 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
  */
 export const READ_HEAL_MAX_CANDIDATES = 8;
 
+/** Test seam only. healAbandonedPreBoundaryAttemptsForRead calls through this object rather than
+ * the bare function above so a test can replace `dependencies.closeAbandonedPreBoundaryAttempts`
+ * with a stub that throws and prove the three read routes stay fail-closed (200, a diagnostic, no
+ * envelope) exactly as the outer try/catch below already promises - see
+ * submissionAuthorityReadHeal.db.test.ts. This repo's plain `node --test` invocation carries no
+ * module-mocking flag, so a swappable object is the seam, not a mocked import. Production never
+ * reassigns this. */
+export const dependencies = {
+  closeAbandonedPreBoundaryAttempts,
+};
+
 export async function healAbandonedPreBoundaryAttemptsForRead(input: {
   userId: string;
   log: AbandonedAttemptReadHealLog;
@@ -516,7 +527,7 @@ export async function healAbandonedPreBoundaryAttemptsForRead(input: {
       if (!await tryLockSubmissionAttemptUser(tx, input.userId)) {
         return { closedAttemptIds: [], failedAttemptIds: [] };
       }
-      return closeAbandonedPreBoundaryAttempts({
+      return dependencies.closeAbandonedPreBoundaryAttempts({
         userId: input.userId,
         executor: tx,
         log: input.log,
