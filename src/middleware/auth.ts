@@ -1,5 +1,5 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { jwtVerify } from 'jose';
+import { jwtVerify, decodeJwt } from 'jose';
 import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
@@ -49,6 +49,68 @@ type SessionOutcome =
   | { ok: false; reason: 'invalid' }
   | { ok: false; reason: 'misconfigured' };
 
+/**
+ * Every reason resolveToken answers 'invalid', so a rejection is diagnosable after the fact
+ * instead of only from a live repro. Added 2026-09-04: a live dashboard session signed itself
+ * out on a token that was, by every check this file makes, still good -- not past its own exp
+ * claim, not epoch-revoked (session_valid_from was NULL on the account), not version-stale
+ * (session_version was 0 and had never been bumped) -- and the previous bare
+ * `catch { return invalid }` gave nobody a way to tell a signature failure from any of the
+ * other five rejections after the fact. See src/middleware/auth.test.ts for the coverage this
+ * exists to keep honest: the outcome returned to every caller, and the 401 body a client sees,
+ * are unchanged by this. It only adds a log line.
+ */
+type TokenRejectionReason =
+  | 'no_user_id'
+  | 'user_not_found'
+  | 'issued_before_epoch'
+  | 'session_version_stale'
+  | 'guest_expired'
+  | 'guest_flag_mismatch'
+  | 'verify_threw';
+
+/**
+ * Logs enough to tell these six apart after the fact, without ever logging the token or the
+ * signing secret. `log` is optional and called through `?.` on purpose: plenty of tests in this
+ * file construct a bare `{ headers }` request with no Fastify logger attached, and a rejection
+ * path that only exists in a request handler's error branch is exactly the kind of thing a test
+ * exercises without wiring up every incidental collaborator.
+ */
+function logRejectedToken(
+  log: FastifyRequest['log'] | undefined,
+  token: string,
+  rejectionReason: TokenRejectionReason,
+  verifyError?: unknown,
+): void {
+  /* decodeJwt reads the payload without checking the signature, so this still works for the
+     exact case under investigation: a token whose signature no longer verifies against the
+     current secret. A token too malformed even for that is itself informative, so the decode
+     failure is captured rather than thrown past. */
+  let claims: { userId?: unknown; sessionVersion?: unknown; iat?: unknown; exp?: unknown } | null = null;
+  let claimDecodeError: string | null = null;
+  try {
+    claims = decodeJwt(token);
+  } catch (decodeError) {
+    claimDecodeError = decodeError instanceof Error ? decodeError.message : String(decodeError);
+  }
+  log?.warn(
+    {
+      tokenRejection: {
+        reason: rejectionReason,
+        verifyErrorName: verifyError instanceof Error ? verifyError.name : undefined,
+        verifyErrorMessage: verifyError instanceof Error ? verifyError.message : undefined,
+        claimDecodeError,
+        claimUserId: typeof claims?.userId === 'string' ? claims.userId : undefined,
+        claimSessionVersion: typeof claims?.sessionVersion === 'number' ? claims.sessionVersion : undefined,
+        claimIat: typeof claims?.iat === 'number' ? claims.iat : undefined,
+        claimExp: typeof claims?.exp === 'number' ? claims.exp : undefined,
+        nowSeconds: Math.floor(Date.now() / 1000),
+      },
+    },
+    'requireAuth rejected a presented token',
+  );
+}
+
 const inFlightSessions = new Map<string, Promise<SessionOutcome>>();
 
 /**
@@ -81,7 +143,7 @@ async function resolveSession(request: FastifyRequest): Promise<SessionOutcome> 
      identical auth queries. Share only the active resolution. The entry is
      removed as soon as it settles, so revocation still reaches the next
      request rather than waiting behind a time-based cache. */
-  const resolution = resolveToken(token, secret);
+  const resolution = resolveToken(token, secret, request.log);
   inFlightSessions.set(token, resolution);
   const cleanup = () => {
     if (inFlightSessions.get(token) === resolution) inFlightSessions.delete(token);
@@ -90,12 +152,17 @@ async function resolveSession(request: FastifyRequest): Promise<SessionOutcome> 
   return resolution;
 }
 
-async function resolveToken(token: string, secret: string): Promise<SessionOutcome> {
+async function resolveToken(
+  token: string,
+  secret: string,
+  log?: FastifyRequest['log'],
+): Promise<SessionOutcome> {
   try {
     const secretBytes = new TextEncoder().encode(secret);
     const { payload } = await jwtVerify(token, secretBytes);
 
     if (!payload['userId']) {
+      logRejectedToken(log, token, 'no_user_id');
       return { ok: false, reason: 'invalid' };
     }
 
@@ -125,13 +192,26 @@ async function resolveToken(token: string, secret: string): Promise<SessionOutco
       .where(eq(users.id, userId))
       .limit(1);
 
-    if (row.length === 0) return { ok: false, reason: 'invalid' };
-    if (issuedBeforeEpoch(payload.iat, row[0].session_valid_from)) return { ok: false, reason: 'invalid' };
-    if (sessionVersionIsStale(payload['sessionVersion'], row[0].session_version)) return { ok: false, reason: 'invalid' };
-    if (row[0].is_guest && row[0].guest_expires_at && row[0].guest_expires_at <= new Date()) {
+    if (row.length === 0) {
+      logRejectedToken(log, token, 'user_not_found');
       return { ok: false, reason: 'invalid' };
     }
-    if (Boolean(payload['isGuest']) !== row[0].is_guest) return { ok: false, reason: 'invalid' };
+    if (issuedBeforeEpoch(payload.iat, row[0].session_valid_from)) {
+      logRejectedToken(log, token, 'issued_before_epoch');
+      return { ok: false, reason: 'invalid' };
+    }
+    if (sessionVersionIsStale(payload['sessionVersion'], row[0].session_version)) {
+      logRejectedToken(log, token, 'session_version_stale');
+      return { ok: false, reason: 'invalid' };
+    }
+    if (row[0].is_guest && row[0].guest_expires_at && row[0].guest_expires_at <= new Date()) {
+      logRejectedToken(log, token, 'guest_expired');
+      return { ok: false, reason: 'invalid' };
+    }
+    if (Boolean(payload['isGuest']) !== row[0].is_guest) {
+      logRejectedToken(log, token, 'guest_flag_mismatch');
+      return { ok: false, reason: 'invalid' };
+    }
 
     return {
       ok: true,
@@ -147,7 +227,8 @@ async function resolveToken(token: string, secret: string): Promise<SessionOutco
       },
       cardGateLocked: accountIsCardGateLocked(row[0]),
     };
-  } catch {
+  } catch (error) {
+    logRejectedToken(log, token, 'verify_threw', error);
     return { ok: false, reason: 'invalid' };
   }
 }
