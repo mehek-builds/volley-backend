@@ -329,12 +329,25 @@ export type ManagedBrowserResult = {
       scope: {
         /* Which resolved scope the runner bound the submit to. 'form' is a real <form> ancestor;
          * 'container' is the nearest field-bearing ancestor on a formless page (Ashby's div#form).
-         * Emitted by every runner since the submit-scope repair; absent only from older runners. */
-        scopeKind?: 'form' | 'container';
-        formFingerprint: string;
-        submitFingerprint: string;
-        formMatchCount: 1;
-        submitMatchCount: 1;
+         * Emitted by every runner since the submit-scope repair; absent only from older runners.
+         * `null` is the UNBOUND scope described below: the runner resolved no scope at all. */
+        scopeKind?: 'form' | 'container' | null;
+        /* NULLABLE ONLY ON A PASS THAT BOUND NOTHING, and the runtime gate is what enforces that.
+         *
+         * managed-browser.js builds two SYNTHETIC passes at points where no scope was ever
+         * fingerprinted - the caller-bound application form was unusable (15390), and the security
+         * code controls did not retain the exact code (15458). Both carry a blockerReason naming a
+         * refusal that PRECEDES any press, and both are the runner's way of saying "there was
+         * nothing here to identify", which is a truthful report and not a malformed one.
+         *
+         * These fields stay loose here and strict in assertManagedRequiredFieldsConfirmed, which
+         * admits the null combination only as one pinned shape and keeps every existing check for a
+         * pass that DOES claim a bound scope. Read `unboundScopeProof` there for the whole rule; do
+         * not infer from this type that a null fingerprint is acceptable anywhere else. */
+        formFingerprint: string | null;
+        submitFingerprint: string | null;
+        formMatchCount: 0 | 1;
+        submitMatchCount: 0 | 1;
         requiredControlCount: number;
         sameNode: boolean;
       };
@@ -355,8 +368,55 @@ export type ManagedBrowserResult = {
       retries: number;
       unresolved: string[];
       submissionOutcome: 'clicked' | 'blocked';
-      blockerReason?: 'submit_node_replaced' | 'ambiguous_submit' | 'form_identity_changed'
-        | 'no_submit_control' | 'submit_chooser_changed';
+      /* Mirrors MANAGED_BLOCKER_REASONS in portalSubmission.ts, which is the runtime gate and the
+       * list the runner is pinned against. Kept as a union so a reason this service reads by name
+       * is a compile error when it is not a reason the runner can emit. Add, never remove. */
+      blockerReason?:
+        // Chooser and scope binding: the control this run bound is not the control it would press.
+        | 'submit_node_replaced' // the bound submit element was replaced before the press
+        | 'ambiguous_submit' // more than one control tied for final submit (v3 chooser outcome)
+        | 'form_identity_changed' // the bound form's identity changed between scan and press
+        | 'no_submit_control' // no submit control was selected at all (v3 chooser outcome)
+        | 'submit_chooser_changed' // the chooser's selection changed between scan and press
+        // Caller-supplied values: what was confirmed is no longer what would be sent.
+        | 'successful_address_changed' // a confirmed application value or file changed after confirmation
+        | 'security_code_binding_changed' // the verification code's bound control changed before the press
+        | 'security_code_payload_unaddressed' // the exact code reached no successful native payload control
+        // Application scope: the caller-bound form was unusable at submit time.
+        | 'application_scope_missing' // the bound application form was not found
+        | 'application_scope_ambiguous' // the scope selector matched more than one form
+        | 'application_scope_not_form' // the bound scope resolved to a node that is not a form
+        | 'application_scope_detached' // the bound scope left the document before the press
+        | 'application_scope_unavailable' // the scope could not be read at all
+        // Transport binding, before the press: the exact native request could not be pinned.
+        | 'submit_payload_unverifiable' // the native submit transport or payload could not be bound
+        | 'submit_transport_unsupported' // the form's method, target or enctype is outside atomic submit v4
+        | 'submit_transport_unpinned' // the page attempted an unbound network transport
+        | 'submit_transport_guard_unavailable' // the transport gate could not be armed or authorized
+        // Activation guard, while arming: the submit-time binding could not be fixed.
+        | 'submit_activation_guard_unavailable' // the submit-time binding guard could not be armed
+        | 'submit_activation_binding_changed' // the binding fingerprint changed before arming completed
+        // Activation witnesses, during the press: the press was not the one that was authorized.
+        | 'submit_binding_changed_during_activation' // the gate blocked without naming a narrower reason
+        | 'submit_click_failed' // the press itself threw
+        | 'submit_identity_changed' // the bound form or submitter identity changed mid-activation
+        | 'protected_surface_mutated' // a protected node was mutated during activation
+        | 'submit_activation_unobserved' // the guard produced no verdict for the activation
+        | 'submit_event_unobserved' // no submit event was seen
+        | 'submit_event_canceled' // the submit event was default-prevented
+        | 'submit_document_bubble_missing' // the submit event never bubbled to the document
+        | 'submit_window_bubble_missing' // the submit event never bubbled to the window
+        | 'submit_bubble_witness_missing' // a required bubble witness was missing at finalize
+        | 'submit_formdata_unobserved' // no formdata event accompanied the submit
+        | 'post_click_binding_changed' // the binding no longer matched after the click
+        // Native request matching, after the press: the observed request is not the bound one.
+        | 'submit_request_unobserved' // no native document request followed the press
+        | 'submit_multiple_native_requests' // more than one native document request followed the press
+        | 'submit_method_changed' // the observed request's method differed from the bound one
+        | 'submit_destination_changed' // the observed request's URL differed from the bound one
+        | 'submit_enctype_changed' // the observed request's enctype differed from the bound one
+        | 'submit_payload_changed' // the observed request's payload differed from the bound one
+        | 'submit_transport_release_failed'; // the matched request could not be released to the network
     }>;
   } | null;
 };

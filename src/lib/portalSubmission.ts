@@ -45,6 +45,7 @@ import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
   readManagedFinalSubmitChooser,
   readManagedFinalSubmitNoClick,
+  readManagedSubmitOutcome,
 } from './managedSubmitOutcome';
 import { receiptProof } from './receiptProof';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from './workableApplicationUrl';
@@ -12148,6 +12149,28 @@ function observedManagedSubmitWithheld(result: unknown): boolean {
   return proof.passes.every((pass) => isRecord(pass) && pass.submissionOutcome === 'blocked');
 }
 
+/* THE OTHER HALF OF THE SAME READ, AND THE ONLY THING THAT OUTRANKS AN UNBOUND PASS.
+ *
+ * A payload whose pass proves no submit control was ever bound, on a run that separately reports
+ * pressing one, is CONTRADICTORY - and a contradiction is not evidence of a no-send. Whichever half
+ * is wrong, the honest reading of the pair is PR 506's: the click state is unknown. So a claimed
+ * press disqualifies the unbound branch outright and sends the pass back to the strict checks it
+ * cannot pass, which is exactly where it went before that branch existed.
+ *
+ * Deliberately not the negation of observedManagedSubmitWithheld. That function answers "did the
+ * runner positively report withholding", where silence is not a yes. This one answers "did anything
+ * claim a press", where silence is not a yes either. Both must stay false on a silent payload, and
+ * a single boolean cannot do that.
+ */
+function observedManagedSubmitPressClaimed(result: unknown): boolean {
+  if (!isRecord(result)) return false;
+  /* readManagedSubmitOutcome is the canonical read of this field, and submissionProvablyNotSent
+   * already uses this exact expression for this exact purpose - refusing to believe a no-send from
+   * a result that contradicts itself about the press. Two hand-rolled readings of one field drift;
+   * this one defers so a nuance added there reaches this gate too. */
+  return readManagedSubmitOutcome(result)?.pressed === true;
+}
+
 function confirmationContractError(message: string, submitWithheld = false): never {
   if (submitWithheld) {
     throw new ManagedRequiredFieldConfirmationError(
@@ -12200,6 +12223,12 @@ const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
   'Bound submit control or application form was replaced before submission',
   'Bound application form or submit identity changed during confirmation',
   'Litos could not bind required-field validation to the selected application form',
+  /* The two synthetic passes' own sentences, managed-browser.js:15398 and :15458. Without these the
+   * only text a scope refusal could offer the applicant was UNATTRIBUTED_REQUIRED_BLOCKER - "a
+   * required answer is still missing" - which names the wrong problem on a form Litos never
+   * reached, and sends her to fill in fields that were not the reason it stopped. */
+  'The caller-bound application form was unavailable at submit time',
+  'The security code controls did not retain the exact caller-supplied code',
 ]);
 
 /** What the applicant is told when a blocker cannot be attributed to a control on this form. */
@@ -12237,6 +12266,156 @@ export function managedApplicationProofIsRequired(
   return !(standingChallenge && initialSubmitOutcome?.pressed === false);
 }
 
+/* EVERY REFUSAL THE MANAGED RUNNER CAN NAME, MIRRORED FROM stratus-browser-cloud.
+ *
+ * A v4 run that correctly refuses its own press reports why in `pass.blockerReason`. Any value not
+ * named here was rejected as contractError('blocker reason') — still fail-closed, nothing is sent,
+ * but the real cause is replaced by an opaque one, so the operator and the applicant are told that
+ * a submission failed without being told what stopped it. A Workable v4 run that refused because
+ * the page reached for an unbound network transport read as a generic contract violation for as
+ * long as this list was five entries long.
+ *
+ * This is a DIAGNOSIS vocabulary, not a safety gate: the gate is `submissionOutcome`, which is
+ * 'blocked' whenever any reason is present. Widening this list can therefore never let a send
+ * through that would otherwise have been stopped.
+ *
+ * ADD, NEVER REMOVE. A reason the runner has stopped emitting is still in flight on a run that
+ * started before the deploy, and removing it turns that run's report back into an opaque failure.
+ * `blocker reasons stay in sync with the managed runner` pins this list against the runner source.
+ */
+export const MANAGED_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  // Chooser and scope binding: the control this run bound is not the control it would press.
+  'submit_node_replaced', // the bound submit element was replaced before the press
+  'ambiguous_submit', // more than one control tied for final submit (v3 chooser outcome)
+  'form_identity_changed', // the bound form's identity changed between scan and press
+  'no_submit_control', // no submit control was selected at all (v3 chooser outcome)
+  'submit_chooser_changed', // the chooser's selection changed between scan and press
+  // Caller-supplied values: what was confirmed is no longer what would be sent.
+  'successful_address_changed', // a confirmed application value or file changed after confirmation
+  'security_code_binding_changed', // the verification code's bound control changed before the press
+  'security_code_payload_unaddressed', // the exact code reached no successful native payload control
+  // Application scope: the caller-bound form was unusable at submit time.
+  'application_scope_missing', // the bound application form was not found
+  'application_scope_ambiguous', // the scope selector matched more than one form
+  'application_scope_not_form', // the bound scope resolved to a node that is not a form
+  'application_scope_detached', // the bound scope left the document before the press
+  'application_scope_unavailable', // the scope could not be read at all
+  // Transport binding, before the press: the exact native request could not be pinned.
+  'submit_payload_unverifiable', // the native submit transport or payload could not be bound
+  'submit_transport_unsupported', // the form's method, target or enctype is outside atomic submit v4
+  'submit_transport_unpinned', // the page attempted an unbound network transport
+  'submit_transport_guard_unavailable', // the transport gate could not be armed or authorized
+  // Activation guard, while arming: the submit-time binding could not be fixed.
+  'submit_activation_guard_unavailable', // the submit-time binding guard could not be armed
+  'submit_activation_binding_changed', // the binding fingerprint changed before arming completed
+  // Activation witnesses, during the press: the press was not the one that was authorized.
+  'submit_binding_changed_during_activation', // the gate blocked without naming a narrower reason
+  'submit_click_failed', // the press itself threw
+  'submit_identity_changed', // the bound form or submitter identity changed mid-activation
+  'protected_surface_mutated', // a protected node was mutated during activation
+  'submit_activation_unobserved', // the guard produced no verdict for the activation
+  'submit_event_unobserved', // no submit event was seen
+  'submit_event_canceled', // the submit event was default-prevented
+  'submit_document_bubble_missing', // the submit event never bubbled to the document
+  'submit_window_bubble_missing', // the submit event never bubbled to the window
+  'submit_bubble_witness_missing', // a required bubble witness was missing at finalize
+  'submit_formdata_unobserved', // no formdata event accompanied the submit
+  'post_click_binding_changed', // the binding no longer matched after the click
+  // Native request matching, after the press: the observed request is not the bound one.
+  'submit_request_unobserved', // no native document request followed the press
+  'submit_multiple_native_requests', // more than one native document request followed the press
+  'submit_method_changed', // the observed request's method differed from the bound one
+  'submit_destination_changed', // the observed request's URL differed from the bound one
+  'submit_enctype_changed', // the observed request's enctype differed from the bound one
+  'submit_payload_changed', // the observed request's payload differed from the bound one
+  'submit_transport_release_failed', // the matched request could not be released to the network
+]);
+
+/* THE REFUSALS THAT PROVE THEMSELVES BY PRECEDING THE PRESS.
+ *
+ * A strict subset of the list above, and the subset is the safety argument. `unboundScopeProof`
+ * below accepts a pass that fingerprints NOTHING - no form, no submit control - and reports it as
+ * "blocked, nothing sent". That verdict is only sound when the reason it carries is one that can
+ * physically only be reached before a control is pressed. Every reason here is decided while the
+ * scope is being resolved (managed-browser.js:14257-14280) or while a caller-supplied value is
+ * being re-checked, in both cases before any submit handle exists.
+ *
+ * A POST-press reason must never appear here. 'submit_request_unobserved' means the click already
+ * happened and its request went missing; reading that as "nothing was sent" is exactly the false
+ * release this whole gate exists to prevent, so it stays out even though a run carrying it also has
+ * no useful fingerprints to show.
+ */
+export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  'application_scope_missing',
+  'application_scope_ambiguous',
+  'application_scope_not_form',
+  'application_scope_detached',
+  'application_scope_unavailable',
+  'successful_address_changed',
+]);
+
+/* THE ONE PASS SHAPE THAT PROVES NO PRESS BY PROVING THERE WAS NOTHING TO PRESS.
+ *
+ * The contract below asks every pass for the identity of the form it bound and the control it
+ * pressed, because for a pass that pressed something those are the only evidence that the press was
+ * the authorized one. Two of the runner's emissions cannot answer, and their inability IS the
+ * report: managed-browser.js:15390 refuses because the caller-bound application form was unusable,
+ * and 15458 refuses because the security-code controls did not retain the exact code. Neither ever
+ * resolved a scope, so neither has a fingerprint to give.
+ *
+ * Until this branch existed both died at contractError('scope kind') / ('scope identity'), which
+ * discards the pass wholesale - so the six reasons above could never surface, and the operator was
+ * handed the name of an internal check instead of the cause. Worse, the correct "nothing was sent"
+ * classification then rested entirely on observedManagedSubmitWithheld reading submitOutcome.pressed
+ * === false out of the same payload the service had just declared unreadable. Any run reaching this
+ * service without that field - an older runner, a truncated retained result - flipped to
+ * ManagedConfirmationUnprovenError and told the applicant Litos had pressed Send.
+ *
+ * WHAT MAKES IT SAFE TO ACCEPT, stated as the property rather than the field list: a press is an
+ * event on a submit control, so a pass that never identified one cannot have pressed. That is
+ * carried by submitFingerprint === null AND submitMatchCount === 0 together - no control was named
+ * and none matched - alongside an empty attempt record and a reason that could only have been
+ * decided beforehand. Every clause is required; a pass that satisfies all but one is NOT admitted
+ * here, it falls through to the strict checks and is rejected exactly as it is today. The caller
+ * adds one more clause this function cannot see: observedManagedSubmitPressClaimed. A payload that
+ * says it pressed never takes this branch, however well-formed the pass is.
+ *
+ * THE TWO SCOPE-SIDE COMBINATIONS ARE PINNED RATHER THAN RANGED, because they are the two the
+ * runner writes and nothing should be able to invent a third. 15390 reports honestly that it bound
+ * nothing (scopeKind null, formMatchCount 0). 15458 reports scopeKind 'form' with formMatchCount 1
+ * while still carrying a null formFingerprint - a form was located, never identified - which is a
+ * half-claim this service tolerates but does not rely on: with the submit side unclaimed, the form
+ * side proves nothing either way. `the runner writes no third unbound scope shape` pins both.
+ *
+ * The scope side and the reason are pinned INDEPENDENTLY, so a reason the runner only writes on one
+ * of the two shapes is accepted on either. That is deliberate rather than overlooked: binding each
+ * reason to the shape it ships with today would break the moment stratus makes 15458 report the
+ * honest unbound shape, and the safety property does not need the binding - it holds on every
+ * combination, because all six reasons are decided before any submit handle exists.
+ */
+function unboundScopeProof(pass: Record<string, unknown>): boolean {
+  const scope = pass.scope;
+  if (!isRecord(scope)) return false;
+  /* An ABSENT scopeKind is not a null one. Older runners omit the key entirely, and they also never
+   * build these synthetic passes, so treating the two as interchangeable would admit a third
+   * combination on top of the two the runner writes — for no case that exists. Present-and-null is
+   * a statement ("I resolved no scope"); missing is silence, and silence takes the strict path. */
+  const scopeSide = (scope.scopeKind === null && scope.formMatchCount === 0)
+    || (scope.scopeKind === 'form' && scope.formMatchCount === 1);
+  return scopeSide
+    && scope.formFingerprint === null
+    && scope.submitFingerprint === null
+    && scope.submitMatchCount === 0
+    && scope.requiredControlCount === 0
+    && scope.sameNode === false
+    && pass.submissionOutcome === 'blocked'
+    && pass.retries === 0
+    && Array.isArray(pass.requiredControls) && pass.requiredControls.length === 0
+    && Array.isArray(pass.attempts) && pass.attempts.length === 0
+    && typeof pass.blockerReason === 'string'
+    && MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.has(pass.blockerReason);
+}
+
 /**
  * Require the remote runner's per-field proof before this service records a receipt. The action
  * itself is the pre-click barrier. This read is the independent reporting barrier, so an older
@@ -12251,6 +12430,7 @@ export function assertManagedRequiredFieldsConfirmed(
    * past a never-returning arrow when the const carries an explicit type, and every guard below
    * depends on that narrowing to keep reading `result` and `pass` as records. */
   const submitWithheld = observedManagedSubmitWithheld(result);
+  const pressClaimed = observedManagedSubmitPressClaimed(result);
   const contractError: (detail: string) => never = (detail) => confirmationContractError(detail, submitWithheld);
   if (!isRecord(result)) contractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
@@ -12289,28 +12469,33 @@ export function assertManagedRequiredFieldsConfirmed(
       'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
       'requiredControlCount', 'sameNode',
     ], ['scopeKind'])) contractError('scope proof');
-    if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
-      contractError('scope kind');
+    /* Read once, ahead of the identity checks it excuses, and it excuses NOTHING ELSE. A pass that
+     * misses the shape by any clause is not unbound, so it arrives at the same two contract errors
+     * it hits today. See unboundScopeProof for why a fingerprintless pass can be believed. */
+    const unboundScope = !pressClaimed && unboundScopeProof(pass);
+    if (!unboundScope) {
+      if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
+        contractError('scope kind');
+      }
+      if (!opaqueFingerprint(pass.scope.formFingerprint)
+        || !opaqueFingerprint(pass.scope.submitFingerprint)
+        || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
+        || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
+        || (pass.scope.requiredControlCount as number) < 0
+        || (pass.scope.requiredControlCount as number) > 500) contractError('scope identity');
     }
-    if (!opaqueFingerprint(pass.scope.formFingerprint)
-      || !opaqueFingerprint(pass.scope.submitFingerprint)
-      || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
-      || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
-      || (pass.scope.requiredControlCount as number) < 0
-      || (pass.scope.requiredControlCount as number) > 500) contractError('scope identity');
     if (pass.submissionOutcome !== 'clicked' && pass.submissionOutcome !== 'blocked') {
       contractError('submission outcome');
     }
-    const blockerReasons = new Set([
-      'submit_node_replaced', 'ambiguous_submit', 'form_identity_changed', 'no_submit_control',
-      'submit_chooser_changed',
-    ]);
     if (pass.blockerReason !== undefined
-      && (typeof pass.blockerReason !== 'string' || !blockerReasons.has(pass.blockerReason))) {
+      && (typeof pass.blockerReason !== 'string' || !MANAGED_BLOCKER_REASONS.has(pass.blockerReason))) {
       contractError('blocker reason');
     }
     if (typeof pass.blockerReason === 'string') blockerFailures.push(pass.blockerReason);
-    if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced') {
+    /* sameNode false ordinarily means the bound submit node was swapped under the runner, and only
+     * 'submit_node_replaced' explains that. An unbound pass never bound a node to compare, so its
+     * false is the absence of a comparison rather than a failed one. */
+    if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced' && !unboundScope) {
       contractError('detached node reason');
     }
     if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) contractError('retries');
