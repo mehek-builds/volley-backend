@@ -1996,17 +1996,35 @@ test('study year stays blank when graduation evidence cannot support it', () => 
   );
 });
 
-test('salary questions are left for human attention', () => {
+test('a salary field fills from a currency-matched stored figure, and surfaces a mismatch (R-031)', () => {
   const ap = { desired_salary: '80000', desired_salary_currency: 'USD' };
   const usd = resolveKnownAnswer('expected salary (USD)', 'text', ap, undefined);
-  assert.ok(usd && 'skipReason' in usd);
+  assert.deepEqual(usd, { value: '80000' }, 'a stored figure fills when the posting currency matches it');
   const eur = resolveKnownAnswer('expected salary (EUR)', 'text', ap, undefined);
-  assert.ok(eur && 'skipReason' in eur);
+  assert.ok(eur && 'skipReason' in eur, 'a currency mismatch is surfaced, never converted');
+  assert.match(
+    (eur as { skipReason: string }).skipReason,
+    /EUR/,
+    'the surfaced reason names the mismatch, not a bare "left for you"',
+  );
 });
 
-test('salary questions stay blank even when the label states a range', () => {
+test('a salary field fills the median of a range stated in the label', () => {
   const resolved = resolveKnownAnswer('desired salary (e.g. USD 90,000 - 110,000)', 'text', {}, undefined);
-  assert.ok(resolved && 'skipReason' in resolved);
+  assert.ok(resolved && 'value' in resolved, 'a stated range is answerable, not left blank');
+  assert.match((resolved as { value: string }).value, /100,000/, 'the answer is the median of the stated range');
+});
+
+test('a salary field fills the median of a range stated in the job description', () => {
+  const jd = 'Compensation: the salary range for this position is USD 120,000 to 140,000 per year.';
+  const jdRange = resolveKnownAnswer('Expected base salary', 'text', {}, jd);
+  assert.ok(jdRange && 'value' in jdRange, 'a JD-stated range is answerable');
+  assert.match((jdRange as { value: string }).value, /130,000/, 'the answer is the median of the JD range');
+});
+
+test('a salary field the posting does not state and the profile does not carry stays with the applicant', () => {
+  const bare = resolveKnownAnswer('Expected salary', 'text', {}, 'A wonderful opportunity to build things.');
+  assert.ok(bare && 'skipReason' in bare, 'no range and no stored figure is surfaced, never invented');
 });
 
 test('eeoAnswer is exact-match-only, never a near-miss (R-018)', () => {
