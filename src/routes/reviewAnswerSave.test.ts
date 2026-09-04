@@ -1182,3 +1182,45 @@ for (const [name, evidence] of [
     );
   });
 }
+
+/* THE ROUTE THE REFUSAL NAMES ACTUALLY CARRIES THE CORRECTION - AND RE-OPENS THE APPROVAL.
+ *
+ * A 409 that names an exit is worse than one that names none if the exit does not go where it says.
+ * Two facts have to hold on submit-request for the sentence above to be honest, and neither is
+ * something this route can assert by injecting: a restart books a browser run.
+ *
+ *   IT TAKES HER ANSWERS.   The posted `questions` become submittedQuestions, are merged and
+ *                           normalised, and the review the restart writes is built FROM that list.
+ *                           If the route ignored the body on a restart it would refill the company's
+ *                           form with the same wrong essay, which is a restart and not a correction.
+ *   IT RE-OPENS THE AUDIT.  freshSubmitRequestReview drops preview_screenshot_url, final_approved_at
+ *                           and filled_fields. This is the half that keeps the invariant the 409
+ *                           exists for: the correction can only land together with the discarding of
+ *                           the picture it would otherwise have contradicted, so an approved packet
+ *                           and the packet that was audited still cannot diverge.
+ *
+ * Read off the source for the same reason submissionStateMachine.test.ts reads this route off the
+ * source - what is being pinned is a composition, and the alternative is booting a browser.
+ */
+test('the restart the refusal names is fed the posted answers and re-opens the approval', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  const submitRequest = route.slice(route.indexOf("'/applications/:id/submit-request'"));
+
+  assert.match(submitRequest, /const submittedQuestions = parsed\.data\.questions as ApplicationReviewQuestion\[\]/,
+    'the posted answers are what the restart resolves against');
+  assert.match(submitRequest, /const next = freshSubmitRequestReview\(current, canonicalSubmittedQuestions, submittedReviewedAt\)/,
+    'and the review the restart writes is built from them, not from the stored list it is replacing');
+
+  const restartGate = submitRequest.indexOf("restartable && parsed.data.restart === true");
+  const answerMerge = submitRequest.indexOf('const submittedQuestions = parsed.data.questions');
+  assert.ok(restartGate > 0 && answerMerge > restartGate,
+    'and the restart falls THROUGH to that merge rather than returning early: an exit that skipped it '
+    + 'would refill the form with the answer she is trying to correct');
+
+  const fresh = route.slice(route.indexOf('export function freshSubmitRequestReview'));
+  for (const cleared of ['preview_screenshot_url: undefined', 'final_approved_at: undefined', 'filled_fields: undefined']) {
+    assert.ok(fresh.slice(0, 2500).includes(cleared),
+      `the restart must clear ${cleared} - the corrected answer and the picture of the filled form move together or the invariant is gone`);
+  }
+});
