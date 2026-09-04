@@ -191,9 +191,13 @@ export type AbandonedAttemptClosureLog = {
  * close, and the caller's own logger records why.
  *
  * THE POST-WRITE ASSERTION IS STILL THE POINT, and it mirrors the one POST /submission/unverified
- * makes: the ledger is re-read after the append and the attempt must actually fold to
- * `safe_not_sent`. A fact that did not move the fold would leave the packet blocked while this
- * function reported it healed, which is the failure the caller cannot see.
+ * makes: the fact just appended, folded together with the events already read, must actually
+ * resolve the attempt to `safe_not_sent`. A fact that did not move the fold would leave the packet
+ * blocked while this function reported it healed, which is the failure the caller cannot see. It is
+ * folded LOCALLY rather than re-read from the user's whole ledger: appendSubmissionAttemptEvent
+ * already returns the exact row it wrote (or the exact existing row a replay found), and the user
+ * advisory lock this function's caller holds for the whole transaction rules out a concurrent writer
+ * changing the answer between the append and a re-read.
  *
  * The caller must supply its write transaction. appendSubmissionAttemptEvent takes the user
  * advisory lock, which is reentrant when the caller already holds it.
@@ -241,7 +245,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
     })) continue;
     try {
       await input.executor.transaction(async (savepoint) => {
-        await appendSubmissionAttemptEvent({
+        const appended = await appendSubmissionAttemptEvent({
           ...submissionAttemptBindingFromEvent(opening),
           eventId: submissionAttemptEventId(
             attemptId,
@@ -252,9 +256,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
           proofKind: 'typed_pre_click_stop',
           evidenceCode: ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
         }, { executor: savepoint });
-        const reread = (await submissionAttemptEventsForUser(input.userId, { executor: savepoint }))
-          .filter((event) => event.attempt_id === attemptId);
-        const resolved = submissionAttemptRetrySafety(reread);
+        const resolved = submissionAttemptRetrySafety([...attemptEvents, appended.event]);
         if (resolved.kind !== 'safe_not_sent' || resolved.proofKind !== 'typed_pre_click_stop') {
           throw new Error('ABANDONED_ATTEMPT_CLOSURE_FACT_INCOMPLETE');
         }
