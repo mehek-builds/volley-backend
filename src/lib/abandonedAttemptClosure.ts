@@ -46,7 +46,9 @@
 
 import { and, eq, inArray } from 'drizzle-orm';
 import { generated_resumes } from '../db/schema';
-import { readApplicationReview } from './applicationReview';
+import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
+import { employerMayHoldApplication, type StoredSendEvidence } from './managedSubmitOutcome';
+import { reviewAnswerSaveDisposition } from './submissionSafety';
 import {
   appendSubmissionAttemptEvent,
   ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
@@ -60,6 +62,11 @@ import {
   type SubmissionAttemptLedgerExecutor,
 } from './submissionAttemptLedger';
 
+/** The packet-review facts this closure asks about employer contact, kept to exactly the shape
+ * reviewAnswerSaveDisposition already reads so the two never have to be reconciled by hand. */
+export type AbandonedAttemptClosurePacketReview =
+  Pick<ApplicationReviewState, 'status' | 'submission_claimed_at'> & StoredSendEvidence;
+
 /** What this predicate could establish about the packet an attempt's opening names. `null` means
  * the row could not be read - missing, or its stored review would not parse - and that is a
  * REFUSAL, never a stand-in for "no claim". See the note on `packet` below. */
@@ -68,7 +75,32 @@ export type AbandonedAttemptClosurePacket = {
    * claimSubmission generates one value and uses it for both. `null` means the packet holds no
    * claim at all. */
   claimId: string | null;
+  /** The rest of the row's own evidence about whether an employer may already hold something. */
+  review: AbandonedAttemptClosurePacketReview;
 };
+
+/** The packet review's own answer to "may an employer already hold something", asked through the
+ * same two predicates submissionSafety.ts and managedSubmitOutcome.ts already use for it, so a
+ * later change to either widens or narrows this closure too instead of silently disagreeing with
+ * it.
+ *
+ * THIS IS THE SECOND PROOF a legacy_backfill opening needs. attemptNeverReachedEmployer is pure
+ * arithmetic over event kinds, and a legacy_backfill attempt carries only `attempt_opened` because
+ * the 2026-08-27T14:11:35.408Z migration that wrote it recorded nothing else about the run - not
+ * because anyone observed this exact run stop before the boundary. The packet's CURRENT review is
+ * the one place that can still say so.
+ *
+ * `submission_attempted_at` is checked again on its own, stricter than employerMayHoldApplication
+ * alone: that predicate neutralises a stale attempted_at once the applicant has looked and said "it
+ * is not there", because her own look is the release it is built to trust. Nothing here is her
+ * looking - this is a machine closing an attempt she never saw - so a standing submission_attempted_at
+ * is left as a refusal regardless of any resolution recorded against it. */
+function packetReviewProvesNoEmployerContact(review: AbandonedAttemptClosurePacketReview): boolean {
+  if (employerMayHoldApplication(review)) return false;
+  if (review.submission_attempted_at) return false;
+  if (reviewAnswerSaveDisposition(review) === 'reject') return false;
+  return true;
+}
 
 /**
  * Whether this attempt is provably dead and provably pre-boundary, so closing it costs nothing.
@@ -103,6 +135,10 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
    * that case needs a wall-clock bound to reach the same certainty (see PR #912), rather than the
    * certainty this line gets for free. */
   if (input.packet.claimId === attemptId) return false;
+  /* THE SECOND PROOF. See packetReviewProvesNoEmployerContact: the event vocabulary alone is not
+   * enough for a legacy_backfill opening, which carries only `attempt_opened` by construction of
+   * the migration that wrote it rather than by observation of this run stopping pre-boundary. */
+  if (!packetReviewProvesNoEmployerContact(input.packet.review)) return false;
   return true;
 }
 
@@ -153,7 +189,7 @@ export async function closeAbandonedPreBoundaryAttempts(input: {
   const packetById = new Map<string, AbandonedAttemptClosurePacket | null>();
   for (const packet of packets) {
     const review = readApplicationReview(packet.spec);
-    packetById.set(packet.id, review ? { claimId: review.submission_claim_id ?? null } : null);
+    packetById.set(packet.id, review ? { claimId: review.submission_claim_id ?? null, review } : null);
   }
 
   const closedAttemptIds: string[] = [];

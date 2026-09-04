@@ -17,7 +17,10 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { abandonedPreBoundaryAttemptIsClosable } from './abandonedAttemptClosure';
+import {
+  abandonedPreBoundaryAttemptIsClosable,
+  type AbandonedAttemptClosurePacketReview,
+} from './abandonedAttemptClosure';
 import {
   attemptNeverReachedEmployer,
   type SubmissionAttemptEventKind,
@@ -48,9 +51,14 @@ const OPENED_AND_PRESSED = [
   event('press_observed'),
 ];
 
-const NO_CLAIM = { claimId: null };
-const MOVED_TO_OTHER_ATTEMPT = { claimId: OTHER_ATTEMPT };
-const STILL_THIS_ATTEMPT = { claimId: ATTEMPT };
+/* A review with no status opinion of its own and no send evidence at all - the shape that must
+ * never be the thing standing between a provably-dead attempt and closing it. */
+const BENIGN_REVIEW: AbandonedAttemptClosurePacketReview = { status: 'needs_attention' };
+const SUBMITTED_REVIEW: AbandonedAttemptClosurePacketReview = { status: 'submitted' };
+
+const NO_CLAIM = { claimId: null, review: BENIGN_REVIEW };
+const MOVED_TO_OTHER_ATTEMPT = { claimId: OTHER_ATTEMPT, review: BENIGN_REVIEW };
+const STILL_THIS_ATTEMPT = { claimId: ATTEMPT, review: BENIGN_REVIEW };
 
 describe('the Databricks class closes with no applicant and no clock', () => {
   test('an opened-only attempt whose packet has dropped the claim is closable', () => {
@@ -84,6 +92,69 @@ describe('an unknown packet refuses, and is never read as "no claim"', () => {
      * an attempt that may still be live. */
     assert.equal(
       abandonedPreBoundaryAttemptIsClosable({ attemptEvents: OPENED_ONLY, packet: null }),
+      false,
+    );
+  });
+});
+
+describe('a legacy_backfill opening needs the packet review to prove it too', () => {
+  /* attemptNeverReachedEmployer is arithmetic over event kinds: one attempt_opened, nothing else.
+   * That is true of every legacy_backfill row by CONSTRUCTION of the 2026-08-27T14:11:35.408Z
+   * migration that wrote them, whether or not the run it describes ever crossed the boundary. The
+   * packet's own current review is the second, independent proof. */
+  const LEGACY_OPENED_ONLY = [event('attempt_opened', { source: 'legacy_backfill' })];
+
+  test('a legacy_backfill opening on a packet whose review says submitted is not closable', () => {
+    assert.equal(attemptNeverReachedEmployer(LEGACY_OPENED_ONLY), true, 'the event vocabulary alone still reads as pre-boundary');
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: LEGACY_OPENED_ONLY,
+        packet: { claimId: null, review: SUBMITTED_REVIEW },
+      }),
+      false,
+    );
+  });
+
+  test('a legacy_backfill opening on a packet whose review is needs_attention with no attempted_at is closable', () => {
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: LEGACY_OPENED_ONLY,
+        packet: { claimId: null, review: BENIGN_REVIEW },
+      }),
+      true,
+    );
+  });
+
+  test('a standing submission_attempted_at refuses even when unverified_submission resolves not_sent', () => {
+    /* employerMayHoldApplication alone would read this as safe - her own look neutralises the
+     * unverified record and its sibling attempted_at together. This closure is not her look, so it
+     * asks submission_attempted_at again on its own and refuses regardless of the resolution. */
+    const review: AbandonedAttemptClosurePacketReview = {
+      status: 'needs_attention',
+      submission_attempted_at: '2026-08-20T10:00:00.000Z',
+      unverified_submission: {
+        resolution: 'not_sent',
+      } as unknown as AbandonedAttemptClosurePacketReview['unverified_submission'],
+    };
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: LEGACY_OPENED_ONLY,
+        packet: { claimId: null, review },
+      }),
+      false,
+    );
+  });
+
+  test('a security_code wall refuses, even though it never touched this run', () => {
+    const review: AbandonedAttemptClosurePacketReview = {
+      status: 'needs_attention',
+      security_code: {} as unknown as AbandonedAttemptClosurePacketReview['security_code'],
+    };
+    assert.equal(
+      abandonedPreBoundaryAttemptIsClosable({
+        attemptEvents: LEGACY_OPENED_ONLY,
+        packet: { claimId: null, review },
+      }),
       false,
     );
   });
