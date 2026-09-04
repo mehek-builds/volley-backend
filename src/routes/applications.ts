@@ -2582,7 +2582,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
 
       let updated: Array<{ id: string }>;
       try {
-        updated = await withReadOnlyRetry(
+        /* THE WHOLE TRANSACTION IS THE RETRY UNIT HERE, not the statement inside it.
+         *
+         * The submission-authority revision guard raises 40001 from a BEFORE trigger on the UPDATE
+         * above, and a raise inside an explicit transaction aborts that ENTIRE transaction - so
+         * retrying the statement in place cannot succeed, and withAuthorityRevisionRetry's own
+         * documentation says as much. Wrapping the transaction is the form that works: nothing was
+         * committed, the artifact-version insert did not happen either, and the retried transaction
+         * re-runs the identical exact-spec CAS, so it can only land on the row this edit was
+         * composed against.
+         *
+         * OUTSIDE withReadOnlyRetry, deliberately. That helper's exhaustion path moves to a
+         * dedicated writer endpoint because the pooled backend was READ-ONLY, which is a different
+         * fault with a different remedy; a lock the account's own poll holds for four milliseconds
+         * is not fixed by changing endpoints. The blob was uploaded before this block, so no retry
+         * here re-uploads anything. */
+        updated = await withAuthorityRevisionRetry(() => withReadOnlyRetry(
           () => runResumeEditTransaction(db),
           {
             onRetry: (attempt) => request.log.warn(
@@ -2597,7 +2612,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
               return runResumeEditTransaction(directDb);
             }),
           },
-        );
+        ), {
+          onRetry: (attempt) => request.log.warn(
+            { attempt, applicationId: row.id },
+            'Resume edit transaction hit the authority revision guard; retrying the whole transaction',
+          ),
+        });
       } catch (error) {
         await deleteObjects(blob.pathname).catch(() => undefined);
         throw error;
