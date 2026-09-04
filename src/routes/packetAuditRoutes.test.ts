@@ -40,6 +40,34 @@ test('packet audit endpoint is owner scoped and persists only with exact packet 
     'historical canonical cover-letter selection must be mirrored before audit build but never rewrite sent history');
 });
 
+/* A WRITE CONFLICT MUST NOT BE PUBLISHED AS A VERDICT ABOUT THE PACKET, AND ITS STATEMENT MUST NOT
+ * BE PUBLISHED AT ALL.
+ *
+ * This route's catch echoes `error.message` at 422 PACKET_AUDIT_FAILED, which is right for every
+ * authored sentence createAndPersistPacketAudit throws ("The stored resume is not a verified PDF")
+ * and wrong for exactly one thing: the submission-authority revision guard's 40001. That raise
+ * arrives wrapped by drizzle as `Failed query: <the whole UPDATE>\nparams: <every bound value>`, so
+ * the catch shipped the audit's statement, its exact-spec predicate and the stored spec itself to a
+ * browser, under a code the dashboard treats as a terminal packet failure - features/applications/
+ * domain/audit-refusal.ts lists PACKET_AUDIT_FAILED's siblings under AUTOPILOT_CANNOT_CLEAR and
+ * REVIEW_RECOVERY_REQUIRED. Measured live 2026-09-04 on Exa packet 73768339: 422 here and 500 out
+ * of PUT /review/answers, one condition reported two contradictory ways and neither of them true.
+ *
+ * The conflict is rethrown instead, so the global handler answers 503 with Retry-After: 1 and the
+ * sentence toPublicError already carries for this SQLSTATE. Pinned on the source because the
+ * ordering is the property: the classification has to happen BEFORE the 422 is composed. */
+test('a packet audit write conflict is rethrown, never published as a 422 carrying the statement', () => {
+  const route = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/submission/extension-packet'");
+  const conflictCheck = route.indexOf('isAuthorityRevisionConflictError(error)');
+  const rawMessageEcho = route.indexOf('error instanceof Error ? error.message');
+  assert.ok(conflictCheck >= 0,
+    'the catch must classify the authority revision guard before it composes a packet verdict');
+  assert.ok(rawMessageEcho > conflictCheck,
+    'the classification must precede the 422 that echoes error.message, or the statement still ships');
+  assert.match(route.slice(conflictCheck, rawMessageEcho), /throw error;/,
+    'a conflict is rethrown to the global handler, which answers 503 with Retry-After');
+});
+
 test('packet cover-letter reconciliation retries read-only transactions without repeating Blob recovery', () => {
   const start = canonicalCoverLetters.indexOf('async function reconcileCanonicalCoverLetterAttempt(');
   const end = canonicalCoverLetters.indexOf('export async function reuseCanonicalCoverLetter(', start);
