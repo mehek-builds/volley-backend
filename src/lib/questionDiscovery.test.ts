@@ -4500,7 +4500,7 @@ test('a label naming the minor is never answered from the school or the major', 
     major: 'Computer Science',
   };
 
-  for (const label of ['Minor', 'minor (if any)', 'school minor', 'Field of study - minor']) {
+  for (const label of ['Minor', 'minor (if any)', 'school minor', 'Field of study - minor', 'Academic minor']) {
     assert.equal(classifyField(label), 'minor', label);
     assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
   }
@@ -4518,6 +4518,42 @@ test('a label naming the minor is never answered from the school or the major', 
   // `minor` today (see its own comment on the type), but the rule itself does not assume that.
   const withMinor: ApplicationProfileLike = { ...ap, minor: 'Data Science' };
   assert.deepEqual(resolveKnownAnswer('school minor', 'text', withMinor, undefined), { value: 'Data Science' });
+});
+
+/* THE QUALIFIER GUARD, added in review before this ever shipped a wrong answer. MINOR_QUESTION's
+ * bare `\bminors?\b` also matches every one of these labels, and none of them ask for a field of
+ * study - a minor CHILD, a minor OFFENSE, a minor INFRACTION, a minor INJURY and the framing "are
+ * you a minor" are five different things that happen to spell the same word as the academic one.
+ *
+ * Built with `minor: 'Data Science'` ON the profile deliberately, unlike the test above. With
+ * nothing stored, resolveKnownAnswer's 'minor' case declines no matter how the label classified, so
+ * that shape of assertion would pass whether or not this guard existed - it is exactly the "no wrong
+ * answer YET" gap the qualifier closes. Only a populated `ap.minor` proves these labels were never
+ * handed her stored academic minor as an answer to a question about her family, her record, or her
+ * own age. A date of birth is on the profile too, so "Are you a minor?" is also checked against the
+ * one rule that could honestly answer an age question - see the comment at MINOR_QUESTION's call
+ * site for why that label classifies null rather than 'minor': AGE_ATTESTATION_QUESTION does not
+ * itself contain "minor", so ageAttestationAnswer does not answer it either, and null is what leaves
+ * it for the applicant instead of this rule inventing a discipline fact nobody has. */
+test('a minor child, offense, infraction, injury or age is never the academic minor', () => {
+  const ap: ApplicationProfileLike = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    major: 'Computer Science',
+    minor: 'Data Science',
+    date_of_birth: '2001-01-01',
+  };
+
+  for (const label of [
+    'Do you have any minor children?',
+    'Emergency contact (must not be a minor)',
+    'felony or minor offense',
+    'minor infractions on your driving record',
+    'minor injuries',
+    'Are you a minor?',
+  ]) {
+    assert.notEqual(classifyField(label), 'minor', label);
+    assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
+  }
 });
 
 /* ---- one control, one answer, whatever the caller knows about its type ----

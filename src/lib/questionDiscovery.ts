@@ -5740,6 +5740,39 @@ const SCHOOL_NOUN = /\b(school|university|college|institution)\b/i;
  * words are only ambiguous next to a school noun. */
 const SCHOOL_ATTRIBUTE_QUALIFIER =
   /\bmajors?\b|\bminors?\b|\bdisciplines?\b|\bfields?\s+of\s+study\b|\bdegrees?\b|\bprograms?\b|\blocations?\b|\bcit(?:y|ies)\b|\bstates?\b|\bcountr(?:y|ies)\b/i;
+/* THE ACADEMIC MINOR, versus every other "minor" a job form ever means.
+ *
+ * MINOR_QUESTION's bare `\bminors?\b` (see its own comment, above near MAJOR_QUESTION) has no way
+ * to tell "school minor" from "Do you have any minor children?" - both contain the word. MEASURED
+ * against the corpus: "Do you have any minor children?", "Emergency contact (must not be a minor)",
+ * "felony or minor offense", "minor infractions on your driving record", "minor injuries" and "Are
+ * you a minor?" all contain the bare word and none of them name a field of study, but the bare
+ * keyword alone cannot see that - the same shape of collision SCHOOL_ATTRIBUTE_QUALIFIER and
+ * KEYWORD_SUBJECT_QUALIFIER already exist to catch for the school and major rules.
+ *
+ * `ap.minor` declines on every application today (see its own comment on ApplicationProfileLike),
+ * so none of these six labels have produced a wrong answer yet - the moment onboarding starts
+ * populating it, "Do you have any minor children?" would be answered with a stored academic minor.
+ * This qualifies MINOR_QUESTION the same way those two qualify their bare keywords: an academic cue
+ * must be present, and a disqualifying cue must not be - see the two constants below and their use
+ * at MINOR_QUESTION's call site. */
+const MINOR_ACADEMIC_CUE =
+  /\bschools?\b|\buniversit(?:y|ies)\b|\bcolleges?\b|\bfields?\s+of\s+study\b|\bdegrees?\b|\bmajors?\b|\bconcentrations?\b|\bacademic\b|\bstudy\b|\bprograms?\b/i;
+/* Age, family and severity words a "minor" question uses when it does not mean the academic one.
+ * "a minor" alone (not just "are you a minor") is deliberate: it also catches "must not be a
+ * minor" on an emergency-contact field, which asks about someone else's age, not the applicant's
+ * field of study or even her own age. */
+const MINOR_NON_ACADEMIC_CUE =
+  /\bchild(?:ren)?\b|\bdependents?\b|\bunder\s+(?:18|eighteen)\b|\ba\s+minors?\b|\boffenses?\b|\binfractions?\b|\bconvictions?\b|\binjur(?:y|ies)\b|\bdamage\b|\bsurgery\b|\brepairs?\b/i;
+const MINOR_STANDALONE_LABEL_MAX_WORDS = 3;
+/* "Minor" and "Minor (if any)" are real field names - short enough that no other word is present to
+ * serve as a cue either way. Bounded the same way FIELD_NAME_LABEL_MAX_WORDS bounds
+ * labelNamesProfileField: a label this short that contains the word already IS the field it names. */
+function isStandaloneMinorLabel(label: string): boolean {
+  const core = (label ?? '').replace(/[()*:•]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!core) return false;
+  return core.split(' ').length <= MINOR_STANDALONE_LABEL_MAX_WORDS;
+}
 const PHONE_NOUN = /\b(phone|mobile)\b/i;
 /* A label that ASKS FOR a phone number, however much captured junk surrounds the ask. No word
  * budget on purpose: the label this exists for is teamtailor's, which welds the placeholder and
@@ -6050,8 +6083,41 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
    * degree, major, gpa and gpa_scale for education and nothing else (see db/schema.ts - `major` is
    * the only discipline column). The 'minor' case in resolveKnownAnswer is what actually declines,
    * on that absence; this rule's only job is to keep every broader rule from guessing at a fact
-   * nobody stored. */
-  if (MINOR_QUESTION.test(l)) return 'minor';
+   * nobody stored.
+   *
+   * BUT THE BARE WORD IS NOT ENOUGH ON ITS OWN, and unqualified it is a trap the Belvedere fix did
+   * not close. MEASURED against the corpus: "Do you have any minor children?", "Emergency contact
+   * (must not be a minor)", "felony or minor offense", "minor infractions on your driving record",
+   * "minor injuries" and "Are you a minor?" all contain the bare word `\bminors?\b` and none of them
+   * ask for a field of study - a minor CHILD, a minor OFFENSE and a minor INJURY are three different
+   * words that happen to spell the same as the academic one. Every one of those six declines today
+   * for the same reason "school minor" would answer correctly if asked: `ap.minor` is unset, so the
+   * 'minor' case below has nothing to answer with either way. The moment onboarding starts
+   * populating it, "Do you have any minor children?" would be handed a stored academic minor as its
+   * answer - a real wrong answer, not a blank. So this is qualified now, the same shape
+   * SCHOOL_ATTRIBUTE_QUALIFIER and KEYWORD_SUBJECT_QUALIFIER already qualify their own bare
+   * keywords with: an academic cue (school/university/major/degree/...) must be present, or the
+   * label must be short enough to essentially BE the field name ("Minor", "Minor (if any)") - and
+   * neither is enough when an age/family/severity word (child, "a minor", offense, injury, ...)
+   * says this "minor" is not the academic one. See MINOR_ACADEMIC_CUE, MINOR_NON_ACADEMIC_CUE and
+   * isStandaloneMinorLabel, defined beside SCHOOL_ATTRIBUTE_QUALIFIER above.
+   *
+   * "Are you a minor?" bare deliberately stays OUT of this key rather than being routed to it: it
+   * is the same age attestation AGE_ATTESTATION_QUESTION/BELOW_AGE_18_QUESTION already exist to
+   * answer (ageAttestationAnswer runs at the top of resolveKnownAnswer, ahead of this function), and
+   * MINOR_NON_ACADEMIC_CUE's `\ba\s+minors?\b` is what keeps it there instead of falling into an
+   * academic decline that would mask a question the age rule could actually have answered from a
+   * stored date of birth on a label phrased just slightly differently. Classifying it null here is
+   * correct even though today's AGE_ATTESTATION_QUESTION does not itself contain "minor" - null
+   * leaves it for the essay drafter/held-question path rather than this rule inventing a discipline
+   * fact nobody has.
+   *
+   * Compound labels ("Major and minor", "Field of study (major or minor)") still classify 'minor'
+   * and still decline - MINOR_ACADEMIC_CUE's own `major` alternative sees "major" sitting right next
+   * to "minor" and calls that academic, which it is. Declining is the honest answer for one control
+   * asking for both facts when only one of them is on file; see the test that pins this. */
+  if (MINOR_QUESTION.test(l) && !MINOR_NON_ACADEMIC_CUE.test(l)
+    && (MINOR_ACADEMIC_CUE.test(l) || isStandaloneMinorLabel(l))) return 'minor';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (EDUCATION_ATTENDANCE_DATE_QUESTION.test(l)) {
