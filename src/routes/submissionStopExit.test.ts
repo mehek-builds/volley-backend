@@ -707,7 +707,12 @@ describe('a refusal that never bound a scope releases on its own proof', () => {
   });
 
   test('a security code the controls did not retain releases the same way', () => {
-    for (const [label, outcome] of [['reported', WITHHELD], ['silent', undefined]] as const) {
+    /* ONLY on a reported withholding, unlike the application shape above. A verification phase
+       exists because an application phase preceded it, so "this phase bound nothing" cannot speak
+       for whether the application was already sent. WITHHELD is strong enough because
+       finalSubmitPressed is run-scoped in managed-browser.js: `pressed: false` on a continuation
+       denies the press for the whole run. Silence is not, and is asserted below. */
+    for (const [label, outcome] of [['reported', WITHHELD]] as const) {
       const persisted = submissionFailureReview(
         claimedRunning(), refusalFor(unboundRun(securityCodeUnretained(), outcome), 'verification'),
       );
@@ -717,6 +722,13 @@ describe('a refusal that never bound a scope releases on its own proof', () => {
       assert.equal(persisted.submission_stop?.before_click, true, label);
       assert.ok(exitIsAnOrdinaryRerun(persisted), label);
     }
+    /* With no press report at all a phase-0 press is unobservable, and releasing here re-applies to
+       an employer that already holds the application. The row keeps its claim instead. */
+    const silent = submissionFailureReview(
+      claimedRunning(), refusalFor(unboundRun(securityCodeUnretained()), 'verification'),
+    );
+    assert.notEqual(silent.unverified_submission, undefined,
+      'silence about the press cannot release a verification phase');
   });
 
   /* THE SAME CAUSE HAS TO REACH HER, NOT JUST THE SAME ROW. The row above was already correct

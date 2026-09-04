@@ -20,6 +20,7 @@ import {
   CRELATE_FINAL_SUBMIT_SELECTOR,
   MANAGED_ACTION_LIMIT,
   MANAGED_BLOCKER_REASONS,
+  MANAGED_PRE_PRESS_BLOCKER_REASONS,
   MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS,
   MANAGED_FINAL_SUBMIT_SELECTOR,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
@@ -1382,6 +1383,18 @@ function runnerBlockerReasons(source: string): Set<string> {
   collect(/\breason(?:\s*=|:|\s*\|\|)\s*'([a-z_]+)'/g);
   collect(/\breason\s*=\s*[^;\n]*?\?\s*'([a-z_]+)'\s*:\s*'([a-z_]+)'/g);
   collect(/blockActivation\('([a-z_]+)'/g);
+  /* The activation guard reports through `unchanged(reason, event)`, which forwards to
+   * blockActivation. Three of its reasons are literals; the rest are built at runtime. */
+  collect(/unchanged\('([a-z_]+)'/g);
+  /* `eventType(event) + '_binding_changed'` never exists as a literal anywhere, so no scan of
+   * literals can find it. Rebuild the family from the event list the runner actually registers,
+   * plus the 'activation' fallback eventType() returns when the type getter throws. Reading the
+   * array rather than hard-coding it means a new activation event joins the set on its own. */
+  const activationEvents = source.match(/const ordinaryActivationEvents = \[([^\]]*)\]/);
+  assert.ok(activationEvents, 'the runner still lists the activation events it witnesses');
+  const eventTypes = [...activationEvents[1]!.matchAll(/'([a-z]+)'/g)].map((match) => match[1]!);
+  assert.ok(eventTypes.length > 0, 'the activation event list is still readable');
+  for (const type of [...eventTypes, 'activation']) found.add(`${type}_binding_changed`);
   /* `armActivation` reports by return value, and its result becomes the blockerReason whenever it
    * is anything but 'armed'. Slice to that sentinel rather than scanning every `return` in a
    * twenty-thousand-line file. */
@@ -1394,10 +1407,17 @@ function runnerBlockerReasons(source: string): Set<string> {
 }
 
 test('the blocker reason union and the runtime allowlist are the same list', () => {
-  const source = readFileSync('src/lib/browserbase.ts', 'utf8');
+  /* Strip BOTH comment forms before slicing, not after. Stripping afterwards made the slice
+     boundary depend on comment punctuation - a semicolon inside any inline comment ended the union
+     early - and it left block-comment prose inside the matched region, where a quoted fragment like
+     '_binding_changed' reads as a declared member. Both were live: this assertion caught the second
+     one on the very commit that added the comment. */
+  const source = readFileSync('src/lib/browserbase.ts', 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
   const start = source.indexOf('blockerReason?:');
   assert.ok(start >= 0, 'the confirmation proof still declares blockerReason');
-  const union = source.slice(start, source.indexOf(';', start)).replace(/\/\/[^\n]*/g, '');
+  const union = source.slice(start, source.indexOf(';', start));
   const declared = new Set([...union.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!));
   assert.deepEqual(
     [...declared].sort(),
@@ -1415,7 +1435,13 @@ const RUNNER_SOURCE_ABSENT = existsSync(RUNNER_SOURCE_PATH)
 
 test('blocker reasons stay in sync with the managed runner', { skip: RUNNER_SOURCE_ABSENT }, () => {
   const emitted = runnerBlockerReasons(readFileSync(RUNNER_SOURCE_PATH, 'utf8'));
-  assert.ok(emitted.size > 30, `the scan found only ${emitted.size} reasons; the patterns went stale`);
+  /* Derived from the allowlist rather than a magic number: the runner's vocabulary is all but the
+     handful of retired reasons this service keeps under ADD, NEVER REMOVE. A floor five below the
+     real yield let a partial pattern regression pass unnoticed. */
+  assert.ok(
+    emitted.size >= MANAGED_BLOCKER_REASONS.size - 2,
+    `the scan found ${emitted.size} of ${MANAGED_BLOCKER_REASONS.size} reasons; the patterns went stale`,
+  );
   const unknown = [...emitted].filter((reason) => !MANAGED_BLOCKER_REASONS.has(reason)).sort();
   assert.deepEqual(unknown, [], 'the runner emits a blocker reason this service would reject as a contract error');
   /* Deliberately one-directional. This service may keep a reason the runner has retired — a run
@@ -1490,6 +1516,15 @@ function securityCodeUnretainedPass() {
 }
 
 /** The whole result, with submitOutcome deliberately ABSENT unless a test supplies one. */
+/* WHAT THE RUNNER ACTUALLY SENDS ON A CONTINUATION. finalSubmitPressed is run-scoped in
+ * managed-browser.js and written on both arms at :16938, so a verification result always carries an
+ * explicit press report - and because it is run-scoped rather than per-phase, `pressed: false` on a
+ * continuation denies the press for the WHOLE run, which is what makes it strong enough to release
+ * on. Verification fixtures below carry it for that reason; silence is exercised separately. */
+const RUN_WITHHELD_PRESS = {
+  pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null,
+} as const;
+
 function unboundRun(pass: unknown, submitOutcome?: unknown): Record<string, unknown> {
   const result: Record<string, unknown> = {
     requiredFieldConfirmation: { version: 2, status: 'blocked', passes: [pass] },
@@ -1527,7 +1562,7 @@ test('every application-scope refusal the runner can name reaches the operator',
 });
 
 test('a security code the controls did not retain reaches the operator too', () => {
-  const error = refusal(unboundRun(securityCodeUnretainedPass()), 'verification');
+  const error = refusal(unboundRun(securityCodeUnretainedPass(), RUN_WITHHELD_PRESS), 'verification');
   assert.ok(error instanceof ManagedRequiredFieldConfirmationError);
   assert.ok(error instanceof NoSubmitControlError);
   assert.deepEqual((error as ManagedRequiredFieldConfirmationError).fields,
@@ -1545,7 +1580,7 @@ test('both unbound shapes survive the wire the runner actually sends them over',
     [applicationScopeFailurePass('application_scope_detached'), 'application'],
     [securityCodeUnretainedPass(), 'verification'],
   ] as const) {
-    const sent = unboundRun(pass);
+    const sent = unboundRun(pass, kind === 'verification' ? RUN_WITHHELD_PRESS : undefined);
     const received = JSON.parse(JSON.stringify(sent));
     assert.deepEqual(received, sent, 'nothing in the shape may be a value JSON silently drops');
     const error = refusal(received, kind);
@@ -1647,7 +1682,7 @@ test('an unbound pass can never be read as a confirmed send', () => {
     [applicationScopeFailurePass('application_scope_missing'), 'application'],
     [securityCodeUnretainedPass(), 'verification'],
   ] as const) {
-    const forged = unboundRun(pass);
+    const forged = unboundRun(pass, kind === 'verification' ? RUN_WITHHELD_PRESS : undefined);
     (forged.requiredFieldConfirmation as { status: string }).status = 'confirmed';
     const error = refusal(forged, kind);
     assert.match(error.message, /confirmed with failures/,
@@ -1704,4 +1739,244 @@ test('the runner writes no third unbound scope shape', { skip: RUNNER_SOURCE_ABS
     assert.ok(source.includes(sentence),
       `the runner no longer writes "${sentence}", so RUNNER_AUTHORED_BLOCKERS is repeating a dead string`);
   }
+});
+
+/* A REFUSAL AFTER THE CLICK IS NOT A PROOF THAT NOTHING WAS SENT.
+ *
+ * ManagedRequiredFieldConfirmationError extends NoSubmitControlError, and submissionFailureReview
+ * reads that class as "the click provably did not happen": it clears submitted_at, receipt and
+ * unverified_submission and releases the packet to be sent again. While MANAGED_BLOCKER_REASONS
+ * held five entries every one of them was pre-press, so the equivalence held by accident. At
+ * thirty-eight it stopped holding, and a Workable run that pressed Send came back as one that
+ * never did - which files the application to a real employer a second time. */
+
+const BOUND_PASS_SCOPE = {
+  scopeKind: 'form',
+  formFingerprint: 'Zm9ybV9maW5nZXJwcmludF9hYmM',
+  submitFingerprint: 'c3VibWl0X2ZpbmdlcnByaW50X3h5',
+  formMatchCount: 1,
+  submitMatchCount: 1,
+  requiredControlCount: 0,
+  sameNode: true,
+} as const;
+
+/** A pass that bound a real form and a real control, then refused - the ordinary v4 shape. */
+function boundRefusal(blockerReason: string, submitOutcome?: unknown) {
+  const result: Record<string, unknown> = {
+    requiredFieldConfirmation: {
+      version: 2,
+      status: 'blocked',
+      passes: [{
+        submitKind: 'application',
+        scope: { ...BOUND_PASS_SCOPE },
+        requiredControls: [],
+        attempts: [],
+        retries: 0,
+        unresolved: ['Bound submit control or application form was replaced before submission'],
+        blockerReason,
+        submissionOutcome: 'blocked',
+      }],
+    },
+  };
+  if (submitOutcome !== undefined) result.submitOutcome = submitOutcome;
+  return result;
+}
+
+function thrownBy(result: unknown): Error {
+  try {
+    assertManagedRequiredFieldsConfirmed(result, 'application');
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error('a blocked proof must never be accepted');
+}
+
+test('a post-press refusal is an unknown outcome, never a released packet', () => {
+  /* submit_transport_release_failed is the sharpest case: the runner MATCHED the native request and
+     replayed it to the network, and only the release confirmation went missing. The employer very
+     likely has the application. */
+  let checked = 0;
+  for (const reason of MANAGED_BLOCKER_REASONS) {
+    if (MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason)) continue;
+    checked += 1;
+    const error = thrownBy(boundRefusal(reason));
+    assert.ok(
+      error instanceof ManagedConfirmationUnprovenError,
+      `${reason} is not decided before the press, so it cannot release the packet`,
+    );
+    assert.ok(!(error instanceof NoSubmitControlError), `${reason} must not read as a pre-click stop`);
+  }
+  /* A `continue` loop over two sets asserts NOTHING if the sets ever become equal, and would then
+     report success on the exact merge that reintroduces the bug. Count what was actually tried. */
+  assert.equal(
+    checked,
+    MANAGED_BLOCKER_REASONS.size - MANAGED_PRE_PRESS_BLOCKER_REASONS.size,
+    'every reason outside the pre-press set must have been exercised',
+  );
+  assert.ok(checked > 0, 'the post-press set is not empty');
+});
+
+test('a pre-press refusal still releases, so the fix costs the honest stops nothing', () => {
+  for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
+    const error = thrownBy(boundRefusal(reason));
+    assert.ok(
+      error instanceof ManagedRequiredFieldConfirmationError,
+      `${reason} is decided before the press and must stay a proven no-send`,
+    );
+  }
+});
+
+test('every pre-press reason is a reason the runner can actually name', { skip: RUNNER_SOURCE_ABSENT }, () => {
+  for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
+    assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} is not in the runner's vocabulary`);
+  }
+  /* MEMBERSHIP IS BY RUNNER SITE, and until this assertion existed nothing checked that. The single
+     post-click assignment is `blockerReason = gateResult.reason || ...`, so every reason the gate
+     can produce is post-press by construction: finalizeActivation's own reasons, everything
+     blockActivation and unchanged() witness, and everything decideSubmitTransportGate names. If a
+     future runner routes one of those through the pre-press sites instead, that is a decision to
+     make deliberately, not one to discover from a duplicate application. */
+  const source = readFileSync(RUNNER_SOURCE_PATH, 'utf8');
+  const gateSlice = source.slice(
+    source.indexOf('const decideSubmitTransportGate = '),
+    source.indexOf('const finishSubmitTransportGate = '),
+  );
+  assert.ok(gateSlice.length > 0, 'the submit transport gate still decides the post-click reason');
+  const postClick = new Set([...gateSlice.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!));
+  for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
+    assert.ok(
+      !postClick.has(reason),
+      `${reason} is named by the post-click transport gate, so it cannot prove the press never happened`,
+    );
+  }
+  /* Assigned on BOTH sides of the click in managed-browser.js, so neither can prove a no-send. The
+     two names read as though they belong here, which is exactly why they are pinned as absent. */
+  assert.ok(!MANAGED_PRE_PRESS_BLOCKER_REASONS.has('submit_transport_unpinned'));
+  assert.ok(!MANAGED_PRE_PRESS_BLOCKER_REASONS.has('submit_transport_unsupported'));
+  /* The unbound-scope set releases on the pass alone, so it must be a subset of the pre-press set. */
+  for (const reason of MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS) {
+    assert.ok(MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason), `${reason} releases but is not pre-press`);
+  }
+});
+
+test('a press the runner claims outranks the proof, however it spells it', () => {
+  /* `pressed === true` was too narrow in the one direction that matters. A truncated retained result
+     that keeps `state: 'confirmed'` but loses the `pressed` key is the shape this branch exists for,
+     and it used to read as "no claim" and release the packet. */
+  for (const claim of [{ pressed: true }, { pressed: 1 }, { pressed: 'true' },
+    { state: 'confirmed', source: 'receipt' }]) {
+    assert.ok(
+      thrownBy(boundRefusal('submit_node_replaced', claim)) instanceof ManagedConfirmationUnprovenError,
+      `${JSON.stringify(claim)} claims a press, so the outcome is unknown`,
+    );
+  }
+  /* An explicit denial is still a denial, and no submitOutcome at all stays the branch's own case. */
+  assert.ok(thrownBy(boundRefusal('submit_node_replaced', { pressed: false }))
+    instanceof ManagedRequiredFieldConfirmationError);
+  assert.ok(thrownBy(boundRefusal('submit_node_replaced')) instanceof ManagedRequiredFieldConfirmationError);
+});
+
+test('the activation guard\'s runtime-built reasons are all named and none of them releases', () => {
+  /* These are the eight the first pass of this list missed: `unchanged()` never assigns
+     blockerReason, and five of the names are concatenated at runtime, so a literal scan is blind to
+     them. Being unlisted was not a reporting gap - contractError releases when the runner denies its
+     own press, which it does on exactly these blocks, AFTER the click. */
+  const runtimeBuilt = ['pointerdown', 'mousedown', 'focus', 'click', 'activation']
+    .map((type) => `${type}_binding_changed`);
+  for (const reason of [...runtimeBuilt, 'submit_capture_binding_changed',
+    'submit_document_bubble_binding_changed', 'submit_window_bubble_binding_changed']) {
+    assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} would be rejected as a contract error`);
+    assert.ok(
+      !MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason),
+      `${reason} is witnessed during activation, so it can never prove the press did not happen`,
+    );
+    assert.ok(
+      thrownBy(boundRefusal(reason)) instanceof ManagedConfirmationUnprovenError,
+      `${reason} must leave the outcome unknown`,
+    );
+  }
+});
+
+test('a verification pass that never bound a scope cannot speak for the application', () => {
+  /* A verification phase exists only because an application phase preceded it, so "this phase bound
+     nothing" is not a statement about whether the application was already sent. An explicit
+     `pressed: false` IS such a statement - finalSubmitPressed is run-scoped, so it denies the press
+     for the whole run - and that shape still releases. Silence does not: with no submitOutcome a
+     phase-0 press is unobservable, and releasing there re-applies to an employer that already holds
+     the application. */
+  assert.ok(
+    refusal(unboundRun(securityCodeUnretainedPass(), RUN_WITHHELD_PRESS), 'verification')
+      instanceof ManagedRequiredFieldConfirmationError,
+    'a run-wide denial of the press still releases',
+  );
+  assert.ok(
+    refusal(unboundRun(securityCodeUnretainedPass()), 'verification')
+      instanceof ManagedConfirmationUnprovenError,
+    'silence about the press cannot release a phase that had a predecessor',
+  );
+  /* The application shape is unchanged: a truncated result is the case the branch exists for, and
+     no earlier phase could have pressed. */
+  assert.ok(
+    refusal(unboundRun(applicationScopeFailurePass('application_scope_missing')), 'application')
+      instanceof ManagedRequiredFieldConfirmationError,
+    'an application pass still releases on silence',
+  );
+});
+
+test('an unbound pass must carry the runner sentence that explains its reason', () => {
+  /* Without this clause a pass with `unresolved: []` satisfied every other one, and the applicant
+     was handed the bare token - application_scope_missing - with the sentence explaining it gone.
+     That is the defect the unbound branch exists to remove, reachable inside the branch itself. */
+  const stripped = applicationScopeFailurePass('application_scope_missing') as Record<string, unknown>;
+  stripped.unresolved = [];
+  assert.ok(
+    refusal(unboundRun(stripped), 'application') instanceof ManagedConfirmationUnprovenError,
+    'a refusal that explains nothing cannot be a proven no-send',
+  );
+});
+
+test('a scope-invalid chooser steps aside so the confirmation proof can name the refusal', () => {
+  /* THE ORDERING IS THE WHOLE BUG. submissionRunner runs the chooser barrier BEFORE the confirmation
+     barrier, and the runner emits `outcome: 'application_scope_invalid'` in the same block that
+     builds the unbound pass. While the chooser reader rejected that outcome, the first barrier threw
+     "Litos could not read the managed final-submit chooser proof" - an internal check name - and the
+     five application_scope_* reasons could never reach the operator on any real run. Both new tests
+     for those reasons passed anyway, because they call the confirmation read directly.
+
+     This asserts the pair in production order. */
+  const policy = MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY;
+  const result = {
+    finalSubmitChooser: {
+      version: 1,
+      policyName: policy.name,
+      policyVersion: policy.version,
+      grammarHash: policy.grammarHash,
+      submitKind: 'application',
+      outcome: 'application_scope_invalid',
+      candidateCount: 0,
+      viableCandidateCount: 0,
+      topScore: null,
+      topScoreCount: 0,
+      addressedScopeCount: 0,
+      bareSendCandidateCount: 0,
+    },
+    ...unboundRun(applicationScopeFailurePass('application_scope_detached')),
+  };
+  assert.doesNotThrow(
+    () => assertManagedApplicationFinalSubmitSelected(result as never, FINAL_CHOOSER_URL),
+    'the chooser barrier must defer to the stronger read that follows it',
+  );
+  const error = refusal(result, 'application');
+  assert.ok(error instanceof ManagedRequiredFieldConfirmationError);
+  assert.deepEqual((error as ManagedRequiredFieldConfirmationError).fields,
+    [UNBOUND_SCOPE_MESSAGE, 'application_scope_detached'],
+    'the operator gets the runner\'s sentence and the reason, not an internal check name');
+
+  /* A scope-invalid report that claims it scored candidates is describing a chooser run it also
+     says could not happen; that contradiction still fails closed at the first barrier. */
+  const contradictory = { ...result, finalSubmitChooser: { ...result.finalSubmitChooser, candidateCount: 2 } };
+  assert.throws(
+    () => assertManagedApplicationFinalSubmitSelected(contradictory as never, FINAL_CHOOSER_URL),
+    ManagedConfirmationUnprovenError,
+  );
 });
