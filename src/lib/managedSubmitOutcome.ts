@@ -234,6 +234,22 @@ export type SubmitNetworkEntry = {
   url: string;
   status: number | null;
   failure?: string;
+  /* FOUR FIELDS A SIBLING STRATUS PR IS ADDING to the same network entries, read defensively here
+   * because that deploy has its own cadence: every run older than it, and every run on a request
+   * this module has no reason to describe, carries none of the four. Nothing below may require any
+   * of them to reach a verdict a status code alone cannot already prove.
+   *
+   * body_excerpt is the response body, or the start of it - genuinely an excerpt, so it may be cut
+   * mid-object and fail to parse as JSON, which is read as "no code" rather than an error.
+   * content_type is the response's own Content-Type header, used only to skip parsing a body that
+   * already says it is not JSON. body_unavailable_reason is why body_excerpt is absent even though
+   * a response came back (streamed past the capture limit, redacted, not text) - read by nothing in
+   * this file today, carried through only so a future reader is not left guessing at a silent gap.
+   * transport_disposition is carried for debugging and read by nothing in this file. */
+  body_excerpt?: string;
+  content_type?: string;
+  body_unavailable_reason?: string;
+  transport_disposition?: string;
 };
 
 const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
@@ -246,8 +262,21 @@ const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
     entries.push({
       method: value.method.slice(0, 10),
       url: value.url.split(/[?#]/)[0].slice(0, 300),
-      status: typeof value.status === 'number' ? value.status : null,
+      /* A numeric status under 100 is never a real HTTP response - 0 is what a browser reports
+       * for a network error, a CORS block, or a request the runner aborted, and the range is
+       * otherwise unused. Normalising it to null here, the same shape a transport failure that
+       * returned no status at all already takes, means every consumer of this record - today and
+       * whatever is added later - sees one "no real answer came back" case instead of two. */
+      status: typeof value.status === 'number' && value.status >= 100 ? value.status : null,
       ...(typeof value.failure === 'string' ? { failure: value.failure.slice(0, 120) } : {}),
+      ...(typeof value.body_excerpt === 'string' ? { body_excerpt: value.body_excerpt.slice(0, 2_000) } : {}),
+      ...(typeof value.content_type === 'string' ? { content_type: value.content_type.slice(0, 100) } : {}),
+      ...(typeof value.body_unavailable_reason === 'string'
+        ? { body_unavailable_reason: value.body_unavailable_reason.slice(0, 120) }
+        : {}),
+      ...(typeof value.transport_disposition === 'string'
+        ? { transport_disposition: value.transport_disposition.slice(0, 60) }
+        : {}),
     });
   }
   return entries.length > 0 ? entries : null;
@@ -288,6 +317,23 @@ export type ManagedSubmitVerdict =
   | { kind: 'confirmed'; confirmationText: string; evidence: string }
   /** The employer's own refusal state was on screen. Nothing was filed, and that is KNOWN. */
   | { kind: 'refused'; message: string }
+  /* THE SUBMIT REQUEST'S OWN RESPONSE PROVED THE REFUSAL, not the page's rendered state.
+   *
+   * Distinct from 'refused' above on purpose: that arm reads what the ATS's DOM shows and, past
+   * employer-boundary authorization, is deliberately still treated as uncertain (see the comment at
+   * its call site in routes/submissionRunner.ts) because page text is not proof by itself. This one
+   * is read from the wire - a 4xx on the exact bound posting's own submit endpoint, corroborated by
+   * a recognised refusal banner or a pre-filing refusal code in the response body - which is why it
+   * is allowed to close the ledger attempt without asking the applicant. See
+   * employerSubmitRefusalProof below for exactly what has to be true before this is returned. */
+  | {
+    kind: 'employer_refused';
+    cause: 'employer_refused_submit';
+    httpStatus: number;
+    code?: string;
+    bannerText?: string;
+    securityCodeRecipient?: string;
+  }
   /** The click landed and the page never said. The applicant has to look, and she is told where. */
   | { kind: 'unverified'; cause: UnverifiedCause }
   /** The runner never pressed Send, so nothing reached the employer and nothing is uncertain. */
@@ -579,12 +625,252 @@ export function exactManagedAtsReceipt(input: {
   return Boolean(receiptBinding && exactAtsReceipt(input.result, outcome, receiptBinding));
 }
 
+/* THE SUBMIT ENDPOINT'S OWN URL SHAPE - A THIRD ONE FOR THE SAME POSTING IDENTITY.
+ *
+ * managedAtsBinding above already parses two Greenhouse shapes: the tenant path a direct job page
+ * uses (/<board>/jobs/<id>) and the embed query FORM page (/embed/job_app?for=<board>&token=<id>).
+ * Neither is what the embed form POSTS to. Measured verbatim on two live sends, both 2026-09-04:
+ * Sage (packet aae653a3-2d5a-4f3e-ba3b-afea4219df37, run 46f50a9b) and Hudson River Trading (packet
+ * 4a79eec1-5c65-4dd4-8e72-e119fbfbd733) both fired
+ * `POST https://boards.greenhouse.io/embed/<board>/jobs/<id>` and both got back 428. Same board,
+ * same job id as the packet's own application URL, a third path shape for that identity - so this
+ * is compared against the SAME tenant/jobToken managedAtsBinding already computed from the packet's
+ * expected application URL, never against the network entry's host alone. */
+function greenhouseEmbedSubmitBinding(url: URL): { tenant: string; jobToken: string } | null {
+  if (!/^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/.test(url.hostname.toLowerCase())) return null;
+  const match = url.pathname.match(/^\/embed\/([^/]+)\/jobs\/([^/]+)\/?$/);
+  return match && validGreenhouseIdentity(match[1], match[2])
+    ? { tenant: match[1], jobToken: match[2] }
+    : null;
+}
+
+/**
+ * The LAST network entry that is a submit-class request to the bound posting's OWN submit
+ * endpoint, or null when none matches - including when the network list is absent, every entry is
+ * a read, every write-shaped request went somewhere else (an analytics beacon, a captcha vendor,
+ * or the same board with a DIFFERENT job id), or ANY bound entry - earlier or later than the one
+ * that would otherwise be chosen - came back 2xx/3xx or with no status at all. Matching family,
+ * board and job id - never host alone - is what keeps a refusal from a foreign endpoint from ever
+ * being read as this posting's own answer; picking the last of possibly several, and refusing to
+ * answer at all when a success or an unknown outcome sits anywhere among them, is what keeps a
+ * retried press (press, 428, re-press, 2xx) from ever being read backwards as a refusal - see the
+ * loop body for why that specific ordering is not just theoretical.
+ *
+ * Greenhouse only for now: the ashby and workable submit-request shapes have not been measured on a
+ * live run, and guessing one wrong would be worse than leaving those two families on the existing
+ * 'unverified' path. Widen this the same way CONFIRMATION_LOOKS_LIKE below was widened - one family
+ * at a time, once its shape is actually seen.
+ */
+function boundEmployerSubmitNetworkEntry(
+  network: readonly SubmitNetworkEntry[] | null,
+  expected: ManagedAtsBinding,
+): SubmitNetworkEntry | null {
+  if (!network || expected.family !== 'greenhouse') return null;
+  let chosen: SubmitNetworkEntry | null = null;
+  for (const entry of network) {
+    if (!/^(?:POST|PUT|PATCH)$/i.test(entry.method)) continue;
+    let url: URL;
+    try {
+      url = new URL(entry.url);
+    } catch {
+      continue;
+    }
+    const binding = greenhouseEmbedSubmitBinding(url);
+    if (!binding || binding.tenant !== expected.tenant || binding.jobToken !== expected.jobToken) continue;
+    /* A 2xx/3xx, an unknown outcome (no status at all - the transport never returned one), OR a
+     * status under 100 (0 is what a browser reports for a network error, a CORS block, or a request
+     * the runner aborted - never a real HTTP response), on ANY of this posting's own bound submit
+     * attempts means the run cannot be read as a clean refusal, whichever attempt this is and
+     * whatever order they came in. Measured shape: a real Greenhouse run can press submit, get back
+     * a 428 captcha-retry, and have the client re-press with captcha_retried:true - the SAME bound
+     * URL, a 2xx the second time. A refusal-shaped entry after that 2xx would be reading a
+     * duplicate-apply rejection as a first refusal; the reverse order is no safer, since an earlier
+     * no-status/2xx/network-error attempt this run never confirmed could just as well have been
+     * filed silently, with a later 428 answering a retry of an application that was already there.
+     * readSubmitNetwork above already normalises a sub-100 status to null before this function ever
+     * sees one; the explicit check here is defense in depth for whatever else ever builds a
+     * SubmitNetworkEntry[] directly. All three shapes fail closed to null (unverified) rather than
+     * risk a proven refusal that lets a caller release the claim and a re-send duplicate the
+     * application. */
+    if (entry.status === null || entry.status < 100 || (entry.status >= 200 && entry.status < 400)) return null;
+    // Last bound submit-class entry wins, not first: a retried press appends a LATER entry to the
+    // same bound endpoint, and that later entry - not whichever one happened to come first in the
+    // array - is the run's own final word on this posting, once the guard above has already ruled
+    // out a later or earlier success.
+    chosen = entry;
+  }
+  return chosen;
+}
+
+/* 4xx, EXCLUDING THE TWO LOGIN WALLS. 401 and 403 mean the request itself was not accepted for
+ * evaluation - a session or auth problem, not the employer answering the application - and stay on
+ * whatever path already handles them today (unverified). Every other 4xx is the server having
+ * looked at the submission and refused it: a CAPTCHA check, a stale or exceeded request token,
+ * invalid attributes, or an ordinary validation failure this module has no banner text for yet -
+ * which is exactly why the banner/code check below still has to agree before this ever proves
+ * anything. A 2xx or 3xx is never a refusal, whatever the DOM says; that case keeps today's
+ * unverified handling by construction, since this predicate is the only gate that can produce one. */
+function isEmployerSubmitRefusalStatus(status: number | null): status is number {
+  return typeof status === 'number' && status >= 400 && status < 500 && status !== 401 && status !== 403;
+}
+
+/* THE FAMILY'S OWN REFUSAL VOCABULARY. Same discipline as CONFIRMATION_LOOKS_LIKE below: only a
+ * family whose page text has actually been measured gets an entry, so an ATS this has never seen
+ * refuse fails closed to 'unverified' rather than guessing at a sentence nobody has read.
+ *
+ * Greenhouse's embed form renders this sentence IN PLACE of the form while the form itself stays
+ * mounted and resubmittable underneath it - measured verbatim, observed page text beginning exactly
+ * this way, on both live sends named above. */
+const SUBMIT_REFUSAL_BANNER_TEXT: Partial<Record<ManagedAtsFamily, RegExp>> = {
+  greenhouse: /There was an error processing your application\.\s*Please try again\./i,
+};
+
+/* GREENHOUSE'S OWN PRE-FILING REFUSAL CODES, read from the submit response body rather than from
+ * the page: a JSON object whose `code` field names why nothing was filed, returned instead of a 2xx
+ * even though the request reached Greenhouse's servers.
+ *
+ * THE LAST TWO ARE NOT YET MEASURED ON A LIVE RUN. They are named from Greenhouse's own request-
+ * token behaviour (its embed form mints a short-lived token per page load and refuses a submit
+ * whose token has expired or has been retried past its limit) rather than from a captured
+ * body_excerpt, so treat them as the best available guess until a real payload confirms the exact
+ * string - and note every code below is matched EXACTLY against the whole parsed string, never by
+ * substring or prefix, so a wrong guess or a future Greenhouse rename fails closed to 'unverified'
+ * instead of mis-filing an ambiguous code as proven. */
+const GREENHOUSE_PRE_FILING_REFUSAL_CODES = new Set([
+  'captcha-failed',
+  'captcha-retry',
+  'invalid-attributes',
+  'request-token-expired',
+  'request-token-exceeded',
+]);
+const GREENHOUSE_CAPTCHA_REFUSAL_CODES = new Set(['captcha-failed', 'captcha-retry']);
+
+type SubmitRefusalBody = { code: string | null; securityCodeRecipient: string | null };
+
+/**
+ * The submit response's own JSON, read defensively: body_excerpt is a sibling PR's addition and may
+ * be absent, truncated mid-object, or not JSON at all - none of which may throw or fabricate a code.
+ * `security_code_recipient`, when present, is the address Greenhouse said it emailed a fallback
+ * verification code to; carried through so the sentence shown to the applicant can name it.
+ */
+function submitRefusalBody(entry: SubmitNetworkEntry): SubmitRefusalBody {
+  const empty: SubmitRefusalBody = { code: null, securityCodeRecipient: null };
+  if (typeof entry.body_excerpt !== 'string' || !entry.body_excerpt.trim()) return empty;
+  if (typeof entry.content_type === 'string' && !/json/i.test(entry.content_type)) return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(entry.body_excerpt);
+  } catch {
+    return empty;
+  }
+  if (!isObjectRecord(parsed)) return empty;
+  return {
+    code: typeof parsed.code === 'string' ? parsed.code : null,
+    securityCodeRecipient: typeof parsed.security_code_recipient === 'string'
+      ? parsed.security_code_recipient.slice(0, 200)
+      : null,
+  };
+}
+
+export type EmployerSubmitRefusalProof = {
+  httpStatus: number;
+  code: string | null;
+  bannerText: string | null;
+  securityCodeRecipient: string | null;
+};
+
+/**
+ * THE EMPLOYER'S OWN ANSWER, READ FROM THE WIRE INSTEAD OF FROM THE ATS'S RENDERED STATE.
+ *
+ * Every arm of managedSubmitVerdict above answers from what the PAGE showed: an ATS container, a
+ * route, a body-text phrase. Measured on two live Greenhouse sends, both 2026-09-04 (Sage packet
+ * aae653a3-2d5a-4f3e-ba3b-afea4219df37/run 46f50a9b, Hudson River Trading packet
+ * 4a79eec1-5c65-4dd4-8e72-e119fbfbd733): the page showed nothing decisive - submitOutcome.state
+ * 'unknown', the form still mounted - while the submit REQUEST itself carried the employer's answer
+ * the whole time: a 428 on the exact bound posting's own submit endpoint, with Greenhouse's own
+ * refusal sentence in the observed page text. That is not "Litos cannot tell"; it is the employer
+ * saying no before anything was filed, and it deserves its own verdict rather than another trip
+ * through 'unverified'.
+ *
+ * Fails closed at every step: wrong family, wrong board, wrong job id, a 2xx/3xx or unknown-outcome
+ * bound entry ANYWHERE in the run (not just the one chosen - see boundEmployerSubmitNetworkEntry),
+ * a login wall (401/403), the form actually gone (it navigated, so whatever it navigated to gets to
+ * answer), or neither a recognised banner nor a recognised code - and this returns null, leaving
+ * the caller's own 'unverified' verdict exactly as it was.
+ */
+function employerSubmitRefusalProof(
+  outcome: ManagedSubmitOutcome,
+  expectedApplicationUrl: string,
+): EmployerSubmitRefusalProof | null {
+  // The page never navigated away from the form - still exactly the condition that would otherwise
+  // read as "we do not know" - which is the one this proof exists to resolve instead of leaving open.
+  if (outcome.formStillPresent !== true) return null;
+  const expected = managedAtsBinding({ url: expectedApplicationUrl });
+  if (!expected) return null;
+  const entry = boundEmployerSubmitNetworkEntry(outcome.network, expected);
+  if (!entry || !isEmployerSubmitRefusalStatus(entry.status)) return null;
+  const bannerPattern = SUBMIT_REFUSAL_BANNER_TEXT[expected.family];
+  const bannerText = bannerPattern && outcome.message && bannerPattern.test(outcome.message)
+    ? outcome.message.trim().slice(0, 300)
+    : null;
+  const body = submitRefusalBody(entry);
+  const provenCode = body.code && GREENHOUSE_PRE_FILING_REFUSAL_CODES.has(body.code) ? body.code : null;
+  if (!bannerText && !provenCode) return null;
+  return {
+    httpStatus: entry.status,
+    code: provenCode,
+    bannerText,
+    securityCodeRecipient: provenCode ? body.securityCodeRecipient : null,
+  };
+}
+
+/**
+ * The plain-words sentence for a submit request the employer's own answer proves was refused
+ * before anything was filed. Unlike unverifiedSubmissionReason below, this is not a question:
+ * nothing here asks her to go look or to say which she found, because the network status and the
+ * employer's own page or response already answered it - see employerSubmitRefusalProof above for
+ * how each of the two proofs is read. Greenhouse-only today, matching the proof it describes.
+ */
+export function employerSubmitRefusalReason(input: {
+  code?: string;
+  bannerText?: string;
+  securityCodeRecipient?: string;
+}): string {
+  const base = input.code && GREENHOUSE_CAPTCHA_REFUSAL_CODES.has(input.code)
+    ? 'Greenhouse’s automated check refused this attempt before anything was filed. Nothing has '
+      + 'gone to the employer.'
+    : input.code
+      ? `Greenhouse refused this submit request before filing it (code “${input.code}”). Nothing `
+        + 'has gone to the employer.'
+      : 'Greenhouse refused this submit request before filing it'
+        + `${input.bannerText ? `, saying: “${input.bannerText}”` : ''}. Nothing has gone to the employer.`;
+  const codeHint = input.securityCodeRecipient
+    ? ` Greenhouse said it emailed a verification code to ${input.securityCodeRecipient}.`
+    : '';
+  return `${base}${codeHint} Litos released this attempt: send it again from Review and send `
+    + 'whenever you are ready.';
+}
+
 /** A managed confirmation verdict is usable only when its portal-specific receipt is exact. */
 export function exactManagedSubmitVerdict(
   result: ManagedReceiptResult | null | undefined,
   expectedApplicationUrl: string,
 ): ManagedSubmitVerdict {
   const verdict = managedSubmitVerdict(result);
+  if (verdict.kind === 'unverified' && verdict.cause === 'no_confirmation_state' && result) {
+    const outcome = readManagedSubmitOutcome(result);
+    const refusal = outcome && employerSubmitRefusalProof(outcome, expectedApplicationUrl);
+    if (refusal) {
+      return {
+        kind: 'employer_refused',
+        cause: 'employer_refused_submit',
+        httpStatus: refusal.httpStatus,
+        ...(refusal.code ? { code: refusal.code } : {}),
+        ...(refusal.bannerText ? { bannerText: refusal.bannerText } : {}),
+        ...(refusal.securityCodeRecipient ? { securityCodeRecipient: refusal.securityCodeRecipient } : {}),
+      };
+    }
+  }
   if (verdict.kind !== 'confirmed') return verdict;
   if (result && exactManagedAtsReceipt({ result, expectedApplicationUrl })) return verdict;
   if (result && corroboratedFamilyReceipt(result, expectedApplicationUrl, verdict.confirmationText, readManagedSubmitOutcome(result)?.source ?? null)) {
@@ -1210,4 +1496,60 @@ export function unverifiedSubmissionReason(input: {
     + 'record it as sent and will not apply again; if it is not, Litos will send this one for you. '
     + 'Do not submit it by hand in the meantime, because two applications to the same posting count '
     + 'against you and cannot be taken back.';
+}
+
+/**
+ * The review patch for a submit request the employer's own answer proves was refused before
+ * anything was filed.
+ *
+ * PURE, and deliberately extracted from the transaction that writes it
+ * (recordManagedAuthorizedAttemptRefused, routes/submissionRunner.ts) so this shape - status
+ * needs_attention, the claim released, unverified_submission left unset, employer_refusal set - can
+ * be tested without a database. The caller is what makes it durable: it must append the ledger's
+ * own not_sent_proven/employer_rejected_not_filed fact in the SAME transaction as this patch, or a
+ * released row would sit unclaimed while its ledger attempt still folds to blocked_unverified and
+ * every gate that reads the ledger keeps refusing it.
+ *
+ * Mirrors releaseAttemptThatNeverReachedEmployer (lib/expiredHandoffClaimRelease.ts) in shape: same
+ * claim fields cleared, same claim_released record, same reason status stays needs_attention rather
+ * than moving to some fourth state nothing else knows how to render. What is deliberately DIFFERENT
+ * is unverified_submission and attention_categories: that sibling function is repairing a row that
+ * may already carry an unverified record left by an earlier run and is careful to only ever clear
+ * one that belongs to the same run; this one is called from inside the run that just received the
+ * refusal and never wrote an unverified_submission record at all, so there is nothing to preserve
+ * and 'employer_refused' is the one category set, never 'unverified_submission' beside it.
+ */
+export function employerRefusalReleasePatch(
+  review: Pick<ApplicationReviewState, 'submission_claim_id'>,
+  input: {
+    at: string;
+    httpStatus: number;
+    code?: string;
+    attentionReason: string;
+    previewUrl?: string;
+  },
+): Partial<ApplicationReviewState> {
+  return {
+    status: 'needs_attention',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_packet_version: undefined,
+    submission_authorization: undefined,
+    submission_attempted_at: undefined,
+    unverified_submission: undefined,
+    submission_error: undefined,
+    ...(input.previewUrl ? { preview_screenshot_url: input.previewUrl } : {}),
+    attention_reason: input.attentionReason,
+    attention_categories: ['employer_refused'],
+    employer_refusal: {
+      http_status: input.httpStatus,
+      ...(input.code ? { code: input.code } : {}),
+      at: input.at,
+    },
+    claim_released: {
+      cause: 'employer_refused_before_filing',
+      ...(review.submission_claim_id ? { claim_id: review.submission_claim_id } : {}),
+      released_at: input.at,
+    },
+  };
 }

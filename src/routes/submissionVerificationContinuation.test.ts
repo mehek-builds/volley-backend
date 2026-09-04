@@ -177,8 +177,13 @@ test('terminal cleanup runs independently before the terminal application select
 test('terminal review and every cleanup obligation share one locked packet update', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = runner.indexOf('export async function recordManagedAuthorizedAttemptUnverified(');
+  const refusedStart = runner.indexOf('export async function recordManagedAuthorizedAttemptRefused(', start);
   const end = runner.indexOf('/** Persist exact post-call uncertainty', start);
-  const fold = runner.slice(start, end);
+  assert.ok(start > 0 && refusedStart > start && end > refusedStart);
+
+  // recordManagedAuthorizedAttemptUnverified: the review write and every cleanup obligation fold
+  // into ONE locked update, never a second write for the cleanup markers.
+  const fold = runner.slice(start, refusedStart);
   const lock = fold.indexOf('await lockSubmissionAttemptUser(tx, row.user_id)');
   const outbox = fold.indexOf('specWithManagedTerminalFold', lock);
   const review = fold.indexOf('unresolved,', outbox);
@@ -186,6 +191,20 @@ test('terminal review and every cleanup obligation share one locked packet updat
   assert.ok(lock >= 0 && outbox > lock && review > outbox && update > review);
   assert.equal((fold.match(/await tx\.update\(generated_resumes\)/g) ?? []).length, 1);
   assert.doesNotMatch(fold, /persistManagedTerminalCleanupMarker|queueManagedTerminalCleanup/);
+
+  // recordManagedAuthorizedAttemptRefused sits immediately after it and makes the exact same
+  // promise for its own release write. It is a deliberate hand-mirrored sibling, not a shared
+  // helper (see the comment above its declaration), so it is pinned by the same shape check
+  // independently rather than by widening the assertion above across both functions.
+  const refusedFold = runner.slice(refusedStart, end);
+  const refusedLock = refusedFold.indexOf('await lockSubmissionAttemptUser(tx, row.user_id)');
+  const refusedOutbox = refusedFold.indexOf('specWithManagedTerminalFold', refusedLock);
+  const refusedReview = refusedFold.indexOf('released,', refusedOutbox);
+  const refusedUpdate = refusedFold.indexOf('await tx.update(generated_resumes)', refusedReview);
+  assert.ok(refusedLock >= 0 && refusedOutbox > refusedLock && refusedReview > refusedOutbox
+    && refusedUpdate > refusedReview);
+  assert.equal((refusedFold.match(/await tx\.update\(generated_resumes\)/g) ?? []).length, 1);
+  assert.doesNotMatch(refusedFold, /persistManagedTerminalCleanupMarker|queueManagedTerminalCleanup/);
 });
 
 test('continuation recovery folds initial and continuation cleanup entries together', async () => {

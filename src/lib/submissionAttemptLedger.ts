@@ -171,6 +171,30 @@ const PRE_CLICK_ONLY_PROOFS = new Set<SubmissionNotSentProofKind>([
   'typed_pre_click_stop',
   'extension_cancelled_before_press',
 ]);
+/* THE PROOFS STRONG ENOUGH TO CLOSE AN ATTEMPT AFTER AUTHORIZATION, ALONGSIDE HER OWN LOOK.
+ *
+ * The rule this set exists to widen is stated at its one call site below: once boundary_authorized
+ * exists, no MACHINE-authored not-sent proof may close the attempt, because an authorization is
+ * durable employer-boundary risk and only the applicant's own post-expiry check used to be trusted
+ * to discharge it. That rule was written for the case where nothing on the record says what
+ * happened - a press that timed out, a provider that fell over mid-read - and there the caution is
+ * right: guessing costs a duplicate application.
+ *
+ * `employer_rejected_not_filed` is not a guess. It is written only by a caller that has already
+ * proven, from the submit REQUEST'S OWN response, that the employer looked at this exact posting's
+ * submit endpoint and refused it before filing anything: a 4xx that is not a login wall, bound to
+ * the exact family/board/job id the packet expected (never by hostname alone), corroborated by
+ * either the employer's own rendered refusal banner or a pre-filing refusal code in the response
+ * body. See employerSubmitRefusalProof in managedSubmitOutcome.ts for exactly what is required
+ * before this proof kind is ever written. That is strictly MORE than "the applicant looked and did
+ * not see a receipt" - it is the employer's own server answering - so admitting it here is not a
+ * weakening of the post-authorization rule, it is the same rule recognising a second witness who
+ * can be exactly as certain as she can. */
+const AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS = new Set<SubmissionNotSentProofKind>([
+  'applicant_checked_not_sent',
+  'applicant_checked_all_possible_destinations_not_sent',
+  'employer_rejected_not_filed',
+]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /* FIVE MINUTES, THE CAP THIS FILE ALREADY ENFORCES, NOT THREE.
  *
@@ -791,8 +815,7 @@ export function submissionAttemptRetrySafety(
   const pressContradictsProof = pressed.length > 0
     && Boolean(resolutionProof && PRE_CLICK_ONLY_PROOFS.has(resolutionProof));
   const authorizationContradictsProof = authorized.length > 0
-    && resolutionProof !== 'applicant_checked_not_sent'
-    && resolutionProof !== 'applicant_checked_all_possible_destinations_not_sent';
+    && !(resolutionProof && AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS.has(resolutionProof));
   const riskAfterResolution = Boolean(lastRisk && resolution && lastRisk.created_at > resolution.created_at);
   const invalidSequence = invalidBinding
     || invalidVocabulary
