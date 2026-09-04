@@ -840,6 +840,18 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
       resumeSource,
       resumeAttachedAt,
     });
+    /* RESYNC FROM THE ROW THE WRITE ACTUALLY PRODUCED. updateCanonicalApplicationAfterFill derives
+       the stored linkage from resumeLinkageIntentFrom, which reads selectedResumeArtifactId ahead of
+       the (resumeAttached, resumeSource) pair - so a request naming only
+       selected_resume_artifact_id (the gate above never fires for it) writes an attached row while
+       these locals still hold the application's OLD values. Below this point resumeAttached,
+       resumeSource and selectedResumeArtifactId feed both needs_user and the top-level
+       resume_attached/resume_source fields - "the Free preparation contract" the comment above this
+       route names - so leaving them stale made one JSON response say attached in
+       application.resume_attached and not attached at its own top level. */
+    selectedResumeArtifactId = updated?.selected_resume_artifact_id ?? selectedResumeArtifactId;
+    resumeAttached = updated?.resume_attached ?? resumeAttached;
+    resumeSource = (updated?.resume_source as 'artifact' | 'base_resume' | 'none' | undefined) ?? resumeSource;
     const [account, entitlement] = await Promise.all([
       db.select({ automatic_submission_enabled: users.automatic_submission_enabled })
         .from(users).where(eq(users.id, userId)).limit(1),

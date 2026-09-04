@@ -156,6 +156,40 @@ test('a fill that names only an artifact attaches it, instead of pointing at a r
   });
   assert.equal(response.json().application.resume_attached, true);
   assert.equal(response.json().application.resume_source, 'artifact');
+  /* THE SAME DEFECT, ONE LAYER UP. application.resume_attached above reads the fresh .returning()
+   * row and was already correct; these are the TOP-LEVEL fields built from the route's own locals,
+   * which a gate keyed on resume_attached/resume_source (both absent from this request) never
+   * touched. Before the fix this response said resume_attached: true one line up and
+   * resume_attached: false here, in the same JSON payload - and needs_user, "the Free preparation
+   * contract consumed by the dashboard and extension" per the route's own comment, still listed
+   * 'resume_attachment' for an application that had just attached one. */
+  assert.equal(response.json().resume_attached, true);
+  assert.equal(response.json().resume_source, 'artifact');
+  assert.equal(response.json().selected_resume_artifact_id, artifactId);
+  assert.ok(
+    !response.json().needs_user.includes('resume_attachment'),
+    'needs_user must not ask for a resume this response just attached: ' + JSON.stringify(response.json().needs_user),
+  );
+});
+
+test('a fill that names only an artifact reports the attachment at the top level too, mirrored by a fill that detaches', async () => {
+  // The regression guard for the fix above: the detach path already sent resume_attached and
+  // resume_source together, so the gate fired and the top-level fields were never stale for it.
+  // This proves the fix did not flip that already-correct path.
+  const applicationId = await application();
+  const artifactId = await artifact();
+  await fill(applicationId, { selected_resume_artifact_id: artifactId });
+
+  const response = await fill(applicationId, { resume_attached: false, resume_source: 'none' });
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().resume_attached, false);
+  assert.equal(response.json().resume_source, 'none');
+  assert.equal(response.json().application.resume_attached, false);
+  assert.ok(
+    response.json().needs_user.includes('resume_attachment'),
+    'needs_user must ask for a resume on an application that just detached: ' + JSON.stringify(response.json().needs_user),
+  );
 });
 
 test('a fill that detaches takes the pointer with it', async () => {
