@@ -164,6 +164,10 @@ import {
   ashbyPublicQuestionLabelKey,
 } from '../lib/ashbyPublicApplication';
 import {
+  leverPublicApplicationSchema,
+  leverPublicQuestionLabelKey,
+} from '../lib/leverPublicApplication';
+import {
   exactManagedSubmitVerdict,
   employerRefusalReleasePatch,
   employerSubmitRefusalReason,
@@ -7737,6 +7741,30 @@ async function prepareManaged(
       }, 'Could not read the employer-published Ashby form schema, keeping the live DOM read');
     }
   }
+  /* LEVER PUBLISHES ITS FORM TOO, as the server-rendered apply page: every `<select>` with its
+   * options and every radio group with its alternatives is in the HTML, no browser needed. The
+   * live DOM read cannot enumerate Lever's university dropdown - measured 2026-09-04 on Belvedere
+   * Trading's Software Engineer Intern - Summer 2027 (packet c4413bff): "Name of School" carries
+   * 2,965 options and reached the packet as missing_exact_options, so a required control the
+   * profile answers exactly was left blank on every fill. Same join as Ashby's below, same
+   * fail-closed rules (see lib/leverPublicApplication.ts). */
+  let leverSchema: Awaited<ReturnType<typeof leverPublicApplicationSchema>> = null;
+  if (portal === 'lever' || portal === 'controlled_lever') {
+    try {
+      leverSchema = await leverPublicApplicationSchema(applicationUrl);
+      if (leverSchema) {
+        fastify.log.info({
+          applicationId: row.id,
+          publicOptionLabelCount: Object.keys(leverSchema.optionsByLabel).length,
+        }, 'Read the employer-published Lever form schema');
+      }
+    } catch (error) {
+      fastify.log.warn({
+        applicationId: row.id,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }, 'Could not read the employer-published Lever form schema, keeping the live DOM read');
+    }
+  }
   // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
@@ -7812,22 +7840,31 @@ async function prepareManaged(
    *    fields share; this drops one that two DISCOVERED fields share, so a duplicated question on
    *    the page can never take a list that might belong to its twin. Same rule as
    *    attachManagedFieldOptions' refusal to attach one list to two controls sharing a durable id. */
-  const ashbyDiscoveredLabelCounts = new Map<string, number>();
-  if (ashbySchema) {
+  /* One published schema at most: the family decides which reader ran, and each reader keys its
+   * labels with its own normalizer, so the join below reads both through the same pair. Lever's
+   * key strips the required glyph the live DOM keeps in the discovered label ("name of school ✱");
+   * Ashby's is the Greenhouse key unchanged. */
+  const publishedSchema = ashbySchema
+    ? { optionsByLabel: ashbySchema.optionsByLabel, labelKey: ashbyPublicQuestionLabelKey }
+    : leverSchema
+      ? { optionsByLabel: leverSchema.optionsByLabel, labelKey: leverPublicQuestionLabelKey }
+      : null;
+  const publishedDiscoveredLabelCounts = new Map<string, number>();
+  if (publishedSchema) {
     for (const field of normalizedDiscoveredFields) {
-      const labelKey = ashbyPublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
+      const labelKey = publishedSchema.labelKey(normalizeDiscoveredLabel(field.label));
       if (labelKey) {
-        ashbyDiscoveredLabelCounts.set(labelKey, (ashbyDiscoveredLabelCounts.get(labelKey) ?? 0) + 1);
+        publishedDiscoveredLabelCounts.set(labelKey, (publishedDiscoveredLabelCounts.get(labelKey) ?? 0) + 1);
       }
     }
   }
-  const publicSchemaDiscoveredFields = !ashbySchema
+  const publicSchemaDiscoveredFields = !publishedSchema
     ? normalizedDiscoveredFields
     : normalizedDiscoveredFields.map((field) => {
       if (field.options?.length && field.optionsComplete !== false) return field;
-      const labelKey = ashbyPublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
-      if (!labelKey || ashbyDiscoveredLabelCounts.get(labelKey) !== 1) return field;
-      const options = ashbySchema.optionsByLabel[labelKey];
+      const labelKey = publishedSchema.labelKey(normalizeDiscoveredLabel(field.label));
+      if (!labelKey || publishedDiscoveredLabelCounts.get(labelKey) !== 1) return field;
+      const options = publishedSchema.optionsByLabel[labelKey];
       return options?.length ? { ...field, options, optionsComplete: true } : field;
     });
   /* A CONTROL THE BOARD PUBLISHES AS OPEN TEXT IS NEVER PROBED AS A CLOSED LIST.
