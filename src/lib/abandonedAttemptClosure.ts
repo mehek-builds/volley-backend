@@ -517,8 +517,18 @@ export async function healAbandonedPreBoundaryAttemptsForRead(input: {
    * page of its own - refuseDuplicateApplication, on the send path - which still gets a
    * whole-ledger heal, now bounded by READ_HEAL_MAX_CANDIDATES rather than unbounded. */
   packetIds?: readonly string[];
+  /** Which code path is asking, recorded on every log line below as `closedBy` - REVIEW ROUND 1,
+   * 2026-09-05, Finding 4 (auditability). `'read_heal'` for the three GETs, `'send_path'` for
+   * refuseDuplicateApplication. THIS IS A LOG FIELD ONLY: application_submission_attempt_events has
+   * no free-form details/metadata column to also carry it on the appended fact itself (checked
+   * against db/schema.ts - every column is a specific typed field with its own check constraint,
+   * not a JSON catch-all), and this module does not add one for a single audit field. The event a
+   * heal appends is identical either way; only the log line naming its closure says which path
+   * asked for it. Required rather than defaulted so a future caller has to say which it is instead
+   * of silently inheriting whatever the last caller meant. */
+  trigger: 'read_heal' | 'send_path';
 }): Promise<{ closedAttemptIds: string[]; failedAttemptIds: string[] }> {
-  const logContext = input.logContext ?? {};
+  const logContext = { ...input.logContext, closedBy: input.trigger };
   try {
     const healed = await db.transaction(async (tx) => {
       // TRY, NEVER WAIT - see the doc above. A lost race just means another writer already holds

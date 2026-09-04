@@ -279,6 +279,7 @@ async function unattemptedPacketSubmissionAuthority(
         log,
         logContext: { packetId, route: 'GET /applications/:id/submission' },
         packetIds: [packetId],
+        trigger: 'read_heal',
       })).closedAttemptIds;
       if (closedAttemptIds.includes(blockingAttemptId)) {
         projections = await authoritativeSubmissionProjection({ userId, packetIds: [packetId] });
@@ -1203,6 +1204,7 @@ async function refuseDuplicateApplication(
     userId,
     log,
     logContext: { applicationId: row.id },
+    trigger: 'send_path',
   });
   const verdict = await duplicateApplicationVerdict({
     userId,

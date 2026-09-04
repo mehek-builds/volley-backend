@@ -2065,6 +2065,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         log: request.log,
         logContext: { route: 'GET /resume/history', candidatePacketIds },
         packetIds: candidatePacketIds,
+        trigger: 'read_heal',
       });
       if (healed.closedAttemptIds.length > 0) {
         submissionAuthority = (await loadSubmissionAuthority()) ?? submissionAuthority;

@@ -845,6 +845,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
         log: request.log,
         logContext: { route: 'GET /applications/board', candidatePacketIds: boardCandidatePacketIds },
         packetIds: boardCandidatePacketIds,
+        trigger: 'read_heal',
       });
       if (healed.closedAttemptIds.length > 0) {
         submissionAuthority = (await loadBoardSubmissionAuthority()) ?? submissionAuthority;
