@@ -49,9 +49,11 @@ const SEPARATE_FORM_ROUTES: ReadonlyArray<{ host: (hostname: string) => boolean;
   /* Tenant subdomains only: the vendor's own www/app/api hosts serve no posting, so a form-shaped
      path there is left exactly as pasted. Teamtailor's regional tenants (<tenant>.na.teamtailor.com)
      are real career sites and are read like any other; whether the submission side supports them
-     is HOSTS.teamtailor's question, not this reader's. */
+     is HOSTS.teamtailor's question, not this reader's. The region bound (2-4 letters, not just 2)
+     matches HOSTS.teamtailor exactly, widened together 2026-09-05, so a regional apply-form URL
+     rewrites to its posting here the same tenants it is recognised as teamtailor there. */
   { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+\.recruitee\.com$/i.test(h), path: RECRUITEE_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
-  { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+(?:\.[a-z]{2})?\.teamtailor\.com$/i.test(h), path: TEAMTAILOR_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
+  { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+(?:\.[a-z]{2,4})?\.teamtailor\.com$/i.test(h), path: TEAMTAILOR_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
   { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+\.pinpointhq\.com$/i.test(h), path: PINPOINT_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
   { host: (h) => /^(?!(?:www|app|api)\.)[a-z0-9-]+\.breezy\.hr$/i.test(h), path: BREEZY_APPLICATION_PATH, posting: (m) => `/${m[1]}` },
 ];

@@ -1052,19 +1052,31 @@ test('CBS legacy Recruitee phone produces one normalized audit and acknowledgeme
  * c24e48a2-06b1-4a01-989f-b6c2c5719f18: "Fill application" -> "Tailor resume first" against
  * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance built a packet
  * with portal_url set and portal_supported: false. HOSTS.teamtailor (lib/portalSubmission.ts)
- * matches only a single label before ".teamtailor.com" ("fully.teamtailor.com",
+ * matched only a single label before ".teamtailor.com" ("fully.teamtailor.com",
  * "flanks.teamtailor.com"), so this regional Teamtailor tenant's two-label host
- * ("covenanthouseinternational.na.teamtailor.com") matches no HOSTS entry at all and detectPortal
- * throws for it - correctly, by isPortalSupported's own header, for the runner. But
+ * ("covenanthouseinternational.na.teamtailor.com") matched no HOSTS entry at all and detectPortal
+ * threw for it - correctly, by isPortalSupported's own header, for the runner. But
  * normalizedPacketAuditQuestions called detectPortal on every portal_url unconditionally, with no
  * isPortalSupported guard, and GET /submission's resolvePacketAuditQuestionFixpoint calls it on
  * every dashboard poll: a routine read of a freshly tailored, never-sent packet turned into a
  * repeatable 500 the moment the URL happened to be a regional tenant. GET /resume/history's own
  * equivalent (refreshedHistorySpec, routes/resume.ts) already guards this exact call with
- * isPortalSupported; this sibling reader had the same call unguarded. */
-test('detectPortal throws for a regional Teamtailor tenant HOSTS.teamtailor does not match', () => {
+ * isPortalSupported; this sibling reader had the same call unguarded.
+ *
+ * THE FIXTURE HOST BELOW CHANGED 2026-09-05. HOSTS.teamtailor now recognises exactly the regional
+ * shape measured above (lib/portalSubmission.ts, "<tenant>.<region>.teamtailor.com") - see
+ * portalSubmission.test.ts's own "recognizes a regional Teamtailor tenant" test and
+ * freshTailoredApplicationRead.db.test.ts's "heals to portal_supported: true" test for that packet
+ * now succeeding end to end. That is real coverage gained, not lost: it would be dishonest for
+ * these three tests to keep asserting detectPortal throws for a host it no longer throws for. The
+ * catch-and-fallback GUARD they exist to pin is a general property - a bare Error from detectPortal
+ * must never 500 this route, for WHATEVER host still cannot be classified - so they now exercise it
+ * against api.na.teamtailor.com instead: still a Teamtailor-shaped, two-label regional host, and
+ * still refused on purpose (the reserved "api" vendor-product exclusion applies in the tenant
+ * position whether or not a region follows it - see HOSTS.teamtailor's own comment). */
+test('detectPortal throws for a Teamtailor host reserved for the vendor, region label or not', () => {
   assert.throws(
-    () => detectPortal('https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance'),
+    () => detectPortal('https://api.na.teamtailor.com/jobs/686133-intern-finance'),
     /cannot fill in this company/,
   );
 });
@@ -1073,7 +1085,7 @@ test('normalizedPacketAuditQuestions falls back to the stored questions when det
   const review: ApplicationReviewState = {
     jd_text: 'Support the finance team at Covenant House International.',
     role: 'Intern, Finance',
-    portal_url: 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance',
+    portal_url: 'https://api.na.teamtailor.com/jobs/686133-intern-finance',
     ats_name: 'teamtailor',
     portal_supported: false,
     status: 'ready_to_submit',
@@ -1095,7 +1107,7 @@ test('resolvePacketAuditQuestionFixpoint does not throw for a freshly tailored p
   const review: ApplicationReviewState = {
     jd_text: 'Support the finance team at Covenant House International.',
     role: 'Intern, Finance',
-    portal_url: 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance',
+    portal_url: 'https://api.na.teamtailor.com/jobs/686133-intern-finance',
     ats_name: 'teamtailor',
     portal_supported: false,
     status: 'ready_to_submit',

@@ -157,6 +157,38 @@ test('detects the four supported applicant portal families', () => {
   assert.equal(detectPortal('https://jobs.smartrecruiters.com/Acme/744000-role'), 'smartrecruiters');
 });
 
+/* MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com: "Fill application" -> "Tailor resume
+ * first" against https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance
+ * built a packet whose portal_url matched no HOSTS entry at all, because the regex took exactly one
+ * label before ".teamtailor.com" and a REGIONAL tenant puts the region between the tenant and the
+ * vendor domain as a second label. detectPortal threw for a posting the account's standing consent
+ * grant would otherwise have let Litos send. No test asserted a bare (non-regional) Teamtailor host
+ * detected as 'teamtailor' before this one either - this closes both gaps at once. */
+test('recognizes a regional Teamtailor tenant the same as a bare one, and still refuses the vendor’s own and lookalike hosts', () => {
+  assert.equal(
+    detectPortal('https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance'),
+    'teamtailor',
+  );
+  assert.equal(detectPortal('https://fully.teamtailor.com/jobs/12345-a-role'), 'teamtailor');
+  // A second measured region, so the bound is proven to be "a region label", not "na specifically".
+  assert.equal(
+    detectPortal('https://sometenant.eu.teamtailor.com/jobs/12345-a-role/applications/new'),
+    'teamtailor',
+  );
+
+  for (const url of [
+    'https://www.teamtailor.com/jobs/686133-intern-finance',
+    'https://app.teamtailor.com/jobs/686133-intern-finance',
+    // api as the TENANT label, with a region right after it - the exclusion has to hold in this
+    // shape too, not just the no-region form the map carried before this fix.
+    'https://api.na.teamtailor.com/jobs/686133-intern-finance',
+    'https://evil-teamtailor.com/jobs/686133-intern-finance',
+    'https://teamtailor.com.evil.net/jobs/686133-intern-finance',
+  ]) {
+    assert.throws(() => detectPortal(url), /cannot fill in/, url);
+  }
+});
+
 test('a managed discovery run detects custom questions and cover-letter attachment capability without submitting', () => {
   // R-055 on the managed path: this cheap first call exists only to get the page's custom
   // questions back (stratus-browser-cloud PR #7). It reuses the same fixed-field fills (including
