@@ -891,7 +891,12 @@ export function submissionAttemptBindingFromEvent(event: SubmissionAttemptEventR
   };
 }
 
-function groupByAttempt(events: readonly SubmissionAttemptEventRecord[]) {
+/** One attempt's events, grouped, so every fold that needs "this attempt's whole history" reads
+ * the same rows the same way. Exported so a caller outside this module - abandonedAttemptClosure.ts
+ * is the first - never has to keep its own copy in step by hand. */
+export function groupByAttempt(
+  events: readonly SubmissionAttemptEventRecord[],
+): Map<string, SubmissionAttemptEventRecord[]> {
   const grouped = new Map<string, SubmissionAttemptEventRecord[]>();
   for (const event of events) {
     const existing = grouped.get(event.attempt_id) ?? [];

@@ -51,6 +51,7 @@ import { readApplicationReview } from './applicationReview';
 import {
   appendSubmissionAttemptEvent,
   attemptNeverReachedEmployer,
+  groupByAttempt,
   submissionAttemptBindingFromEvent,
   submissionAttemptEventId,
   submissionAttemptEventsForUser,
@@ -95,19 +96,6 @@ export function abandonedPreBoundaryAttemptIsClosable(input: {
 export const ABANDONED_ATTEMPT_CLOSURE_EVIDENCE = 'attempt_never_reached_employer';
 export const ABANDONED_ATTEMPT_CLOSURE_FACT_KEY = 'abandoned-pre-boundary-attempt';
 
-
-/** One attempt's events, grouped, so the fold and the proof read the same rows. */
-function groupByAttempt(
-  events: readonly SubmissionAttemptEventRecord[],
-): Map<string, SubmissionAttemptEventRecord[]> {
-  const grouped = new Map<string, SubmissionAttemptEventRecord[]>();
-  for (const event of events) {
-    const existing = grouped.get(event.attempt_id) ?? [];
-    existing.push(event);
-    grouped.set(event.attempt_id, existing);
-  }
-  return grouped;
-}
 
 /**
  * Close every abandoned pre-boundary attempt this user still carries, and report which.
