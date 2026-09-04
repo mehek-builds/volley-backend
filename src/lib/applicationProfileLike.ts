@@ -66,8 +66,31 @@ function experienceBankType(value: string): 'job' | 'project' | 'leadership' | u
 /**
  * The dated employment entries the resolver may do arithmetic on: the parsed resume's `experience`
  * array (the base resume's when the parse has none), plus every `job` row of the experience bank
- * that carries a date range. Projects and leadership are excluded on both sources - they are not
- * employment. Undefined when nothing dated is on file, which the resolver refuses on.
+ * that carries a date range. Projects and leadership are excluded on all three sources - they are
+ * not employment - but by two different tests, because the sources disagree about where the kind is
+ * recorded: the bank keeps `type === 'job'`, and the resume paths DROP an explicit project or
+ * leadership row while keeping an untyped one. See isNonEmployment for why that asymmetry is
+ * required rather than untidy. Undefined when nothing dated is on file, which the resolver refuses on.
+ *
+ * EACH ENTRY ALSO CARRIES ITS OWN BULLETS, and they are skill evidence, never dates. The role TITLE
+ * is deliberately NOT carried: it was, and reading it produced false claims, because titles are
+ * Title Case by convention and every case-based signal is inverted on that field. See
+ * experienceEvidencing.
+ * skillScopedExperienceAnswer answers "how many years of hands on experience do you have with X"
+ * by summing only the roles whose own words name X, so the span and the words it belongs to have to
+ * arrive together. Nothing in the tenure arithmetic reads either field (see ExperiencePeriod), so
+ * carrying them cannot move a total that this function already produced. The bullets are joined
+ * into one string rather than kept as an array because every reader of them asks the same question,
+ * "is this skill named anywhere in this role", and one string is the honest shape for that.
+ *
+ * The bank rows deliberately contribute no evidence text: a bank row is an organisation, a title
+ * and a date range with no bullets, and a title alone is not where a tool gets named. They still
+ * count toward total tenure exactly as before.
+ *
+ * WHAT THE PROSE IS AND IS NOT ALLOWED TO PROVE is decided downstream by skillEvidencedIn, not here.
+ * This function's job is to carry her words across unchanged; judging whether "excel at reporting"
+ * names a spreadsheet is that function's, and putting any of that judgement here would split one
+ * rule across two modules.
  *
  * Pure, and exported for the loader test: loadApplicationProfileLike itself needs a database.
  */
@@ -77,6 +100,42 @@ export function experiencePeriodsFromSources(
   bankRows: readonly { type?: string | null; date_range?: string | null }[],
 ): ExperiencePeriod[] | undefined {
   const dateText = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  /* Every shape the parse and the resume spec write their prose in: a single `description`, a
+   * `summary`, or the `bullets`/`highlights` arrays the resume spec uses. Non-string members are
+   * dropped rather than stringified, so an object never reaches the matcher as "[object Object]". */
+  const evidenceText = (entry: Record<string, unknown>): string | undefined => {
+    const parts: string[] = [];
+    for (const key of ['description', 'summary', 'bullets', 'highlights', 'responsibilities']) {
+      const value = entry[key];
+      if (typeof value === 'string') parts.push(value);
+      else if (Array.isArray(value)) parts.push(...value.filter((item): item is string => typeof item === 'string'));
+    }
+    const joined = parts.map((part) => part.trim()).filter(Boolean).join(' ');
+    return joined || undefined;
+  };
+  /* A NON-EMPLOYMENT ROW IS DROPPED HERE, and this filter is not optional decoration.
+   *
+   * `base` is `profileRow.base_resume_json`, a ResumeSpec, and ITS `experience[]` is one array
+   * holding all three kinds with a `type: 'job' | 'project' | 'leadership'` discriminator beside
+   * `date_range` and `bullets` (src/llm/resumeSpec.ts). `parsed_json` is shaped differently: its
+   * `experience` is employment only, with leadership in a separate top-level array, which is why
+   * this path had no filter and looked correct. It is not correct for the base resume, and
+   * fromResume(base) runs whenever the parse carries no experience array at all. Measured: a
+   * personal `Trading bot` project whose bullets say "Built a Python backtester" answered "how
+   * many years of hands on experience do you have with Python" with 1-2 years, and a club
+   * presidency answered the same question about Kubernetes, for an applicant whose only
+   * employment there was two months of unrelated operations work.
+   *
+   * THE TEST IS NEGATIVE, AND THE ASYMMETRY WITH THE BANK FILTER BELOW IS DELIBERATE. The bank
+   * requires `type === 'job'` because every bank row carries a type. A parsed resume entry
+   * routinely carries NO type at all, so requiring 'job' here would silently drop every parsed
+   * role and zero out the total tenure that yearsOfExperienceAnswer already ships. Only an
+   * EXPLICIT project or leadership row is excluded; an untyped row is employment, as it always was.
+   * Do not "harmonize" these two filters. */
+  const isNonEmployment = (entry: Record<string, unknown>): boolean => {
+    const type = typeof entry.type === 'string' ? entry.type.trim().toLowerCase() : '';
+    return type === 'project' || type === 'leadership';
+  };
   const fromResume = (source: Record<string, unknown>): ExperiencePeriod[] | undefined => {
     const experience = source.experience;
     if (!Array.isArray(experience)) return undefined;
@@ -84,10 +143,12 @@ export function experiencePeriodsFromSources(
     for (const item of experience) {
       if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
       const entry = item as Record<string, unknown>;
+      if (isNonEmployment(entry)) continue;
       const start = dateText(entry.start ?? entry.start_date ?? entry.startDate ?? entry.from);
       const end = dateText(entry.end ?? entry.end_date ?? entry.endDate ?? entry.to);
       const date_range = dateText(entry.date_range ?? entry.dates);
-      if (start || end || date_range) periods.push({ start, end, date_range });
+      const description = evidenceText(entry);
+      if (start || end || date_range) periods.push({ start, end, date_range, description });
     }
     return periods;
   };
