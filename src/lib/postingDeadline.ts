@@ -1,4 +1,5 @@
 import type { ApplicationReviewState } from './applicationReview';
+import { POSTING_STATUS_MID_RUN_STATUSES } from './applicationPortalRepair';
 
 /**
  * A conservative reader of an employer's OWN STATED APPLICATION DEADLINE, from free-form English
@@ -192,6 +193,9 @@ export function derivePostingDeadlineStatus(
   now: Date = new Date(),
 ): ApplicationReviewState {
   if (review.posting_status?.state === 'closed') return review;
+  // Same mid-run exclusion as the monitor-inactive check, and for the same reason: see
+  // POSTING_STATUS_MID_RUN_STATUSES's own doc comment for the submitted-packet bug this prevents.
+  if (POSTING_STATUS_MID_RUN_STATUSES.has(review.status)) return review;
 
   const stated = parseStatedApplicationDeadline(review.jd_text);
   if (!stated) return review;

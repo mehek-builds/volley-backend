@@ -24,16 +24,22 @@ export const POSTING_CLOSED_BY_MONITOR_REASON =
 /**
  * Statuses where a browser or an employer may already be MID-ACTION on this exact packet.
  *
- * The monitor's is_active flip is read-time evidence about the POSTING; it is not evidence about
- * what THIS RUN already did, and the run's own facts always outrank it. A managed fill that is
- * mid-flight, or a submission already claimed, sitting on a security code, or filed, must not be
- * relitigated into 'closed' because the posting happened to go inactive in the middle - see
- * keepUsedPortal above for the identical argument about the URL itself. Left completely untouched
- * here (not even portal_url is refreshed) rather than partially patched, because a run in one of
- * these statuses reads its own review moments after this repair runs and must see exactly what it
- * wrote, not a new posting_status wedged in beside it.
+ * Shared by BOTH posting_status derivers - this file's own monitor-inactive check and
+ * postingDeadline.ts's derivePostingDeadlineStatus - because the argument is identical for each:
+ * this is read-time evidence about the POSTING, not about what THIS RUN already did, and the run's
+ * own facts always outrank it. A managed fill that is mid-flight, or a submission already claimed,
+ * sitting on a security code, or filed, must not be relitigated because the posting happened to go
+ * inactive, or its stated deadline happened to pass, in the middle - see keepUsedPortal above for
+ * the identical argument about the URL itself. Before derivePostingDeadlineStatus read this too, a
+ * packet already 'submitted' (sent, done) whose jd_text names a deadline that has since passed -
+ * true of nearly every submitted packet with a deadline sentence at all, since sending necessarily
+ * happens before it - had its OWN attention_reason overwritten with the deadline-passed sentence on
+ * every read of GET /resume/history and /applications/:id/submission. Left completely untouched
+ * (not even portal_url is refreshed) rather than partially patched, because a run in one of these
+ * statuses reads its own review moments after this runs and must see exactly what it wrote, not a
+ * new posting_status wedged in beside it.
  */
-const POSTING_CLOSED_MID_RUN_STATUSES: ReadonlySet<ApplicationReviewState['status']> = new Set([
+export const POSTING_STATUS_MID_RUN_STATUSES: ReadonlySet<ApplicationReviewState['status']> = new Set([
   'submitting',
   'submission_claimed',
   'awaiting_security_code',
@@ -57,7 +63,7 @@ function closedPostingReview(
   applyUrl: string,
   observedAt: Date | string | null | undefined,
 ): ApplicationReviewState {
-  if (POSTING_CLOSED_MID_RUN_STATUSES.has(current.status)) return current;
+  if (POSTING_STATUS_MID_RUN_STATUSES.has(current.status)) return current;
   const observed = observedAt instanceof Date
     ? observedAt.toISOString()
     : typeof observedAt === 'string' && observedAt.trim()

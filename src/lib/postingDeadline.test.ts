@@ -122,6 +122,19 @@ test('derivePostingDeadlineStatus leaves a review with no stated deadline untouc
   assert.equal(derived, original);
 });
 
+for (const midRunStatus of ['submitting', 'submission_claimed', 'awaiting_security_code', 'submitted'] as const) {
+  test(`a "${midRunStatus}" row is left untouched even though its jd_text names a past deadline`, () => {
+    // Regression: nearly every SUBMITTED packet with a deadline sentence at all has a deadline in
+    // the past by the time it is read back, since sending necessarily happens before it. Before
+    // this exclusion existed, every read of GET /resume/history overwrote a sent packet's own
+    // attention_reason with the deadline-passed sentence and set portal_supported: false on it.
+    const original = review({ status: midRunStatus });
+    const derived = derivePostingDeadlineStatus(original, new Date('2026-09-05T00:00:00.000Z'));
+    assert.equal(derived, original);
+    assert.equal(derived.posting_status, undefined);
+  });
+}
+
 test('a take-down outranks a stated deadline and is left exactly as repair wrote it', () => {
   const closed = review({
     posting_status: { state: 'closed', reason: 'monitor_inactive', observed_at: '2026-09-01T00:00:00.000Z' },
