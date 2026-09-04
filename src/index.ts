@@ -488,8 +488,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
    * "Internal Server Error". toPublicError's authored sentences, its Retry-After and its refusal to
    * echo server internals were all unreachable from the routes that actually serve applicants.
    *
-   * Verified by construction rather than by comment: src/index.test.ts asserts that a route
-   * registered the way these are answers with this handler's body and never with the raw text. */
+   * Pinned in src/index.test.ts, on the source rather than through an injected request, because the
+   * ordering is the whole mechanism and nothing injected can see it: a plugin a test registers after
+   * buildApp() returns inherits this handler under EITHER ordering, which is exactly why the defect
+   * survived a suite that exercises these routes constantly. */
   fastify.setErrorHandler((error, _request, reply) => {
     fastify.log.error(error);
     const publicError = toPublicError(error);
