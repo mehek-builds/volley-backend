@@ -177,6 +177,62 @@ test('returns null for empty or missing text', () => {
   assert.equal(parseStatedApplicationDeadline(null), null);
 });
 
+// Regression: a posting naming both a priority/early tier and a later, final deadline was flagged
+// against the EARLIER one, since the old implementation returned the first label match that parsed
+// at all. A real posting with a priority deadline in the past and a final deadline still open must
+// not read as closed.
+test('prefers a later "Final deadline" over an earlier "Priority deadline"', () => {
+  const parsed = parseStatedApplicationDeadline(
+    'Priority deadline: August 1, 2026. Final deadline: December 1, 2026.',
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.displayDate, 'December 1, 2026');
+});
+
+test('prefers the later final deadline regardless of which one is written first', () => {
+  const parsed = parseStatedApplicationDeadline(
+    'Final deadline: December 1, 2026. Priority deadline: August 1, 2026.',
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.displayDate, 'December 1, 2026');
+});
+
+test('a single "Application Deadline" with no other deadline in the text is unaffected', () => {
+  const parsed = parseStatedApplicationDeadline(MERCARI_SENTENCE);
+  assert.ok(parsed);
+  assert.equal(parsed.displayDate, 'August 31, 2026');
+});
+
+test('an "Early deadline" still flags when it is the only deadline the text names', () => {
+  const parsed = parseStatedApplicationDeadline('Early deadline: August 1, 2020.');
+  assert.ok(parsed);
+  assert.equal(parsed.displayDate, 'August 1, 2020');
+});
+
+test('an "Initial" or "First-round" or "Round 1" deadline is also treated as an early tier', () => {
+  const initial = parseStatedApplicationDeadline(
+    'Initial deadline: August 1, 2026. Deadline: December 1, 2026.',
+  );
+  const firstRound = parseStatedApplicationDeadline(
+    'First-round deadline: August 1, 2026. Deadline: December 1, 2026.',
+  );
+  const round1 = parseStatedApplicationDeadline(
+    'Round 1 deadline: August 1, 2026. Deadline: December 1, 2026.',
+  );
+  assert.equal(initial?.displayDate, 'December 1, 2026');
+  assert.equal(firstRound?.displayDate, 'December 1, 2026');
+  assert.equal(round1?.displayDate, 'December 1, 2026');
+});
+
+test('two unqualified deadlines both count and the later one wins', () => {
+  // Not an early-tier case at all - just two plain "Deadline:" mentions naming different dates
+  // (e.g. one for a different track). The later one is the one that should still be open.
+  const parsed = parseStatedApplicationDeadline(
+    'Deadline: August 1, 2026. Deadline: December 1, 2026.',
+  );
+  assert.equal(parsed?.displayDate, 'December 1, 2026');
+});
+
 test('derivePostingDeadlineStatus flags deadline_passed when now is after the stated deadline', () => {
   const derived = derivePostingDeadlineStatus(review(), new Date('2026-09-05T00:00:00.000Z'));
   assert.equal(derived.posting_status?.state, 'deadline_passed');

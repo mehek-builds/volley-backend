@@ -29,6 +29,10 @@ import { POSTING_STATUS_MID_RUN_STATUSES } from './applicationPortalRepair';
  * occasionally invents a wrong one tells an applicant Litos will not send something it safely could,
  * which is the worse failure for a tool she is trusting to act on her behalf.
  *
+ * MULTIPLE STATED DEADLINES in one description (a "priority" or "early" tier alongside the real,
+ * final cutoff) are all collected, not just the first one found - see the selection comment in
+ * parseStatedApplicationDeadline for exactly how the real cutoff is picked out from the early ones.
+ *
  * PURE, DELIBERATELY. This runs at packet-creation time (managedPrepare.ts, against a fresh
  * monitored_jobs.description) and, just as importantly, at READ time against a packet's own
  * already-frozen jd_text - which is what lets an application prepared before this shipped start
@@ -176,6 +180,18 @@ function labelPattern(): RegExp {
 /** How far past a label match this looks for a date before giving up on that occurrence. */
 const DATE_LOOKAHEAD_CHARS = 60;
 
+/* A label qualified by one of these words names an early/bonus tier, not the real cutoff - see the
+ * selection comment in parseStatedApplicationDeadline. Deliberately narrow: this file recognises
+ * these five phrasings because they are the ones measured, and treats anything else (including a
+ * bare "Deadline:" and anything qualified by "final") as the real, unqualified cutoff rather than
+ * guess at other phrasings that might mean the same thing. */
+const DEADLINE_QUALIFIER_RE = /\b(?:priority|early|initial|first-round|round\s+1)\b/i;
+
+/** How far before a label match this looks for one of the qualifier words above - long enough for
+ * "Initial " or "First-round " plus a leading article ("The "), short enough that an unrelated
+ * qualifier word from an earlier sentence cannot drift onto a later, unrelated label. */
+const QUALIFIER_LOOKBEHIND_CHARS = 30;
+
 function toStatedDeadline(match: RegExpExecArray): StatedDeadline | null {
   const [, monthRaw, dayRaw, yearRaw, hourRaw, minuteRaw, ampmRaw, zoneParenRaw, zoneBareRaw] = match;
   const monthIndex = MONTHS[(monthRaw ?? '').toLowerCase().replace(/\.$/, '')];
@@ -244,6 +260,7 @@ function toStatedDeadline(match: RegExpExecArray): StatedDeadline | null {
 export function parseStatedApplicationDeadline(text: string | null | undefined): StatedDeadline | null {
   if (!text) return null;
   const label = labelPattern();
+  const candidates: Array<{ parsed: StatedDeadline; qualified: boolean }> = [];
   let labelMatch: RegExpExecArray | null;
   // eslint-disable-next-line no-cond-assign
   while ((labelMatch = label.exec(text))) {
@@ -252,13 +269,39 @@ export function parseStatedApplicationDeadline(text: string | null | undefined):
     const dateMatch = MONTH_DAY_YEAR_RE.exec(candidate);
     if (dateMatch) {
       const parsed = toStatedDeadline(dateMatch);
-      if (parsed) return parsed;
+      if (parsed) {
+        // The qualifier word sits BEFORE the label itself ("Priority deadline:" - labelPattern only
+        // ever matches "deadline:", not "priority"), so it is looked for in the text immediately
+        // preceding this match, not inside labelMatch[0].
+        const precedingStart = Math.max(0, labelMatch.index - QUALIFIER_LOOKBEHIND_CHARS);
+        const preceding = text.slice(precedingStart, labelMatch.index);
+        candidates.push({ parsed, qualified: DEADLINE_QUALIFIER_RE.test(preceding) });
+      }
     }
     // A label with no clean date after it (a false positive like "deadline-driven environment", or
     // a real deadline this file cannot confidently parse) is not the only occurrence necessarily -
     // keep walking the rest of the text rather than giving up on the whole description.
   }
-  return null;
+  if (candidates.length === 0) return null;
+
+  /* A posting naming more than one deadline is almost always an early/priority tier plus the real,
+   * final cutoff - the early one is bonus-consideration, never the date that should ever flag an
+   * application as closed (see the module header's MULTIPLE STATED DEADLINES note). So: prefer
+   * whichever candidates are NOT qualified as early/priority, and among those take the LATEST date -
+   * two genuine "Deadline:" mentions naming different dates should read as the later one superseding
+   * the earlier, same as a "Final deadline" superseding a "Priority deadline". Only fall back to the
+   * qualified candidates when EVERY candidate found is qualified: a posting with nothing but an
+   * early-bird deadline still has no other stated cutoff to prefer, and still deserves to flag once
+   * that one date passes. */
+  const unqualified = candidates.filter((c) => !c.qualified);
+  const pool = unqualified.length > 0 ? unqualified : candidates;
+  let latest = pool[0];
+  for (const candidate of pool) {
+    if (candidate.parsed.deadlineUtc.getTime() > latest.parsed.deadlineUtc.getTime()) {
+      latest = candidate;
+    }
+  }
+  return latest.parsed;
 }
 
 /**
