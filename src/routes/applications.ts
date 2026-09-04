@@ -80,7 +80,7 @@ import {
   releaseStalledFillRun,
   stalledFillRunReleaseIsAdmissible,
 } from '../lib/stalledFillRunRelease';
-import { attemptNeverPressedReason } from '../lib/managedSubmitOutcome';
+import { attemptNeverPressedReason, employerMayHoldApplication } from '../lib/managedSubmitOutcome';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
@@ -2864,10 +2864,55 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // The row, not its status. needs_attention is also what a run that may have pressed submit
       // leaves behind, and only the evidence fields on the row tell those two apart.
       if (reviewAnswerSaveDisposition(current) !== 'save') {
-        return reply.status(409).send({
-          error: 'These answers can no longer be edited from this application’s current submission state',
-          code: 'REVIEW_ANSWERS_NOT_EDITABLE',
-        });
+        /* THE REFUSAL THAT WAS RIGHT AND NAMED NO WAY OUT, WHICH THIS ROUTE'S NEIGHBOUR ALREADY
+         * CALLS A BUG IN ITSELF.
+         *
+         * Measured live 2026-09-04, account mehekmandal05@gmail.com: Flow Traders packet
+         * 8dc65cd0-cab5-4af2-a1d8-2583766fd2d4 (greenhouse) at ready_for_final_approval. The
+         * dashboard drew "Answer 1 question", opened the editor with the essay in it, took her
+         * typing, and every Save came back with the sentence below. The essay contained a factual
+         * error. Nothing in the response said where a correction could go, so from the client there
+         * was no difference between "this cannot be edited here" and "this cannot be edited".
+         *
+         * THE REFUSAL DOES NOT MOVE. reviewAnswerSaveDisposition is correct for this status and its
+         * reason is the one written above it: the form is filled and there is a preview screenshot
+         * of it, and this route writes answers "and nothing else", so a save through it would leave
+         * the picture the applicant approves describing a different form. That is the invariant, and
+         * widening the state set here would break it rather than serve her.
+         *
+         * WHAT IS ADDED IS THE EXIT, and it is the one that already exists. preparedRunCanRestart
+         * admits exactly this shape - ready_for_final_approval with no claim - and
+         * POST /applications/:id/submit-request with `restart: true` takes the corrected answers in
+         * its body, discards the filled form, fills it again FROM them and takes a fresh preview. So
+         * the answers and the picture move together in one request, which is the invariant honoured
+         * rather than spent. Said in the same shape submit-request's own 409 uses for the same door
+         * (see PREPARED_RUN_RESTARTABLE), so a client learns the route from either side.
+         *
+         * The code stays REVIEW_ANSWERS_NOT_EDITABLE and the status stays 409: this IS still a
+         * refusal of this route, and clients keying on either must not see it turn into a success.
+         * `restart_with_answers` is additive, and the generic sentence is untouched for every other
+         * refusal - a packet at the employer has no exit and must not be handed one. */
+        const restartWithAnswers = preparedRunCanRestart(
+          current.status,
+          Boolean(current.submission_claimed_at),
+        ) && !employerMayHoldApplication(current);
+        return reply.status(409).send(restartWithAnswers
+          ? {
+            error: 'This application’s form is already filled in and waiting for you to look it over, '
+              + 'so its answers cannot be edited in place - a new answer underneath the filled form '
+              + 'would leave the preview you approve describing something else. To correct one, POST '
+              + '/applications/:id/submit-request with the corrected questions and restart true: '
+              + 'Litos will throw that filled form away, fill it again from your answers and show you '
+              + 'a fresh preview.',
+            code: 'REVIEW_ANSWERS_NOT_EDITABLE',
+            restart_with_answers: true,
+            run_revision: current.run_revision ?? null,
+          }
+          : {
+            error: 'These answers can no longer be edited from this application’s current submission state',
+            code: 'REVIEW_ANSWERS_NOT_EDITABLE',
+            restart_with_answers: false,
+          });
       }
       /* THE MERGE'S OWN NARROW RULE IS THE ONLY THING THAT MAY MINT A CLAIM HERE, and the round is
        * minted FIRST so that rule can actually run.
