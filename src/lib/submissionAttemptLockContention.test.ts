@@ -42,22 +42,40 @@ function slice(source: string, from: string, to: string): string {
   return source.slice(start, end);
 }
 
-/* THE READER STOPS EXCLUDING OTHER READERS. This is the whole of the read-only-dashboard fix: the
- * projection is a read, so shared is what it actually needs, and shared/shared does not conflict. */
-test('the passive authority projection holds the account key shared, not exclusively', () => {
-  const shared = slice(ledger, 'export async function lockSubmissionAttemptUserShared', '\n}');
-  assert.match(shared, /pg_advisory_xact_lock_shared\(hashtextextended\(/u);
-  assert.match(shared, /submission-attempt:\$\{userId\}/u);
-
-  // The passive branch - the one behind the 2.5s poll and every page render - must choose it.
+/* THE READER STOPS PARTICIPATING IN THE LOCK AT ALL, which is the whole of the fix.
+ *
+ * Shared alone would not have been enough, and the reason is worth pinning: shared readers stop
+ * queueing behind each other, but a read that outlasts the 2.5s poll interval still produces
+ * UNBROKEN shared coverage - poll N+1 starts before poll N finishes - and shared still blocks the
+ * exclusive lock the revision guard needs. The account would have stayed read-only. A REPEATABLE
+ * READ transaction gets the same consistent (revision, snapshot) pair from MVCC, holding nothing,
+ * so a reader can no longer fail a write at ANY duration. */
+test('the passive authority projection takes no account lock at all', () => {
   const passive = slice(
     projection,
     'export async function authoritativeSubmissionProjection',
     'const packetIds = uniqueStrings',
   );
-  assert.match(passive, /lockMode: 'shared'/u,
-    'the branch that opens its own transaction is the poll path and must take the key shared');
-  assert.match(passive, /lockSubmissionAttemptUserShared\(input\.executor, input\.userId\)/u);
+  assert.match(passive, /isolationLevel: 'repeatable read'/u,
+    'consistency comes from the snapshot, since it no longer comes from the lock');
+  assert.match(passive, /accessMode: 'read only'/u,
+    'and the database enforces that this page render cannot write');
+  assert.match(passive, /lockMode: 'snapshot'/u);
+
+  // The passive branch is chosen exactly when the caller supplied no executor - the poll path.
+  const chooses = slice(passive, 'if (!input.executor)', 'const lockMode');
+  assert.doesNotMatch(chooses, /lockSubmissionAttemptUser(?!Shared)\(/u,
+    'the poll path must not take the key the revision guard needs');
+
+  // snapshot mode must not lock, and must not write - the seed insert would fail read-only anyway.
+  const read = slice(
+    readFileSync('src/lib/submissionAuthorityRevision.ts', 'utf8'),
+    'export async function readSubmissionAuthorityRevision',
+    '\n}',
+  );
+  assert.match(read, /lockMode !== 'snapshot'/u, 'a snapshot read must skip the seed write');
+  assert.match(read, /lockMode === 'snapshot' && result\.rows\[0\] === undefined/u,
+    'and must answer 0 for an account with no row, which is what the seed would have created');
 });
 
 /* AND THE INVARIANT IS NOT WEAKENED, which is the thing a careless version of this fix breaks.
@@ -85,12 +103,17 @@ test('writers and the revision guard still take the account key exclusively', ()
  * packets for one posting have to see each other's attempts. Per-row scoping would let them bump
  * independent counters and each conclude the other had never been sent. */
 test('the authority key stays account-wide, never per packet', () => {
-  for (const helper of ['lockSubmissionAttemptUser(', 'lockSubmissionAttemptUserShared(']) {
-    const body = slice(ledger, `export async function ${helper.slice(0, -1)}`, '\n}');
-    assert.match(body, /`submission-attempt:\$\{userId\}`/u,
-      'the key is derived from the account and nothing else');
-    assert.doesNotMatch(body, /packetId|applicationId|rowId/u);
-  }
+  const body = slice(ledger, 'export async function lockSubmissionAttemptUser(', '\n}');
+  assert.match(body, /`submission-attempt:\$\{userId\}`/u,
+    'the key is derived from the account and nothing else');
+  assert.doesNotMatch(body, /packetId|applicationId|rowId/u);
+
+  /* The snapshot that the revision describes is account-wide for the same reason: duplicate-send
+   * safety is cross-packet, so narrowing either the key or the read would let two packets for one
+   * posting each conclude the other had never been sent. */
+  const snapshot = slice(projection, 'async function projectionSnapshot', 'canonicalReceipts');
+  assert.match(snapshot, /eq\(generated_resumes\.user_id, userId\)/u);
+  assert.doesNotMatch(snapshot, /limit\(/u, 'the account snapshot is never truncated');
 });
 
 /* NO LONG-RUNNING WORK HOLDS THE LEDGER KEY. createFencedBrowserSession spans an external POST

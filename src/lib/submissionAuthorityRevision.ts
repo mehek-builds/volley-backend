@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { db } from '../db';
-import { lockSubmissionAttemptUser, lockSubmissionAttemptUserShared } from './submissionAttemptLedger';
+import { lockSubmissionAttemptUser } from './submissionAttemptLedger';
 import { DATABASE_PROBE_TIMEOUT_MS } from './healthProbe';
 
 export const SUBMISSION_AUTHORITY_SCHEMA_VERSION = 'submission-authority-v1' as const;
@@ -41,38 +41,56 @@ function revisionFromResult(
   return parseSubmissionAuthorityRevision(raw);
 }
 
-/** How a caller holds the ledger key while it reads. See lockSubmissionAttemptUserShared. */
-export type SubmissionAuthorityLockMode = 'exclusive' | 'shared';
+/* How a caller holds the ledger key while it reads.
+ *
+ * `exclusive` - a writer, or a reader inside a writer's critical section. The default.
+ * `snapshot`  - NO LOCK. For a read whose transaction is REPEATABLE READ, which gets a consistent
+ *               (revision, snapshot) pair from MVCC instead of from mutual exclusion. This is what
+ *               the passive projection read uses, so that a reader can never make a write on the
+ *               account fail. See authoritativeSubmissionProjection's passive branch.
+ */
+export type SubmissionAuthorityLockMode = 'exclusive' | 'snapshot';
 
 /**
  * Read the revision while owning the same transaction lock as the authority snapshot.
  * The executor must be an active transaction. The lock is reentrant for callers that acquired it
  * before reading the projection, which is the required ordering for a passive snapshot.
  *
- * `lockMode: 'shared'` is for a caller that only READS - it still cannot straddle a revision bump,
- * because shared conflicts with the exclusive form every writer and the revision trigger take, but
- * it no longer serializes against other readers of the same account. The insert below is an
- * idempotent `on conflict do nothing` seed of revision 0 on a table the revision trigger does not
- * cover, so it neither needs exclusivity nor fires the guard.
+ * `lockMode: 'snapshot'` is for a caller that only READS, inside a REPEATABLE READ transaction: it
+ * takes no lock and seeds nothing, because one MVCC snapshot already makes the revision and the
+ * rows it describes agree. That is what stops a page render from being able to fail a write.
  */
 export async function readSubmissionAuthorityRevision(
   userId: string,
   executor: SubmissionAuthorityRevisionExecutor,
   options: { lockMode?: SubmissionAuthorityLockMode } = {},
 ): Promise<SubmissionAuthorityRevision> {
-  if (options.lockMode === 'shared') await lockSubmissionAttemptUserShared(executor, userId);
-  else await lockSubmissionAttemptUser(executor, userId);
-  await executor.execute(sql`
-    insert into submission_authority_revisions (user_id, schema_version, revision)
-    values (${userId}::uuid, ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}, 0)
-    on conflict (user_id) do nothing
-  `);
+  const lockMode = options.lockMode ?? 'exclusive';
+  if (lockMode === 'exclusive') await lockSubmissionAttemptUser(executor, userId);
+  /* THE SEED IS A WRITE, so a snapshot read must not do it - its transaction is read only, and
+   * Postgres would refuse the statement outright rather than let a page render take a row lock.
+   *
+   * Skipping it answers the identical revision. The seed only ever materialized revision 0 for a
+   * user who had none, and an absent row means exactly that: no covered write has ever happened
+   * for this account. The migration backfills every existing user at 0, and `users` is itself a
+   * covered table, so a user created afterwards gets its row from the bump trigger. So "absent"
+   * and "present at 0" are the same fact, and 0 is what this read returned before either way. */
+  if (lockMode !== 'snapshot') {
+    await executor.execute(sql`
+      insert into submission_authority_revisions (user_id, schema_version, revision)
+      values (${userId}::uuid, ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}, 0)
+      on conflict (user_id) do nothing
+    `);
+  }
   const result = await executor.execute(sql`
     select revision::text as revision
     from submission_authority_revisions
     where user_id = ${userId}::uuid
       and schema_version = ${SUBMISSION_AUTHORITY_SCHEMA_VERSION}
   `);
+  if (lockMode === 'snapshot' && result.rows[0] === undefined) {
+    return parseSubmissionAuthorityRevision('0');
+  }
   return revisionFromResult(result);
 }
 

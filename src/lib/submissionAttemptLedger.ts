@@ -520,39 +520,6 @@ export async function lockSubmissionAttemptUser(
   await executor.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`submission-attempt:${userId}`}, 0::bigint))`);
 }
 
-/* THE SAME KEY, HELD THE WAY A READER ACTUALLY NEEDS IT.
- *
- * Measured live 2026-09-04, account mehekmandal05@gmail.com: POST
- * /applications/:id/packet-audit answered 503 "This account changed at the same time" on four
- * attempts spaced 20-40s apart, and it kept answering it. No run was holding the lock. The holder
- * was the DASHBOARD ITSELF.
- *
- * authoritativeSubmissionProjection is a READ, and until now it took this key EXCLUSIVELY for the
- * whole of projectionSnapshot - which loads the entire account: every application, every packet
- * (201 rows on that account), every attempt event, every canonical receipt, every email message,
- * every artifact and artifact version. That read is issued by the packet page's 2.5-SECOND POLL.
- * Once one pass takes longer than the poll interval the passes overlap, and because they were
- * mutually exclusive they queued: the key was then held essentially without interruption, and the
- * revision trigger - which TRIES and gives up instantly - failed every single-statement write on
- * the account. The dashboard went read-only and stayed that way, and OPENING THE PACKET PAGE IS
- * WHAT SUSTAINED IT.
- *
- * Readers do not need to exclude each other; they need to not straddle a revision bump. That is
- * exactly what a SHARED lock says. Shared/shared does not conflict, so polls stop serializing and
- * the key goes idle between them. Shared/exclusive still conflicts, so a reader's (revision,
- * snapshot) pair is still consistent and no writer can interleave with it. The invariant the
- * revision counter protects is untouched; only the reader-versus-reader queue is gone.
- *
- * Writers - reservations, ledger appends, every covered-table write - keep taking the exclusive
- * form above. Do NOT use this one for anything that writes.
- */
-export async function lockSubmissionAttemptUserShared(
-  executor: Pick<typeof db, 'execute'>,
-  userId: string,
-): Promise<void> {
-  await executor.execute(sql`select pg_advisory_xact_lock_shared(hashtextextended(${`submission-attempt:${userId}`}, 0::bigint))`);
-}
-
 /* THE FENCE KEY, WHICH IS NOT THE LEDGER KEY.
  *
  * Measured in production 2026-09-02 01:30 UTC. One managed prepare for one account held
