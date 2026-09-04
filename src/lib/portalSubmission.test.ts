@@ -3382,18 +3382,36 @@ test('the one attempt at a self-identification opt-out uses the list\'s own spel
   // The answer as the resolver now produces it. The measured packet stored "#hispanic_ethnicity"
   // with input type text, so the action that reaches the page is a single fill of this string and
   // there is no second attempt behind it.
+  /* CHANGED 2026-09-03: these three read `{ eeo_prefs: {} }`, and the refusal being respelled was
+   * therefore one the resolver manufactured rather than one she saved. The respelling is the
+   * subject of this test and is unchanged; what it respells now has to be her own answer. See
+   * eeoAnswer and selfIdentificationAbsence.test.ts. */
+  const declined = { eeo_prefs: {
+    hispanic_ethnicity: 'Decline to self-identify',
+    veteran_status: 'Decline to self-identify',
+    disability_status: 'Decline to self-identify',
+  } };
   assert.deepEqual(
-    resolveKnownAnswer('are you hispanic/latino? hispanic_ethnicity', 'text', { eeo_prefs: {} }, undefined),
+    resolveKnownAnswer('are you hispanic/latino? hispanic_ethnicity', 'text', declined, undefined),
     { value: 'Decline To Self Identify' },
   );
   assert.deepEqual(
-    resolveKnownAnswer('veteran status veteran_status', 'text', { eeo_prefs: {} }, undefined),
+    resolveKnownAnswer('veteran status veteran_status', 'text', declined, undefined),
     { value: "I don't wish to answer" },
   );
   assert.deepEqual(
-    resolveKnownAnswer('disability status disability_status', 'text', { eeo_prefs: {} }, undefined),
+    resolveKnownAnswer('disability status disability_status', 'text', declined, undefined),
     { value: 'I do not want to answer' },
   );
+  // With nothing saved there is no refusal to respell, and the question goes back to her.
+  for (const label of [
+    'are you hispanic/latino? hispanic_ethnicity',
+    'veteran status veteran_status',
+    'disability status disability_status',
+  ]) {
+    const unstored = resolveKnownAnswer(label, 'text', { eeo_prefs: {} }, undefined);
+    assert.ok(unstored && 'skipReason' in unstored, label);
+  }
   // A stated answer is untouched: the substitution only ever swaps one refusal for the same refusal.
   assert.deepEqual(
     resolveKnownAnswer('gender', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),

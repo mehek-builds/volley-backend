@@ -6178,9 +6178,67 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   return null;
 }
 
-// EEO / demographics: exact-match-only (Mehek's 2026-07-17 ruling, R-018). Ported verbatim.
-export function eeoAnswer(pref: string | undefined): string {
-  return pref && pref.trim() ? pref.trim() : 'Decline to self-identify';
+/**
+ * The reason a self-identification question is handed back, when the profile holds no answer to it.
+ *
+ * Worded like ageAttestationSkipReason, which is the same sentence about the same kind of gap: a
+ * sensitive question whose answer is not stored is the applicant's to give, and saying WHY is the
+ * difference between a row she can act on and a blank one she has to guess about.
+ */
+export function selfIdentificationSkipReason(label: string): string {
+  return `self-identification question left for you, because your profile has no saved answer for it: "${label.slice(0, 60)}"`;
+}
+
+/**
+ * THE STORED SELF-IDENTIFICATION ANSWER, AND NOTHING WHERE THERE IS NONE.
+ *
+ * Exact-match-only (Mehek's 2026-07-17 ruling, R-018), ported verbatim and still exact. What
+ * changed on 2026-09-03 is the other half: this used to return the constant
+ * "Decline to self-identify" whenever no preference was stored, and that constant is A REFUSAL SHE
+ * NEVER GAVE.
+ *
+ * MEASURED on the owner account (a18f774b), profile read live from GET /profile/application.
+ * eeo_prefs holds race, gender, veteran_status, disability_status, sexual_orientation and
+ * transgender_status, and carries NO hispanic or ethnicity key of any kind. eeoSubjectPreferenceKeys
+ * reads ["hispanic_ethnicity","hispanic","ethnicity"] for a hispanic label, finds none of them, and
+ * the old default then answered the question for her:
+ *
+ *   "are you hispanic/latino? hispanic_ethnicity"  ->  "Decline To Self Identify"
+ *   "are you hispanic/latino?"                     ->  "Decline to self-identify"
+ *
+ * Both spellings were live on six packets across Verkada, Databricks and Flow, and on two of them
+ * the row carried answer_source 'applicant_review', so the packet asserted she had read the refusal
+ * and chosen it. She had not. THE TWO SPELLINGS ARE THE PROOF THIS LINE IS THE SOURCE: the first is
+ * SELF_ID_VOCABULARY_DECLINE's greenhouse wording, which declineWordingForControl applies to this
+ * constant only when the label carries the handle, and the second is the constant itself. Both trace
+ * here, and neither was read off any employer's option list, which is why resolveKnownAnswer produces
+ * them with no option list in hand at all.
+ *
+ * ABSENCE IS NOT A DECLINE, AND THE PRODUCT ITSELF PROVES IT. The Settings screen that writes this
+ * object offers "Decline to self-identify" as a selectable value on every one of its six
+ * self-identification fields (role-quick-website, app/dashboard/settings/page.tsx, SELF_ID_OPTIONS).
+ * A student who wants Litos to decline on her behalf can say exactly that, it is then STORED, and
+ * this function returns it unchanged. She selected it on no field. So a missing key means one thing
+ * only, that nobody has asked her, and the honest answer to a question nobody asked is to ask it.
+ *
+ * NOR IS IT A RACE ANSWER. The federal taxonomy asks ethnicity separately from race, a person can
+ * be both Hispanic and Asian, and deriving "not Hispanic" from race "South Asian" would write an
+ * identity claim she never made - the same act as writing the refusal, pointing the other way. The
+ * Settings field is labelled "Race / ethnicity" and its own list carries "Hispanic or Latino"
+ * alongside "Asian", so it is a MERGED single-select and not a race-only one, and her stored
+ * "South Asian" is not even on that list, so it cannot be read as a choice made against it.
+ * selfIdentificationStatedForms already refuses the same derivation, by excluding a hispanic label
+ * from the federal race widening; this keeps the two rules saying one thing.
+ *
+ * Undefined rather than a sentinel string, so absence cannot be spelled into a refusal by accident
+ * anywhere downstream: the only way to get a decline out of here is for one to be stored.
+ * chooseEeoOption's sole-decline last resort is starved by the same change, structurally rather
+ * than by a check - it is reached only from resolveProfileField, which returns null the moment
+ * resolveKnownAnswer has no value, so a question with no stored preference never reaches it.
+ */
+export function eeoAnswer(pref: string | undefined): string | undefined {
+  const stored = pref?.trim();
+  return stored ? stored : undefined;
 }
 
 /**
@@ -8955,8 +9013,34 @@ export function resolveKnownAnswer(
      * Done here rather than in a fill builder because this is where the answer is made, so every
      * path - the managed fill, the combobox ladder, the direct-Playwright option snap and the
      * card Mehek reads - all say the same thing. declineWordingForControl never touches a stated
-     * answer and never invents a refusal; it only respells one she already gave. */
+     * answer and never invents a refusal; it only respells one she already gave.
+     *
+     * ONE CORRECTION TO THE MEASUREMENT ABOVE (2026-09-03). The twenty packets were real and the
+     * respelling is still right, but on the hispanic control the "stored answer" being respelled
+     * was never hers: eeo_prefs has no hispanic key, so eeoAnswer's absent-value constant supplied
+     * the refusal and this line dressed it in the board's spelling. The same note is on
+     * SELF_ID_VOCABULARY_DECLINE. With the gate below in place, this line only ever sees a refusal
+     * she saved. */
     const answer = eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs));
+    /* NOTHING STORED FOR THIS SUBJECT MEANS SHE HAS NOT ANSWERED IT, SO THE QUESTION IS HERS.
+     *
+     * The same shape pronounsAnswer and ageAttestationAnswer already have, a skipReason when the
+     * profile holds nothing, and until 2026-09-03 self-identification was the one family that
+     * answered anyway. See eeoAnswer for what it answered, on which packets, and why a missing key
+     * is not a refusal.
+     *
+     * A skipReason rather than null. Null falls through to isLegalConsentQuestion and every rule
+     * below it, and a self-identification label reaching a keyword fallback is the defect
+     * standardizedTestAnswer's own absolute refusal exists to prevent, arrived at from the other
+     * side. It also gives the dashboard a sentence to show instead of a silent blank row.
+     *
+     * WHAT THIS COSTS, stated rather than glossed. A required self-identification question with no
+     * stored answer now holds the packet until she answers it, where before it was refused in her
+     * name and the row sailed through. That is one click against a false statement on a live
+     * employer form. eeoSubjectPreferenceKeys lists the subjects this can reach, and every one of
+     * them starts answering itself the moment the Settings screen writes the key, with no change
+     * needed here: the ladder already reads hispanic_ethnicity first. */
+    if (!answer) return { skipReason: selfIdentificationSkipReason(label) };
     return { value: declineWordingForControl(label, answer) };
   }
 

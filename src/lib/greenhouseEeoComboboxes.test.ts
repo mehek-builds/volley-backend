@@ -140,7 +140,17 @@ test('the four joined controls are stored with their selectors and answered from
     {
       school: 'University of Southern California',
       high_school_grad_date: 'May 2023',
-      eeo_prefs: { disability_status: 'No', veteran_status: 'No' },
+      /* CHANGED 2026-09-03: gender and race were absent here, and the two rows below passed on the
+         resolver's manufactured "Decline to self-identify" snapping onto each list's sole opt-out.
+         This test is named for answers coming from her STORED preferences, so all four subjects are
+         now stored and all four rows are her own answers. The unstored case is asserted in
+         selfIdentificationAbsence.test.ts, where it belongs. */
+      eeo_prefs: {
+        disability_status: 'No',
+        veteran_status: 'No',
+        gender: 'Female',
+        race: 'South Asian',
+      },
     },
     true,
     'greenhouse',
@@ -151,12 +161,16 @@ test('the four joined controls are stored with their selectors and answered from
     ['are you a veteran?', 'do you have a disability?'].map((label) => [byQuestion.get(label)?.answer, byQuestion.get(label)?.portal_selector]),
     [['No', '[id="248"]'], ['No', '[id="249"]']],
   );
-  for (const label of ['what is your gender?', 'what is your race/ethnicity?']) {
+  for (const [label, expected] of [
+    ['what is your gender?', 'Woman'],
+    ['what is your race/ethnicity?', 'South Asian'],
+  ] as const) {
     const stored = byQuestion.get(label);
     assert.ok(stored, label);
     assert.equal(stored.portal_input_type, 'combobox');
     assert.ok(stored.options && stored.options.length >= 4, 'the choices travel with the row so she can change them');
     assert.ok(stored.options.includes(stored.answer), 'whatever is stored is one of the employer\'s own rows');
+    assert.equal(stored.answer, expected, `${label}: her own answer, in the employer's spelling`);
   }
   const highSchool = result.questions.find((question) => /write in your high school/i.test(question.question));
   assert.ok(highSchool, 'the text box reaches her as a question instead of a probe failure');

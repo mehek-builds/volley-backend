@@ -6153,10 +6153,24 @@ function eeoStoredQuestion(
  * That pairing is the one production can actually produce, and it is the pre-fix signature exactly:
  * answer moved, no evidence, run parks. */
 test('a case-only option snap records its claim, so the 6de82956 EEO rows stop parking', () => {
+  /* THE DECLINE IS STORED, AND IT HAS TO BE, WHICH IS A CHANGE OF FIXTURE AND NOT OF SUBJECT.
+   *
+   * This test is about the drift gate accepting a DOCUMENTED case-only snap, and it needs a stored
+   * answer that snaps onto a differently-cased option. It used to get one from `eeo_prefs: {}`,
+   * because the resolver answered every unstored self-identification question with the constant
+   * "Decline to self-identify". That constant is gone (see eeoAnswer): an unstored subject is now
+   * handed back to the applicant, so an empty eeo_prefs produces no answer to snap and this test
+   * would be exercising nothing. The three subjects below are stored as an explicit decline, which
+   * is what the Settings screen has always let her save and what this gate was always about - a
+   * refusal SHE gave, respelled by an employer's list. Every assertion is unchanged. */
   const ap = {
     full_name: 'Mehek Mandal',
     email: 'mehek@example.com',
-    eeo_prefs: {},
+    eeo_prefs: {
+      transgender_status: 'Decline to self-identify',
+      veteran_status: 'Decline to self-identify',
+      disability_status: 'Decline to self-identify',
+    },
   } as unknown as ApplicationProfileLike;
   const lgbtqia = 'Do you identify as a member of the LGBTQIA (Lesbian, Gay, Bisexual, '
     + 'Transgender, Queer/Questioning, Intersex, and Asexual) community?';
@@ -6266,8 +6280,14 @@ test('a genuinely changed answer still parks the run, snap or no snap', () => {
   const lgbtqia = 'Do you identify as a member of the LGBTQIA (Lesbian, Gay, Bisexual, '
     + 'Transgender, Queer/Questioning, Intersex, and Asexual) community?';
   const options = ['Yes', 'No', 'Decline To Self-Identify'];
+  /* Her decline is STORED, for the reason spelled out on the fixture in the test above: since
+   * eeoAnswer stopped manufacturing one from an absent key, "she approved a packet that declined to
+   * self-identify" has to mean she actually said so. The story this test tells is unchanged and now
+   * true of the product: she stored a decline, approved the packet, then corrected the profile. */
   const declining = {
-    full_name: 'Mehek Mandal', email: 'mehek@example.com', eeo_prefs: {},
+    full_name: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    eeo_prefs: { transgender_status: 'Decline to self-identify' },
   } as unknown as ApplicationProfileLike;
   const corrected = {
     full_name: 'Mehek Mandal', email: 'mehek@example.com', eeo_prefs: { transgender_status: 'Yes' },

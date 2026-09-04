@@ -347,7 +347,18 @@ describe('standardized test scores: a self-identification question is never a te
       STANDARDIZED_TEST_TYPE_QUESTION.test(label),
       'the label must also match a test matcher, or the ordering is never exercised',
     );
-    assert.equal(typedValue(label, answered), 'Decline to self-identify');
+    /* CHANGED 2026-09-03: this asserted 'Decline to self-identify', which was the EEO branch's
+     * manufactured answer for a profile with no disability preference. The ORDERING is what this
+     * test proves and it is proved harder now: with the preference stored, the label is answered
+     * from it, so the EEO branch demonstrably owns the label; with it absent, the branch still owns
+     * the label and hands it back rather than letting a test matcher type a score into a disability
+     * question. Either way the answer is never a test type. */
+    const withDisability = { ...answered, eeo_prefs: { disability_status: 'No' } };
+    assert.equal(typedValue(label, withDisability), 'No');
+    assert.equal(typedValue(label, answered), undefined);
+    const unstored = resolveKnownAnswer(label, 'text', answered, undefined);
+    assert.ok(unstored && 'skipReason' in unstored);
+    assert.match(unstored.skipReason, /self-identification question left for you/);
   });
 
   /* The source-order check is kept as a second signal, but it now asserts both positions are REAL
