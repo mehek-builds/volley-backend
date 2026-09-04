@@ -86,7 +86,7 @@ import { monitoredDescriptionHash } from '../lib/monitoredPortalRepair';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import { applicationContextForQuestionResolution, normalizeStoredPortalQuestions, refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
-import { reopenUnfitClosedChoiceQuestions } from '../lib/questionMetadata';
+import { reopenUnfitClosedChoiceQuestions, snapStoredAnswersToProfileFieldOptions } from '../lib/questionMetadata';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { recoverOwnedGeneratedDocument } from '../lib/downloadDocumentRecovery';
@@ -287,7 +287,14 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
             postingCountryCodeFromJobContext(jobContext),
             asOf,
           );
-          return normalize(packetMayBeWithEmployer ? refreshed : reopenUnfitClosedChoiceQuestions(refreshed));
+          /* Snapped between the refresh and the re-open, inside this transform, for the same
+           * measured reason given at resolvePacketAuditQuestionFixpoint and
+           * resolveSubmittedApplicationAnswers: the un-snapped value is a stable fixed point of
+           * refresh+reopen alone, so a snap applied only once before the fixpoint starts is undone
+           * on the first pass. */
+          return normalize(packetMayBeWithEmployer
+            ? refreshed
+            : reopenUnfitClosedChoiceQuestions(snapStoredAnswersToProfileFieldOptions(refreshed)));
         },
       ),
     },

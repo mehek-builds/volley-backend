@@ -2,7 +2,7 @@ import { mergeSubmittedApplicationReviewQuestions, type ApplicationReviewQuestio
 import type { JobCountry } from './jobLocation';
 import { knownAnswerLookup, refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
 import { packetQuestionFixpoint } from './packetQuestionIdentity';
-import { reopenUnfitClosedChoiceQuestions } from './questionMetadata';
+import { reopenUnfitClosedChoiceQuestions, snapStoredAnswersToProfileFieldOptions } from './questionMetadata';
 import { resolveProfileField } from './profileFieldResolution';
 
 /**
@@ -156,9 +156,16 @@ export function resolveSubmittedApplicationAnswers(options: {
    * the packet at the final required-field confirmation. This path is reachable only through
    * reviewAnswerSaveDisposition, which already refuses every packet that may be with the employer,
    * so no sent record is ever rewritten here. */
+  /* The snap runs between the refresh and the re-open, and on every pass of this fixpoint rather
+   * than once on `merged` before it starts - see snapStoredAnswersToProfileFieldOptions's own
+   * header for the measured reason: the un-snapped resolver value is a stable fixed point of
+   * refresh+reopen alone, so a snap applied only before the loop begins is undone on the very
+   * first pass and the chain settles on the wrong answer. This route already refuses every packet
+   * that may be with the employer (reviewAnswerSaveDisposition), so no sent record is rewritten
+   * here. */
   const questions = packetQuestionFixpoint(
     merged,
-    (candidate) => reopenUnfitClosedChoiceQuestions(refreshKnownQuestionAnswers(
+    (candidate) => reopenUnfitClosedChoiceQuestions(snapStoredAnswersToProfileFieldOptions(refreshKnownQuestionAnswers(
       candidate,
       profile,
       current.jd_text,
@@ -166,7 +173,7 @@ export function resolveSubmittedApplicationAnswers(options: {
       postingCountry,
       postingCountryCode,
       asOf,
-    )),
+    ))),
   );
   return { questions, questionsReviewedAt };
 }
