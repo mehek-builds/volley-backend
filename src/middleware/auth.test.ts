@@ -521,6 +521,103 @@ test('token rejections are diagnosable: each invalid path logs its own reason wi
       assert.equal(request.jwtPayload, undefined);
     });
 
+    /* Measured on litos-api 2026-09-04 15:39:03Z: the signature held, the user-row select threw
+       "Failed query: select session_valid_from, ..." with the pool's connect timeout on its cause,
+       and the old catch answered 401. The dashboard reads a 401 as an expired session, clears the
+       stored token and sends the applicant to /login mid-flow. A check that could not run is an
+       outage, not a rejection: 503, Retry-After, and the token stays. */
+    const outcomeWithHeaders = () => {
+      const calls: Array<{ status: number; headers: Record<string, string>; body: unknown }> = [];
+      const reply = {
+        status(status: number) {
+          const headers: Record<string, string> = {};
+          const chain = {
+            header(name: string, value: string) { headers[name] = value; return chain; },
+            send(body: unknown) { calls.push({ status, headers, body }); },
+          };
+          return chain;
+        },
+      } as unknown as FastifyReply;
+      return { reply, calls };
+    };
+    const poolTimeout = () => {
+      const cause = Object.assign(new Error('timeout exceeded when trying to connect'), { code: 'ETIMEDOUT' });
+      const failure = new Error('Failed query: select "session_valid_from", "session_version" from "users" where "users"."id" = $1 limit $2');
+      (failure as Error & { cause?: unknown }).cause = cause;
+      return failure;
+    };
+    const selectThatThrows = (failure: Error) => mock.method(db, 'select', (() => ({
+      from: () => ({ where: () => ({ limit: () => Promise.reject(failure) }) }),
+    })) as unknown as typeof db.select);
+
+    await t.test('a valid token whose user-row read throws: lookup_unavailable, 503 with Retry-After, and NOT a 401', async () => {
+      const token = await new SignJWT({ userId: 'user-log-db', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = selectThatThrows(poolTimeout());
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcomeWithHeaders();
+        await requireAuth(request, reply);
+        const rejection = soleRejection(warnCalls);
+        assert.equal(rejection.reason, 'lookup_unavailable');
+        assert.equal(rejection.verifyErrorName, 'Error');
+        assert.match(String(rejection.verifyErrorMessage), /^Failed query: select/u);
+        // The driver's own fault travels with the line, code first, so the next reader sees the
+        // pool timeout and not only the query it interrupted.
+        assert.equal(rejection.verifyErrorCause, 'ETIMEDOUT timeout exceeded when trying to connect');
+        assert.equal(rejection.claimUserId, 'user-log-db');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 503);
+        assert.equal(calls[0].headers['Retry-After'], '2');
+        assert.deepEqual(calls[0].body, { error: 'Your session could not be checked right now. Try again in a moment.' });
+        assert.equal(request.jwtPayload, undefined);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('optionalAuth answers the same 503 for a presented token it could not check, never the anonymous page', async () => {
+      const token = await new SignJWT({ userId: 'user-log-db-2', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = selectThatThrows(poolTimeout());
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcomeWithHeaders();
+        await optionalAuth(request, reply);
+        assert.equal(soleRejection(warnCalls).reason, 'lookup_unavailable');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 503);
+        assert.equal(request.jwtPayload, undefined);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a signature that fails is still verify_threw and still 401: the split changes nothing for a bad token', async () => {
+      const foreignToken = await new SignJWT({ userId: 'user-log-3', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(new TextEncoder().encode('a-completely-different-secret-32-chars!!'));
+      // The DB is never reached for a bad signature, so a throwing select proves the order too.
+      const select = selectThatThrows(new Error('must not be reached'));
+      try {
+        const { request, warnCalls } = requestWithLog(foreignToken);
+        const { reply, calls } = outcomeWithHeaders();
+        await requireAuth(request, reply);
+        const rejection = soleRejection(warnCalls);
+        assert.equal(rejection.reason, 'verify_threw');
+        assert.equal(rejection.verifyErrorCause, undefined);
+        assert.equal(calls[0].status, 401);
+        assert.equal(select.mock.callCount(), 0);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
     await t.test('a token missing userId: no_user_id, still an ordinary 401', async () => {
       const token = await new SignJWT({ isGuest: false, authMethod: 'password', sessionVersion: 0 })
         .setProtectedHeader({ alg: 'HS256' })

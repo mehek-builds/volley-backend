@@ -47,6 +47,8 @@ type SessionOutcome =
   | { ok: false; reason: 'anonymous' }
   /** A credential was presented and did not hold up. Never treated as anonymous. */
   | { ok: false; reason: 'invalid' }
+  /** A credential was presented and COULD NOT BE CHECKED: the user-row read threw. Not invalid. */
+  | { ok: false; reason: 'unavailable' }
   | { ok: false; reason: 'misconfigured' };
 
 /**
@@ -67,7 +69,9 @@ type TokenRejectionReason =
   | 'session_version_stale'
   | 'guest_expired'
   | 'guest_flag_mismatch'
-  | 'verify_threw';
+  | 'verify_threw'
+  /** The signature held; the user-row read that follows it threw. Not a rejection of the token. */
+  | 'lookup_unavailable';
 
 /**
  * Logs enough to tell these six apart after the fact, without ever logging the token or the
@@ -99,6 +103,10 @@ function logRejectedToken(
         reason: rejectionReason,
         verifyErrorName: verifyError instanceof Error ? verifyError.name : undefined,
         verifyErrorMessage: verifyError instanceof Error ? verifyError.message : undefined,
+        // drizzle wraps a driver failure as "Failed query: ..." and keeps the real fault on
+        // `cause` (pg's code, e.g. 57014 statement timeout, or the pool's own connect timeout).
+        // Without it the line above names the query and never the reason it failed.
+        verifyErrorCause: describeCause(verifyError),
         claimDecodeError,
         claimUserId: typeof claims?.userId === 'string' ? claims.userId : undefined,
         claimSessionVersion: typeof claims?.sessionVersion === 'number' ? claims.sessionVersion : undefined,
@@ -109,6 +117,16 @@ function logRejectedToken(
     },
     'requireAuth rejected a presented token',
   );
+}
+
+function describeCause(error: unknown): string | undefined {
+  const cause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
+  if (cause === undefined || cause === null) return undefined;
+  if (cause instanceof Error) {
+    const code = (cause as Error & { code?: unknown }).code;
+    return (typeof code === 'string' || typeof code === 'number' ? String(code) + ' ' : '') + cause.message.slice(0, 200);
+  }
+  return String(cause).slice(0, 200);
 }
 
 const inFlightSessions = new Map<string, Promise<SessionOutcome>>();
@@ -157,10 +175,23 @@ async function resolveToken(
   secret: string,
   log?: FastifyRequest['log'],
 ): Promise<SessionOutcome> {
+  let payload: Awaited<ReturnType<typeof jwtVerify>>['payload'];
   try {
     const secretBytes = new TextEncoder().encode(secret);
-    const { payload } = await jwtVerify(token, secretBytes);
-
+    ({ payload } = await jwtVerify(token, secretBytes));
+  } catch (error) {
+    logRejectedToken(log, token, 'verify_threw', error);
+    return { ok: false, reason: 'invalid' };
+  }
+  /* EVERYTHING BELOW RUNS ON A TOKEN WHOSE SIGNATURE HELD. What can throw here is the database,
+     and a database that cannot answer is not a credential that failed. Measured on litos-api
+     2026-09-04 15:39:03Z: the user-row select threw ("Failed query: select session_valid_from,
+     ..."), four minutes after the same instance logged "timeout exceeded when trying to connect"
+     from its pool of ten while a job-monitor pass held connections. The old catch turned that into
+     an ordinary 401, the dashboard read the 401 as a session that expired, cleared the stored token
+     and sent the applicant to /login mid-flow. Every applicant on the instance, on every pool
+     hiccup. A verification that could not run answers 503 and keeps the session. */
+  try {
     if (!payload['userId']) {
       logRejectedToken(log, token, 'no_user_id');
       return { ok: false, reason: 'invalid' };
@@ -228,9 +259,16 @@ async function resolveToken(
       cardGateLocked: accountIsCardGateLocked(row[0]),
     };
   } catch (error) {
-    logRejectedToken(log, token, 'verify_threw', error);
-    return { ok: false, reason: 'invalid' };
+    logRejectedToken(log, token, 'lookup_unavailable', error);
+    return { ok: false, reason: 'unavailable' };
   }
+}
+
+/** A session that could not be checked answers like the outage it is, and keeps the client's token. */
+function replySessionUnavailable(reply: FastifyReply) {
+  return reply.status(503).header('Retry-After', '2').send({
+    error: 'Your session could not be checked right now. Try again in a moment.',
+  });
 }
 
 /**
@@ -288,6 +326,7 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
   if (outcome.reason === 'misconfigured') {
     return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
   }
+  if (outcome.reason === 'unavailable') return replySessionUnavailable(reply);
   if (outcome.reason === 'anonymous') {
     return reply.status(401).send({ error: 'Missing or invalid Authorization header' });
   }
@@ -338,5 +377,8 @@ export async function optionalAuth(request: FastifyRequest, reply: FastifyReply)
     request.log.error('JWT_SIGNING_SECRET not configured; refusing to resolve a presented token');
     return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
   }
+  /* Same reasoning as the 500 above: a presented token that could not be checked is not an
+     anonymous visitor, and serving the signed-out page at 200 would hide the outage. */
+  if (outcome.reason === 'unavailable') return replySessionUnavailable(reply);
   return reply.status(401).send({ error: 'Invalid or expired token' });
 }
