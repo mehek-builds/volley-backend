@@ -95,7 +95,7 @@ import { authoritativeSubmissionProjection } from '../lib/authoritativeSubmissio
 import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
 import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
-import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
+import { resumeContactOfRecord, resumeContactStaleness } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
 import {
   canonicalCompanyScope,
@@ -2036,12 +2036,39 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         retrySafety: submissionAuthority?.retrySafetyByPacketId.get(row.id),
         revision,
       });
+      /* THE SAME SIGNAL GET /applications/:id/submission SENDS, off the SAME comparison
+       * (resumeContactStaleness, lib/resumeContactOfRecord.ts) and the SAME per-request profile read
+       * already above (`profile`, loadApplicationProfileLike - one call, reused for every row here,
+       * never a per-row read). The packet review screen seeds its `submission` state from this row on
+       * a fresh load and never calls GET /applications/:id/submission until an action triggers a poll
+       * (measured on trylitos.com 2026-09-04: Pony.ai fdcf4ccb and Mercari 8b3d8b2d both loaded stale
+       * packets with no submission fetch in the network log), so a client reading resume_contact_stale
+       * only off that route never saw the notice for a row still on this one. contact is row.spec's
+       * OWN _contact, unrefreshed by refreshedHistorySpec below (which only rewrites _review) - the
+       * same frozen header the submission route compares. Absent is the common case and must stay
+       * cheap: no PDF fetch, no packet audit, just this row's already-loaded contact and profile. */
+      const storedContactForStaleness = contact as {
+        full_name?: string;
+        email?: string;
+        phone?: string;
+        location?: string;
+        linkedin_url?: string;
+        github_url?: string;
+        portfolio_url?: string;
+      };
+      const resumeContactStale = storedContactForStaleness.full_name
+        ? resumeContactStaleness(
+          { ...storedContactForStaleness, full_name: storedContactForStaleness.full_name },
+          profile as Record<string, unknown>,
+        )
+        : null;
       return {
         ...row,
         spec: specWithoutDocumentPointers(
           refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
         ),
         ...(submissionAuthorityEnvelope ? { submission_authority: submissionAuthorityEnvelope } : {}),
+        ...(resumeContactStale ? { resume_contact_stale: resumeContactStale } : {}),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`
