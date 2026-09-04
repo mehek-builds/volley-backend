@@ -17,8 +17,10 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import { application_submission_attempt_events, generated_resumes } from '../db/schema';
 import {
   abandonedPreBoundaryAttemptIsClosable,
+  closeAbandonedPreBoundaryAttempts,
   type AbandonedAttemptClosurePacketReview,
 } from './abandonedAttemptClosure';
 import { STALLED_FILL_RUN_RELEASE_MS } from './stalledFillRunRelease';
@@ -26,6 +28,7 @@ import {
   attemptNeverReachedEmployer,
   type SubmissionAttemptEventKind,
   type SubmissionAttemptEventRecord,
+  type SubmissionAttemptLedgerExecutor,
 } from './submissionAttemptLedger';
 
 const ATTEMPT = '7b3c1e88-4a2d-4f19-9c50-2e6a7d41b0c3';
@@ -50,10 +53,35 @@ function event(
   const at = new Date(FIXTURE_BASE_MS + fixtureSequence * 1000);
   return {
     id: `00000000-0000-0000-0000-${String(fixtureSequence).padStart(12, '0')}`,
+    user_id: 'test-user',
+    application_id: null,
+    event_id: `00000000-0000-0000-0001-${String(fixtureSequence).padStart(12, '0')}`,
     event_kind: kind,
     attempt_id: ATTEMPT,
+    parent_attempt_id: null,
     packet_id: PACKET,
     source: 'managed_browser',
+    operation: 'initial_submission',
+    submission_run_id: null,
+    submission_claim_id: null,
+    packet_version: null,
+    posting_key: null,
+    job_id: null,
+    company_role: null,
+    company_name: 'Acme',
+    role: 'Software Engineer',
+    portal_url: null,
+    portal_identity: null,
+    // `undefined` here reads as "not null" to the vocabulary check below, exactly like `null` would
+    // NOT: submissionAttemptRetrySafety requires these explicitly null on every event kind other
+    // than the one that owns them (not_sent_proven for proof_kind, boundary_authorized for the
+    // other two). Leaving them unset silently misclassified every fixture in this file as
+    // 'invalid_sequence' the moment a test folded them through that function instead of through
+    // attemptNeverReachedEmployer alone - which is exactly what the orchestration test below does.
+    proof_kind: null,
+    evidence_code: null,
+    boundary_activation_id: null,
+    boundary_expires_at: null,
     created_at: at,
     observed_at: at,
     ...over,
@@ -300,6 +328,150 @@ describe('the ledger proof is never relaxed', () => {
         packet: NO_CLAIM,
       }),
       false,
+    );
+  });
+});
+
+/* THE ORCHESTRATOR'S OWN SAVEPOINT ISOLATION, WHICH abandonedAttemptClosure.db.test.ts COULD NOT
+ * REACH WITH A REAL POSTGRES.
+ *
+ * The scenario needs a candidate that is genuinely selected (reason 'opened') and genuinely passes
+ * abandonedPreBoundaryAttemptIsClosable, and THEN fails while appendSubmissionAttemptEvent tries to
+ * write its closing fact. Two real-data constructions were tried against the PGlite harness and both
+ * are unreachable: a self-parented opening is refused by a DATABASE check constraint before it can
+ * even be seeded, and a pre-planted conflicting not_sent_proven fact removes the attempt from
+ * candidate selection entirely (submissionAttemptRetrySafety only ever returns reason 'opened' when
+ * NO not_sent_proven event already exists - see the db test file for the full argument). So this one
+ * controls the failure directly with a minimal fake SubmissionAttemptLedgerExecutor instead: real
+ * closeAbandonedPreBoundaryAttempts and real submissionAttemptRetrySafety, a hand-rolled in-memory
+ * table standing in for the two queries this module issues (the packet select, and everything
+ * appendSubmissionAttemptEvent itself does).
+ */
+function fakeSubmissionAttemptExecutor(store: {
+  events: SubmissionAttemptEventRecord[];
+  packets: { id: string; spec: unknown }[];
+  failForAttemptId?: string;
+}): SubmissionAttemptLedgerExecutor {
+  // The real table objects, compared by reference: production code's own .from(...) calls pass
+  // exactly these, so identity is enough to tell the two queries apart without interpreting SQL.
+  function chain(kind: 'select' | 'insert') {
+    const c: {
+      _table?: unknown;
+      _limit?: number;
+      _values?: Record<string, unknown>;
+      from: (table: unknown) => typeof c;
+      where: () => typeof c;
+      limit: (n: number) => typeof c;
+      orderBy: () => typeof c;
+      values: (v: Record<string, unknown>) => typeof c;
+      onConflictDoNothing: () => typeof c;
+      returning: () => typeof c;
+      then: (resolve: (value: unknown) => void, reject: (error: unknown) => void) => void;
+    } = {
+      from(table) { c._table = table; return c; },
+      where() { return c; },
+      limit(n) { c._limit = n; return c; },
+      orderBy() { return c; },
+      values(v) { c._values = v; return c; },
+      onConflictDoNothing() { return c; },
+      returning() { return c; },
+      then(resolve, reject) {
+        try {
+          if (kind === 'insert') {
+            const v = c._values!;
+            if (store.failForAttemptId && v.attempt_id === store.failForAttemptId) {
+              throw new Error(`simulated append failure for attempt ${v.attempt_id as string}`);
+            }
+            const row = {
+              id: `generated-${store.events.length}`,
+              created_at: new Date(),
+              observed_at: new Date(),
+              ...v,
+            } as unknown as SubmissionAttemptEventRecord;
+            store.events.push(row);
+            resolve([row]);
+            return;
+          }
+          if (c._table === application_submission_attempt_events) {
+            // appendSubmissionAttemptEvent's own existence check always calls .limit(1); answering
+            // "not found" is safe here precisely because it is always true for a fresh not_sent_proven
+            // fact keyed on this closure's own factKey - see the comment at the call site.
+            resolve(c._limit === 1 ? [] : [...store.events]);
+            return;
+          }
+          if (c._table === generated_resumes) {
+            resolve([...store.packets]);
+            return;
+          }
+          resolve([]);
+        } catch (error) {
+          reject(error);
+        }
+      },
+    };
+    return c;
+  }
+
+  // Drizzle's own select/insert signatures are generic over the exact columns and table types, and
+  // a plain object literal can never implement that generality - only a real QueryBuilder can. Cast
+  // the whole fake at once rather than fighting each member's type individually; every other
+  // db.test.ts harness in this repo takes the same way out (see e.g. `backendDb: any` in
+  // canonicalPacketBinding.db.test.ts) for the identical reason.
+  const fake = {
+    select: () => chain('select'),
+    insert: () => chain('insert'),
+    execute: async () => ({ rows: [] }),
+    transaction: async (callback: (tx: SubmissionAttemptLedgerExecutor) => unknown) => callback(executor),
+  };
+  const executor = fake as unknown as SubmissionAttemptLedgerExecutor;
+  return executor;
+}
+
+describe('the savepoint isolates one candidate\'s failure from another\'s success', () => {
+  test('a failing candidate does not roll back a passing one closed in the same call', async () => {
+    const USER_ID = 'orchestration-user';
+    const GOOD_PACKET = 'packet-good';
+    const BAD_PACKET = 'packet-bad';
+    const GOOD_ATTEMPT = 'attempt-good';
+    const BAD_ATTEMPT = 'attempt-bad';
+    const OPENED_AT = new Date('2026-08-20T00:00:00.000Z');
+
+    const events = [
+      event('attempt_opened', {
+        user_id: USER_ID, attempt_id: GOOD_ATTEMPT, packet_id: GOOD_PACKET,
+        created_at: OPENED_AT, observed_at: OPENED_AT,
+      }),
+      event('attempt_opened', {
+        user_id: USER_ID, attempt_id: BAD_ATTEMPT, packet_id: BAD_PACKET,
+        created_at: OPENED_AT, observed_at: OPENED_AT,
+      }),
+    ];
+    const packets = [
+      { id: GOOD_PACKET, spec: { _review: BENIGN_REVIEW } },
+      { id: BAD_PACKET, spec: { _review: BENIGN_REVIEW } },
+    ];
+    const warnings: { details: Record<string, unknown>; message: string }[] = [];
+    const executor = fakeSubmissionAttemptExecutor({ events, packets, failForAttemptId: BAD_ATTEMPT });
+
+    const result = await closeAbandonedPreBoundaryAttempts({
+      userId: USER_ID,
+      executor,
+      log: { warn: (details, message) => { warnings.push({ details, message }); } },
+    });
+
+    assert.deepEqual(result.closedAttemptIds, [GOOD_ATTEMPT]);
+    assert.deepEqual(result.failedAttemptIds, [BAD_ATTEMPT]);
+    assert.equal(warnings.length, 1, 'the failure is reported, not swallowed');
+    assert.equal(warnings[0]!.details.attemptId, BAD_ATTEMPT);
+
+    assert.ok(
+      events.some((stored) => stored.attempt_id === GOOD_ATTEMPT && stored.event_kind === 'not_sent_proven'),
+      'the healthy candidate closed even though it shared the call with a failing one',
+    );
+    assert.equal(
+      events.filter((stored) => stored.attempt_id === BAD_ATTEMPT).length,
+      1,
+      'the failed candidate is left exactly as it was - only its original opening',
     );
   });
 });
