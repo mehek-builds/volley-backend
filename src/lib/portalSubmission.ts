@@ -12166,9 +12166,20 @@ function observedManagedSubmitPressClaimed(result: unknown): boolean {
   if (!isRecord(result)) return false;
   /* readManagedSubmitOutcome is the canonical read of this field, and submissionProvablyNotSent
    * already uses this exact expression for this exact purpose - refusing to believe a no-send from
-   * a result that contradicts itself about the press. Two hand-rolled readings of one field drift;
-   * this one defers so a nuance added there reaches this gate too. */
-  return readManagedSubmitOutcome(result)?.pressed === true;
+   * a result that contradicts itself about the press. Ask it first, so a nuance added there reaches
+   * this gate too. */
+  if (readManagedSubmitOutcome(result)?.pressed === true) return true;
+  /* But the canonical read normalizes with `pressed === true`, which cannot tell an explicit denial
+   * from a key that is simply absent - and absence is the shape this gate is protecting against.
+   * `pressed: 1`, `pressed: 'true'`, and an outcome carrying `state: 'confirmed'` with the `pressed`
+   * key dropped all normalized to false, read as "no claim", and released the packet.
+   *
+   * So: no submitOutcome AT ALL is not a claim - that absence is the truncated-retained-result case
+   * the unbound branch exists for, and treating it as a claim would close the branch permanently.
+   * But once the runner HAS written an outcome record, only an explicit `false` is a denial. Silence
+   * inside a record that is otherwise describing the submit is not a denial. */
+  const outcome = result.submitOutcome;
+  return isRecord(outcome) && outcome.pressed !== false;
 }
 
 function confirmationContractError(message: string, submitWithheld = false): never {
@@ -12345,6 +12356,61 @@ export const MANAGED_BLOCKER_REASONS: ReadonlySet<string> = new Set([
  * release this whole gate exists to prevent, so it stays out even though a run carrying it also has
  * no useful fingerprints to show.
  */
+/* WHICH REFUSALS PROVE THE BUTTON WAS NEVER PRESSED.
+ *
+ * MANAGED_BLOCKER_REASONS is a diagnosis vocabulary - it decides whether a refusal arrives with its
+ * cause. This set decides something else entirely, and getting the two confused is what made the
+ * widening from five reasons to thirty-eight a regression rather than an improvement.
+ *
+ * The tail throw hands back ManagedRequiredFieldConfirmationError, which extends NoSubmitControlError
+ * and which submissionFailureReview reads as "the click provably did not happen" - clearing
+ * submitted_at, receipt and unverified_submission and releasing the packet to be sent again. That
+ * verdict is only true for a reason decided BEFORE the click. While the allowlist was five entries
+ * long every reason in it was pre-press and the equivalence held silently; at thirty-eight it does
+ * not, and a run that pressed Send came back as one that never did.
+ *
+ * 'submit_request_unobserved' means the click happened and its request went missing.
+ * 'submit_transport_release_failed' is worse: the native request was matched and replayed TO THE
+ * NETWORK, and only the release confirmation was lost. Reading either as "nothing was sent" files
+ * the application a second time.
+ *
+ * MEMBERSHIP IS BY RUNNER SITE, NOT BY HOW THE NAME READS. A reason earns a place here only if
+ * EVERY site that assigns it is upstream of submitHandle.click(). Two names that sound pre-press
+ * are deliberately absent because they are assigned on both sides of the click:
+ * 'submit_transport_unpinned' (pre-press at managed-browser.js recordBlockedAncillaryTransport, and
+ * post-press from decideSubmitTransportGate) and 'submit_transport_unsupported' (pre-press from the
+ * transport binding and from armActivation, post-press from requestMatchesNativeBinding). An
+ * ambiguous reason is treated as post-press, because the failure directions are not symmetric:
+ * calling a pre-press stop "unknown" costs one packet a manual check, and calling a post-press stop
+ * "proven not sent" costs the applicant a duplicate application to a real employer.
+ *
+ * ADD ONLY AFTER READING THE RUNNER. A name landing in MANAGED_BLOCKER_REASONS is a reporting
+ * change; a name landing here is a release decision. */
+export const MANAGED_PRE_PRESS_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  // The chooser refused before it ever had a control to press.
+  'submit_node_replaced',
+  'ambiguous_submit',
+  'form_identity_changed',
+  'no_submit_control',
+  'submit_chooser_changed',
+  // A caller-supplied value stopped matching while the form was still being filled.
+  'successful_address_changed',
+  'security_code_binding_changed',
+  'security_code_payload_unaddressed',
+  // The application scope was never resolved, so no submit handle was ever taken.
+  'application_scope_missing',
+  'application_scope_ambiguous',
+  'application_scope_not_form',
+  'application_scope_detached',
+  'application_scope_unavailable',
+  // The transport could not be bound, and binding precedes the click.
+  'submit_payload_unverifiable',
+  'submit_transport_guard_unavailable',
+  // The activation guard refused while arming, which is also before the click.
+  'submit_activation_guard_unavailable',
+  'submit_activation_binding_changed',
+]);
+
 export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Set([
   'application_scope_missing',
   'application_scope_ambiguous',
@@ -12570,6 +12636,19 @@ export function assertManagedRequiredFieldsConfirmed(
   if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) contractError('confirmed with failures');
   if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) contractError('blocked without failure');
   if (proof.status !== 'confirmed') {
+    /* A refusal only releases the packet when every reason it carries was decided before the click,
+     * and when the runner has not separately said it pressed. Anything else is an UNKNOWN outcome:
+     * the send may have landed, so the claim is kept and the row stays for a human to resolve.
+     * ManagedRequiredFieldConfirmationError is not merely a message here - it is the release. */
+    const postPressReason = blockerFailures.find(
+      (reason) => !MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason),
+    );
+    if (postPressReason !== undefined || (pressClaimed && blockerFailures.length > 0)) {
+      throw new ManagedConfirmationUnprovenError(
+        "Litos could not prove the send run withheld its press (the managed browser refused after"
+        + ' the click was already under way), so whether submit was pressed is unknown',
+      );
+    }
     throw new ManagedRequiredFieldConfirmationError([...allFailures, ...blockerFailures]);
   }
 }

@@ -20,6 +20,7 @@ import {
   CRELATE_FINAL_SUBMIT_SELECTOR,
   MANAGED_ACTION_LIMIT,
   MANAGED_BLOCKER_REASONS,
+  MANAGED_PRE_PRESS_BLOCKER_REASONS,
   MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS,
   MANAGED_FINAL_SUBMIT_SELECTOR,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
@@ -1704,4 +1705,110 @@ test('the runner writes no third unbound scope shape', { skip: RUNNER_SOURCE_ABS
     assert.ok(source.includes(sentence),
       `the runner no longer writes "${sentence}", so RUNNER_AUTHORED_BLOCKERS is repeating a dead string`);
   }
+});
+
+/* A REFUSAL AFTER THE CLICK IS NOT A PROOF THAT NOTHING WAS SENT.
+ *
+ * ManagedRequiredFieldConfirmationError extends NoSubmitControlError, and submissionFailureReview
+ * reads that class as "the click provably did not happen": it clears submitted_at, receipt and
+ * unverified_submission and releases the packet to be sent again. While MANAGED_BLOCKER_REASONS
+ * held five entries every one of them was pre-press, so the equivalence held by accident. At
+ * thirty-eight it stopped holding, and a Workable run that pressed Send came back as one that
+ * never did - which files the application to a real employer a second time. */
+
+const BOUND_PASS_SCOPE = {
+  scopeKind: 'form',
+  formFingerprint: 'Zm9ybV9maW5nZXJwcmludF9hYmM',
+  submitFingerprint: 'c3VibWl0X2ZpbmdlcnByaW50X3h5',
+  formMatchCount: 1,
+  submitMatchCount: 1,
+  requiredControlCount: 0,
+  sameNode: true,
+} as const;
+
+/** A pass that bound a real form and a real control, then refused - the ordinary v4 shape. */
+function boundRefusal(blockerReason: string, submitOutcome?: unknown) {
+  const result: Record<string, unknown> = {
+    requiredFieldConfirmation: {
+      version: 2,
+      status: 'blocked',
+      passes: [{
+        submitKind: 'application',
+        scope: { ...BOUND_PASS_SCOPE },
+        requiredControls: [],
+        attempts: [],
+        retries: 0,
+        unresolved: ['Bound submit control or application form was replaced before submission'],
+        blockerReason,
+        submissionOutcome: 'blocked',
+      }],
+    },
+  };
+  if (submitOutcome !== undefined) result.submitOutcome = submitOutcome;
+  return result;
+}
+
+function thrownBy(result: unknown): Error {
+  try {
+    assertManagedRequiredFieldsConfirmed(result, 'application');
+  } catch (error) {
+    return error as Error;
+  }
+  throw new Error('a blocked proof must never be accepted');
+}
+
+test('a post-press refusal is an unknown outcome, never a released packet', () => {
+  /* submit_transport_release_failed is the sharpest case: the runner MATCHED the native request and
+     replayed it to the network, and only the release confirmation went missing. The employer very
+     likely has the application. */
+  for (const reason of MANAGED_BLOCKER_REASONS) {
+    if (MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason)) continue;
+    const error = thrownBy(boundRefusal(reason));
+    assert.ok(
+      error instanceof ManagedConfirmationUnprovenError,
+      `${reason} is not decided before the press, so it cannot release the packet`,
+    );
+    assert.ok(!(error instanceof NoSubmitControlError), `${reason} must not read as a pre-click stop`);
+  }
+});
+
+test('a pre-press refusal still releases, so the fix costs the honest stops nothing', () => {
+  for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
+    const error = thrownBy(boundRefusal(reason));
+    assert.ok(
+      error instanceof ManagedRequiredFieldConfirmationError,
+      `${reason} is decided before the press and must stay a proven no-send`,
+    );
+  }
+});
+
+test('every pre-press reason is a reason the runner can actually name', () => {
+  for (const reason of MANAGED_PRE_PRESS_BLOCKER_REASONS) {
+    assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} is not in the runner's vocabulary`);
+  }
+  /* Assigned on BOTH sides of the click in managed-browser.js, so neither can prove a no-send. The
+     two names read as though they belong here, which is exactly why they are pinned as absent. */
+  assert.ok(!MANAGED_PRE_PRESS_BLOCKER_REASONS.has('submit_transport_unpinned'));
+  assert.ok(!MANAGED_PRE_PRESS_BLOCKER_REASONS.has('submit_transport_unsupported'));
+  /* The unbound-scope set releases on the pass alone, so it must be a subset of the pre-press set. */
+  for (const reason of MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS) {
+    assert.ok(MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason), `${reason} releases but is not pre-press`);
+  }
+});
+
+test('a press the runner claims outranks the proof, however it spells it', () => {
+  /* `pressed === true` was too narrow in the one direction that matters. A truncated retained result
+     that keeps `state: 'confirmed'` but loses the `pressed` key is the shape this branch exists for,
+     and it used to read as "no claim" and release the packet. */
+  for (const claim of [{ pressed: true }, { pressed: 1 }, { pressed: 'true' },
+    { state: 'confirmed', source: 'receipt' }]) {
+    assert.ok(
+      thrownBy(boundRefusal('submit_node_replaced', claim)) instanceof ManagedConfirmationUnprovenError,
+      `${JSON.stringify(claim)} claims a press, so the outcome is unknown`,
+    );
+  }
+  /* An explicit denial is still a denial, and no submitOutcome at all stays the branch's own case. */
+  assert.ok(thrownBy(boundRefusal('submit_node_replaced', { pressed: false }))
+    instanceof ManagedRequiredFieldConfirmationError);
+  assert.ok(thrownBy(boundRefusal('submit_node_replaced')) instanceof ManagedRequiredFieldConfirmationError);
 });
