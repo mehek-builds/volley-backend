@@ -102,6 +102,32 @@ describe('recruiteeOfferUrlParts', () => {
 });
 
 describe('recruiteeHtmlToText', () => {
+  /* Review round 1, finding 3: script/style/noscript/template content must not survive as visible
+   * text. The generic tag-removal pass only deletes tag MARKUP, not what sits between the tags -
+   * correct for a <p>, wrong for a <script>, whose source was previously passing straight through. */
+  test('strips <script> and <style> element content, not just their tags (finding 3)', () => {
+    const html = '<p>Great role.</p>'
+      + '<script>alert(document.cookie)</script>'
+      + '<style>.evil{color:red}</style>'
+      + '<p>Apply now.</p>';
+    const text = recruiteeHtmlToText(html);
+    assert.ok(!text.includes('alert(document.cookie)'), 'script content must not appear in the extracted text');
+    assert.ok(!text.includes('.evil'), 'style content must not appear in the extracted text');
+    assert.ok(!text.includes('color:red'), 'style content must not appear in the extracted text');
+    assert.deepEqual(text.split('\n'), ['Great role.', 'Apply now.']);
+  });
+
+  test('strips <noscript> and <template> element content the same way', () => {
+    const html = '<p>Before.</p>'
+      + '<noscript>Enable JavaScript to see this warning text.</noscript>'
+      + '<template><p>Not real content, a client-side render stamp.</p></template>'
+      + '<p>After.</p>';
+    const text = recruiteeHtmlToText(html);
+    assert.ok(!text.includes('Enable JavaScript'));
+    assert.ok(!text.includes('Not real content'));
+    assert.deepEqual(text.split('\n'), ['Before.', 'After.']);
+  });
+
   test('turns paragraph and list-item boundaries into their own lines', () => {
     const html = '<p>Intro paragraph.</p><ul><li>First requirement bullet</li><li>Second requirement bullet</li></ul>';
     const text = recruiteeHtmlToText(html);

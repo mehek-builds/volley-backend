@@ -157,9 +157,16 @@ export function decodeHtmlEntities(value: string): string {
  * Nothing in Recruitee's public contract promises that nesting, so `<li>` gets its own explicit
  * line-break rule rather than relying on it - the one property this converter exists to guarantee is
  * that a list item can never merge onto its neighbor's line regardless of what is nested inside it.
+ *
+ * SCRIPT/STYLE/NOSCRIPT/TEMPLATE CONTENT IS STRIPPED WHOLESALE, tags and text together, BEFORE the
+ * generic tag-removal pass below (2026-09-04 review round 1, finding 3). That generic pass only
+ * deletes the TAG markup, not what is between the tags - correct for `<p>caption</p>`, wrong for
+ * `<script>alert(document.cookie)</script>`, whose JS source is not page content and was previously
+ * surviving into the extracted text as if it were prose.
  */
 export function recruiteeHtmlToText(html: string): string {
   const withLineBreaks = html
+    .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(?:p|li|h[1-6]|div|tr)>/gi, '\n')
