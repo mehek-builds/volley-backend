@@ -238,6 +238,25 @@ export class ApplicantEmailRegenerationRequiredError extends Error {
   }
 }
 
+/**
+ * THE ROUTE COULD NOT BE CHECKED, which is not the same as the route being wrong.
+ *
+ * Separate from ApplicantEmailRegenerationRequiredError because the two owe the applicant opposite
+ * sentences and opposite recoveries. A regeneration hold is a permanent fact about HER PACKET: the
+ * pinned alias really is stale or unreceivable, and only rebuilding the packet clears it. This is a
+ * transient fact about a NETWORK PROBE of the route, and regenerating cannot change it - a retry
+ * can. Reporting the second as the first sends her to rebuild a packet that was never broken, and
+ * leaves her with no way to tell a real stale alias from a bad minute on the deliverability check.
+ */
+export class ApplicantEmailRouteUnknownError extends Error {
+  readonly code = 'applicant_email_route_unknown';
+
+  constructor(reason: string) {
+    super(`Litos could not verify this application's routing email: ${reason}`);
+    this.name = 'ApplicantEmailRouteUnknownError';
+  }
+}
+
 type StoredApplicantEmailSpec = {
   _applicant_email?: unknown;
   _application_email?: unknown;
@@ -312,10 +331,29 @@ export async function resolveFrozenApplicantEmail(input: {
     throw new ApplicantEmailRegenerationRequiredError('the resume email and tracked applicant email are not separate');
   }
 
-  const deliverability = await (deps.deliverability ?? applicationAliasDeliverability)().catch(() => null);
-  if (!deliverability?.deliverable) {
+  /* A CHECK THAT COULD NOT RUN IS NOT A VERDICT, and conflating the two told applicants their
+   * packet was permanently broken every time this probe had a bad minute.
+   *
+   * `.catch(() => null)` collapsed a THROWN check into the same shape as a definitive
+   * `deliverable: false`, and both raised ApplicantEmailRegenerationRequiredError. The applicant
+   * then read "This application must be regenerated before submission", which is a permanent
+   * verdict about their packet, in response to a transient failure of a network probe about the
+   * ROUTE - a fact that has nothing to do with the packet and that regenerating cannot change.
+   * Measured live 2026-09-04 on Exa packet 73768339: its packet audit, which resolves through this
+   * same function, passed minutes before the send refused with exactly that sentence.
+   *
+   * The distinction already exists one function down: applicantEmailForApplication catches the
+   * same call into an explicit `reason: 'check_unavailable'` rather than a null. This does the
+   * same, and the unknown case now raises a RETRYABLE error instead of a regeneration hold. Only a
+   * check that ran and said no is still a regeneration hold. */
+  const deliverability = await (deps.deliverability ?? applicationAliasDeliverability)()
+    .catch((): null => null);
+  if (deliverability === null) {
+    throw new ApplicantEmailRouteUnknownError('the routing check could not be completed');
+  }
+  if (!deliverability.deliverable) {
     throw new ApplicantEmailRegenerationRequiredError(
-      `the pinned Litos email is not receivable (${deliverability?.reason ?? 'deliverability_check_failed'})`,
+      `the pinned Litos email is not receivable (${deliverability.reason})`,
     );
   }
   const currentAlias = applicationAliasFor(input.userId, input.applicationId);
