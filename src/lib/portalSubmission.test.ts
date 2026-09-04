@@ -5453,6 +5453,19 @@ test('every workable_cookie_ label is protected from the budget trim by its pref
   }
 });
 
+/* Same shape, same reason, for Teamtailor's single decline label: only one exists today
+ * (teamtailor_cookie_preflight, pushed at the top of pushFixedFieldActions' teamtailor branch), but
+ * matching it by prefix rather than by name means a future terminal or evidence boundary added under
+ * the same family inherits the protection for free, the way greenhouse's and Workable's already do. */
+test('the teamtailor_cookie_ label is protected from the budget trim by its prefix, not by name', () => {
+  const source = readFileSync('src/lib/portalSubmission.ts', 'utf8');
+  assert.match(source, /workable_phone_\(\?:assertion_capability\|value_visible\|country_visible\)\$\|teamtailor_cookie_\|/,
+    'the protection must match the teamtailor_cookie_ prefix');
+  assert.doesNotMatch(source, /teamtailor_cookie_\(\?:/,
+    'an enumeration of today\'s one label goes stale the moment a second boundary is added');
+  assert.ok('teamtailor_cookie_preflight'.startsWith('teamtailor_cookie_'));
+});
+
 test('Workable clears the consent overlay before its first pointer action on the fill, submit and discovery plans', () => {
   const packet = { ...capturePacket, phone: '+1 213 555 0100' };
   const plans = {
@@ -5542,6 +5555,32 @@ test('the Workable preflight barrier survives every budget trim', () => {
   }
   assert.equal(untrimmed.discovery.some((action) => action.label?.startsWith('workable_cookie_final')), false,
     'a discovery pass has no phone terminal block, so it has no terminal boundary either');
+});
+
+/* THE TRIM ARM HAS TO ACTUALLY TRIM here too - this is the exact risk the teamtailor_cookie_ prefix
+ * (isProtectedManagedAction) was added to close. 300 questions is not a measured Teamtailor packet;
+ * it is chosen to force the SAME generic truncateManagedActionsToBudget path every family shares
+ * (buildManagedPortalActions calls it whenever the raw list still exceeds MANAGED_ACTION_LIMIT after
+ * the question-level trims) to actually remove actions, so this proves the decline survives the
+ * trim rather than merely asserting it sits far enough from the tail to dodge one that never ran. */
+test('the Teamtailor cookie decline survives the generic budget trim', () => {
+  const packet = {
+    ...capturePacket,
+    questions: Array.from({ length: 300 }, (_, index) => ({
+      question: `Why are you interested in area ${index + 1}?`,
+      answer: `Grounded answer ${index + 1}`,
+    })),
+  };
+  const plans = {
+    fill: buildManagedPortalActions('teamtailor', packet),
+    submit: buildManagedPortalActions('teamtailor', packet, true),
+    discovery: buildManagedDiscoveryActions('teamtailor', packet),
+  };
+  for (const [name, actions] of Object.entries(plans)) {
+    assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${name} exceeded the managed action budget`);
+    assert.equal(actions[0]?.label, 'teamtailor_cookie_preflight', `${name} lost or moved the cookie decline`);
+    assert.equal(actions.filter((action) => action.label === 'teamtailor_cookie_preflight').length, 1, name);
+  }
 });
 
 /* The DIRECT (non-managed) path runs the same boundary through the same Playwright twin, in the

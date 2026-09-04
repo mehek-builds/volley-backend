@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildManagedDiscoveryActions,
   buildManagedPortalActions,
   detectPortal,
   MANAGED_CONSENT_TICK_GUARD_LABEL,
@@ -12,6 +13,9 @@ import {
   readManagedReceipt,
 } from './portalSubmission';
 import { AUTOMATIC_CONSENT_ACCEPTANCE_VERSION } from './automationConsent';
+
+const TEAMTAILOR_COOKIE_DECLINE = 'dialog[data-controller="common--cookies--alert"] '
+  + 'button[data-action*="common--cookies--alert#disableAll"]';
 
 const packet = {
   fullName: 'Taylor Example',
@@ -121,6 +125,63 @@ test('detects two unrelated live Teamtailor tenants but stops before privacy con
   assert.equal(actions.some((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]'), false);
   assert.equal(portalCanAutoSubmit('teamtailor'), false);
   assert.match(portalHandoffReason('teamtailor') ?? '', /privacy terms/i);
+});
+
+/* MEASURED 2026-09-04 21:12-21:13Z, production: fill run e7ffd4c0 against Covenant House
+ * International's regional Teamtailor tenant wrote nothing but the resume - Teamtailor's own cookie
+ * dialog sat over the whole form and nothing ever declined it. portalSubmission.ts's
+ * TEAMTAILOR_COOKIE_DECLINE_SELECTOR constant carries the curl-derived selector evidence (four
+ * tenants, 2026-09-05); this test pins the resulting plan shape instead of re-deriving the evidence.
+ *
+ * "Regional and non-regional host" is a detectPortal distinction, not a buildManagedPortalActions
+ * one - both map to the SAME 'teamtailor' family, so the plan the builder returns is identical either
+ * way. Routing both of today's measured host shapes through detectPortal first, rather than writing
+ * 'teamtailor' by hand, is what would catch a future regression where a new host-specific family
+ * (an EU-only variant, say) forgot to wire itself back to this branch. */
+test('a Teamtailor plan declines the cookie dialog first, optionally, on both a regional and a bare host', () => {
+  const regionalFamily = detectPortal('https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance');
+  const bareFamily = detectPortal('https://career.teamtailor.com/jobs/8124573-group-financial-controller/applications/new');
+  assert.equal(regionalFamily, 'teamtailor');
+  assert.equal(bareFamily, 'teamtailor');
+
+  for (const family of [regionalFamily, bareFamily]) {
+    const plans = {
+      fill: buildManagedPortalActions(family, packet),
+      submit: buildManagedPortalActions(family, packet, true),
+      discovery: buildManagedDiscoveryActions(family, packet),
+    };
+    for (const [name, actions] of Object.entries(plans)) {
+      assert.equal(actions[0]?.label, 'teamtailor_cookie_preflight', `${family} ${name}: decline must be the first action`);
+      assert.equal(actions[0]?.type, 'click');
+      assert.equal(actions[0]?.selector, TEAMTAILOR_COOKIE_DECLINE, `${family} ${name}: selector must match the measured evidence`);
+      assert.equal(actions[0]?.optional, true, `${family} ${name}: absent dialog (a returning visitor's consent cookie) must not fail the run`);
+      assert.equal(actions[0]?.requireUnique, true, `${family} ${name}: an ambiguous match must refuse rather than click the wrong node`);
+      assert.equal(actions[0]?.timeout, 10_000);
+
+      // Never the accept button, never the "Cookie preferences"/"Manage cookies" openers - the
+      // dialog's own comment names all three as sitting a few characters away from the decline.
+      const serialized = JSON.stringify(actions);
+      assert.doesNotMatch(serialized, /acceptAll/, `${family} ${name}: must never accept cookies`);
+      assert.doesNotMatch(serialized, /openPreferences|openCookiePreferences|cookie-preferences/,
+        `${family} ${name}: must never open the cookie-preferences/manage surface`);
+      assert.doesNotMatch(serialized, /Accept all cookies|Cookie preferences|Manage cookies/,
+        `${family} ${name}: no tenant-language pin for the other two controls either`);
+
+      // Exactly one decline in the whole plan - no drift back to a second hand-copied site.
+      assert.equal(actions.filter((action) => action.label === 'teamtailor_cookie_preflight').length, 1, `${family} ${name}`);
+    }
+  }
+});
+
+/* Every OTHER family's plan must stay exactly as it was: no teamtailor selector, no teamtailor
+ * label, leaked in by a stray shared code path. */
+test('the Teamtailor cookie decline never leaks into another family\'s plan', () => {
+  for (const family of ['greenhouse', 'lever', 'workable', 'smartrecruiters', 'recruitee'] as const) {
+    const actions = buildManagedPortalActions(family, packet, true);
+    const serialized = JSON.stringify(actions);
+    assert.doesNotMatch(serialized, /common--cookies--alert/, family);
+    assert.equal(actions.some((action) => action.label === 'teamtailor_cookie_preflight'), false, family);
+  }
 });
 
 /* ---- the grant-conditional consent tick ---- */
