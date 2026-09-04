@@ -634,11 +634,16 @@ function greenhouseEmbedSubmitBinding(url: URL): { tenant: string; jobToken: str
 }
 
 /**
- * The one network entry that is a submit-class request to the bound posting's OWN submit endpoint,
- * or null when none matches - including when the network list is absent, every entry is a read, or
- * every write-shaped request went somewhere else (an analytics beacon, a captcha vendor, or the
- * same board with a DIFFERENT job id). Matching family, board and job id - never host alone - is
- * what keeps a refusal from a foreign endpoint from ever being read as this posting's own answer.
+ * The LAST network entry that is a submit-class request to the bound posting's OWN submit
+ * endpoint, or null when none matches - including when the network list is absent, every entry is
+ * a read, every write-shaped request went somewhere else (an analytics beacon, a captcha vendor,
+ * or the same board with a DIFFERENT job id), or ANY bound entry - earlier or later than the one
+ * that would otherwise be chosen - came back 2xx/3xx or with no status at all. Matching family,
+ * board and job id - never host alone - is what keeps a refusal from a foreign endpoint from ever
+ * being read as this posting's own answer; picking the last of possibly several, and refusing to
+ * answer at all when a success or an unknown outcome sits anywhere among them, is what keeps a
+ * retried press (press, 428, re-press, 2xx) from ever being read backwards as a refusal - see the
+ * loop body for why that specific ordering is not just theoretical.
  *
  * Greenhouse only for now: the ashby and workable submit-request shapes have not been measured on a
  * live run, and guessing one wrong would be worse than leaving those two families on the existing
@@ -650,6 +655,7 @@ function boundEmployerSubmitNetworkEntry(
   expected: ManagedAtsBinding,
 ): SubmitNetworkEntry | null {
   if (!network || expected.family !== 'greenhouse') return null;
+  let chosen: SubmitNetworkEntry | null = null;
   for (const entry of network) {
     if (!/^(?:POST|PUT|PATCH)$/i.test(entry.method)) continue;
     let url: URL;
@@ -659,11 +665,25 @@ function boundEmployerSubmitNetworkEntry(
       continue;
     }
     const binding = greenhouseEmbedSubmitBinding(url);
-    if (binding && binding.tenant === expected.tenant && binding.jobToken === expected.jobToken) {
-      return entry;
-    }
+    if (!binding || binding.tenant !== expected.tenant || binding.jobToken !== expected.jobToken) continue;
+    /* A 2xx/3xx, OR an unknown outcome (no status at all - the transport never returned one), on
+     * ANY of this posting's own bound submit attempts means the run cannot be read as a clean
+     * refusal, whichever attempt this is and whatever order they came in. Measured shape: a real
+     * Greenhouse run can press submit, get back a 428 captcha-retry, and have the client re-press
+     * with captcha_retried:true - the SAME bound URL, a 2xx the second time. A refusal-shaped entry
+     * after that 2xx would be reading a duplicate-apply rejection as a first refusal; the reverse
+     * order is no safer, since an earlier no-status/2xx attempt this run never confirmed could
+     * just as well have been filed silently, with a later 428 answering a retry of an application
+     * that was already there. Both shapes fail closed to null (unverified) rather than risk a
+     * proven refusal that lets a caller release the claim and a re-send duplicate the application. */
+    if (entry.status === null || (entry.status >= 200 && entry.status < 400)) return null;
+    // Last bound submit-class entry wins, not first: a retried press appends a LATER entry to the
+    // same bound endpoint, and that later entry - not whichever one happened to come first in the
+    // array - is the run's own final word on this posting, once the guard above has already ruled
+    // out a later or earlier success.
+    chosen = entry;
   }
-  return null;
+  return chosen;
 }
 
 /* 4xx, EXCLUDING THE TWO LOGIN WALLS. 401 and 403 mean the request itself was not accepted for
@@ -756,10 +776,11 @@ export type EmployerSubmitRefusalProof = {
  * saying no before anything was filed, and it deserves its own verdict rather than another trip
  * through 'unverified'.
  *
- * Fails closed at every step: wrong family, wrong board, wrong job id, a 2xx/3xx, a login wall
- * (401/403), the form actually gone (it navigated, so whatever it navigated to gets to answer), or
- * neither a recognised banner nor a recognised code - and this returns null, leaving the caller's
- * own 'unverified' verdict exactly as it was.
+ * Fails closed at every step: wrong family, wrong board, wrong job id, a 2xx/3xx or unknown-outcome
+ * bound entry ANYWHERE in the run (not just the one chosen - see boundEmployerSubmitNetworkEntry),
+ * a login wall (401/403), the form actually gone (it navigated, so whatever it navigated to gets to
+ * answer), or neither a recognised banner nor a recognised code - and this returns null, leaving
+ * the caller's own 'unverified' verdict exactly as it was.
  */
 function employerSubmitRefusalProof(
   outcome: ManagedSubmitOutcome,

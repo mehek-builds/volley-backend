@@ -1811,6 +1811,14 @@ describe('the submit request itself proves an employer refusal', () => {
     }
   });
 
+  test('a bound 5xx is the server erroring, not the employer answering the application', () => {
+    for (const status of [500, 503]) {
+      const verdict = exactManagedSubmitVerdict(unknownResult({ status }), APPLY_URL);
+      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+        `status ${status} must stay unverified, never refused`);
+    }
+  });
+
   test('the form actually gone (navigation happened) is left to whatever it navigated to', () => {
     const verdict = exactManagedSubmitVerdict(unknownResult({ formStillPresent: false }), APPLY_URL);
     assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
@@ -1854,6 +1862,89 @@ describe('the submit request itself proves an employer refusal', () => {
       },
     }, 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083');
     assert.equal(verdict.kind, 'confirmed');
+  });
+});
+
+describe('a success or an unknown outcome anywhere on the bound endpoint blocks the refusal (duplicate-send hazard)', () => {
+  const APPLY_URL = 'https://job-boards.greenhouse.io/embed/job_app?for=wehrtyou&token=8052083';
+  const BANNER = 'There was an error processing your application. Please try again.';
+  const NETWORK_URL = 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083';
+
+  function twoEntryResult(network: Array<{
+    status: number | null;
+    body_excerpt?: string;
+    failure?: string;
+  }>) {
+    return {
+      url: APPLY_URL,
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null,
+        message: network.some((entry) => entry.body_excerpt) ? null : BANNER,
+        formStillPresent: true,
+        network: network.map((entry) => ({
+          method: 'POST',
+          url: NETWORK_URL,
+          status: entry.status,
+          ...(entry.body_excerpt !== undefined ? { body_excerpt: entry.body_excerpt } : {}),
+          ...(entry.failure !== undefined ? { failure: entry.failure } : {}),
+        })),
+      },
+    };
+  }
+
+  test('428 then 200 on the identical bound URL: the retry succeeded, this is not a refusal', () => {
+    const verdict = exactManagedSubmitVerdict(
+      twoEntryResult([{ status: 428 }, { status: 200 }]),
+      APPLY_URL,
+    );
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+      'a 200 later in the run means a re-press went through - never call the earlier 428 a refusal');
+  });
+
+  test('200 then 428 on the identical bound URL: still not a proven refusal', () => {
+    // The naive reading of this order is "the 428 is the last word, so it is the refusal." Decided
+    // conservatively instead: an earlier 2xx on this posting's own submit endpoint means the
+    // application may already be filed, and the 428 could just as easily be Greenhouse rejecting a
+    // duplicate re-press as it could be a first refusal. Either way, calling it employer_refused
+    // risks telling a caller it is safe to release the claim and send a duplicate application, so
+    // this fails closed to unverified whenever a 2xx/3xx exists ANYWHERE in the bound run, not only
+    // after the chosen entry.
+    const verdict = exactManagedSubmitVerdict(
+      twoEntryResult([{ status: 200 }, { status: 428 }]),
+      APPLY_URL,
+    );
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+      'an earlier 2xx on this same bound endpoint must block the refusal too, not just a later one');
+  });
+
+  test('an unknown-outcome bound attempt (no status) anywhere blocks the refusal too', () => {
+    const verdict = exactManagedSubmitVerdict(
+      twoEntryResult([{ status: null, failure: 'net::ERR_CONNECTION_RESET' }, { status: 428 }]),
+      APPLY_URL,
+    );
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+      'a transport failure never proves the first attempt was not filed; a later 428 does not rule that out');
+  });
+
+  test('two refusal-status entries to the same bound URL: the LAST one is read, not the first', () => {
+    const verdict = exactManagedSubmitVerdict(twoEntryResult([
+      { status: 428, body_excerpt: JSON.stringify({ code: 'captcha-failed', security_code_recipient: 'first-alias@example.com' }) },
+      { status: 428, body_excerpt: JSON.stringify({ code: 'captcha-retry', security_code_recipient: 'second-alias@example.com' }) },
+    ]), APPLY_URL);
+    assert.equal(verdict.kind, 'employer_refused');
+    if (verdict.kind !== 'employer_refused') return;
+    assert.equal(verdict.code, 'captcha-retry', 'the LAST bound entry must be read, not the first');
+    assert.equal(verdict.securityCodeRecipient, 'second-alias@example.com');
+  });
+
+  test('a single refusal with no success or unknown-outcome sibling is still proven', () => {
+    // Regression guard: the fix above must not turn EVERY multi-entry run unverified, only the
+    // ones where something other than a clean refusal-status entry sits among the bound attempts.
+    const verdict = exactManagedSubmitVerdict(
+      twoEntryResult([{ status: 401 }, { status: 428 }]),
+      APPLY_URL,
+    );
+    assert.equal(verdict.kind, 'employer_refused', 'a login wall alongside the refusal must not block it');
   });
 });
 
