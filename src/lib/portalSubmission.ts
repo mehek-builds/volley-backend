@@ -2726,11 +2726,11 @@ function managedAnchorResolution(
    * reconstructing to exactly that. The alias has nowhere left to go, so it goes nowhere. */
   if (holder.answer?.trim()) return { kind: 'refuse' };
   /* No failed-control guard here, deliberately. One was written, and mutating it left every test in
-   * ambiguousLabelAnchor.test.ts green: the last-line invariant at the end of the build (managedActionTargetsFailedField)
-   * already strips an id-scoped action at a failed control, and it matches `#question_68000289`
-   * against controlId `question_68000289` by the same regex it uses for every other builder. A guard
-   * that cannot be made to fail is not defence in depth, it is a line that makes a test look
-   * covered. The boundary is asserted end to end instead, in ambiguousLabelAnchor.test.ts. */
+   * ambiguousLabelAnchor.test.ts green: managedActionTargetsFailedField, the last-line invariant at
+   * the end of the build, already strips an id-scoped action at a failed control, and it matches
+   * `#question_68000289` against controlId `question_68000289` by the same regex it uses for every
+   * other builder. A guard that cannot be made to fail is not defence in depth, it is a line that
+   * makes a test look covered. The boundary is asserted end to end in that file instead. */
   const selector = durablePortalSelector(reviewQuestionPortalSelector(holder));
   // A control with no durable handle cannot be addressed precisely, and addressing it by the same
   // ambiguous label is the defect this whole function exists to end.
