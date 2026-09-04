@@ -320,3 +320,71 @@ test('a posting with one GPA control keeps the behaviour it already had', () => 
     "a single named control is the runner's to resolve, as it always was",
   );
 });
+
+/* THE ROW THIS RESOLUTION MUST NOT TOUCH, and why the GPA reasoning does not travel to it.
+ *
+ * A Greenhouse education section repeats the same anchor once per row, so "End date year" names two
+ * controls exactly. The GPA band's read list IS the whole of what that control accepts, so "3.89 is
+ * not among these thirteen" really does prove the band cannot hold it. An education year menu's read
+ * list is a TRUNCATED WINDOW: row 0 commonly publishes only the next few years. Refusing row 0 on
+ * that basis makes row 1 the sole survivor and binds her graduation year to her SECOND education
+ * entry, while the runner's own .first() lands it on row 0 correctly.
+ *
+ * Measured on PR #920 before the resolution was scoped to the GPA anchors:
+ *   main only: {"type":"fillByLabelText","text":"End date year","value":"2028",...}
+ *   PR   only: {"type":"fill","selector":"#end-year--1","value":"2028",...}
+ *
+ * Row 0 is a combobox with a real, non-empty, capped option list, which is exactly the configuration
+ * the file's other education fixture does not model: giving both rows portalInputType 'text' and no
+ * fieldOptions lands in the stand-aside clause, so it pins the safe case and nothing pins this one. */
+const EDU_ANCHOR = 'End date year';
+const EDU_ROW_0 = { selector: '#end-year--0', label: EDU_ANCHOR };
+const EDU_ROW_1 = { selector: '#end-year--1', label: EDU_ANCHOR };
+
+function twoRowEducationPacket(): SubmissionPacket {
+  return hrtPacket({
+    questions: [
+      BAND_QUESTION,
+      SCALE_QUESTION,
+      WRITE_IN_QUESTION,
+      { question: EDU_ANCHOR, answer: '', portalSelector: EDU_ROW_0.selector, portalInputType: 'combobox' },
+      { question: EDU_ANCHOR, answer: '', portalSelector: EDU_ROW_1.selector, portalInputType: 'combobox' },
+    ],
+    fieldOptions: {
+      question_68000287: BAND_OPTIONS,
+      question_68000288: SCALE_OPTIONS,
+      'end-year--0': ['2024', '2025', '2026', '2027'],
+      'end-year--1': ['2026', '2027', '2028', '2029'],
+    },
+  });
+}
+
+test('a capped education year list does not move her graduation year to the second row', () => {
+  const actions = build(twoRowEducationPacket()).filter((action) => action.value === '2028');
+  assert.equal(actions.length > 0, true, 'her graduation year must still be filled');
+  for (const action of actions) {
+    assert.notEqual(
+      action.selector,
+      EDU_ROW_1.selector,
+      'a truncated option read on row 0 must never bind her graduation year to the second education row',
+    );
+  }
+  assert.equal(
+    actions.some((action) => action.type === 'fillByLabelText' && action.text === EDU_ANCHOR),
+    true,
+    'the education anchor stays on the label fill, where the runner resolves it to row 0 itself',
+  );
+});
+
+test('scoping the resolution to GPA does not cost the GPA fix', () => {
+  // The same packet that carries the education rows must still put her raw GPA in the write-in and
+  // keep it away from both menus, so the scoping is a narrowing of blast radius and not of effect.
+  const packet = twoRowEducationPacket();
+  assert.deepEqual(
+    reaching(packet, WRITE_IN).map((action) => ({ type: action.type, selector: action.selector })),
+    [{ type: 'fill', selector: WRITE_IN.selector }],
+    'her 3.89 still belongs in the write-in',
+  );
+  assert.deepEqual(reaching(packet, BAND), [], 'and must still never reach the band');
+  assert.deepEqual(reaching(packet, SCALE), [], 'nor the scale menu');
+});

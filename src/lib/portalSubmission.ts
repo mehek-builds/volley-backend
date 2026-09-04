@@ -2744,8 +2744,28 @@ function managedFillByLabelUnlessHandled(
   text: string,
   value: string | undefined,
   label: string,
+  /* OPT-IN, AND OFF EVERYWHERE BUT GPA, BECAUSE "NOT ON THE READ LIST" IS NOT "CANNOT HOLD IT".
+   *
+   * managedAnchorCandidateRefusesValue treats a read option list as proof of what a control accepts.
+   * That is true of the GPA band, whose thirteen bands are the whole of what it offers. It is FALSE
+   * of an education year menu, whose read list is routinely a truncated window. Measured on a
+   * two-row education section with row 0 published as ['2024','2025','2026','2027'] and row 1
+   * offering 2028, resolution refuses row 0, finds row 1 the sole survivor, and binds
+   *
+   *   {"type":"fill","selector":"#end-year--1","value":"2028","label":"education_end_year"}
+   *
+   * which is her SECOND education entry. Leaving that anchor on the label fill lands it on row 0
+   * through the runner's own resolution, correctly. The same shape moves "May" to #end-month--1 when
+   * row 0 spells months numerically. So generalising this to all eleven anchors fixes GPA and breaks
+   * the education row on the same submission.
+   *
+   * Scoped rather than repaired because the repair needs a way to tell a complete option read from a
+   * truncated one, and the packet carries no such signal. Widening this flag without that signal
+   * reintroduces the regression above; the fixture that catches it is the two-row education section
+   * with row 0 as a combobox, in ambiguousLabelAnchor.test.ts. */
+  resolveAmbiguousAnchor = false,
 ) {
-  const resolution = managedAnchorResolution(packet, text, value);
+  const resolution = resolveAmbiguousAnchor ? managedAnchorResolution(packet, text, value) : undefined;
   if (resolution?.kind === 'refuse') return;
   /* The id-scoped fill deliberately runs ahead of managedSpeculativeLabelFillSuppressed, whose own
    * doc comment scopes it to LABEL-resolved fills. That guard stands the ladder down because a
@@ -7673,8 +7693,11 @@ function pushFixedFieldActions(
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
+      /* The two anchors the resolution is enabled for. A GPA band's read list IS the whole of what
+       * it accepts, so "3.89 is not among these thirteen" really does prove the band cannot hold it.
+       * See the flag's own comment for why that reasoning does not travel to the education rows. */
+      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa', true);
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question', true);
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
