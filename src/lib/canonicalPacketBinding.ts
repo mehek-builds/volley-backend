@@ -172,13 +172,50 @@ async function canonicalFreeConfirmedReceiptCandidate(
   return exact[0]!;
 }
 
-function oneExactCandidate(
+/**
+ * A canonical row that recorded no portal URL offers no portal evidence: it was created from a
+ * monitored job id alone (routes/resume.ts writes the reconstructed URL only when the request names
+ * an application), and the runner derives the URL it lands on from that same job id later. Once a
+ * run has landed, the frozen identity carries an origin and a provider key that the row never
+ * stored, so the strict comparison reads the row's absence as a difference and the packet can
+ * never bind. Measured 2026-09-04 on Railway prod: 174 of 646 packet-linked canonical rows, across
+ * 18 accounts, carry a null portal_url, and every one of them was refused at send with
+ * CANONICAL_PACKET_BINDING_MISSING as soon as the Greenhouse legacy-host 301 started resolving.
+ *
+ * Only the immutable monitored job id may stand in for the missing URL, and only under the same
+ * company-and-role guard the strict tiers apply. A row with no URL and no job id has no exact scope
+ * and stays unbindable. This never widens the match for a row that does carry a URL.
+ */
+export function canonicalApplicationStandsInWithoutPortal(
+  application: Pick<typeof applications.$inferSelect,
+  'company_name' | 'role' | 'job_id' | 'portal_url'>,
+  frozen: FrozenPostingIdentity,
+): boolean {
+  const candidate = freezePostingIdentity({
+    company: application.company_name,
+    role: application.role,
+    job_id: application.job_id,
+  }, application.portal_url);
+  if (candidate.portalUrl) return false;
+  if (frozen.companyRole && candidate.companyRole !== frozen.companyRole) return false;
+  return Boolean(frozen.jobId && candidate.jobId === frozen.jobId);
+}
+
+/**
+ * The strict posting match decides first, exactly as before, so every candidate set that resolved
+ * until now still resolves to the same row. The stand-in tier is consulted only when the strict
+ * tier found nothing at all, which is the one situation the strict tier could never decide.
+ */
+export function oneExactCandidate(
   candidates: Array<typeof applications.$inferSelect>,
   frozen: FrozenPostingIdentity,
 ): typeof applications.$inferSelect {
-  const exact = [...new Map(candidates
-    .filter((candidate) => canonicalApplicationMatchesFrozenPosting(candidate, frozen))
-    .map((candidate) => [candidate.id, candidate])).values()];
+  const distinct = (matches: (candidate: typeof applications.$inferSelect) => boolean) =>
+    [...new Map(candidates.filter(matches).map((candidate) => [candidate.id, candidate])).values()];
+  const strict = distinct((candidate) => canonicalApplicationMatchesFrozenPosting(candidate, frozen));
+  const exact = strict.length > 0
+    ? strict
+    : distinct((candidate) => canonicalApplicationStandsInWithoutPortal(candidate, frozen));
   if (exact.length === 0) throw new CanonicalPacketBindingError('CANONICAL_PACKET_BINDING_MISSING');
   if (exact.length !== 1) throw new CanonicalPacketBindingError('CANONICAL_PACKET_BINDING_AMBIGUOUS');
   return exact[0]!;
