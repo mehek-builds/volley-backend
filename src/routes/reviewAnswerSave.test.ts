@@ -735,6 +735,130 @@ test('a save that landed answers 200 with no saved flag on it', async () => {
   assert.equal(response.json().saved, undefined);
 });
 
+/* THE OTHER LOST RACE, WHICH REACHED HER AS A CRASH CARRYING THE STATEMENT.
+ *
+ * The three tests above stage the race the row can show: the run commits, the exact-spec predicate
+ * matches nothing, and the route answers 202. Production had a second one that never got that far.
+ * Every write to generated_resumes fires the submission-authority revision guard from a BEFORE
+ * trigger; the guard takes the per-user advisory lock with pg_try_advisory_xact_lock - TRY, never
+ * wait - and RAISES 40001 the instant anything else on the account holds it. A managed run holds it
+ * for its whole transaction, and the dashboard's own 2.5-second poll holds it for a few
+ * milliseconds. drizzle wraps that raise in a DrizzleQueryError whose message is `Failed query:
+ * <the whole UPDATE>\nparams: <every bound value>`, and nothing caught it.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com, Exa packet 73768339: this save answered
+ * 500 with that statement in the body, the dashboard printed "Internal Server Error", and the
+ * identical save answered 200 the moment the run finished.
+ *
+ * STAGED WITH A TRIGGER that raises exactly what the shipped guard raises, for the same reason the
+ * lost-CAS test above uses one: the interleaving cannot be produced from outside the process. The
+ * counter makes it the transient case - one refusal, then out of the way - which is the shape a
+ * poll produces and the shape a retry is for.
+ */
+async function installAuthorityGuard(refusals: 'once' | 'always'): Promise<void> {
+  /* THE ATTEMPT COUNTER IS A SEQUENCE, and it has to be. The raise aborts the statement's whole
+   * transaction - which is the very property that makes a retry safe - so a counter kept in a table
+   * is rolled back with it and every attempt reads "first attempt" forever. nextval is exempt from
+   * rollback, so it is the one thing in Postgres that can remember an attempt the database has
+   * un-remembered. Measured: a table-backed counter made the 'once' guard refuse without end. */
+  await pglite.exec(`
+    CREATE SEQUENCE IF NOT EXISTS litos_test_guard_attempts;
+    ALTER SEQUENCE litos_test_guard_attempts RESTART WITH 1;
+    CREATE OR REPLACE FUNCTION litos_test_authority_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF nextval('litos_test_guard_attempts') > ${refusals === 'once' ? '1' : '2147483647'}
+        THEN RETURN NEW; END IF;
+      RAISE EXCEPTION 'submission authority changed concurrently; retry the request'
+        USING ERRCODE = '40001';
+    END $$;
+    DROP TRIGGER IF EXISTS litos_test_authority_guard ON generated_resumes;
+    CREATE TRIGGER litos_test_authority_guard BEFORE UPDATE ON generated_resumes
+      FOR EACH ROW EXECUTE FUNCTION litos_test_authority_guard();
+  `);
+}
+
+async function removeAuthorityGuard(): Promise<void> {
+  await pglite.exec('DROP TRIGGER IF EXISTS litos_test_authority_guard ON generated_resumes');
+}
+
+/* THE COMMON CASE, AND THE ONE THE APPLICANT SHOULD NEVER SEE AT ALL. The guard refused once and
+ * then let go, which is what a poll holding the lock for four milliseconds looks like. The raise
+ * happens in a BEFORE trigger, so the statement aborted before touching anything: retrying it is
+ * retrying a write that provably did not happen, and the retried statement is byte-identical, exact
+ * -spec predicate included, so it can only land on the row this request read. */
+test('a save the authority guard refuses once still lands', async () => {
+  const id = await applicationWith(stoppedRun());
+  await installAuthorityGuard('once');
+
+  let response;
+  try {
+    response = await saveAnswers(id, 'No');
+  } finally {
+    await removeAuthorityGuard();
+  }
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().saved, undefined, 'it landed, so it carries no lost-race discriminator');
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'No', 'and her answer is on the row, not merely reported');
+});
+
+/* AND WHEN IT NEVER LETS GO, IT IS STILL NOT AN ERROR ABOUT HER APPLICATION. Nothing was written -
+ * the same proof the retry rests on - so "your answers did not land, they are still on this screen"
+ * is exactly true, and that sentence is what the dashboard already renders for 202 + saved:false
+ * (REVIEW_ANSWERS_SAVE_RACED). A 500 said none of it, and said it with the UPDATE attached. */
+test('a save the authority guard never lets through answers 202, not 500', async () => {
+  const id = await applicationWith(stoppedRun());
+  await installAuthorityGuard('always');
+
+  let response;
+  try {
+    response = await saveAnswers(id, 'No');
+  } finally {
+    await removeAuthorityGuard();
+  }
+
+  assert.equal(response.statusCode, 202, response.body);
+  assert.equal(response.json().saved, false,
+    'the body must say the save did not land, or a client that only reads the body cannot tell');
+
+  /* THE LEAK, ASSERTED SEPARATELY FROM THE STATUS, because fixing one without the other still ships
+   * the statement. The 500 body carried the whole UPDATE, its jsonb_set, its `spec = $4::jsonb`
+   * predicate and its bound-parameter shape to a browser. No response on this route may contain any
+   * of it, whatever status it wears. */
+  for (const forbidden of ['Failed query', 'jsonb_set', 'generated_resumes', 'params:']) {
+    assert.ok(!response.body.includes(forbidden),
+      `the response leaks server internals: ${forbidden} appears in ${response.body.slice(0, 400)}`);
+  }
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, '', 'and nothing of this save reached the row');
+  assert.equal(persisted.questions_reviewed_at, undefined);
+});
+
+/* THE SAME GUARD ON THE SIBLING ROUTE, which shares this one's 202 + saved:false contract to the
+ * byte. Ticking a "Your turn" checkbox while a run works the packet must not 500 either. */
+test('a checklist tick the authority guard refuses answers 202, not 500', async () => {
+  const id = await applicationWith(stoppedRun());
+  await installAuthorityGuard('always');
+
+  let response;
+  try {
+    response = await app.inject({
+      method: 'POST',
+      url: `/applications/${id}/review/attention-acks`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { item_id: 'line-1', label: 'Upload your transcript on the company page', acknowledged: true },
+    });
+  } finally {
+    await removeAuthorityGuard();
+  }
+
+  assert.equal(response.statusCode, 202, response.body);
+  assert.equal(response.json().saved, false);
+  assert.ok(!response.body.includes('Failed query'), 'and it does not ship the statement');
+});
+
 /* THE OTHER SILENT 200, WHICH THIS ROUTE ALSO ANSWERED FOR MONTHS AFTER IT COULD SAVE.
  *
  * The tests above prove a BLANK gets filled. Rewriting an answer an earlier run had already resolved

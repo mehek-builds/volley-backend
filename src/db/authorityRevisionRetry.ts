@@ -67,3 +67,47 @@ export async function withAuthorityRevisionRetry<T>(
     }
   }
 }
+
+/**
+ * An exact-CAS review write, run so that the guard's refusal reads as A RACE THIS WRITE LOST rather
+ * than as a database fault. Answers the statement's returned rows, or `[]` when the guard held the
+ * lock for the whole retry window.
+ *
+ * WHY RETRYING THE SAME STATEMENT CANNOT CLOBBER THE CONCURRENT WRITER, which is the property that
+ * makes this safe to use on a write whose whole point is a compare-and-swap. The retried statement
+ * is byte-identical, predicate included: it still pins `spec = <the exact spec this request read>`.
+ * So the only two outcomes remain the two the caller already handles. If the other actor merely
+ * HELD the lock - an authority projection read behind the dashboard's 2.5-second poll, a history
+ * load - the row is unchanged, the predicate still matches, and the applicant's save lands. If the
+ * other actor COMMITTED something, the predicate matches nothing and the caller takes its existing
+ * "the row moved under you" branch. Nothing is re-read, nothing is rebuilt against the new row, and
+ * nothing the run just recorded is overwritten. Re-reading and rebuilding is exactly what would
+ * discard it, which is why this helper deliberately does not.
+ *
+ * WHY A ZERO-ROW ANSWER IS THE RIGHT ONE ON EXHAUSTION. The guard raises from a BEFORE trigger, so
+ * the statement aborted before touching anything: nothing was written, no revision was bumped,
+ * nothing committed - the same proof withAuthorityRevisionRetry relies on to retry at all. "Nothing
+ * of yours landed" is precisely what a lost compare-and-swap means, so a caller that already
+ * answers a conflict for zero rows answers the identical, correct thing here. Callers whose
+ * zero-row branch means something ELSE - a terminal refusal the client will not retry - must NOT
+ * use this helper; they let the conflict propagate and answer 503 with Retry-After instead.
+ *
+ * SINGLE-STATEMENT WRITES ONLY, for the reason withAuthorityRevisionRetry documents: a 40001 inside
+ * an explicit multi-statement transaction aborts that whole transaction, and retrying one statement
+ * inside it cannot succeed.
+ */
+export async function conditionalWriteRows<Row>(
+  operation: () => Promise<Row[]>,
+  options: AuthorityRevisionRetryOptions & {
+    /** Called once when the guard refused for the whole window and `[]` is being answered. */
+    onLostToGuard?: () => void;
+  } = {},
+): Promise<Row[]> {
+  try {
+    return await withAuthorityRevisionRetry(operation, options);
+  } catch (error) {
+    if (!isAuthorityRevisionConflictError(error)) throw error;
+    options.onLostToGuard?.();
+    return [];
+  }
+}

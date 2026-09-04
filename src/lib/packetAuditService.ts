@@ -34,6 +34,7 @@ import {
 } from './packetResumeRestore';
 import { resolveFrozenApplicantEmail } from './applicationEmail';
 import { resumeEmailOfRecord } from './resumeEmail';
+import { withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 
@@ -787,13 +788,32 @@ export async function createAndPersistPacketAudit(
     terms: scored.terms,
   });
   const next: ApplicationReviewState = { ...review, packet_audit: audit };
-  const updated = await db.update(generated_resumes).set({
+  /* RETRIED, BUT DELIBERATELY NOT COLLAPSED INTO `persisted: false`, and the difference matters more
+   * here than anywhere else this guard is handled.
+   *
+   * The retry is the same one every other exact-CAS review write now gets: the submission-authority
+   * revision trigger takes the per-user advisory lock with pg_try_advisory_xact_lock and RAISES
+   * 40001 rather than waiting, so a dashboard poll's projection read - which is milliseconds, and
+   * which the audit screen is issuing every 2.5 seconds while this runs - was enough to fail the
+   * write. Re-running this statement unchanged keeps the exact-spec CAS, so a retry can only land on
+   * the row this audit was built from.
+   *
+   * WHAT MUST NOT HAPPEN ON EXHAUSTION. `persisted: false` means one specific thing to this
+   * function's caller: POST /applications/:id/packet-audit answers 409 PACKET_AUDIT_STALE, and the
+   * dashboard treats that code as NOT transient - features/applications/domain/audit-refusal.ts
+   * lists it under both AUTOPILOT_CANNOT_CLEAR and REVIEW_RECOVERY_REQUIRED, so the autopilot stops
+   * retrying the packet and the applicant is sent back to re-review a PDF that never changed.
+   * Spending that on a lock someone held for four milliseconds would be a worse lie than the 500.
+   * So the conflict propagates, and the route answers 503 with Retry-After: 1 and "This account
+   * changed at the same time. Try the request again." - the contract toPublicError already carries
+   * for this SQLSTATE. Nothing was written either way; only one of the two answers is true. */
+  const updated = await withAuthorityRevisionRetry(() => db.update(generated_resumes).set({
     spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(next)}::jsonb, true)`,
   }).where(and(
     eq(generated_resumes.id, row.id),
     eq(generated_resumes.user_id, row.user_id),
     sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
     sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-  )).returning({ id: generated_resumes.id });
+  )).returning({ id: generated_resumes.id }));
   return { audit, persisted: updated.length === 1, pdfBytes: loaded.bytes };
 }

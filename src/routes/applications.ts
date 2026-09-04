@@ -171,7 +171,7 @@ import {
 } from '../lib/authoritativeSubmissionProjection';
 import { submissionAuthorityEnvelopeForUnattemptedPacket } from './resume';
 import { submissionAuthorityPublicationForPacket } from '../lib/submissionAuthorityEnvelope';
-import { withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
+import { conditionalWriteRows, isAuthorityRevisionConflictError, withAuthorityRevisionRetry } from '../db/authorityRevisionRetry';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
@@ -1370,6 +1370,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         };
         return reply.status(200).send(response);
       } catch (error) {
+        /* A WRITE CONFLICT IS NOT A VERDICT ABOUT THE PACKET, and this catch was publishing it as
+         * one - with the statement attached.
+         *
+         * Every OTHER throw reaching here is an authored sentence about this application, written
+         * to be read: "The stored resume is not a verified PDF", "The stored resume PDF is not bound
+         * to this exact saved resume. Generate it again." Echoing `error.message` at 422 is right
+         * for those and only for those. The submission-authority revision guard's 40001 is not one
+         * of them: drizzle-orm wraps the pg error in a DrizzleQueryError whose message is `Failed
+         * query: <the whole UPDATE>\nparams: <every bound value>`, so this line shipped the audit's
+         * update, its predicate and its parameter shape to the browser under a code that says the
+         * packet failed verification. Measured live 2026-09-04 on packet 73768339, alongside the
+         * same statement's 500 out of PUT /review/answers - two paths, two status codes, one
+         * condition, and neither of them the condition.
+         *
+         * Rethrown so it reaches the global handler, which answers 503 with Retry-After: 1 and the
+         * sentence toPublicError already carries for this SQLSTATE. Nothing was written, the packet
+         * is unchanged, and the only true instruction is "try again in a moment". */
+        if (isAuthorityRevisionConflictError(error)) {
+          request.log.warn(
+            { applicationId: row.id },
+            'Packet audit lost the authority revision guard; answering 503 rather than a packet verdict',
+          );
+          throw error;
+        }
         request.log.warn({ error, applicationId: row.id }, 'Packet audit could not verify the saved application');
         return reply.status(422).send({
           error: error instanceof Error ? error.message : 'The saved application could not be audited',
@@ -1423,12 +1447,23 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         acknowledged_at: new Date().toISOString(),
       };
       const next: ApplicationReviewState = { ...review, packet_audit_acknowledgement: acknowledgement };
-      const updated = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
-        eq(generated_resumes.id, row.id),
-        eq(generated_resumes.user_id, request.jwtPayload!.userId),
-        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-      )).returning({ id: generated_resumes.id });
+      /* Retried on the authority guard's 40001, and NOT collapsed into the zero-row branch, for the
+       * same reason createAndPersistPacketAudit is not: the refusal below is PACKET_AUDIT_STALE,
+       * which the dashboard treats as terminal and answers by throwing away her acknowledgement and
+       * sending her back to re-review the packet. A lock held for a few milliseconds by a poll must
+       * not cost her that. An exhausted window propagates and answers 503 with Retry-After. */
+      const updated = await withAuthorityRevisionRetry(() => db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) }).where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+        )).returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'packet audit acknowledgement hit the authority revision guard; retrying',
+        ),
+      });
       if (!updated.length) {
         return reply.status(409).send({
           error: 'The saved application changed before the acknowledgement was recorded.',
@@ -2547,7 +2582,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
 
       let updated: Array<{ id: string }>;
       try {
-        updated = await withReadOnlyRetry(
+        /* THE WHOLE TRANSACTION IS THE RETRY UNIT HERE, not the statement inside it.
+         *
+         * The submission-authority revision guard raises 40001 from a BEFORE trigger on the UPDATE
+         * above, and a raise inside an explicit transaction aborts that ENTIRE transaction - so
+         * retrying the statement in place cannot succeed, and withAuthorityRevisionRetry's own
+         * documentation says as much. Wrapping the transaction is the form that works: nothing was
+         * committed, the artifact-version insert did not happen either, and the retried transaction
+         * re-runs the identical exact-spec CAS, so it can only land on the row this edit was
+         * composed against.
+         *
+         * OUTSIDE withReadOnlyRetry, deliberately. That helper's exhaustion path moves to a
+         * dedicated writer endpoint because the pooled backend was READ-ONLY, which is a different
+         * fault with a different remedy; a lock the account's own poll holds for four milliseconds
+         * is not fixed by changing endpoints. The blob was uploaded before this block, so no retry
+         * here re-uploads anything. */
+        updated = await withAuthorityRevisionRetry(() => withReadOnlyRetry(
           () => runResumeEditTransaction(db),
           {
             onRetry: (attempt) => request.log.warn(
@@ -2562,7 +2612,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
               return runResumeEditTransaction(directDb);
             }),
           },
-        );
+        ), {
+          onRetry: (attempt) => request.log.warn(
+            { attempt, applicationId: row.id },
+            'Resume edit transaction hit the authority revision guard; retrying the whole transaction',
+          ),
+        });
       } catch (error) {
         await deleteObjects(blob.pathname).catch(() => undefined);
         throw error;
@@ -2623,7 +2678,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // Not a spread here: an edit that changes portal_url has to re-derive portal_supported with
       // it, or the review persists a new URL next to the old verdict. See applyApplicationReviewEdit.
       const next = applyApplicationReviewEdit(current, parsed.data);
-      const claimed = await db.update(generated_resumes)
+      /* Same authority guard, same reading as the two save routes below: a 40001 out of this
+       * statement's BEFORE trigger means nothing was written, so retry it unchanged - CAS predicate
+       * included, which is what keeps a retry from landing on a run's committed work - and read a
+       * window that never clears as this edit not having landed. That is the 202 below. */
+      const claimed = await conditionalWriteRows(() => db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
@@ -2631,7 +2690,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
         ))
-        .returning({ id: generated_resumes.id });
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'review edit hit the authority revision guard; retrying',
+        ),
+        onLostToGuard: () => request.log.warn(
+          { applicationId: row.id },
+          'review edit lost the authority revision guard for its whole window; answering 202',
+        ),
+      });
       if (claimed.length === 0) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
@@ -2783,7 +2851,31 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         questions_reviewed_at: reviewedAt,
         updated_at: new Date().toISOString(),
       };
-      const saved = await db.update(generated_resumes)
+      /* THE OTHER WAY THIS SAVE LOSES THE RACE, and until now it was the only one that reached the
+       * applicant as a crash.
+       *
+       * The zero-row branch below is one half of "a run wrote to this packet". The other half never
+       * gets that far: the submission-authority revision guard fires from a BEFORE trigger on this
+       * very statement, takes the per-user advisory lock with pg_try_advisory_xact_lock - TRY, never
+       * wait - and RAISES 40001 the moment anything else on the account holds it. A managed run
+       * holds it for the length of its transaction; the dashboard's own 2.5-second poll holds it for
+       * a few milliseconds while it reads the authority projection. So the applicant typing on the
+       * answer-confirmation screen the send flow opens FOR her, while her run works the packet, is
+       * the single most likely person in the product to hit it.
+       *
+       * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com, Exa packet 73768339: this save
+       * answered 500 carrying the raw UPDATE and its bound parameters, the dashboard printed
+       * "Internal Server Error", and the identical save answered 200 the moment the run finished.
+       *
+       * Retried, then answered as what it is. The retry re-runs THIS statement unchanged, exact-spec
+       * predicate and all, so it cannot overwrite whatever the run recorded: if the run only held
+       * the lock the save lands, and if the run committed, the predicate matches nothing and the
+       * branch below runs. If the guard is still held after the whole window, the save did not land,
+       * and this route already has the honest word for that - a 202 carrying `saved: false`, which
+       * the dashboard renders as "Litos was working on this application while you were typing, so
+       * these answers were not saved. They are still on this screen, so try again." Every clause of
+       * that is true of a guard conflict, and a 500 was true of none of it. */
+      const saved = await conditionalWriteRows(() => db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
@@ -2791,7 +2883,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
         ))
-        .returning({ id: generated_resumes.id });
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'review answers save hit the authority revision guard; retrying',
+        ),
+        onLostToGuard: () => request.log.warn(
+          { applicationId: row.id },
+          'review answers save lost the authority revision guard for its whole window; answering 202',
+        ),
+      });
       if (saved.length === 0) {
         /* The row moved under the save, which for this packet means a run wrote to it. Answer with
          * what is actually stored rather than with what this request wanted to store, so the screen
@@ -2869,7 +2970,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const next = applyReviewPatch(current, {
         attention_acknowledgements: Object.keys(acknowledgements).length > 0 ? acknowledgements : undefined,
       });
-      const saved = await db.update(generated_resumes)
+      /* Same guard, same answer as the answers route above: the authority revision trigger raises
+       * 40001 rather than waiting, so a poll or a run holding the per-user lock would otherwise turn
+       * a checkbox into a 500. Retried unchanged - the exact-spec predicate rides along, so the
+       * retry cannot land on top of a run's write - and a window that never clears means the tick
+       * did not land, which is exactly what the 202 below says. */
+      const saved = await conditionalWriteRows(() => db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
@@ -2877,7 +2983,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
         ))
-        .returning({ id: generated_resumes.id });
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'attention acknowledgement hit the authority revision guard; retrying',
+        ),
+        onLostToGuard: () => request.log.warn(
+          { applicationId: row.id },
+          'attention acknowledgement lost the authority revision guard for its whole window; answering 202',
+        ),
+      });
       if (saved.length === 0) {
         /* A run wrote to the packet under this tick, so the tick did not land - and must not be
          * retried blind, because the run's fresh report may have replaced the sentence she ticked.
@@ -4301,7 +4416,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         submission_claim_id: undefined,
         updated_at: now,
       };
-      const approved = await db.update(generated_resumes)
+      /* Retried on the authority guard's 40001 - the applicant pressing Send while her own dashboard
+       * polls the authority projection is the ordinary case, and this statement's BEFORE trigger
+       * refuses rather than waits. NOT collapsed into the zero-row branch: this route's 202 is the
+       * same body a STARTED send answers with, so reporting a write that never happened as one would
+       * tell the dashboard a submission is under way when nothing was claimed. An exhausted window
+       * propagates instead and answers 503 with Retry-After, which is the only true reading of a
+       * statement that aborted before it touched the row. */
+      const approved = await withAuthorityRevisionRetry(() => db.update(generated_resumes)
         .set({ spec: approvedReviewSpec(next, now) })
         .where(and(
           eq(generated_resumes.id, row.id),
@@ -4310,7 +4432,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
         ))
-        .returning({ id: generated_resumes.id });
+        .returning({ id: generated_resumes.id }), {
+        onRetry: (attempt) => request.log.warn(
+          { applicationId: row.id, attempt },
+          'final approval hit the authority revision guard; retrying',
+        ),
+      });
       if (approved.length === 0) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;

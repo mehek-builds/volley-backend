@@ -367,3 +367,56 @@ test('a concurrent review mutation before acknowledgement carry wins the exact s
   });
   assert.equal(verdict.valid, false, 'the failed carry leaves the replacement audit fail closed');
 });
+
+/* THE OTHER WAY THIS WRITE FAILS, AND THE ONE THAT NEVER REACHED ITS CAS AT ALL.
+ *
+ * The two tests above stage the exact-spec CAS losing to a committed concurrent write, which
+ * `persisted: false` describes correctly. Production hit a different failure on the same statement.
+ * Every write to generated_resumes fires the submission-authority revision guard from a BEFORE
+ * trigger; the guard takes the per-user advisory lock with pg_try_advisory_xact_lock - TRY, never
+ * wait - and RAISES 40001 the moment anything else on the account holds it, which the audit screen's
+ * own 2.5-second poll does for a few milliseconds at a time. drizzle wraps that raise in a
+ * DrizzleQueryError whose message is `Failed query: <the whole UPDATE>\nparams: <every bound
+ * value>`, POST /applications/:id/packet-audit caught it in its blanket handler, and the applicant
+ * received a 422 PACKET_AUDIT_FAILED carrying the statement as its authored reason. Measured live
+ * 2026-09-04 on Exa packet 73768339, alongside the same statement's 500 out of PUT
+ * /review/answers.
+ *
+ * The raise happens before the row is touched, so nothing was written and the retried statement is
+ * byte-identical - exact-spec predicate included - which is why it can only ever land on the packet
+ * this audit was built from. The trigger below raises what the shipped guard raises, once, which is
+ * the shape a poll produces.
+ */
+test('an audit the authority revision guard refuses once still persists', async () => {
+  const seeded = await seedPacket({ acknowledged: false });
+  /* nextval, not a counter table: the raise aborts its own transaction, so a table-backed counter is
+     rolled back with it and every attempt would read as the first one. */
+  await pglite.exec(`
+    CREATE SEQUENCE IF NOT EXISTS litos_audit_guard_attempts;
+    ALTER SEQUENCE litos_audit_guard_attempts RESTART WITH 1;
+    CREATE OR REPLACE FUNCTION litos_audit_authority_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF nextval('litos_audit_guard_attempts') > 1 THEN RETURN NEW; END IF;
+      RAISE EXCEPTION 'submission authority changed concurrently; retry the request'
+        USING ERRCODE = '40001';
+    END $$;
+    DROP TRIGGER IF EXISTS litos_audit_authority_guard ON generated_resumes;
+    CREATE TRIGGER litos_audit_authority_guard BEFORE UPDATE ON generated_resumes
+      FOR EACH ROW EXECUTE FUNCTION litos_audit_authority_guard();
+  `);
+
+  let result;
+  try {
+    result = await createAndPersistPacketAudit(await rowById(seeded.id), {
+      loadPdf: async () => ({ bytes: OLD_BYTES, contentType: 'application/pdf' }),
+      validateApplicantEmail: async () => {},
+    });
+  } finally {
+    await pglite.exec('DROP TRIGGER IF EXISTS litos_audit_authority_guard ON generated_resumes');
+  }
+
+  assert.equal(result.persisted, true, 'a guard refusal that clears is not a lost CAS and not a failure');
+  const stored = readApplicationReview((await rowById(seeded.id)).spec)!;
+  assert.equal(stored.packet_audit?.audit_digest, result.audit.audit_digest,
+    'and the audit it reports is the audit the row actually holds');
+});
