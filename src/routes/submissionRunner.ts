@@ -165,6 +165,8 @@ import {
 } from '../lib/ashbyPublicApplication';
 import {
   exactManagedSubmitVerdict,
+  employerRefusalReleasePatch,
+  employerSubmitRefusalReason,
   isManagedRunTimeout,
   managedSubmitVerdict,
   observeManagedReceiptOnce,
@@ -350,6 +352,7 @@ import {
   submissionBoundaryAuthorization,
   submissionAttemptEventId,
   submissionAttemptEventsForPacket,
+  submissionAttemptRetrySafety,
   submissionAttemptsOpenedToday,
   SubmissionAccountDeletionDrainError,
   type SubmissionBoundaryAuthorization,
@@ -1409,6 +1412,94 @@ export async function recordManagedAuthorizedAttemptUnverified(
     const updated = await tx.update(generated_resumes).set({
       spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
     }).where(and(...conditions)).returning({ id: generated_resumes.id });
+    return updated.length > 0;
+  });
+}
+
+type ManagedAuthorizedRefusedInput = {
+  httpStatus: number;
+  code?: string;
+  attentionReason: string;
+  previewUrl?: string;
+  cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
+  cleanupQuarantines?: readonly ManagedTerminalCleanupQuarantine[];
+};
+
+/**
+ * Every submit request the employer's own answer proves was refused before anything was filed.
+ *
+ * Sibling to recordManagedAuthorizedAttemptUnverified above, and deliberately NOT built on top of
+ * it: that function's whole contract is "the parent stays an unresolved unverified record", and
+ * this one exists precisely because employerSubmitRefusalProof (lib/managedSubmitOutcome.ts) is
+ * strong enough that the applicant should not have to be asked. Closes the ledger attempt with a
+ * not_sent_proven/employer_rejected_not_filed fact and releases the claim in the SAME transaction
+ * as the review write, so a lost race can never leave one done without the other - the same
+ * discipline writeReviewWithRunnerNotSentFact above uses for the pre-click case. The post-write fold
+ * check mirrors POST /applications/:id/submission/unverified's own belt-and-suspenders assertion:
+ * if submissionAttemptRetrySafety ever disagreed that this fact closed the attempt, writing the
+ * review anyway would strand it unclaimed while every ledger-reading gate kept refusing it.
+ */
+export async function recordManagedAuthorizedAttemptRefused(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  input: ManagedAuthorizedRefusedInput,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview
+      || latestReview.submission_claim_id !== attemptBinding.attemptId
+      || latestReview.submission_run_id !== attemptBinding.submissionRunId) return false;
+    const authorization = await submissionBoundaryAuthorization(
+      row.user_id,
+      attemptBinding.attemptId,
+      { executor: tx },
+    );
+    if (!authorization) return false;
+    const exactEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    if (exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+        || event.event_kind === 'not_sent_proven')) return false;
+    const evidenceCode = input.code
+      ? `employer_refusal_code:${input.code}`
+      : `employer_refusal_status:${input.httpStatus}`;
+    await appendSubmissionAttemptEvent({
+      ...attemptBinding,
+      eventId: submissionAttemptEventId(attemptBinding.attemptId, 'not_sent_proven', 'employer-refused-submit'),
+      eventKind: 'not_sent_proven',
+      proofKind: 'employer_rejected_not_filed',
+      evidenceCode,
+    }, { executor: tx });
+    const resolvedEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    const resolvedSafety = submissionAttemptRetrySafety(resolvedEvents);
+    if (resolvedSafety.kind !== 'safe_not_sent' || resolvedSafety.proofKind !== 'employer_rejected_not_filed') {
+      throw new Error('EMPLOYER_REFUSAL_NOT_SENT_FACT_INCOMPLETE');
+    }
+    const released = nextReview(latestReview, employerRefusalReleasePatch(latestReview, {
+      at: resolvedSafety.resolvedAt,
+      httpStatus: input.httpStatus,
+      ...(input.code ? { code: input.code } : {}),
+      attentionReason: input.attentionReason,
+      ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
+    }));
+    const foldedSpec = specWithManagedTerminalFold(
+      latest.spec,
+      released,
+      input.cleanupMarkers ?? [],
+      input.cleanupQuarantines ?? [],
+    );
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`${JSON.stringify(foldedSpec)}::jsonb`,
+    }).where(and(
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+    )).returning({ id: generated_resumes.id });
     return updated.length > 0;
   });
 }
@@ -11312,6 +11403,35 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       (receiptResult.blockers ?? []) as readonly string[],
       receiptResult,
     ));
+    /* 'employer_refused' IS PROVEN FROM THE WIRE, NOT FROM THE PAGE, so unlike the 'refused' arm
+     * right below it, it is allowed to machine-close the parent even after authorization. The
+     * verdict already carried its own proof through exactManagedSubmitVerdict
+     * (employerSubmitRefusalProof in lib/managedSubmitOutcome.ts): a 4xx on the exact bound
+     * posting's own submit endpoint, corroborated by the employer's rendered refusal banner or a
+     * recognised pre-filing refusal code. recordManagedAuthorizedAttemptRefused records that as a
+     * not_sent_proven/employer_rejected_not_filed ledger fact - never an applicant attestation -
+     * and releases the claim, so the packet becomes needs_attention and retryable through the
+     * ordinary Review and send path instead of parking on "I found it there / It is not there". */
+    if (verdict.kind === 'employer_refused') {
+      await recordManagedAuthorizedAttemptRefused(row, attemptBinding, {
+        httpStatus: verdict.httpStatus,
+        ...(verdict.code ? { code: verdict.code } : {}),
+        attentionReason: employerSubmitRefusalReason({
+          code: verdict.code,
+          bannerText: verdict.bannerText,
+          securityCodeRecipient: verdict.securityCodeRecipient,
+        }),
+        previewUrl: blob.url,
+        cleanupMarkers: managedCleanupMarkers(),
+      });
+      await acknowledgeManagedCleanupMarkers();
+      fastify.log.warn({
+        applicationId: row.id,
+        httpStatus: verdict.httpStatus,
+        code: verdict.code ?? null,
+      }, 'Employer refused the submit request before filing; released the claim');
+      return;
+    }
     if (verdict.kind === 'refused') {
       const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
         ? 'rejected' as const

@@ -6809,3 +6809,77 @@ test('an optional unmatched select the applicant skipped is not raised again', a
     'a skip cannot silence a required control the employer will reject as empty',
   );
 });
+
+// ─── An employer refusal proven from the wire, not from an applicant's look ──────────────────
+//
+// SOURCE-LEVEL for the same reason every other test of the giant managed-submit function is:
+// the branch runs inside an unexported function that needs a database, a blob store and a managed
+// browser provider. recordManagedAuthorizedAttemptRefused IS exported, but it still needs a real
+// `db` to run, so what it means to have proven and to have released the claim is pinned
+// behaviourally instead, as two pure functions, in managedSubmitOutcome.test.ts:
+// employerSubmitRefusalProof (via exactManagedSubmitVerdict) and employerRefusalReleasePatch. What
+// only a source read can check here is the WIRING: that the new verdict is actually reached before
+// the pre-existing 'refused' arm, that it calls the new recorder rather than the applicant-facing
+// one, and that the recorder itself appends the ledger's own proof rather than an attestation.
+test('an employer_refused verdict is handled before the DOM-text refused arm, by its own recorder', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const verdictAt = source.indexOf('const verdict = exactManagedSubmitVerdict(receiptResult, applicationUrl);');
+  const employerRefusedAt = source.indexOf("verdict.kind === 'employer_refused'", verdictAt);
+  const refusedAt = source.indexOf("verdict.kind === 'refused'", verdictAt);
+  assert.ok(verdictAt > 0, 'the managed send path must ask the run what it saw');
+  assert.ok(employerRefusedAt > verdictAt);
+  assert.ok(refusedAt > verdictAt);
+  assert.ok(employerRefusedAt < refusedAt,
+    'the wire-proven refusal must be checked ahead of the DOM-text arm it is not built on top of');
+
+  const employerRefusedBranch = source.slice(employerRefusedAt, refusedAt);
+  assert.match(employerRefusedBranch, /await recordManagedAuthorizedAttemptRefused\(row, attemptBinding, \{/,
+    'a proven employer refusal must not go through recordManagedAuthorizedAttemptUnverified');
+  assert.doesNotMatch(employerRefusedBranch, /recordManagedAuthorizedAttemptUnverified/);
+  assert.match(employerRefusedBranch, /employerSubmitRefusalReason\(\{/);
+  assert.match(employerRefusedBranch, /httpStatus: verdict\.httpStatus/);
+});
+
+test('recordManagedAuthorizedAttemptRefused proves the ledger fact and never writes an attestation', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('export async function recordManagedAuthorizedAttemptRefused(');
+  assert.ok(start > 0, 'recordManagedAuthorizedAttemptRefused must exist');
+  const end = source.indexOf('\n/** Persist exact post-call uncertainty', start);
+  assert.ok(end > start);
+  const body = source.slice(start, end);
+
+  // The ledger gets the immutable, evidence-bearing fact - never an applicant attestation kind.
+  assert.match(body, /eventKind: 'not_sent_proven'/);
+  assert.match(body, /proofKind: 'employer_rejected_not_filed'/);
+  assert.doesNotMatch(body, /'applicant_checked_not_sent'/);
+  assert.doesNotMatch(body, /'applicant_checked_all_possible_destinations_not_sent'/);
+
+  // The write is only trusted once the ledger itself agrees the attempt is provably not-sent - the
+  // same belt-and-suspenders discipline POST /applications/:id/submission/unverified uses for her
+  // own look, so a future regression in the fold cannot silently strand a released-looking row
+  // whose ledger attempt still blocks every other gate that reads it.
+  assert.match(body, /submissionAttemptRetrySafety\(resolvedEvents\)/);
+  assert.match(body, /resolvedSafety\.kind !== 'safe_not_sent'/);
+
+  // The review patch is the extracted, pure, separately-tested function - not reimplemented here.
+  assert.match(body, /employerRefusalReleasePatch\(latestReview, \{/);
+  assert.doesNotMatch(body, /unverified_submission:/,
+    'this function must never itself write an unverified_submission record');
+});
+
+test('the ledger admits employer_rejected_not_filed to close an authorized attempt, alongside her own look', () => {
+  const source = readFileSync('src/lib/submissionAttemptLedger.ts', 'utf8');
+  const start = source.indexOf('const AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS = new Set');
+  assert.ok(start > 0);
+  const end = source.indexOf(']);', start);
+  const admissible = source.slice(start, end);
+  assert.match(admissible, /'applicant_checked_not_sent'/);
+  assert.match(admissible, /'applicant_checked_all_possible_destinations_not_sent'/);
+  assert.match(admissible, /'employer_rejected_not_filed'/);
+  // Deliberately not widened to every not-sent proof kind at once - see
+  // submissionAttemptLedger.test.ts for the behavioural regression guard on this.
+  assert.doesNotMatch(admissible, /'provider_definitive_rejection'/);
+  assert.doesNotMatch(admissible, /'employer_verification_pending_not_filed'/);
+
+  assert.match(source, /authorizationContradictsProof = authorized\.length > 0\s*\n\s*&& !\(resolutionProof && AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS\.has\(resolutionProof\)\)/);
+});

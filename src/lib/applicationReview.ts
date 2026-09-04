@@ -323,6 +323,17 @@ export type ApplicationAttentionCategory =
    * something rather than a person fixing something, and because a state this expensive to be in
    * has to be countable. */
   | 'unverified_submission'
+  /* THE EMPLOYER'S OWN SERVER ANSWERED, AND THE ANSWER WAS NO - before anything was filed.
+   *
+   * Deliberately NOT 'unverified_submission': that category means Litos pressed Send and cannot
+   * say what happened, and its whole point is that a PERSON has to go look. Here nothing is
+   * uncertain - the submit request's own response proved the employer refused it (a 4xx on the
+   * exact bound posting's own submit endpoint, corroborated by the employer's rendered refusal
+   * banner or a pre-filing refusal code), so there is nothing to look for and no question to ask.
+   * Deliberately NOT 'run_failed' either: nothing broke, the employer's own server did exactly
+   * what it was asked and said no. See ApplicationReviewState.employer_refusal and
+   * managedSubmitOutcome.ts's employerSubmitRefusalProof for the proof this category records. */
+  | 'employer_refused'
   /* The packet's generated resume passed its 30-day retention window and the file was deleted, so
    * there was nothing to send and nothing was sent. Deliberately NOT 'required_document', which
    * means an EMPLOYER is waiting on a document from the applicant, and deliberately not
@@ -1296,9 +1307,26 @@ export type ApplicationReviewState = {
    * whatever run took it. Presence of this record proves a release occurred; it is never read as a
    * licence for anything, and a later run that takes a fresh claim leaves it in place as history. */
   claim_released?: {
-    cause: 'attended_handoff_expired' | 'attempt_never_reached_employer';
+    cause: 'attended_handoff_expired' | 'attempt_never_reached_employer' | 'employer_refused_before_filing';
     claim_id?: string;
     released_at: string;
+  };
+  /* THE EMPLOYER'S OWN ANSWER, STRUCTURED SO A QUERY CAN FIND IT WITHOUT GREPPING attention_reason.
+   *
+   * Written only alongside attention_categories including 'employer_refused', and only by
+   * recordManagedAuthorizedAttemptRefused (routes/submissionRunner.ts), which also closes the
+   * ledger attempt with a not_sent_proven/employer_rejected_not_filed fact carrying the same
+   * http_status and code as evidence. See employerSubmitRefusalProof in managedSubmitOutcome.ts for
+   * what has to be true before this is ever set: a 4xx (never a login wall) on the bound posting's
+   * own submit endpoint, with the form still on screen, corroborated by the employer's own rendered
+   * refusal text or by a recognised pre-filing refusal code in the response body.
+   *
+   * `code` is present only when the response body carried a recognised code (today, one of
+   * Greenhouse's own pre-filing refusal codes); a refusal proven by banner text alone omits it. */
+  employer_refusal?: {
+    http_status: number;
+    code?: string;
+    at: string;
   };
   /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
    *

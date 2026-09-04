@@ -8,6 +8,8 @@ import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+  employerRefusalReleasePatch,
+  employerSubmitRefusalReason,
   isManagedNoSubmitControl,
   isManagedRunTimeout,
   managedSubmitVerdict,
@@ -1516,6 +1518,44 @@ describe('the submit network record', () => {
     })?.network, null);
   });
 
+  test('body_excerpt, content_type and transport_disposition are read defensively when present', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: [{
+          method: 'POST',
+          url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083?x=1',
+          status: 428,
+          body_excerpt: '{"code":"captcha-retry"}',
+          content_type: 'application/json; charset=utf-8',
+          transport_disposition: 'completed',
+        }],
+      },
+    });
+    assert.deepEqual(outcome?.network, [{
+      method: 'POST',
+      url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083',
+      status: 428,
+      body_excerpt: '{"code":"captcha-retry"}',
+      content_type: 'application/json; charset=utf-8',
+      transport_disposition: 'completed',
+    }]);
+  });
+
+  test('a run from before the sibling stratus PR carries none of the three, and that is fine', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: [{ method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 428 }],
+      },
+    });
+    assert.deepEqual(outcome?.network, [
+      { method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 428 },
+    ]);
+  });
+
   test('the record is bounded at twenty entries on this side too', () => {
     const outcome = readManagedSubmitOutcome({
       submitOutcome: {
@@ -1652,6 +1692,265 @@ describe('the client-validation refusal', () => {
       ...base, source: 'ats_state', message: 'Something went wrong', formStillPresent: true,
     } });
     assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+});
+
+/* THE TWO MEASURED SENDS THIS VERDICT EXISTS FOR, both 2026-09-04: Sage (packet
+ * aae653a3-2d5a-4f3e-ba3b-afea4219df37, run 46f50a9b) and Hudson River Trading (packet
+ * 4a79eec1-5c65-4dd4-8e72-e119fbfbd733). Both fired `POST .../embed/<board>/jobs/<id>`, both got
+ * back 428, both left submitOutcome.state 'unknown' with the form still mounted, and both left the
+ * observed page text reading Greenhouse's own refusal banner verbatim. */
+describe('the submit request itself proves an employer refusal', () => {
+  const APPLY_URL = 'https://job-boards.greenhouse.io/embed/job_app?for=wehrtyou&token=8052083';
+  const BANNER = 'There was an error processing your application. Please try again.';
+
+  function unknownResult(over: {
+    status?: number | null;
+    url?: string;
+    body_excerpt?: string;
+    content_type?: string;
+    message?: string | null;
+    formStillPresent?: boolean | null;
+  } = {}) {
+    return {
+      url: APPLY_URL,
+      submitOutcome: {
+        pressed: true,
+        state: 'unknown',
+        source: null,
+        evidence: null,
+        message: over.message === undefined ? BANNER : over.message,
+        formStillPresent: over.formStillPresent === undefined ? true : over.formStillPresent,
+        network: [{
+          method: 'POST',
+          url: over.url ?? 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083',
+          status: over.status === undefined ? 428 : over.status,
+          ...(over.body_excerpt !== undefined ? { body_excerpt: over.body_excerpt } : {}),
+          ...(over.content_type !== undefined ? { content_type: over.content_type } : {}),
+        }],
+      },
+    };
+  }
+
+  test('a 428 with the employer’s own banner still on screen is proven, not just unverified', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult(), APPLY_URL);
+    assert.deepEqual(verdict, {
+      kind: 'employer_refused',
+      cause: 'employer_refused_submit',
+      httpStatus: 428,
+      bannerText: BANNER,
+    });
+  });
+
+  test('a body_excerpt code proves it even with no banner text at all', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      message: null,
+      body_excerpt: JSON.stringify({ code: 'captcha-retry' }),
+    }), APPLY_URL);
+    assert.deepEqual(verdict, {
+      kind: 'employer_refused',
+      cause: 'employer_refused_submit',
+      httpStatus: 428,
+      code: 'captcha-retry',
+    });
+  });
+
+  test('a security_code_recipient in the body rides along with the code', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      message: null,
+      body_excerpt: JSON.stringify({ code: 'captcha-failed', security_code_recipient: 'app-alias@example.com' }),
+    }), APPLY_URL);
+    assert.equal(verdict.kind, 'employer_refused');
+    if (verdict.kind !== 'employer_refused') return;
+    assert.equal(verdict.code, 'captcha-failed');
+    assert.equal(verdict.securityCodeRecipient, 'app-alias@example.com');
+  });
+
+  test('a 428 on a DIFFERENT job id is never read as this posting’s own answer', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/9999999',
+    }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a 428 on a different board (same job id) is also never read as this posting’s own answer', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      url: 'https://boards.greenhouse.io/embed/someoneelse/jobs/8052083',
+    }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a 4xx on an unrelated request (analytics, a captcha vendor) proves nothing', () => {
+    const verdict = exactManagedSubmitVerdict({
+      url: APPLY_URL,
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: BANNER, formStillPresent: true,
+        network: [
+          { method: 'POST', url: 'https://browser-intake-datadoghq.com/api/v2/rum', status: 429 },
+          { method: 'GET', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 428 },
+        ],
+      },
+    }, APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+      'a GET is not a submit, and an analytics 4xx is not the employer answering');
+  });
+
+  test('a 200/3xx submit with an unknown DOM state keeps today’s unverified handling', () => {
+    for (const status of [200, 201, 302]) {
+      const verdict = exactManagedSubmitVerdict(unknownResult({ status }), APPLY_URL);
+      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+        `status ${status} must never be read as a refusal`);
+    }
+  });
+
+  test('401 and 403 are login walls, not the employer answering the application', () => {
+    for (const status of [401, 403]) {
+      const verdict = exactManagedSubmitVerdict(unknownResult({ status }), APPLY_URL);
+      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+        `status ${status} must keep its existing (unchanged) behaviour`);
+    }
+  });
+
+  test('the form actually gone (navigation happened) is left to whatever it navigated to', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({ formStillPresent: false }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('neither a recognised banner nor a recognised code leaves the existing verdict untouched', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      message: 'Something went wrong. Please contact support.',
+      body_excerpt: JSON.stringify({ code: 'unrecognised-future-code' }),
+    }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a truncated body_excerpt that is not valid JSON degrades to null, not a throw', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      message: null,
+      body_excerpt: '{"code":"captcha-ret',
+    }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a non-JSON content-type is never parsed for a code, even if the body looks like JSON', () => {
+    const verdict = exactManagedSubmitVerdict(unknownResult({
+      message: null,
+      body_excerpt: JSON.stringify({ code: 'captcha-retry' }),
+      content_type: 'text/html; charset=utf-8',
+    }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a confirmed verdict is never downgraded by an incidental 4xx elsewhere in the network record', () => {
+    // Belt and suspenders on top of the URL binding above: even a MATCHING-shaped 4xx must not
+    // unseat a verdict that already resolved to 'confirmed' through the ATS's own state.
+    const verdict = exactManagedSubmitVerdict({
+      url: 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083/confirmation',
+      submitOutcome: {
+        pressed: true, state: 'confirmed', source: 'ats_route',
+        evidence: 'greenhouse:/wehrtyou/jobs/8052083/confirmation',
+        message: 'Thank you for applying', formStillPresent: false,
+        network: [{ method: 'POST', url: 'https://boards.greenhouse.io/embed/wehrtyou/jobs/8052083', status: 428 }],
+      },
+    }, 'https://job-boards.greenhouse.io/wehrtyou/jobs/8052083');
+    assert.equal(verdict.kind, 'confirmed');
+  });
+});
+
+describe('the plain-words sentence for a proven employer refusal', () => {
+  test('a CAPTCHA-shaped code uses the exact required sentence', () => {
+    for (const code of ['captcha-failed', 'captcha-retry']) {
+      const reason = employerSubmitRefusalReason({ code });
+      assert.match(reason,
+        /Greenhouse’s automated check refused this attempt before anything was filed\. Nothing has gone to the employer\./);
+    }
+  });
+
+  test('a non-captcha code is named, not hidden behind the generic sentence', () => {
+    const reason = employerSubmitRefusalReason({ code: 'invalid-attributes' });
+    assert.match(reason, /invalid-attributes/);
+    assert.match(reason, /Nothing has gone to the employer/);
+  });
+
+  test('a banner-only refusal quotes what the employer actually showed', () => {
+    const reason = employerSubmitRefusalReason({
+      bannerText: 'There was an error processing your application. Please try again.',
+    });
+    assert.match(reason, /There was an error processing your application/);
+    assert.match(reason, /Nothing has gone to the employer/);
+  });
+
+  test('a security-code recipient is named so she knows a fallback code was sent', () => {
+    const reason = employerSubmitRefusalReason({
+      code: 'captcha-failed',
+      securityCodeRecipient: 'app-alias@example.com',
+    });
+    assert.match(reason, /emailed a verification code to app-alias@example\.com/);
+  });
+
+  test('every variant tells her the attempt was released and it is safe to send again', () => {
+    for (const input of [
+      { code: 'captcha-retry' },
+      { code: 'invalid-attributes' },
+      { bannerText: 'There was an error processing your application. Please try again.' },
+    ]) {
+      assert.match(employerSubmitRefusalReason(input), /released this attempt/);
+    }
+  });
+});
+
+/* PURE ON PURPOSE. recordManagedAuthorizedAttemptRefused (routes/submissionRunner.ts) is a thin DB
+ * transaction around this patch plus the ledger append; this is the extracted mapping function the
+ * transaction cannot be unit-tested without a database, so this is what proves the review shape:
+ * needs_attention, the claim released, unverified_submission left unset, employer_refusal set. */
+describe('the review patch for a proven employer refusal', () => {
+  test('the claim is released and unverified_submission is never set beside it', () => {
+    const patch = employerRefusalReleasePatch({ submission_claim_id: 'claim-123' }, {
+      at: '2026-09-04T20:00:00.000Z',
+      httpStatus: 428,
+      code: 'captcha-retry',
+      attentionReason: 'Greenhouse’s automated check refused this attempt before anything was filed.',
+      previewUrl: 'https://blob.example/receipt.png',
+    });
+    assert.equal(patch.status, 'needs_attention');
+    assert.equal(patch.submission_claimed_at, undefined);
+    assert.equal(patch.submission_claim_id, undefined);
+    assert.equal(patch.submission_packet_version, undefined);
+    assert.equal(patch.submission_authorization, undefined);
+    assert.equal(patch.submission_attempted_at, undefined);
+    // The one field the memory of this whole class of bug is about: this must stay unset, or the
+    // dashboard renders "I found it there / It is not there" for an outcome that is already known.
+    assert.equal(patch.unverified_submission, undefined);
+    assert.deepEqual(patch.attention_categories, ['employer_refused']);
+    assert.deepEqual(patch.employer_refusal, { http_status: 428, code: 'captcha-retry', at: '2026-09-04T20:00:00.000Z' });
+    assert.deepEqual(patch.claim_released, {
+      cause: 'employer_refused_before_filing',
+      claim_id: 'claim-123',
+      released_at: '2026-09-04T20:00:00.000Z',
+    });
+    assert.equal(patch.preview_screenshot_url, 'https://blob.example/receipt.png');
+  });
+
+  test('a banner-only refusal omits code rather than writing an empty one', () => {
+    const patch = employerRefusalReleasePatch({ submission_claim_id: 'claim-456' }, {
+      at: '2026-09-04T20:05:00.000Z',
+      httpStatus: 428,
+      attentionReason: 'Greenhouse refused this submit request before filing it.',
+    });
+    assert.deepEqual(patch.employer_refusal, { http_status: 428, at: '2026-09-04T20:05:00.000Z' });
+    assert.ok(!('code' in (patch.employer_refusal as object)));
+  });
+
+  test('no claim id on the review still releases cleanly, with no claim_id key written', () => {
+    const patch = employerRefusalReleasePatch({ submission_claim_id: undefined }, {
+      at: '2026-09-04T20:10:00.000Z',
+      httpStatus: 428,
+      attentionReason: 'Greenhouse refused this submit request before filing it.',
+    });
+    assert.deepEqual(patch.claim_released, {
+      cause: 'employer_refused_before_filing',
+      released_at: '2026-09-04T20:10:00.000Z',
+    });
   });
 });
 
