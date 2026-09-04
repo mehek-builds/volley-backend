@@ -3462,9 +3462,20 @@ test('every managed provider start, continuation POST, and direct session creati
   const createStart = resourceSource.indexOf('export async function createFencedBrowserSession(');
   const createEnd = resourceSource.indexOf('\nasync function markResourceGone', createStart);
   const create = resourceSource.slice(createStart, createEnd);
+  /* The ordering below is unchanged; the KEY it is ordered around is not. This transaction spans
+   * createReservedBrowserSession, a provider POST bounded at 15s, and it used to span it holding
+   * the LEDGER key - the one the revision trigger takes on every write to the account - so each
+   * session creation made 15 seconds of that account's writes answer 503 "This account changed at
+   * the same time". That is the same defect this test's own header describes for
+   * withProviderCallFence, in the one place that took the key directly instead of through it.
+   *
+   * The deletion fence is untouched by the swap: account deletion takes BOTH keys (asserted
+   * above, ledger first), so holding the provider-call key alone still excludes a drain. */
+  assert.ok(!create.includes('await lockSubmissionAttemptUser('),
+    'a 15s provider POST must not hold the key every write on the account needs');
   assert.ok(create.indexOf('reserveBrowserProviderResource({')
-    < create.indexOf('await lockSubmissionAttemptUser(tx, input.userId)'));
-  assert.ok(create.indexOf('await lockSubmissionAttemptUser(tx, input.userId)')
+    < create.indexOf('await lockSubmissionProviderCallUser(tx, input.userId)'));
+  assert.ok(create.indexOf('await lockSubmissionProviderCallUser(tx, input.userId)')
     < create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)'));
   assert.ok(create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)')
     < create.indexOf('await createReservedBrowserSession('));
