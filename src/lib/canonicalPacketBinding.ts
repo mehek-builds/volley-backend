@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db';
 import {
   application_artifacts,
@@ -15,6 +15,16 @@ import {
 import { parseCanonicalFreeVersionedDocumentBinding } from './canonicalFreeDocumentBinding';
 
 export type CanonicalPacketBindingExecutor = Pick<typeof db, 'select'>;
+
+/** `canonicalApplicationForNewPacketAttempt` alone needs to heal a stale label, so it alone needs
+ * write access. Every other function in this file stays read-only. */
+export type CanonicalPacketBindingWriteExecutor = CanonicalPacketBindingExecutor & Pick<typeof db, 'update'>;
+
+/* A job id lives on `applications.job_id`, a `uuid` column, so a healed value must have that exact
+ * shape or Postgres refuses the whole update - which must never take the packet's send down with
+ * it. Same layout `applicationPortalRepair.ts:jobContextJobId` already holds `job_context.job_id`
+ * to, because both read the same `monitored_jobs.id`. */
+const CANONICAL_JOB_ID_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class CanonicalPacketBindingError extends Error {
   constructor(readonly code:
@@ -185,19 +195,118 @@ function oneExactCandidate(
 }
 
 /**
+ * Heal a CURRENT pointer's stale posting-identity columns toward the packet's own live identity.
+ *
+ * `applications.company_name`/`role`/`job_id`/`portal_url` are a snapshot written once, at the
+ * generating INSERT (src/routes/resume.ts) or at linkGeneratedPacketToCanonicalApplication, and
+ * never refreshed afterward - no writer in canonicalApplicationSync.ts touches them again. But the
+ * PACKET's own posting identity is not static: repairReviewPortalFromMonitoredJob restores
+ * `_review.portal_url` from `monitored_jobs.apply_url` on every prepare (submissionRunner.ts
+ * prepare(), and the submit-request route before it), because a job board's displayed URL and its
+ * actual apply destination can carry different provider tokens for the same posting - measured on
+ * Hudson River Trading itself, packet 4a79eec1, 2026-09-02 (see the comment on keepUsedPortal in
+ * applicationPortalRepair.ts): the fill ran against job-boards.greenhouse.io/wehrtyou, a board
+ * token neither the posting's public URL nor the canonical row's stored portal_url would guess.
+ * atsPostingKey encodes that token, and frozenPostingIdentitiesMatch requires an EXACT postingKey
+ * match once one is present on the frozen side - so a canonical row created before that repair
+ * last ran, or before this exact pair of prepares, silently stops matching its own packet.
+ *
+ * This is the fix for the DATA, not the check: the pointer (legacy_generated_resume_id, unique per
+ * packet, set once via an explicit link write) already proves this row is the one and only current
+ * owner of this packet for this exact user. Once that is proven, the row's posting-identity columns
+ * are a label describing what the pointer already established, and the packet - fresher by
+ * construction, since every fill discovers the real destination - is the more current source for
+ * that label. Ownership is untouched: this never runs unless `user_id` and the unique pointer
+ * already matched, and it never widens which packet a canonical row may point at.
+ *
+ * Conservative in one more direction: a field is only overwritten when the packet's OWN frozen
+ * identity holds a real value for it. A packet that does not know its own job id must not erase one
+ * the canonical row already has, because frozenPostingIdentitiesMatch never required agreement on a
+ * field the frozen side leaves unset either - erasing it here would fix nothing and destroy
+ * evidence for a still-unrelated reason to refuse.
+ */
+async function reconcileCurrentPointerPostingIdentity(
+  executor: CanonicalPacketBindingWriteExecutor,
+  input: { userId: string; packetId: string },
+  candidate: typeof applications.$inferSelect,
+  frozen: FrozenPostingIdentity,
+): Promise<typeof applications.$inferSelect | null> {
+  const patch: Partial<typeof applications.$inferInsert> = {};
+  if (frozen.companyRole && frozen.company && frozen.company !== candidate.company_name) {
+    patch.company_name = frozen.company;
+  }
+  if (frozen.companyRole && frozen.role && frozen.role !== candidate.role) {
+    patch.role = frozen.role;
+  }
+  if (frozen.portalUrl && frozen.portalUrl !== candidate.portal_url) {
+    patch.portal_url = frozen.portalUrl;
+  }
+  if (frozen.jobId && CANONICAL_JOB_ID_UUID.test(frozen.jobId) && frozen.jobId !== candidate.job_id) {
+    patch.job_id = frozen.jobId;
+  }
+  // Nothing on the packet's own identity disagrees with a value the row actually has, so there is
+  // no label this function can honestly correct. Whatever refused the match is not a stale label.
+  if (Object.keys(patch).length === 0) return null;
+  const [healed] = await executor.update(applications).set({
+    ...patch,
+    updated_at: new Date(),
+  }).where(and(
+    eq(applications.id, candidate.id),
+    eq(applications.user_id, input.userId),
+    // The pointer itself must still name this exact packet at write time, not only at read time.
+    eq(applications.legacy_generated_resume_id, input.packetId),
+    // CAS against the exact row this decision was made from, so a concurrent writer - another
+    // heal, a fresh tailor, a consolidation - is never silently overwritten by a stale read.
+    sql`${applications.company_name} is not distinct from ${candidate.company_name}`,
+    sql`${applications.role} is not distinct from ${candidate.role}`,
+    sql`${applications.portal_url} is not distinct from ${candidate.portal_url}`,
+    sql`${applications.job_id} is not distinct from ${candidate.job_id}`,
+  )).returning();
+  return healed ?? null;
+}
+
+/**
  * Resolve the canonical row before an attempt is opened. The caller must already hold the shared
  * submission-user transaction lock. A new employer boundary may open only for the packet currently
  * selected by the canonical row. Immutable artifact links recover historical receipts, but they
  * cannot revive a superseded packet or silently establish a missing mutable pointer.
+ *
+ * A CURRENT pointer that fails only the posting-identity check is healed once, in place, and
+ * re-checked - see reconcileCurrentPointerPostingIdentity for why that is a data repair and not a
+ * loosened check. Healing is attempted only when the pointer query returns EXACTLY one row: zero
+ * rows is a genuinely missing pointer (nothing to heal), and `applications_legacy_resume_unique`
+ * guarantees it can never be more than one.
  */
 export async function canonicalApplicationForNewPacketAttempt(
-  executor: CanonicalPacketBindingExecutor,
+  executor: CanonicalPacketBindingWriteExecutor,
   input: { userId: string; packetId: string; postingIdentity: FrozenPostingIdentity },
 ): Promise<typeof applications.$inferSelect> {
-  return oneExactCandidate(
-    await currentPacketPointerCandidates(executor, input),
-    input.postingIdentity,
-  );
+  const candidates = await currentPacketPointerCandidates(executor, input);
+  try {
+    return oneExactCandidate(candidates, input.postingIdentity);
+  } catch (error) {
+    if (!(error instanceof CanonicalPacketBindingError)
+      || error.code !== 'CANONICAL_PACKET_BINDING_MISSING'
+      || candidates.length !== 1) {
+      throw error;
+    }
+    const healed = await reconcileCurrentPointerPostingIdentity(
+      executor,
+      input,
+      candidates[0]!,
+      input.postingIdentity,
+    );
+    if (healed && canonicalApplicationMatchesFrozenPosting(healed, input.postingIdentity)) {
+      return healed;
+    }
+    // Either the mismatch was not repairable from the packet's own identity, or the CAS above lost
+    // to a concurrent writer. Re-read once, fresh, and answer honestly - never fabricate a match a
+    // freshly-read row does not actually have.
+    return oneExactCandidate(
+      await currentPacketPointerCandidates(executor, input),
+      input.postingIdentity,
+    );
+  }
 }
 
 /**
