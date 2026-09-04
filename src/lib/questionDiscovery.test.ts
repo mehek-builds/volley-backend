@@ -4556,6 +4556,22 @@ test('a minor child, offense, infraction, injury or age is never the academic mi
   }
 });
 
+// A control asking for BOTH facts in one label still classifies 'minor' (MINOR_ACADEMIC_CUE's own
+// `major` alternative sees that word sitting right beside "minor" and calls it academic, correctly)
+// and still declines: one stored major is not an honest answer to a control that also asks for a
+// minor she does not have.
+test('a compound major-and-minor label still declines rather than answering half the question', () => {
+  const ap: ApplicationProfileLike = {
+    school: 'University of Southern California, Viterbi School of Engineering',
+    major: 'Computer Science',
+  };
+
+  for (const label of ['Major and minor', 'Field of study (major or minor)']) {
+    assert.equal(classifyField(label), 'minor', label);
+    assert.equal(resolveKnownAnswer(label, 'text', ap, undefined), null, label);
+  }
+});
+
 /* ---- one control, one answer, whatever the caller knows about its type ----
  *
  * Teamtailor welds the placeholder and the control's name attributes into the captured label, so
