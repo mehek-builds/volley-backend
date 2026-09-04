@@ -559,6 +559,79 @@ for (const [name, evidence] of SEND_EVIDENCE) {
   });
 }
 
+/* `failed` READS THE ROW THE SAME WAY, NOT THE STATUS LIST.
+ *
+ * reviewAnswerSaveDisposition names five statuses outright (submitted, awaiting_security_code,
+ * preparing, filling, submitting, submit_requested-with-a-claim, ready_for_final_approval) and falls
+ * through to employerMayHoldApplication for everything else, `failed` included. That is deliberate:
+ * a packet audit that fails before any browser interaction is exactly the ordinary case this route
+ * exists for (see 'an application still being prepared accepts the save' above), and a blanket reject
+ * on the status word alone would refuse that one too. What the row carries decides it, exactly as it
+ * already does for needs_attention just above - same four facts, same predicate, same 409.
+ *
+ * Measured live 2026-09-04, Hudson River Trading application 4a79eec1-5c65-4dd4-8e72-e119fbfbd733:
+ * `ready_for_final_approval` with the send gate clear (see hrtPacketSendPathComposition.test.ts), a
+ * submit-request run attempted, and the run failed on an unrelated GPA-control defect (#920, since
+ * fixed) after the attempt was already under way. A row that reaches an employer's page and stops
+ * there is precisely the case `submission_attempted_at` exists to flag; `failed` never clears it. */
+const FAILED_SEND_EVIDENCE: Array<[string, Partial<ApplicationReviewState>]> = [
+  ['a recorded submit attempt', { submission_attempted_at: STOPPED_AT }],
+  ['the employer\'s own confirmation', {
+    receipt: {
+      confirmation_text: 'Thanks for applying to kos.',
+      final_url: `${PORTAL_URL}/confirmation`,
+      captured_at: STOPPED_AT,
+    },
+  }],
+  ['an unresolved unverified submission', {
+    unverified_submission: { at: STOPPED_AT, cause: 'no_confirmation_state', portal_url: PORTAL_URL },
+  }],
+  ['a standing security code wall', {
+    security_code: { digits: 6, requested_at: STOPPED_AT, submit_was_authorized: true },
+  }],
+];
+
+for (const [name, evidence] of FAILED_SEND_EVIDENCE) {
+  test(`a failed run carrying ${name} refuses the save with the honest code, and is left untouched`, async () => {
+    const id = await applicationWith(stoppedRun({ status: 'failed', ...evidence }));
+
+    const response = await saveAnswers(id, 'No');
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE');
+    assert.equal(
+      response.json().error,
+      'These answers can no longer be edited from this application’s current submission state',
+      'the sentence the dashboard is required to render verbatim on the press that triggers this',
+    );
+
+    const persisted = await storedReview(id);
+    assert.equal(persisted.questions[0].answer, '',
+      'a failed row that may already be at an employer is refused exactly like a needs_attention one');
+    assert.equal(persisted.questions_reviewed_at, undefined, 'no review round is minted on a refusal');
+    assert.equal(persisted.status, 'failed', 'the refusal does not touch the status either');
+  });
+}
+
+/* AND `failed` IS NOT COLLATERAL EITHER. A packet audit can fail before the run ever reaches the
+ * employer's page - the ordinary shape of a `failed` row - and that packet's whole remaining ask can
+ * be exactly the answer this route exists to store. Asserted with every one of the four evidence
+ * fields absent, so a future change that starts keying this off the status word alone fails here
+ * first rather than only in the four tests above. */
+test('a failed run carrying no send evidence still accepts the save', async () => {
+  const id = await applicationWith(stoppedRun({
+    status: 'failed',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+  }));
+
+  const response = await saveAnswers(id, 'No');
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'No');
+  assert.equal(persisted.status, 'failed', 'a save leaves the status exactly where it found it');
+});
+
 /* HER LOOK IS THE RELEASE. The resolution route records 'not_sent' only after she has opened the
  * employer page and answered, releases the claim, and promises "Litos can send it again whenever
  * you are ready". Measured on the Easy Dynamics Rippling packet (2026-08-20): the promise was
