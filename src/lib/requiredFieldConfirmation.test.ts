@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
@@ -19,6 +19,8 @@ import {
   COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
   CRELATE_FINAL_SUBMIT_SELECTOR,
   MANAGED_ACTION_LIMIT,
+  MANAGED_BLOCKER_REASONS,
+  MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS,
   MANAGED_FINAL_SUBMIT_SELECTOR,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
   managedApplicationUsesAtomicSubmitV4,
@@ -1338,4 +1340,316 @@ test('an unreadable proof on a run that withheld the click is not reported as a 
   ((silent.requiredFieldConfirmation as { passes: Array<{ scope: Record<string, unknown> }> })
     .passes[0]!.scope).somethingNew = true;
   assert.ok(refusalFrom(silent) instanceof ManagedConfirmationUnprovenError, 'a runner silent about the press stays unknown');
+});
+
+/* THE RUNNER'S REFUSAL VOCABULARY IS NOT THIS SERVICE'S TO GUESS.
+ *
+ * `MANAGED_BLOCKER_REASONS` decides whether a refusal arrives with its cause or as
+ * contractError('blocker reason'). It sat at five entries while stratus-browser-cloud grew to
+ * thirty-six, so every v4 refusal outside those five — a page reaching for an unbound network
+ * transport, a payload that changed between binding and press, an application scope that went
+ * missing — reached the operator and the applicant as an unnamed contract violation. Nothing was
+ * sent, which is the part that held; nobody could tell what stopped it, which is the part that did
+ * not.
+ *
+ * These two tests are the reason it cannot drift back. The first pins the two copies inside this
+ * service to each other; the second pins this service to the runner's own source text. */
+
+const RUNNER_SOURCE_PATH = '../stratus-browser-cloud/src/managed-browser.js';
+
+/* Literals the runner-side patterns below reach that are NOT submit refusals. The quarantine file's
+ * `reason` is written while clearing stale provisioning artifacts, before any page is open. A new
+ * unclassified literal fails the test rather than landing here silently — deciding which of the two
+ * lists it belongs in is the whole job. */
+const NOT_A_BLOCKER_REASON = new Set(['stale_inactive_artifacts']);
+
+/** Every reason literal that can reach `passes[].blockerReason`, read out of the runner's source. */
+function runnerBlockerReasons(source: string): Set<string> {
+  const found = new Set<string>();
+  const collect = (pattern: RegExp, text = source) => {
+    for (const match of text.matchAll(pattern)) {
+      for (const group of match.slice(1)) if (group) found.add(group);
+    }
+  };
+  // Assigned straight onto the pass, including the `x || 'fallback'` forms.
+  collect(/blockerReason(?:\s*=|:|\s*\|\|)\s*'([a-z_]+)'/g);
+  collect(/blockerReason\s*=\s*[A-Za-z.?]+\s*\|\|\s*'([a-z_]+)'/g);
+  collect(/applicationScopeFailureReason\s*=\s*'([a-z_]+)'/g);
+  collect(/unsupportedReason(?:\s*=|:)\s*'([a-z_]+)'/g);
+  /* Reasons that reach blockerReason indirectly, through `gateResult.reason`, `guardResult.reason`
+   * and `transportBinding.unsupportedReason`. These are the ones a literal-only scan misses, and
+   * they are most of the list. */
+  collect(/\breason(?:\s*=|:|\s*\|\|)\s*'([a-z_]+)'/g);
+  collect(/\breason\s*=\s*[^;\n]*?\?\s*'([a-z_]+)'\s*:\s*'([a-z_]+)'/g);
+  collect(/blockActivation\('([a-z_]+)'/g);
+  /* `armActivation` reports by return value, and its result becomes the blockerReason whenever it
+   * is anything but 'armed'. Slice to that sentinel rather than scanning every `return` in a
+   * twenty-thousand-line file. */
+  const armStart = source.indexOf('const armActivation = (');
+  const armEnd = source.indexOf("return 'armed';", armStart);
+  assert.ok(armStart >= 0 && armEnd > armStart, 'armActivation still reports by return value');
+  collect(/return\s+'([a-z_]+)'/g, source.slice(armStart, armEnd));
+  for (const value of NOT_A_BLOCKER_REASON) found.delete(value);
+  return found;
+}
+
+test('the blocker reason union and the runtime allowlist are the same list', () => {
+  const source = readFileSync('src/lib/browserbase.ts', 'utf8');
+  const start = source.indexOf('blockerReason?:');
+  assert.ok(start >= 0, 'the confirmation proof still declares blockerReason');
+  const union = source.slice(start, source.indexOf(';', start)).replace(/\/\/[^\n]*/g, '');
+  const declared = new Set([...union.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]!));
+  assert.deepEqual(
+    [...declared].sort(),
+    [...MANAGED_BLOCKER_REASONS].sort(),
+    'browserbase.ts declares a reason portalSubmission.ts rejects at runtime, or the reverse',
+  );
+});
+
+/* CI checks out this repo alone, so there the runner source is absent and this test skips. It is
+ * the local pre-push signal for anyone who has both repos side by side, which is how the pair is
+ * actually developed. Making it a CI gate means checking the runner out in ci.yml. */
+const RUNNER_SOURCE_ABSENT = existsSync(RUNNER_SOURCE_PATH)
+  ? false
+  : `${RUNNER_SOURCE_PATH} is not checked out beside this repo`;
+
+test('blocker reasons stay in sync with the managed runner', { skip: RUNNER_SOURCE_ABSENT }, () => {
+  const emitted = runnerBlockerReasons(readFileSync(RUNNER_SOURCE_PATH, 'utf8'));
+  assert.ok(emitted.size > 30, `the scan found only ${emitted.size} reasons; the patterns went stale`);
+  const unknown = [...emitted].filter((reason) => !MANAGED_BLOCKER_REASONS.has(reason)).sort();
+  assert.deepEqual(unknown, [], 'the runner emits a blocker reason this service would reject as a contract error');
+  /* Deliberately one-directional. This service may keep a reason the runner has retired — a run
+     that started before the deploy still reports it — so extra entries here are correct, and
+     asserting set equality would force removals that break those runs. */
+});
+
+/* A PASS THAT BOUND NOTHING, AND WHY THE CONTRACT HAD TO LEARN TO READ ONE.
+ *
+ * The proof shape above asks every pass to name the form it bound and the control it pressed. Two
+ * of the runner's emissions are built at points where neither exists — managed-browser.js:15237,
+ * where the caller-bound application form was unusable, and :15300, where the security-code
+ * controls did not retain the exact code. Both refuse BEFORE any submit handle is resolved, and
+ * both say so by carrying null fingerprints.
+ *
+ * MEASURED ON THIS BRANCH BEFORE THE FIX. Fed the runner's literal payloads, the validator rejected
+ * them at contractError('scope kind') and contractError('scope identity') respectively — both of
+ * which run before the blockerReason check — so all six reasons those two sites can emit were
+ * unreachable, and what came out named an internal check instead of the cause. The classification
+ * happened to survive only because observedManagedSubmitWithheld read submitOutcome.pressed ===
+ * false out of the very payload the service had just called unreadable; strip that one field, as an
+ * older runner or a truncated retained result does, and the same run became
+ * ManagedConfirmationUnprovenError and told the applicant Litos had pressed Send.
+ *
+ * The fixtures below are the runner's object literals, field for field. They are the contract.
+ */
+const UNBOUND_SCOPE_MESSAGE = 'The caller-bound application form was unavailable at submit time';
+const UNBOUND_CODE_MESSAGE = 'The security code controls did not retain the exact caller-supplied code';
+
+/** managed-browser.js:15237 — nothing was bound, and the pass says so in every field. */
+function applicationScopeFailurePass(blockerReason: string) {
+  return {
+    submitKind: 'application' as const,
+    scope: {
+      scopeKind: null,
+      formFingerprint: null,
+      submitFingerprint: null,
+      formMatchCount: 0,
+      submitMatchCount: 0,
+      requiredControlCount: 0,
+      sameNode: false,
+    },
+    requiredControls: [],
+    attempts: [],
+    retries: 0,
+    unresolved: [UNBOUND_SCOPE_MESSAGE],
+    blockerReason,
+    submissionOutcome: 'blocked' as const,
+  };
+}
+
+/** managed-browser.js:15300 — a form was located and never identified, and no control was matched. */
+function securityCodeUnretainedPass() {
+  return {
+    submitKind: 'verification' as const,
+    scope: {
+      scopeKind: 'form',
+      formFingerprint: null,
+      submitFingerprint: null,
+      formMatchCount: 1,
+      submitMatchCount: 0,
+      requiredControlCount: 0,
+      sameNode: false,
+    },
+    requiredControls: [],
+    attempts: [],
+    retries: 0,
+    unresolved: [UNBOUND_CODE_MESSAGE],
+    blockerReason: 'successful_address_changed',
+    submissionOutcome: 'blocked' as const,
+  };
+}
+
+/** The whole result, with submitOutcome deliberately ABSENT unless a test supplies one. */
+function unboundRun(pass: unknown, submitOutcome?: unknown): Record<string, unknown> {
+  const result: Record<string, unknown> = {
+    requiredFieldConfirmation: { version: 2, status: 'blocked', passes: [pass] },
+  };
+  if (submitOutcome !== undefined) result.submitOutcome = submitOutcome;
+  return result;
+}
+
+function refusal(result: unknown, kind: 'application' | 'verification'): Error {
+  try {
+    assertManagedRequiredFieldsConfirmed(result, kind);
+  } catch (error) {
+    return error as Error;
+  }
+  return assert.fail('a blocked proof must never be accepted');
+}
+
+test('every application-scope refusal the runner can name reaches the operator', () => {
+  for (const reason of [
+    'application_scope_missing',
+    'application_scope_ambiguous',
+    'application_scope_not_form',
+    'application_scope_detached',
+    'application_scope_unavailable',
+  ]) {
+    const error = refusal(unboundRun(applicationScopeFailurePass(reason)), 'application');
+    assert.ok(error instanceof ManagedRequiredFieldConfirmationError, reason);
+    assert.ok(error instanceof NoSubmitControlError, `${reason} must classify as a pre-click stop`);
+    assert.ok(!(error instanceof ManagedConfirmationUnprovenError), `${reason} is not an unknown press`);
+    assert.deepEqual((error as ManagedRequiredFieldConfirmationError).fields,
+      [UNBOUND_SCOPE_MESSAGE, reason],
+      'the cause and the runner\'s own sentence both survive');
+    assert.doesNotMatch(error.message, /could not be read/, reason);
+  }
+});
+
+test('a security code the controls did not retain reaches the operator too', () => {
+  const error = refusal(unboundRun(securityCodeUnretainedPass()), 'verification');
+  assert.ok(error instanceof ManagedRequiredFieldConfirmationError);
+  assert.ok(error instanceof NoSubmitControlError);
+  assert.deepEqual((error as ManagedRequiredFieldConfirmationError).fields,
+    [UNBOUND_CODE_MESSAGE, 'successful_address_changed']);
+});
+
+/* THE SHAPE HAS TO SURVIVE THE WIRE, AND null IS THE REASON IT DOES. The runner publishes this
+ * payload with JSON.stringify (managed-browser.js:16977) and the backend reads it back out of the
+ * durable result, so every clause of the shape has to be a value JSON carries. An `undefined`
+ * scopeKind or fingerprint would be DROPPED in transit and land on a different branch — which is
+ * why the runner writes explicit nulls and why this asserts the verdict after a round trip rather
+ * than before it. */
+test('both unbound shapes survive the wire the runner actually sends them over', () => {
+  for (const [pass, kind] of [
+    [applicationScopeFailurePass('application_scope_detached'), 'application'],
+    [securityCodeUnretainedPass(), 'verification'],
+  ] as const) {
+    const sent = unboundRun(pass);
+    const received = JSON.parse(JSON.stringify(sent));
+    assert.deepEqual(received, sent, 'nothing in the shape may be a value JSON silently drops');
+    const error = refusal(received, kind);
+    assert.ok(error instanceof ManagedRequiredFieldConfirmationError,
+      'the round trip must not change the verdict');
+  }
+});
+
+/* THE BRANCH IS A HOLE IN A FAIL-CLOSED GATE, so the thing worth testing is not that it opens —
+ * it is that it stays shut for everything that is not exactly these two shapes. Each mutation below
+ * breaks ONE clause of unboundScopeProof and must put the pass back on the strict path. */
+test('an unbound pass that misses the shape by one field still fails closed', () => {
+  const mutations: Array<[string, (pass: Record<string, any>) => void]> = [
+    ['a fingerprint appears on the form side', (pass) => { pass.scope.formFingerprint = 'form_fingerprint_fixture_1234'; }],
+    ['a fingerprint appears on the submit side', (pass) => { pass.scope.submitFingerprint = 'submit_fingerprint_fixture_1234'; }],
+    ['a submit control claims to have matched', (pass) => { pass.scope.submitMatchCount = 1; }],
+    ['a form claims to have matched without a kind', (pass) => { pass.scope.formMatchCount = 1; }],
+    ['a container scope claims the unbound shape', (pass) => { pass.scope.scopeKind = 'container'; }],
+    ['the scope kind is silent rather than null', (pass) => { delete pass.scope.scopeKind; }],
+    ['a form scope claims it matched nothing', (pass) => { pass.scope.scopeKind = 'form'; }],
+    ['the scan claims to have found controls', (pass) => { pass.scope.requiredControlCount = 1; }],
+    ['the node comparison claims to have run', (pass) => { pass.scope.sameNode = true; }],
+    ['a control is listed', (pass) => {
+      pass.scope.requiredControlCount = 1;
+      pass.requiredControls = [{ selector: 'input[name="a"]', label: 'A', fieldType: 'text', matchCount: 1 }];
+    }],
+    ['an attempt is listed', (pass) => {
+      pass.attempts = [{ selector: 'input[name="a"]', label: 'A', fieldType: 'text', outcome: 'confirmed', attemptCount: 1 }];
+    }],
+    ['a retry is claimed', (pass) => { pass.retries = 1; }],
+    ['the outcome says a control was clicked', (pass) => { pass.submissionOutcome = 'clicked'; }],
+    ['the reason is dropped', (pass) => { delete pass.blockerReason; }],
+    ['the reason is not a string', (pass) => { pass.blockerReason = 1; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const pass = applicationScopeFailurePass('application_scope_missing') as Record<string, any>;
+    mutate(pass);
+    const error = refusal(unboundRun(pass), 'application');
+    assert.ok(
+      error instanceof ManagedConfirmationUnprovenError,
+      `${name}: a pass outside the pinned shape must not be read as a proven no-send, got ${error.name}`,
+    );
+  }
+});
+
+/* THE CLAUSE THAT DOES THE MOST WORK. A reason decided AFTER the press describes a run that already
+ * clicked, so reading its missing fingerprints as "there was nothing to press" inverts the truth.
+ * Those reasons never reach the branch even in an otherwise perfect unbound pass. */
+test('a post-press blocker reason can never buy the unbound shape', () => {
+  for (const reason of MANAGED_BLOCKER_REASONS) {
+    if (MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.has(reason)) continue;
+    const error = refusal(unboundRun(applicationScopeFailurePass(reason)), 'application');
+    assert.ok(error instanceof ManagedConfirmationUnprovenError,
+      `${reason} is not a pre-press refusal and must stay an unknown press`);
+  }
+});
+
+test('the unbound reasons are a strict subset of the reasons the runner can emit', () => {
+  for (const reason of MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS) {
+    assert.ok(MANAGED_BLOCKER_REASONS.has(reason), `${reason} is not a reason this service accepts at all`);
+  }
+  assert.ok(MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.size < MANAGED_BLOCKER_REASONS.size,
+    'the pre-press subset must stay a subset; a post-press reason must never be added');
+});
+
+/* THE ONE THING THAT OUTRANKS THE PROOF. A payload claiming a press, carrying a pass that says no
+ * control was ever bound, is contradictory — and PR 506's reading of a contradiction is the only
+ * safe one: unknown. This is the exact regression the branch could have introduced. */
+test('a run that says it pressed is never re-read as a proven no-send', () => {
+  const pressed = { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null };
+  for (const [pass, kind] of [
+    [applicationScopeFailurePass('application_scope_missing'), 'application'],
+    [securityCodeUnretainedPass(), 'verification'],
+  ] as const) {
+    const error = refusal(unboundRun(pass, pressed), kind);
+    assert.ok(error instanceof ManagedConfirmationUnprovenError,
+      'the pass describes no press and the run claims one; the pair proves nothing');
+  }
+});
+
+test('an unbound pass can never be read as a confirmed send', () => {
+  for (const [pass, kind] of [
+    [applicationScopeFailurePass('application_scope_missing'), 'application'],
+    [securityCodeUnretainedPass(), 'verification'],
+  ] as const) {
+    const forged = unboundRun(pass);
+    (forged.requiredFieldConfirmation as { status: string }).status = 'confirmed';
+    const error = refusal(forged, kind);
+    assert.match(error.message, /confirmed with failures/,
+      'a blocked reason on a proof calling itself confirmed is a contract violation, not a send');
+  }
+});
+
+/* Pins the SHAPES the way `blocker reasons stay in sync with the managed runner` pins the reasons.
+ * The branch above believes exactly two scope-side combinations because those are the two the
+ * runner writes. A third synthetic pass appearing in the runner must fail here rather than in
+ * production, where it would read as an unreadable proof on a run that sent nothing. */
+test('the runner writes no third unbound scope shape', { skip: RUNNER_SOURCE_ABSENT }, () => {
+  const source = readFileSync(RUNNER_SOURCE_PATH, 'utf8');
+  const emitted = [...source.matchAll(/formFingerprint:\s*null/g)];
+  assert.equal(emitted.length, 2,
+    `the runner now builds ${emitted.length} fingerprintless passes; unboundScopeProof knows two`);
+  for (const sentence of [UNBOUND_SCOPE_MESSAGE, UNBOUND_CODE_MESSAGE]) {
+    assert.ok(source.includes(sentence),
+      `the runner no longer writes "${sentence}", so RUNNER_AUTHORED_BLOCKERS is repeating a dead string`);
+  }
 });

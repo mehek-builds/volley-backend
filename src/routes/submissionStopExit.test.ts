@@ -598,3 +598,154 @@ describe('a blocked submission releases, and is never dressed up as a possible s
     assert.doesNotMatch(persisted.attention_reason ?? '', /required answers/i);
   });
 });
+
+/* THE TWO REFUSALS THAT COULD NOT SAY WHY, AND THE ROW THEY WROTE INSTEAD.
+ *
+ * stratus builds two passes at points where it has bound nothing: managed-browser.js:15237, when
+ * the caller-bound application form is unusable, and :15300, when the security-code controls do not
+ * retain the exact code. Both refuse before any submit handle exists and report it with null
+ * fingerprints, and until the unbound-scope branch the backend rejected both as malformed —
+ * discarding six real refusal causes and naming an internal check in their place.
+ *
+ * WHAT THAT COST DEPENDED ON ONE FIELD. With submitOutcome.pressed === false present, the escape in
+ * observedManagedSubmitWithheld still reached the right row by a second route, so the damage was
+ * confined to the sentence. Without it — an older runner, a truncated retained result — the same
+ * provably-unsent run wrote the full false-send row above: "Litos pressed Send", an unresolved
+ * unverified_submission, and the claim kept. These tests hold the row for BOTH payloads, which is
+ * the point of proving the no-send from the pass itself rather than from a sibling field.
+ */
+describe('a refusal that never bound a scope releases on its own proof', () => {
+  /** The error the real validator throws. Nothing here hand-builds the error it asserts on. */
+  function refusalFor(result: unknown, kind: 'application' | 'verification' = 'application'): unknown {
+    try {
+      assertManagedRequiredFieldsConfirmed(result, kind);
+    } catch (error) {
+      return error;
+    }
+    return assert.fail('a blocked proof must never be accepted');
+  }
+
+  /* The exact claim that must not be made about a run that never reached a submit control. */
+  const CLAIMS_A_SEND = /Litos pressed Send/;
+
+  function unboundRun(pass: unknown, submitOutcome?: unknown) {
+    const result: Record<string, unknown> = {
+      requiredFieldConfirmation: { version: 2, status: 'blocked', passes: [pass] },
+    };
+    if (submitOutcome !== undefined) result.submitOutcome = submitOutcome;
+    return result;
+  }
+
+  /** managed-browser.js:15237, field for field. */
+  const applicationScopeFailure = (blockerReason: string) => ({
+    submitKind: 'application',
+    scope: {
+      scopeKind: null,
+      formFingerprint: null,
+      submitFingerprint: null,
+      formMatchCount: 0,
+      submitMatchCount: 0,
+      requiredControlCount: 0,
+      sameNode: false,
+    },
+    requiredControls: [],
+    attempts: [],
+    retries: 0,
+    unresolved: ['The caller-bound application form was unavailable at submit time'],
+    blockerReason,
+    submissionOutcome: 'blocked',
+  });
+
+  /** managed-browser.js:15300, field for field. */
+  const securityCodeUnretained = () => ({
+    submitKind: 'verification',
+    scope: {
+      scopeKind: 'form',
+      formFingerprint: null,
+      submitFingerprint: null,
+      formMatchCount: 1,
+      submitMatchCount: 0,
+      requiredControlCount: 0,
+      sameNode: false,
+    },
+    requiredControls: [],
+    attempts: [],
+    retries: 0,
+    unresolved: ['The security code controls did not retain the exact caller-supplied code'],
+    blockerReason: 'successful_address_changed',
+    submissionOutcome: 'blocked',
+  });
+
+  const WITHHELD = {
+    pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: true,
+  };
+
+  test('an unusable application scope releases the packet, with or without a press report', () => {
+    for (const reason of [
+      'application_scope_missing',
+      'application_scope_ambiguous',
+      'application_scope_not_form',
+      'application_scope_detached',
+      'application_scope_unavailable',
+    ]) {
+      for (const [label, outcome] of [['reported', WITHHELD], ['silent', undefined]] as const) {
+        const where = `${reason} (${label})`;
+        const persisted = submissionFailureReview(
+          claimedRunning(), refusalFor(unboundRun(applicationScopeFailure(reason), outcome)),
+        );
+
+        assert.doesNotMatch(persisted.attention_reason ?? '', CLAIMS_A_SEND,
+          `${where}: the run never reached a submit control, so nothing was sent`);
+        assert.equal(persisted.submission_attempted_at, undefined, where);
+        assert.equal(persisted.unverified_submission, undefined,
+          `${where}: there is no application to go and look for`);
+        assert.equal(persisted.submission_stop?.before_click, true, where);
+        assert.ok(exitIsAnOrdinaryRerun(persisted),
+          `${where}: exit: POST /applications/:id/submit-request`);
+      }
+    }
+  });
+
+  test('a security code the controls did not retain releases the same way', () => {
+    for (const [label, outcome] of [['reported', WITHHELD], ['silent', undefined]] as const) {
+      const persisted = submissionFailureReview(
+        claimedRunning(), refusalFor(unboundRun(securityCodeUnretained(), outcome), 'verification'),
+      );
+
+      assert.doesNotMatch(persisted.attention_reason ?? '', CLAIMS_A_SEND, label);
+      assert.equal(persisted.unverified_submission, undefined, label);
+      assert.equal(persisted.submission_stop?.before_click, true, label);
+      assert.ok(exitIsAnOrdinaryRerun(persisted), label);
+    }
+  });
+
+  /* THE SAME CAUSE HAS TO REACH HER, NOT JUST THE SAME ROW. The row above was already correct
+     whenever submitOutcome survived; what the branch adds is that the refusal can say what it was.
+     A row that releases but still reports a contract violation has not fixed the reported half. */
+  test('the released row names the refusal instead of an internal check', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(), refusalFor(unboundRun(applicationScopeFailure('application_scope_detached'), WITHHELD)),
+    );
+    const reported = `${persisted.submission_error ?? ''} ${persisted.attention_reason ?? ''}`;
+
+    assert.match(reported, /application form was unavailable at submit time/,
+      'the runner said why it stopped; the applicant is told that');
+    assert.doesNotMatch(reported, /scope kind|scope identity|could not be read/,
+      'the name of a backend check is not a reason a form could not be reached');
+  });
+
+  /* THE HALF THAT MUST NOT MOVE, restated for this shape. A pass describing no press, on a run that
+     reports pressing, is a contradiction — and a contradiction stays unknown. */
+  test('a claimed press still outranks a proof that describes no press', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      refusalFor(unboundRun(applicationScopeFailure('application_scope_missing'), { ...WITHHELD, pressed: true })),
+    );
+
+    assert.equal(persisted.submission_stop?.reason, 'confirmation_unproven');
+    assert.equal(persisted.submission_stop?.before_click, false);
+    assert.ok(exitIsTheUnverifiedResolutionRoute(persisted),
+      'exit: POST /applications/:id/submission/unverified');
+    assert.equal(persisted.submission_claimed_at, CLAIMED_AT, 'and the lock stays on');
+  });
+});
