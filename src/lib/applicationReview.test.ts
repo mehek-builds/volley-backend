@@ -242,6 +242,53 @@ describe('application review metadata', () => {
     assert.deepEqual(readApplicationReview({ ...spec, _review: review }), review);
   });
 
+  /* MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com: POST /resume/generate stored
+   * portal_supported: false for a regional Teamtailor tenant because HOSTS.teamtailor did not yet
+   * recognise the <tenant>.<region>.teamtailor.com shape (fixed in lib/portalSubmission.ts the same
+   * day). That packet's row never changes on its own - portal_url is fixed at generate time - so
+   * without this, a stale `false` from before the host-recognition fix would route the dashboard to
+   * the extension handoff forever, even though isPortalSupported now says yes. */
+  test('a stored portal_supported: false heals on read once the host is recognized', () => {
+    const teamtailorUrl = 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance';
+    const review = {
+      jd_text: 'Build workflow software',
+      status: 'ready_to_submit' as const,
+      portal_url: teamtailorUrl,
+      ats_name: 'teamtailor',
+      // Stored false, the way a packet generated before the host-recognition fix would carry it.
+      portal_supported: false,
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: '2026-09-04T20:54:00.000Z',
+    };
+    const healed = readApplicationReview({ ...spec, _review: review });
+    assert.equal(healed?.portal_supported, true);
+    // Nothing else about the stored review moves - this is a read-time correction of one field,
+    // not a rewrite of the packet.
+    assert.deepEqual({ ...healed, portal_supported: false }, review);
+  });
+
+  /* THE OTHER DIRECTION STAYS CLOSED. A stored `true` is a decision, per this function's own
+   * standing comment, and applyApplicationReviewEdit's own header explains why re-deriving it
+   * downward is the worse mistake: it would lock a packet that has already been treated as
+   * sendable out from under an applicant with no self-serve way back. An unresolvable host (never a
+   * real ATS domain) proves isPortalSupported would say false today if this were re-examined - and
+   * that it is not. */
+  test('a stored portal_supported: true is never re-examined, even if the detector would now disagree', () => {
+    const review = {
+      jd_text: 'Build workflow software',
+      status: 'ready_to_submit' as const,
+      portal_url: 'https://this-is-not-a-recognized-ats-host.example.com/jobs/1',
+      portal_supported: true,
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: '2026-09-04T20:54:00.000Z',
+    };
+    assert.equal(readApplicationReview({ ...spec, _review: review })?.portal_supported, true);
+  });
+
   test('normalizes duplicate portal questions by label before submission guards run', () => {
     assert.deepEqual(
       normalizeApplicationReviewQuestions([
