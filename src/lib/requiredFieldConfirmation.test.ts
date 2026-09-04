@@ -1516,6 +1516,15 @@ function securityCodeUnretainedPass() {
 }
 
 /** The whole result, with submitOutcome deliberately ABSENT unless a test supplies one. */
+/* WHAT THE RUNNER ACTUALLY SENDS ON A CONTINUATION. finalSubmitPressed is run-scoped in
+ * managed-browser.js and written on both arms at :16938, so a verification result always carries an
+ * explicit press report - and because it is run-scoped rather than per-phase, `pressed: false` on a
+ * continuation denies the press for the WHOLE run, which is what makes it strong enough to release
+ * on. Verification fixtures below carry it for that reason; silence is exercised separately. */
+const RUN_WITHHELD_PRESS = {
+  pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: null,
+} as const;
+
 function unboundRun(pass: unknown, submitOutcome?: unknown): Record<string, unknown> {
   const result: Record<string, unknown> = {
     requiredFieldConfirmation: { version: 2, status: 'blocked', passes: [pass] },
@@ -1553,7 +1562,7 @@ test('every application-scope refusal the runner can name reaches the operator',
 });
 
 test('a security code the controls did not retain reaches the operator too', () => {
-  const error = refusal(unboundRun(securityCodeUnretainedPass()), 'verification');
+  const error = refusal(unboundRun(securityCodeUnretainedPass(), RUN_WITHHELD_PRESS), 'verification');
   assert.ok(error instanceof ManagedRequiredFieldConfirmationError);
   assert.ok(error instanceof NoSubmitControlError);
   assert.deepEqual((error as ManagedRequiredFieldConfirmationError).fields,
@@ -1571,7 +1580,7 @@ test('both unbound shapes survive the wire the runner actually sends them over',
     [applicationScopeFailurePass('application_scope_detached'), 'application'],
     [securityCodeUnretainedPass(), 'verification'],
   ] as const) {
-    const sent = unboundRun(pass);
+    const sent = unboundRun(pass, kind === 'verification' ? RUN_WITHHELD_PRESS : undefined);
     const received = JSON.parse(JSON.stringify(sent));
     assert.deepEqual(received, sent, 'nothing in the shape may be a value JSON silently drops');
     const error = refusal(received, kind);
@@ -1673,7 +1682,7 @@ test('an unbound pass can never be read as a confirmed send', () => {
     [applicationScopeFailurePass('application_scope_missing'), 'application'],
     [securityCodeUnretainedPass(), 'verification'],
   ] as const) {
-    const forged = unboundRun(pass);
+    const forged = unboundRun(pass, kind === 'verification' ? RUN_WITHHELD_PRESS : undefined);
     (forged.requiredFieldConfirmation as { status: string }).status = 'confirmed';
     const error = refusal(forged, kind);
     assert.match(error.message, /confirmed with failures/,
@@ -1886,4 +1895,88 @@ test('the activation guard\'s runtime-built reasons are all named and none of th
       `${reason} must leave the outcome unknown`,
     );
   }
+});
+
+test('a verification pass that never bound a scope cannot speak for the application', () => {
+  /* A verification phase exists only because an application phase preceded it, so "this phase bound
+     nothing" is not a statement about whether the application was already sent. An explicit
+     `pressed: false` IS such a statement - finalSubmitPressed is run-scoped, so it denies the press
+     for the whole run - and that shape still releases. Silence does not: with no submitOutcome a
+     phase-0 press is unobservable, and releasing there re-applies to an employer that already holds
+     the application. */
+  assert.ok(
+    refusal(unboundRun(securityCodeUnretainedPass(), RUN_WITHHELD_PRESS), 'verification')
+      instanceof ManagedRequiredFieldConfirmationError,
+    'a run-wide denial of the press still releases',
+  );
+  assert.ok(
+    refusal(unboundRun(securityCodeUnretainedPass()), 'verification')
+      instanceof ManagedConfirmationUnprovenError,
+    'silence about the press cannot release a phase that had a predecessor',
+  );
+  /* The application shape is unchanged: a truncated result is the case the branch exists for, and
+     no earlier phase could have pressed. */
+  assert.ok(
+    refusal(unboundRun(applicationScopeFailurePass('application_scope_missing')), 'application')
+      instanceof ManagedRequiredFieldConfirmationError,
+    'an application pass still releases on silence',
+  );
+});
+
+test('an unbound pass must carry the runner sentence that explains its reason', () => {
+  /* Without this clause a pass with `unresolved: []` satisfied every other one, and the applicant
+     was handed the bare token - application_scope_missing - with the sentence explaining it gone.
+     That is the defect the unbound branch exists to remove, reachable inside the branch itself. */
+  const stripped = applicationScopeFailurePass('application_scope_missing') as Record<string, unknown>;
+  stripped.unresolved = [];
+  assert.ok(
+    refusal(unboundRun(stripped), 'application') instanceof ManagedConfirmationUnprovenError,
+    'a refusal that explains nothing cannot be a proven no-send',
+  );
+});
+
+test('a scope-invalid chooser steps aside so the confirmation proof can name the refusal', () => {
+  /* THE ORDERING IS THE WHOLE BUG. submissionRunner runs the chooser barrier BEFORE the confirmation
+     barrier, and the runner emits `outcome: 'application_scope_invalid'` in the same block that
+     builds the unbound pass. While the chooser reader rejected that outcome, the first barrier threw
+     "Litos could not read the managed final-submit chooser proof" - an internal check name - and the
+     five application_scope_* reasons could never reach the operator on any real run. Both new tests
+     for those reasons passed anyway, because they call the confirmation read directly.
+
+     This asserts the pair in production order. */
+  const policy = MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY;
+  const result = {
+    finalSubmitChooser: {
+      version: 1,
+      policyName: policy.name,
+      policyVersion: policy.version,
+      grammarHash: policy.grammarHash,
+      submitKind: 'application',
+      outcome: 'application_scope_invalid',
+      candidateCount: 0,
+      viableCandidateCount: 0,
+      topScore: null,
+      topScoreCount: 0,
+      addressedScopeCount: 0,
+      bareSendCandidateCount: 0,
+    },
+    ...unboundRun(applicationScopeFailurePass('application_scope_detached')),
+  };
+  assert.doesNotThrow(
+    () => assertManagedApplicationFinalSubmitSelected(result as never, FINAL_CHOOSER_URL),
+    'the chooser barrier must defer to the stronger read that follows it',
+  );
+  const error = refusal(result, 'application');
+  assert.ok(error instanceof ManagedRequiredFieldConfirmationError);
+  assert.deepEqual((error as ManagedRequiredFieldConfirmationError).fields,
+    [UNBOUND_SCOPE_MESSAGE, 'application_scope_detached'],
+    'the operator gets the runner\'s sentence and the reason, not an internal check name');
+
+  /* A scope-invalid report that claims it scored candidates is describing a chooser run it also
+     says could not happen; that contradiction still fails closed at the first barrier. */
+  const contradictory = { ...result, finalSubmitChooser: { ...result.finalSubmitChooser, candidateCount: 2 } };
+  assert.throws(
+    () => assertManagedApplicationFinalSubmitSelected(contradictory as never, FINAL_CHOOSER_URL),
+    ManagedConfirmationUnprovenError,
+  );
 });

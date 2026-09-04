@@ -11999,6 +11999,15 @@ export function assertManagedApplicationFinalSubmitSelected(
     );
   }
   if (chooser.outcome === 'selected') return;
+  /* THE CONFIRMATION PROOF IS THE BETTER WITNESS TO THIS ONE, so step aside and let it speak.
+   * When the caller-bound application form was unavailable there was no chooser run to prove
+   * anything about; the runner says so in the same breath it emits the unbound confirmation pass.
+   * Throwing here made this barrier answer first with "Litos could not read the managed
+   * final-submit chooser proof" - an internal check name - and the five application_scope_* reasons
+   * the confirmation proof carries could never reach the operator at all. The caller runs
+   * assertManagedRequiredFieldsConfirmed immediately after this, and that read is strictly
+   * stronger: it names the refusal, and it releases only through the pre-press gate. */
+  if (chooser.outcome === 'application_scope_invalid') return;
   const noClick = readManagedFinalSubmitNoClick(
     result,
     MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
@@ -12227,6 +12236,14 @@ function confirmationContractError(message: string, submitWithheld = false): nev
 const UNRESOLVED_ENTRY_MAX_LENGTH = 400;
 
 /** The runner's own fixed sentences. Constants in its source, carrying no employer text. */
+/* The two sentences the runner writes on a pass that bound nothing. Named rather than inlined
+ * because unboundScopeProof now REQUIRES one of them: without that clause a pass carrying
+ * `unresolved: []` satisfied every other clause, and the applicant was handed the bare reason token
+ * - `application_scope_missing` - with the sentence explaining it gone. That is the defect the
+ * unbound branch exists to remove, reachable inside the branch itself. */
+const UNBOUND_APPLICATION_SCOPE_MESSAGE = 'The caller-bound application form was unavailable at submit time';
+const UNBOUND_SECURITY_CODE_MESSAGE = 'The security code controls did not retain the exact caller-supplied code';
+
 const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
   'A required field on the form has no label Litos can read, and is still empty',
   'Required-field readiness scan failed',
@@ -12238,8 +12255,8 @@ const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
    * only text a scope refusal could offer the applicant was UNATTRIBUTED_REQUIRED_BLOCKER - "a
    * required answer is still missing" - which names the wrong problem on a form Litos never
    * reached, and sends her to fill in fields that were not the reason it stopped. */
-  'The caller-bound application form was unavailable at submit time',
-  'The security code controls did not retain the exact caller-supplied code',
+  UNBOUND_APPLICATION_SCOPE_MESSAGE,
+  UNBOUND_SECURITY_CODE_MESSAGE,
 ]);
 
 /** What the applicant is told when a blocker cannot be attributed to a control on this form. */
@@ -12481,7 +12498,17 @@ export const MANAGED_PRE_PRESS_BLOCKER_REASONS: ReadonlySet<string> = new Set([
  * honest unbound shape, and the safety property does not need the binding - it holds on every
  * combination, because all six reasons are decided before any submit handle exists.
  */
-function unboundScopeProof(pass: Record<string, unknown>): boolean {
+function unboundScopeProof(pass: Record<string, unknown>, pressReported: boolean | null): boolean {
+  /* A VERIFICATION PASS CANNOT SPEAK FOR THE APPLICATION. The verification phase only exists
+   * because an application phase preceded it, so "this phase bound nothing" says nothing about
+   * whether the application was already sent. finalSubmitPressed is run-scoped in
+   * managed-browser.js and is never cleared between phases, which makes an explicit `pressed:
+   * false` on a continuation a statement about the WHOLE run - that is strong enough, and it is
+   * what the runner actually sends. Silence is not: with no submitOutcome at all a phase-0 press is
+   * unobservable, and releasing there re-applies to an employer that already has the application.
+   * An application pass keeps silence, because a truncated result is the case this branch exists
+   * for and there is no earlier phase to have pressed. */
+  if (pass.submitKind === 'verification' && pressReported !== false) return false;
   const scope = pass.scope;
   if (!isRecord(scope)) return false;
   /* An ABSENT scopeKind is not a null one. Older runners omit the key entirely, and they also never
@@ -12501,7 +12528,11 @@ function unboundScopeProof(pass: Record<string, unknown>): boolean {
     && Array.isArray(pass.requiredControls) && pass.requiredControls.length === 0
     && Array.isArray(pass.attempts) && pass.attempts.length === 0
     && typeof pass.blockerReason === 'string'
-    && MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.has(pass.blockerReason);
+    && MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.has(pass.blockerReason)
+    /* The runner's own sentence must be present, or the reason token reaches the applicant alone. */
+    && Array.isArray(pass.unresolved)
+    && pass.unresolved.some((entry) => entry === UNBOUND_APPLICATION_SCOPE_MESSAGE
+      || entry === UNBOUND_SECURITY_CODE_MESSAGE);
 }
 
 /**
@@ -12519,6 +12550,12 @@ export function assertManagedRequiredFieldsConfirmed(
    * depends on that narrowing to keep reading `result` and `pass` as records. */
   const submitWithheld = observedManagedSubmitWithheld(result);
   const pressClaimed = observedManagedSubmitPressClaimed(result);
+  /* Three-valued on purpose: true, false, or "the runner said nothing". The verification clause in
+   * unboundScopeProof needs to tell an explicit denial from silence, which a boolean cannot. */
+  const pressReported: boolean | null = isRecord(result) && isRecord(result.submitOutcome)
+    && typeof result.submitOutcome.pressed === 'boolean'
+    ? result.submitOutcome.pressed
+    : null;
   const contractError: (detail: string) => never = (detail) => confirmationContractError(detail, submitWithheld);
   if (!isRecord(result)) contractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
@@ -12560,7 +12597,7 @@ export function assertManagedRequiredFieldsConfirmed(
     /* Read once, ahead of the identity checks it excuses, and it excuses NOTHING ELSE. A pass that
      * misses the shape by any clause is not unbound, so it arrives at the same two contract errors
      * it hits today. See unboundScopeProof for why a fingerprintless pass can be believed. */
-    const unboundScope = !pressClaimed && unboundScopeProof(pass);
+    const unboundScope = !pressClaimed && unboundScopeProof(pass, pressReported);
     if (!unboundScope) {
       if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
         contractError('scope kind');
