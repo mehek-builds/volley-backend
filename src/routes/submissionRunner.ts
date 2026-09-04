@@ -6303,14 +6303,14 @@ export async function discoverAndResolveQuestions(
      * portal_selector, still a closed control, never a type storedAnswerMatchesNoExactOption may
      * blank - so the types that need exact options before resolution, which are intercepted at the
      * top of this loop anyway, cannot reach this widening. */
-    const menuMeasuredForThisControl = offeredOptions.length > 0
-      ? offeredOptions
-      : optionsSurvivingAnUnreadMenu({
-        freshOptions: field.options,
-        controlType,
-        selector: portalSelectorForField(field),
-        existing,
-      }) ?? [];
+    // optionsSurvivingAnUnreadMenu returns this run's read whenever it produced one, so this is
+    // `offeredOptions` on every read that worked, and the retained menu only where it did not.
+    const menuMeasuredForThisControl = optionsSurvivingAnUnreadMenu({
+      freshOptions: field.options,
+      controlType,
+      selector: portalSelectorForField(field),
+      existing,
+    }) ?? [];
     const reviewedOption = existing?.answer_source === 'applicant_review'
       ? menuMeasuredForThisControl.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
       : undefined;

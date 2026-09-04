@@ -8,6 +8,7 @@ import {
   type DiscoveredQuestion,
 } from './questionDiscovery';
 import {
+  durablePortalSelector,
   managedOptionProbeControlId,
   managedOptionProbeExpectsClosedControl,
   type SupportedPortal,
@@ -362,9 +363,22 @@ export function optionsSurvivingAnUnreadMenu(input: {
   if (!CLOSED_CONTROL_TYPE.test(controlType)) return null;
   // ...and never for one whose stored answer the re-open gate is allowed to blank.
   if (SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType)) return null;
-  const selector = input.selector?.trim();
+  /* THE SAME-CONTROL PROOF HAS TO BE A DURABLE ONE.
+   *
+   * portalSelectorForField hands back `field.selector` - the `[data-litos-discovered-N]` marker
+   * stamped by the DISCOVERY page load - for a Greenhouse combobox with no id, which is precisely
+   * the population this function serves. durablePortalSelector refuses that marker, and it is right
+   * to: N is assigned by discovery ORDER, so the same marker can name a different control on a later
+   * run (a conditional field appeared, a section expanded) and the same control can change markers.
+   * Comparing raw selectors therefore reads as a proof of identity while proving nothing, and the
+   * consequence is not merely cosmetic - reviewedAnswerStillFits consults this menu, so a marker
+   * collision would keep an answer against another control's options AND skip the
+   * missing_exact_options blocker that would otherwise hold the send.
+   *
+   * Where identity cannot be proven, nothing is kept, which is exactly today's behaviour. */
+  const selector = durablePortalSelector(input.selector ?? undefined);
   if (!selector) return null;
-  if (input.existing?.portal_selector?.trim() !== selector) return null;
+  if (durablePortalSelector(input.existing?.portal_selector ?? undefined) !== selector) return null;
   return kept;
 }
 

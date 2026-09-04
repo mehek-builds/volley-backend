@@ -9,6 +9,7 @@ import {
   openControlListboxSelector,
   reactSelectListboxSelector,
   ripplingListboxSelector,
+  durablePortalSelector,
   MANAGED_OPTION_EXTRACT_PREFIX,
   MANAGED_OPTION_PROBE_MENU_WAIT_MS,
   type PortalFamily,
@@ -380,4 +381,75 @@ test('an unread control with NO menu ever measured still refuses to keep a store
   );
   const out = result.questions[0];
   if (out) assert.equal(out.options ?? null, null, 'nothing was ever measured, so nothing is kept');
+});
+
+test('the same-control proof is a DURABLE selector, never the discovery marker', () => {
+  /* portalSelectorForField hands back `field.selector` - the `[data-litos-discovered-N]` marker the
+   * DISCOVERY page load stamps - for a Greenhouse combobox with no id, which is exactly the
+   * population this retention serves. N is assigned by discovery ORDER, so the same marker can name a
+   * different control on a later run and the same control can change markers: comparing raw selectors
+   * reads as a proof of identity while proving nothing. durablePortalSelector refuses the marker, and
+   * retention has to refuse it too - here the consequence is not cosmetic, because
+   * reviewedAnswerStillFits consults this menu to decide whether her answer survives. */
+  const menu = ['Yes', 'No'];
+  assert.equal(durablePortalSelector('[data-litos-discovered-3]'), undefined, 'the marker is not durable');
+  assert.equal(
+    optionsSurvivingAnUnreadMenu({
+      freshOptions: null,
+      controlType: 'combobox',
+      selector: '[data-litos-discovered-3]',
+      existing: { options: menu, portal_selector: '[data-litos-discovered-3]' },
+    }),
+    null,
+    'two equal markers are not a proof that this is the same control',
+  );
+  // The same record on a durable id keeps its menu, so the guard costs nothing where identity is real.
+  assert.deepEqual(
+    optionsSurvivingAnUnreadMenu({
+      freshOptions: null,
+      controlType: 'combobox',
+      selector: '[id="301"]',
+      existing: { options: menu, portal_selector: '[id="301"]' },
+    }),
+    menu,
+  );
+});
+
+test('a rescued question stops raising missing_exact_options, and that is the deliberate trade', async () => {
+  /* THE SEND-GATE CONSEQUENCE, PINNED so it is a decision rather than an accident.
+   *
+   * Baseline measured on eb1f649 for this exact input: `questions` came back EMPTY - the question,
+   * and her reviewed "No" with it, was dropped from the record entirely - plus a missing_exact_options
+   * blocker and two attention reasons, which parks the application.
+   *
+   * Now the question survives with her answer and the menu an earlier run measured on this same
+   * durable control, and no blocker is raised. That is a real relaxation: an application that used to
+   * park now proceeds. It is justified only by the positive evidence this branch requires - a durable
+   * same-control proof, and her current-round pick being byte-for-byte on that measured menu - and the
+   * veto still stands wherever no menu was ever measured (asserted above). Anything that weakens
+   * either half of that evidence must restore the blocker. */
+  const stored = [{
+    id: 'q1', question: 'have you applied to this role at akuna previously?', answer: 'No',
+    kind: 'required', required: true, portal_selector: '[id="301"]', portal_input_type: 'combobox',
+    options: ['Yes', 'No'], answer_source: 'applicant_review', answer_reviewed_at: REVIEWED_ROUND,
+  }];
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'have you applied to this role at akuna previously? 301',
+      selector: '[data-litos-discovered-3]', durableSelector: '[id="301"]',
+      inputType: 'text', role: 'combobox', maxLength: null, options: null, required: true,
+    }] as never,
+    { user_id: 'user-1' } as never,
+    {
+      jd_text: 'Build C++ services.', role: 'Software Engineering Internship',
+      portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=wehrtyou&token=8052083',
+      ats_name: 'greenhouse', status: 'ready_to_submit', edited_terms: [], questions: stored,
+      skipped_reasons: [], questions_reviewed_at: REVIEWED_ROUND, updated_at: REVIEWED_ROUND,
+    } as never,
+    { school: 'USC' } as never, true, 'greenhouse',
+  );
+  assert.equal(result.questions.length, 1, 'the question is no longer dropped');
+  assert.equal(result.questions[0]!.answer, 'No', 'and her reviewed answer rides with it');
+  assert.deepEqual(result.questions[0]!.options, ['Yes', 'No'], 'beside the menu that proves it fits');
+  assert.deepEqual(result.questionMetadataBlockers, [], 'the unread-menu blocker is deliberately not raised');
 });
