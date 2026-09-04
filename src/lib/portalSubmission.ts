@@ -7942,17 +7942,34 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="candidate[email]"]', packet.email, 'email');
     managedFill(actions, 'input[name="candidate[phone]"]', packet.phone, 'phone');
     managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
-    if (options.submit && packet.resume && packet.resumeName) {
-      // Teamtailor uploads the file asynchronously after setInputFiles returns. Its submit control
-      // stays disabled while the progress card says "Uploading..." and the completed filename row
-      // is still hidden. A submit run must wait for that positive completed state before choosing
-      // a final control. Discovery and preparation remain non-blocking when the upload input is not
-      // present, preserving their existing blocker-card behavior.
+    if (packet.resume && packet.resumeName) {
+      /* Teamtailor uploads the file asynchronously after setInputFiles returns. Its submit control
+       * stays disabled while the progress card says "Uploading..." and the completed filename row
+       * is still hidden. A submit run must wait for that positive completed state before choosing
+       * a final control - REQUIRED there, because pressing submit over an unfinished upload is the
+       * one mistake this run cannot take back.
+       *
+       * MEASURED LIVE 2026-09-04, Covenant House International (a regional Teamtailor tenant,
+       * application c24e48a2): fill run e7ffd4c0 reported `filled_fields: ["resume"]` - the upload
+       * action itself never threw - while the SAME run's own readiness reader, a few actions later,
+       * called "Upload resume* Required" still empty, alongside every other required control. This
+       * wait used to run ONLY `if (options.submit)`, so a prepare/fill run (submit=false, exactly
+       * what builds the human-facing preview and its attention_reason) took its screenshot and its
+       * readiness scan while the upload could still be showing "Uploading...". filled_fields and
+       * attention_reason were reading two different moments in the same async operation, and nothing
+       * here waited for them to agree.
+       *
+       * Added for every run that carries a resume, not only a submit: optional so a prepare run
+       * that is genuinely slower than the bound still finishes and reports whatever the page
+       * honestly shows (the existing prepare/discovery non-blocking behavior when the upload input
+       * is altogether absent is unchanged - that case never reaches this branch, since managedUpload
+       * pushed nothing to wait on). Required only on a submit run, where an unresolved upload must
+       * keep blocking the final press exactly as before. */
       actions.push({
         type: 'waitForSelector',
         selector: TEAMTAILOR_RESUME_UPLOAD_COMPLETE_SELECTOR,
         label: 'teamtailor_resume_upload_complete',
-        optional: false,
+        optional: !options.submit,
         timeout: MANAGED_FILL_TIMEOUT_MS,
       });
     }

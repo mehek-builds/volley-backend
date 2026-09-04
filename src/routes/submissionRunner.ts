@@ -7291,6 +7291,58 @@ export function managedActionDiagnosticsForLog(value: unknown): Array<Record<str
 }
 
 /**
+ * THE ONE GAP assertRequiredManagedCapabilities DOES NOT COVER.
+ *
+ * The exact-page-url capability proves the boundary at two checkpoints - before any action ran, and
+ * before the first applicant-data fill (browserbase.ts, assertRequiredManagedCapabilities). A submit
+ * run adds two more, right before the final chooser and right before the press. A PREPARE/FILL run
+ * (submit=false) has neither of those: its last proven checkpoint is "before applicant data", and
+ * everything after that - every fixed-field fill, every reviewed-question answer, the resume upload,
+ * and the runner's own final readiness scan and screenshot - runs with no assertion at all standing
+ * between the page and what gets reported about it. A navigation, redirect, or client-side remount
+ * in that window is invisible to every existing check: the run still returns its capabilities, no
+ * error is thrown, and the review simply reports every required field empty with nothing to say why.
+ *
+ * MEASURED LIVE 2026-09-04, Covenant House International (application c24e48a2, a regional
+ * Teamtailor tenant, portal https://covenanthouseinternational.na.teamtailor.com/jobs/
+ * 686133-intern-finance): fill run e7ffd4c0 reported filled_fields: ["resume"] and an
+ * attention_reason naming EVERY required control - including the very upload filled_fields had just
+ * named - "is required and is still empty". Nothing in the stored run could distinguish "these
+ * selectors were never on this page" from "the page changed under the run" from any of the other
+ * shapes an empty fill can take, because result.url - the runner's own page.url(), read at the exact
+ * moment its post-fill readiness scan runs (managed-browser.js, immediately beside the readiness
+ * read that produces attention_reason) - was never compared against the one page this run was told
+ * to stay on. It already travels on every managed result; this is the first read of it for that
+ * purpose, and it costs zero extra actions and zero extra provider calls.
+ *
+ * Comparison is origin + path only, hash and trailing slash ignored, query string ignored: this is
+ * an observability signal for a human reading logs, not a security boundary (that boundary is, and
+ * stays, MANAGED_EXACT_PAGE_URL_CAPABILITY), so it is written to tolerate exactly the harmless
+ * variation a real employer page can add without a false alarm on every run.
+ */
+export function managedFillFinalUrlDrift(
+  expectedUrl: string,
+  observedUrl: string | undefined,
+): { expected: string; observed: string } | null {
+  if (!observedUrl) return null;
+  let expected: URL;
+  let observed: URL;
+  try {
+    expected = new URL(expectedUrl);
+    observed = new URL(observedUrl);
+  } catch {
+    return null;
+  }
+  const normalizedPath = (url: URL) => url.pathname.replace(/\/+$/, '');
+  if (expected.origin === observed.origin && normalizedPath(expected) === normalizedPath(observed)) {
+    return null;
+  }
+  expected.hash = '';
+  observed.hash = '';
+  return { expected: expected.href, observed: observed.href };
+}
+
+/**
  * ONE CONTROL LITOS COULD NOT READ, NAMED ON ITS OWN.
  *
  * THIS CHANGES WHAT THE PACKET SAYS, NOT WHAT REACHES THE FORM. Read that sentence before trusting
@@ -8335,6 +8387,19 @@ async function prepareManaged(
       portal,
       actionDiagnostics,
     }, 'Managed provider-owned question action diagnostics');
+  }
+  // See managedFillFinalUrlDrift's own comment: the exact-page-url capability proves this run
+  // started on the right page, never that it was still there when the readiness scan behind
+  // attention_reason ran. Logged, never thrown - this is what would have turned the Covenant House
+  // investigation into a log line instead of an afternoon.
+  const finalUrlDrift = managedFillFinalUrlDrift(applicationUrl, result.url);
+  if (finalUrlDrift) {
+    fastify.log.error({
+      applicationId: row.id,
+      portal,
+      expectedUrl: finalUrlDrift.expected,
+      observedUrl: finalUrlDrift.observed,
+    }, 'Managed fill run’s readiness scan ran on a different page than the one this run was told to fill');
   }
   if (!result.screenshot) {
     /* The refusal is litos-api's, not the run's, so the run's own account rides on it. Measured

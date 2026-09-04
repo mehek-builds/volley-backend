@@ -340,6 +340,74 @@ test('a fill run never ticks: the consent tick exists only on the submit list', 
   assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false);
 });
 
+/* MEASURED LIVE 2026-09-04, Covenant House International (application c24e48a2, portal
+ * https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance): a fill run
+ * reported filled_fields: ["resume"] and an attention_reason naming every required control -
+ * including first name, last name, email, phone, and the very upload filled_fields had just named -
+ * "is required and is still empty". volley #954 (787cf4d) had already fixed HOSTS.teamtailor to
+ * recognize this exact regional shape, so `portal` resolved to 'teamtailor' correctly; what this
+ * test pins is the step after that one, which no existing test covered end to end: once a host -
+ * bare tenant or regional - resolves to the 'teamtailor' family, the SAME plan has to be built for
+ * it. buildManagedPortalActions takes the resolved family, never the host, so the two host shapes
+ * below are asserted to produce byte-identical action lists - a future change that let anything here
+ * key off the raw host string would fail this test before it ever reached production. */
+test('a Teamtailor form with a custom question, the resume, and a guarded consent gets identical write actions on a bare and a regional host', () => {
+  const referralQuestion = {
+    question: 'Where did you find our job posting?',
+    answer: 'LinkedIn',
+    portalSelector: 'input[name="candidate[answers_attributes][0][answer]"]',
+    portalInputType: 'text',
+  };
+  const packetForHost = () => ({
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [referralQuestion, consentQuestion],
+  });
+
+  const bareHost = 'https://fully.teamtailor.com/jobs/6360832-internship';
+  const regionalHost = 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance';
+  const barePortal = detectPortal(bareHost);
+  const regionalPortal = detectPortal(regionalHost);
+  assert.equal(barePortal, 'teamtailor');
+  assert.equal(regionalPortal, 'teamtailor');
+
+  const bareActions = buildManagedPortalActions(barePortal, packetForHost(), true);
+  const regionalActions = buildManagedPortalActions(regionalPortal, packetForHost(), true);
+  // The whole point: nothing about the plan may depend on which host shape resolved to this family.
+  assert.deepEqual(bareActions, regionalActions);
+
+  for (const actions of [bareActions, regionalActions]) {
+    const serialized = JSON.stringify(actions);
+    // Identity: first/last/email/phone all reach the wire as real fills, not silently dropped.
+    assert.match(serialized, /candidate\[first_name\]/);
+    assert.match(serialized, /candidate\[last_name\]/);
+    assert.match(serialized, /candidate\[email\]/);
+    assert.match(serialized, /candidate\[phone\]/);
+    assert.ok(
+      actions.some((action) => action.type === 'fill' && action.selector === 'input[name="candidate[first_name]"]' && action.value === 'Taylor'),
+      'first name is filled with the packet value, not merely mentioned',
+    );
+    assert.ok(
+      actions.some((action) => action.type === 'fill' && action.selector === 'input[name="candidate[email]"]' && action.value === packet.email),
+      'email is filled with the packet value',
+    );
+    // The custom question: a write action carrying the discovered control and the applicant's answer.
+    assert.ok(
+      actions.some((action) => action.selector === referralQuestion.portalSelector && 'value' in action && action.value === 'LinkedIn'),
+      'the custom referral question is written, not skipped',
+    );
+    // The resume upload.
+    assert.match(serialized, /upload_resume_field/);
+    assert.ok(
+      actions.some((action) => action.type === 'upload' && action.selector === '#upload_resume_field input[type="file"]'),
+      'the resume upload targets the captured Teamtailor selector',
+    );
+    // The guarded consent tick, exactly once, and the submit press it exists to clear the way for.
+    assert.equal(consentTickClicks(actions).length, 1);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+  }
+});
+
 test('canonicalizes the verified Teamtailor detail route and rejects broad jobs pages', () => {
   const live = 'https://flanks.teamtailor.com/jobs/7847431-software-engineering-intern-web-scraping-data-acquisition';
   assert.equal(detectPortal(live), 'teamtailor');

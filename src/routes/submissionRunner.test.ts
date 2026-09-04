@@ -59,6 +59,7 @@ import {
   managedInitialSubmissionAttempt,
   finalBoundaryAuthorizationMatches,
   undecidedOptionalQuestionLabels,
+  managedFillFinalUrlDrift,
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels } from '../lib/submissionSafety';
@@ -291,6 +292,49 @@ test('managed action diagnostics log only structural fields and fixed outcome na
   }]);
   assert.doesNotMatch(JSON.stringify(diagnostics), /Bachelor|What degree|person@example/,
     'answers, employer prose, options, and applicant data must be discarded');
+});
+
+/* MEASURED LIVE 2026-09-04, Covenant House International (application c24e48a2): a fill run's own
+ * readiness scan reported every required control empty, including one filled_fields had just named
+ * as filled, and nothing in the stored run said whether the page had moved under it - see
+ * managedFillFinalUrlDrift's own comment in submissionRunner.ts for the full account of the gap this
+ * closes. These pin the comparison itself: tolerant of the harmless variation a real employer page
+ * can add (hash, a trailing slash, query-string reordering or additions), and a real signal on
+ * anything else. */
+test('managedFillFinalUrlDrift tolerates hash, trailing slash and query drift but catches a real move', () => {
+  const expected = 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance/applications/new';
+  assert.equal(managedFillFinalUrlDrift(expected, expected), null, 'the same URL is never drift');
+  assert.equal(
+    managedFillFinalUrlDrift(expected, `${expected}/`),
+    null,
+    'a trailing slash is formatting, not a different page',
+  );
+  assert.equal(
+    managedFillFinalUrlDrift(expected, `${expected}#section`),
+    null,
+    'a hash is client-side only and never a different page',
+  );
+  assert.equal(
+    managedFillFinalUrlDrift(expected, `${expected}?utm_source=litos`),
+    null,
+    'this is an observability signal, not the security boundary - query drift alone is not flagged',
+  );
+  assert.equal(managedFillFinalUrlDrift(expected, undefined), null, 'no observed URL is not itself a drift');
+  assert.equal(managedFillFinalUrlDrift(expected, 'not a url'), null, 'an unparseable observed URL fails closed to null, never throws');
+
+  const jdOnly = 'https://covenanthouseinternational.na.teamtailor.com/jobs/686133-intern-finance';
+  const driftedToJd = managedFillFinalUrlDrift(expected, jdOnly);
+  assert.ok(driftedToJd, 'a run that ended back on the bare job page instead of the application form is drift');
+  assert.equal(driftedToJd!.expected, expected);
+  assert.equal(driftedToJd!.observed, jdOnly);
+
+  const otherHost = 'https://covenanthouseinternational.na.teamtailor.com/connect/login';
+  const driftedOffHost = managedFillFinalUrlDrift(expected, otherHost);
+  assert.ok(driftedOffHost, 'a different path on the same host is still drift');
+
+  const differentOrigin = 'https://accounts.google.com/signin';
+  const driftedOffOrigin = managedFillFinalUrlDrift(expected, differentOrigin);
+  assert.ok(driftedOffOrigin, 'a different origin entirely is still drift');
 });
 
 test('closed taxonomies use Other only for truthful referral and recent-experience fallbacks', () => {

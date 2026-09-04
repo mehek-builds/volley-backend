@@ -6309,12 +6309,31 @@ test('Teamtailor submit waits for the asynchronous resume upload to finish', () 
     optional: false,
     timeout: 10_000,
   });
-  assert.equal(
-    buildManagedPortalActions('teamtailor', packet, false)
-      .some((action) => action.label === 'teamtailor_resume_upload_complete'),
-    false,
-    'preparation remains non-blocking when a branded page has no upload control',
+  /* MEASURED LIVE 2026-09-04, Covenant House International (application c24e48a2): a fill run
+   * (submit=false - exactly this call) reported filled_fields: ["resume"] while its own
+   * readiness scan, run moments later, called "Upload resume* Required" still empty alongside
+   * every other required control. This wait used to be pushed ONLY `if (options.submit)`, so a
+   * prepare/fill run took its screenshot and readiness scan while the upload could still be
+   * showing "Uploading..." - filled_fields and attention_reason were reading two different
+   * moments of the same async operation. A prepare run now waits too, so its own screenshot and
+   * readiness scan are far likelier to see the settled state - but OPTIONAL, so a run genuinely
+   * slower than the bound still finishes and reports whatever the page honestly shows, rather
+   * than aborting a preview over a control that was never required to block anything but a
+   * SUBMIT press. */
+  const prepareActions = buildManagedPortalActions('teamtailor', packet, false);
+  const prepareCompletionIndex = prepareActions.findIndex(
+    (action) => action.label === 'teamtailor_resume_upload_complete',
   );
+  assert.ok(prepareCompletionIndex >= 0, 'a prepare run with a resume to upload waits for it to finish too');
+  assert.deepEqual(prepareActions[prepareCompletionIndex], {
+    type: 'waitForSelector',
+    selector: '#upload_resume_field '
+      + '[data-forms--inputs--upload-preview-target="name"]:not(.hidden):visible '
+      + 'a[data-dz-name]:visible',
+    label: 'teamtailor_resume_upload_complete',
+    optional: true,
+    timeout: 10_000,
+  });
 });
 
 test('the blocker naming the tick-covered consent control is excused, and only that one', () => {
