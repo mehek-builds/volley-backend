@@ -115,7 +115,12 @@ const NAMED_ENTITIES: Record<string, string> = {
   bull: '•',
 };
 
-function decodeHtmlEntities(value: string): string {
+// Exported (2026-09-04, "A Recruitee or Teamtailor posting is readable") only so
+// jsonLdJobDescription.ts's host-agnostic reader can reveal a JSON-LD `description` that was
+// HTML-escaped BEFORE being placed in the JobPosting block - measured live on Teamtailor - without
+// forking this exact entity table. Behavior is otherwise untouched; every call site in this file
+// still gets the same function it always has.
+export function decodeHtmlEntities(value: string): string {
   return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
     const token = entity.toLowerCase();
     if (token[0] !== '#') return NAMED_ENTITIES[token] ?? match;
