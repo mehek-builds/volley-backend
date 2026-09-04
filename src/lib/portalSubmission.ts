@@ -12378,6 +12378,15 @@ export const MANAGED_BLOCKER_REASONS: ReadonlySet<string> = new Set([
  * release this whole gate exists to prevent, so it stays out even though a run carrying it also has
  * no useful fingerprints to show.
  */
+export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  'application_scope_missing',
+  'application_scope_ambiguous',
+  'application_scope_not_form',
+  'application_scope_detached',
+  'application_scope_unavailable',
+  'successful_address_changed',
+]);
+
 /* WHICH REFUSALS PROVE THE BUTTON WAS NEVER PRESSED.
  *
  * MANAGED_BLOCKER_REASONS is a diagnosis vocabulary - it decides whether a refusal arrives with its
@@ -12431,15 +12440,6 @@ export const MANAGED_PRE_PRESS_BLOCKER_REASONS: ReadonlySet<string> = new Set([
   // The activation guard refused while arming, which is also before the click.
   'submit_activation_guard_unavailable',
   'submit_activation_binding_changed',
-]);
-
-export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Set([
-  'application_scope_missing',
-  'application_scope_ambiguous',
-  'application_scope_not_form',
-  'application_scope_detached',
-  'application_scope_unavailable',
-  'successful_address_changed',
 ]);
 
 /* THE ONE PASS SHAPE THAT PROVES NO PRESS BY PROVING THERE WAS NOTHING TO PRESS.
@@ -12665,10 +12665,23 @@ export function assertManagedRequiredFieldsConfirmed(
     const postPressReason = blockerFailures.find(
       (reason) => !MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason),
     );
-    if (postPressReason !== undefined || (pressClaimed && blockerFailures.length > 0)) {
+    /* NO `blockerFailures.length > 0` QUALIFIER ON THE PRESS CLAIM. The runner's commonest refusal
+     * carries its failures in `unresolved` and NO blockerReason at all, so a qualifier keyed on the
+     * reason list exempts exactly the shape a claimed press arrives on. `finalSubmitPressed` is
+     * run-scoped in managed-browser.js and is not cleared between phases, so every security-code
+     * continuation result inherits `pressed: true` from the phase-0 application press: a phase-1
+     * verification pass blocked on the code control would otherwise be reported as "Litos did not
+     * press submit" about a run whose application submit was pressed. */
+    if (postPressReason !== undefined || pressClaimed) {
+      const cause = postPressReason !== undefined
+        ? `the refusal was decided after the click was already under way (${postPressReason})`
+        : 'the run reported a press its own proof does not describe';
+      /* The reason travels WITH the refusal. The commit that widened this vocabulary existed to
+       * stop a refusal arriving as an internal check name; a fixed sentence here would re-hide
+       * every one of them behind one indistinguishable string. */
       throw new ManagedConfirmationUnprovenError(
-        "Litos could not prove the send run withheld its press (the managed browser refused after"
-        + ' the click was already under way), so whether submit was pressed is unknown',
+        `Litos could not prove the send run withheld its press (${cause}), so whether submit was`
+        + ' pressed is unknown',
       );
     }
     throw new ManagedRequiredFieldConfirmationError([...allFailures, ...blockerFailures]);
