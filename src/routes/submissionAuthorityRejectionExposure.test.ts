@@ -7,6 +7,7 @@ import {
   submissionAuthorityRefusalForWire,
   submissionAuthorityRefusalTallies,
   submissionAuthorityUnavailableMarker,
+  SUBMISSION_AUTHORITY_UNAVAILABLE_REASONS,
   type SubmissionAuthorityPublication,
   type SubmissionAuthorityRefusal,
 } from '../lib/submissionAuthorityEnvelope';
@@ -44,7 +45,10 @@ const CAPTURED_AT = '2026-08-28T08:02:00.000Z';
 /* SENTINELS, not plausible data. Every one of these is a value a refusal is caused BY, so if any of
  * them can be found in the payload the route publishes, the classification leaked the thing it
  * exists to withhold. They are shaped to survive JSON.stringify unchanged and to be greppable. */
-const SENTINEL_ATTEMPT = '7ffffff1-5eed-7eed-0eed-5eed5eed5eed';
+/* A LEDGER id is validated by layout now, so a sentinel that refuses has to fail the LAYOUT - its
+ * nibbles no longer refuse anything, because the ledger never promised an RFC version or variant.
+ * Still greppable, still survives JSON.stringify unchanged. */
+const SENTINEL_ATTEMPT = 'sentinel5eed-attempt-5eed5eed5eed';
 const SENTINEL_CANONICAL = '7ffffff2-5eed-7eed-0eed-5eed5eed5eed';
 const SENTINEL_TIMESTAMP = '2026-08-28T08:02:00.7654321Z';
 const SENTINEL_URL = 'http://leaked.example.invalid/receipt-7ffffff3';
@@ -108,11 +112,18 @@ function refusal(input: {
 }
 
 /**
- * The seven `unpublishable_projection` return sites, each driven by a sentinel value.
+ * The seven shape-refusal return sites, each driven by a sentinel value.
  *
  * One case per RETURN SITE rather than per clause: eighteen clauses reach these seven returns, and
  * the clause-level naming is already pinned in lib/submissionAuthorityEnvelope.test.ts. What this
  * file has to prove is that each site's rejection survives the trip to the wire.
+ *
+ * The reason word is no longer one for all seven. The census this route exists to serve was run on
+ * 2026-09-03 (mehekmandal05@gmail.com, 200 packets classified, 163 refused) and every single
+ * `unpublishable_projection` on the board - 162 of the 163 - was one field: `projection.attempt_id`,
+ * on `unverified` 150 times, `repair_required` 11 and `confirmed` once. So an attempt identifier the
+ * client cannot bind now reports as `unpublishable_attempt_identity` and the residual word covers
+ * what is actually residual. Both spellings appear below, on the sites that produce them.
  */
 const REFUSAL_SITES: ReadonlyArray<{
   site: string;
@@ -122,6 +133,11 @@ const REFUSAL_SITES: ReadonlyArray<{
   rejected: { branch: string; field: string; shape: string };
 }> = [
   {
+    /* What refuses this now is the LAYOUT, which is the only rule the client still applies to a
+     * ledger-minted identifier. That is the point the split was always making, carried to its end:
+     * the refusal that survives is the one the client would also make, and the nibble refusals -
+     * which only this file was making, and which cost 162 of one account's 163 cards their
+     * envelope - no longer happen at all. */
     site: 'none: a safe_not_sent whose attempt id the client would quarantine',
     projection: { state: 'none' },
     retrySafety: {
@@ -130,8 +146,20 @@ const REFUSAL_SITES: ReadonlyArray<{
       proofKind: 'typed_pre_click_stop',
       resolvedAt: CAPTURED_AT,
     },
-    reason: 'unpublishable_projection',
-    rejected: { branch: 'none', field: 'retry_safety.attemptId', shape: 'uuid_version_unsupported' },
+    reason: 'unpublishable_attempt_identity',
+    rejected: { branch: 'none', field: 'retry_safety.attemptId', shape: 'uuid_malformed' },
+  },
+  {
+    /* THE SITE THAT WAS THE LIVE CAUSE. 150 of the 163 refusals measured on 2026-09-03 were here,
+     * on this exact field, on packets whose only defect was that a ledger id is not shaped like an
+     * RFC-4122 identifier. That refusal is GONE: the client now validates the field by layout, this
+     * file moved onto that rule, and those packets publish. What remains here - and what this site
+     * now pins - is the refusal that is still real: an identifier that is not 128 bits at all. */
+    site: 'unverified: a held attempt whose identifier the client cannot bind',
+    projection: { state: 'unverified', attemptId: SENTINEL_ATTEMPT, observedAt: CAPTURED_AT, reason: 'pressed' },
+    retrySafety: { kind: 'blocked_unverified', attemptId: SENTINEL_ATTEMPT, at: CAPTURED_AT, reason: 'pressed' },
+    reason: 'unpublishable_attempt_identity',
+    rejected: { branch: 'unverified', field: 'projection.attempt_id', shape: 'uuid_malformed' },
   },
   {
     site: 'unverified: a held attempt whose observation is not a strict timestamp',
@@ -204,12 +232,16 @@ describe('submissionAuthorityRefusalForWire', () => {
         site.site,
       );
     }
-    // Seven of the eight are the residual class the 2026-09-03 census collapsed into one word.
-    assert.equal(
-      REFUSAL_SITES.filter((site) => site.reason === 'unpublishable_projection').length,
-      7,
-      'all seven unpublishable_projection return sites are exercised',
-    );
+    /* Every shape-refusal return site is exercised, under whichever of the three words it produces.
+     * The two attempt-identity sites are the ones the census found: 162 of one account's 163
+     * refusals, on `projection.attempt_id` alone. The five residual sites are the classes it found
+     * ZERO of - a timestamp, an empty repair list, a cross-packet binding, a non-https receipt URL -
+     * which is exactly why they should not have been sharing a word with the 162. */
+    const byReason = (reason: string) => REFUSAL_SITES.filter((site) => site.reason === reason).length;
+    assert.equal(byReason('unpublishable_attempt_identity'), 2, 'both attempt-identity sites');
+    assert.equal(byReason('unpublishable_projection'), 6, 'all six residual sites');
+    assert.equal(byReason('unpublishable_receipt_source'), 1, 'the vocabulary site keeps its own word');
+    assert.equal(REFUSAL_SITES.length, 9);
   });
 
   it('publishes the value that failed nowhere in the payload', () => {
@@ -306,10 +338,10 @@ describe('submissionAuthorityRefusalTallies', () => {
     const tallies = submissionAuthorityRefusalTallies(refusals);
     assert.equal(tallies.length, REFUSAL_SITES.length);
     assert.deepEqual(tallies[0], {
-      reason: 'unpublishable_projection',
+      reason: 'unpublishable_attempt_identity',
       branch: 'none',
       field: 'retry_safety.attemptId',
-      shape: 'uuid_version_unsupported',
+      shape: 'uuid_malformed',
       packets: 3,
     });
     for (const tally of tallies.slice(1)) assert.equal(tally.packets, 1);
@@ -373,7 +405,7 @@ describe('the board payload is untouched', () => {
     }
   });
 
-  it('keeps the marker at exactly three keys and six reasons', () => {
+  it('keeps the marker at exactly three keys, over a closed and counted reason vocabulary', () => {
     // The one thing the deployed dashboard could plausibly parse strictly. It gains no key here:
     // the rejection reaches its reader through a route that publishes no card.
     assert.deepEqual(submissionAuthorityUnavailableMarker(PACKET, 'unpublishable_projection'), {
@@ -381,6 +413,25 @@ describe('the board payload is untouched', () => {
       packet_id: PACKET,
       reason: 'unpublishable_projection',
     });
+    /* The reason is the ONLY thing that varies on a marker, so the vocabulary is the whole contract
+     * and it is now countable rather than a union nobody could count - the previous spelling of this
+     * test said "six reasons" in its title and asserted the number nowhere. Seven as of 2026-09-03,
+     * when the census split `unpublishable_attempt_identity` out of the residual. A member added
+     * without a deliberate edit here is a widened contract nobody decided to widen. */
+    assert.deepEqual([...SUBMISSION_AUTHORITY_UNAVAILABLE_REASONS], [
+      'projection_read_failed',
+      'revision_not_canonical',
+      'boundary_authorized',
+      'unpublishable_receipt_source',
+      'inconsistent_retry_evidence',
+      'unpublishable_attempt_identity',
+      'unpublishable_projection',
+    ]);
+    for (const reason of SUBMISSION_AUTHORITY_UNAVAILABLE_REASONS) {
+      assert.deepEqual(Object.keys(submissionAuthorityUnavailableMarker(PACKET, reason)).sort(), [
+        'packet_id', 'reason', 'schema_version',
+      ]);
+    }
     const lib = readFileSync('src/lib/submissionAuthorityEnvelope.ts', 'utf8');
     const marker = lib.slice(
       lib.indexOf('export function submissionAuthorityUnavailableMarker('),

@@ -18,6 +18,7 @@ import {
 import {
   assertSubmissionAccountNotDraining,
   lockSubmissionAttemptUser,
+  lockSubmissionProviderCallUser,
   SubmissionAccountDeletionDrainError,
 } from './submissionAttemptLedger';
 
@@ -59,7 +60,7 @@ export async function reserveBrowserProviderResource(input: {
   });
 }
 
-/** Reserve before POST, then hold the user fence from the final drain check through exact binding. */
+/** Reserve before POST, then hold the PROVIDER-CALL fence from the final drain check through exact binding. */
 export async function createFencedBrowserSession(input: {
   userId: string;
   provider: PersistentBrowserProvider;
@@ -73,10 +74,26 @@ export async function createFencedBrowserSession(input: {
   const result = await db.transaction(async (tx): Promise<
     { kind: 'created'; session: SessionResponse } | { kind: 'deletion_draining' }
   > => {
-    // Keep the shared user lock across the external POST and exact-id binding. If deletion won the
-    // gap after the durable reservation commit, no POST occurs. If this process dies during or
-    // after the POST, the earlier committed reservation remains recoverable by provider metadata.
-    await lockSubmissionAttemptUser(tx, input.userId);
+    /* THE PROVIDER-CALL KEY, NOT THE LEDGER KEY, for the reason submissionAccountFence.ts records
+     * for the stratus call: this transaction spans an external POST bounded at 15s
+     * (createReservedBrowserSession), and the ledger key is the one the submission-authority
+     * revision trigger takes on EVERY write to this account. Held here it made 15 seconds of the
+     * account's generated_resumes, applications and artifacts writes answer 503 "This account
+     * changed at the same time" each time a session was created - the same shape as the 280s
+     * managed prepare that fence was split out for, just shorter, and it was missed then because
+     * it takes the key directly rather than through withProviderCallFence.
+     *
+     * The fence it actually needs is unchanged: an account-deletion drain must not commit between
+     * the drain check below and the exact-id binding. Deletion takes the ledger key AND this one
+     * (account.ts, in that fixed order), so holding this one alone still excludes it. If deletion
+     * won the gap after the durable reservation commit, no POST occurs. If this process dies
+     * during or after the POST, the earlier committed reservation stays recoverable by provider
+     * metadata.
+     *
+     * The binding UPDATE below still fires the revision trigger, which takes the ledger key - but
+     * as the last statement before commit, so it holds it for milliseconds instead of across the
+     * POST, which is the entire point. */
+    await lockSubmissionProviderCallUser(tx, input.userId);
     try {
       await assertSubmissionAccountNotDraining(tx, input.userId);
     } catch (error) {

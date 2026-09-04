@@ -74,6 +74,7 @@ import { objectStorageRoutes } from './routes/objectStorage';
 import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
 import { submissionAuthorityRevisionReadiness } from './lib/submissionAuthorityRevision';
 import { encryptionRekeyRoutes } from './routes/encryptionRekey';
+import { isAuthorityRevisionConflictError } from './db/authorityRevisionRetry';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -103,7 +104,22 @@ export function toPublicError(error: unknown): PublicError {
   }
 
   const candidate = error as { code?: unknown; statusCode?: unknown; message?: unknown };
-  if (candidate.code === '40001') {
+  /* THE CAUSE CHAIN, NOT THE TOP-LEVEL `code`, and the difference is the whole of this branch.
+   *
+   * The submission-authority revision guard raises SQLSTATE 40001 from a BEFORE trigger on every
+   * table it covers, generated_resumes included, whenever another actor on the same account holds
+   * the per-user advisory lock - a dashboard poll's authority projection read, a history load, or a
+   * managed run. drizzle-orm 0.45 does not rethrow that pg error: it wraps it in a
+   * DrizzleQueryError whose own `code` is undefined, whose `cause` is the pg error, and whose
+   * `message` is `Failed query: <the whole statement>\nparams: <every bound value>`. So this
+   * branch, and the authored sentence and Retry-After it exists to send, had stopped firing for
+   * every write that reaches Postgres through drizzle - which is all of them.
+   *
+   * Measured live 2026-09-04 on packet 73768339: PUT /applications/:id/review/answers answered 500
+   * carrying that raw UPDATE and its parameters while a managed run held the lock, and the same
+   * save answered 200 once the run finished. isAuthorityRevisionConflictError walks the chain, so
+   * the wrapper and the bare pg error are read the same way. */
+  if (isAuthorityRevisionConflictError(candidate)) {
     return {
       statusCode: 503,
       message: 'This account changed at the same time. Try the request again.',
@@ -455,6 +471,36 @@ export async function buildApp(options: BuildAppOptions = {}) {
     return reply.redirect(PRODUCT_LINKS.install, 302);
   });
 
+  /* GLOBAL ERROR HANDLER, AND IT HAS TO BE INSTALLED BEFORE THE ROUTES IT COVERS.
+   *
+   * Fastify hands each encapsulated plugin the error handler that exists AT THE MOMENT THE PLUGIN IS
+   * CREATED, and every `await fastify.register(...)` below finishes creating its context before the
+   * next line runs. Installed after that block - where this lived until now - it covered the two
+   * bare `fastify.get` routes declared on the root instance and NOTHING ELSE: every application,
+   * submission, resume and auth route fell through to Fastify's built-in handler instead.
+   *
+   * WHAT THAT COST, measured live 2026-09-04 on packet 73768339. Fastify's default serializes the
+   * thrown error verbatim - `{"statusCode":500,"error":"Internal Server Error","message":"Failed
+   * query: update \"generated_resumes\" set \"spec\" = jsonb_set(...) where (... and
+   * \"generated_resumes\".\"spec\" = $4::jsonb ...) returning \"id\""}` - so a routine write
+   * conflict shipped the whole statement, its bound-parameter shape and the row's stored spec
+   * predicate to the browser, and the dashboard rendered the `error` key as the literal words
+   * "Internal Server Error". toPublicError's authored sentences, its Retry-After and its refusal to
+   * echo server internals were all unreachable from the routes that actually serve applicants.
+   *
+   * Pinned in src/index.test.ts, on the source rather than through an injected request, because the
+   * ordering is the whole mechanism and nothing injected can see it: a plugin a test registers after
+   * buildApp() returns inherits this handler under EITHER ordering, which is exactly why the defect
+   * survived a suite that exercises these routes constantly. */
+  fastify.setErrorHandler((error, _request, reply) => {
+    fastify.log.error(error);
+    const publicError = toPublicError(error);
+    if (publicError.retryAfterSeconds !== undefined) {
+      reply.header('Retry-After', String(publicError.retryAfterSeconds));
+    }
+    return reply.status(publicError.statusCode).send({ error: publicError.message });
+  });
+
   // Routes
   await fastify.register(captchaStallRoutes);
   await fastify.register(authRoutes);
@@ -501,16 +547,6 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(adapterHealthRoutes);
   await fastify.register(managedReceivingCanaryRoutes);
   await fastify.register(dashboardBootstrapRoutes);
-
-  // Global error handler
-  fastify.setErrorHandler((error, _request, reply) => {
-    fastify.log.error(error);
-    const publicError = toPublicError(error);
-    if (publicError.retryAfterSeconds !== undefined) {
-      reply.header('Retry-After', String(publicError.retryAfterSeconds));
-    }
-    return reply.status(publicError.statusCode).send({ error: publicError.message });
-  });
 
   // 404 handler
   fastify.setNotFoundHandler((_request, reply) => {

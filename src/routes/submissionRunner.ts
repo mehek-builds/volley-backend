@@ -113,6 +113,7 @@ import {
   managedResultRequiresCaptchaAttention,
   isManagedCaptchaEvidenceExtract,
   blockersRequireCoverLetter,
+  coverLetterAttentionDisposition,
   fillPortal,
   hasCoverLetterUpload,
   hasTranscriptUpload,
@@ -285,7 +286,7 @@ import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '
 import { loadApplicationProfileLike, loadUnattendedConsentGrant } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
-import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
+import { applicantChoseStoredAnswer, applicantChoseStoredAnswerInRound } from '../lib/applicantAnswer';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import {
   dedupeQuestionMetadataBlockers,
@@ -297,6 +298,7 @@ import {
   questionMetadataBlockerReason,
   questionLabelIsGenericAnswerControl,
   reopenUnfitClosedChoiceQuestions,
+  snapStoredAnswersToProfileFieldOptions,
   type QuestionMetadataBlocker,
 } from '../lib/questionMetadata';
 import {
@@ -357,6 +359,7 @@ import {
 } from '../lib/submissionAttemptLedger';
 import {
   ApplicantEmailRegenerationRequiredError,
+  ApplicantEmailRouteUnknownError,
   readPinnedApplicantEmail,
   resolveFrozenApplicantEmail,
 } from '../lib/applicationEmail';
@@ -5919,18 +5922,6 @@ export function compactMaterialQuestions(
   return [...selected.values()];
 }
 
-function applicantChoseStoredAnswerInRound(
-  question: { answer: string; answer_source?: string; answer_reviewed_at?: string },
-  questionsReviewedAt: string | undefined,
-): boolean {
-  const answerReviewedAt = question.answer_reviewed_at?.trim();
-  const reviewRound = questionsReviewedAt?.trim();
-  return applicantChoseStoredAnswer(question)
-    && Boolean(answerReviewedAt)
-    && Boolean(reviewRound)
-    && answerReviewedAt === reviewRound;
-}
-
 export async function discoverAndResolveQuestions(
   discovered: DiscoveredQuestion[],
   row: ResumeRow,
@@ -6573,9 +6564,31 @@ export async function discoverAndResolveQuestions(
         const skipOutlivedItsAnswer = existing.answer_state === 'skipped'
           && existing.answer.trim() !== ''
           && knownValue.trim() !== existing.answer.trim();
+        /* AND SO DOES THE OVERRIDE RECORD, which is the same rule and was the one field this spread
+         * still carried across a replacement.
+         *
+         * MEASURED 2026-09-03 by running this function over the HRT gender shapes: a row holding
+         * `answer_override_of: "Female"` beside her `Female` came out of the fill as
+         * `answer: "Woman"` with the override note intact, and it survived the whole writeback into
+         * the persisted packet. `answer_override_of` says "the resolution she disagreed with when
+         * she chose the value on this record" - a statement about a string this line is replacing -
+         * and refreshKnownQuestionAnswers reads it to decide whether to KEEP an answer, so a stale
+         * one is not inert. Its own writer drops it the moment the resolver agrees with the answer
+         * (see the `known.value === question.answer` branch in questionDiscovery.ts); a machine
+         * value with no claim beside it has nothing to be an override OF at all.
+         *
+         * KEYED ON THE ANSWER CHANGING, not on the source, because that is what makes the record
+         * stale, and it is the same test provenanceStillHers and skipOutlivedItsAnswer are built
+         * from. Omitted rather than set to undefined: these rows are compared as records. */
+        const answerReplacesTheStoredOne = knownValue.trim() !== existing.answer.trim();
         const { answer_state: _skipOnAReplacedAnswer, ...existingWithoutStaleSkip } = existing;
+        const { answer_override_of: _overrideOfAReplacedAnswer, ...existingWithoutStaleOverride } = (
+          skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing
+        );
         questions.push({
-          ...(skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing),
+          ...(answerReplacesTheStoredOne
+            ? existingWithoutStaleOverride
+            : (skipOutlivedItsAnswer ? existingWithoutStaleSkip : existing)),
           ...(existing.answer_source === 'applicant_review' && !provenanceStillHers
             ? { answer_source: undefined, answer_reviewed_at: undefined }
             : {}),
@@ -8463,15 +8476,28 @@ async function prepareManaged(
   const verificationHandoff = blockers.some((blocker) =>
     /verification code|security code|one[ -]?time code|passcode|\botp\b/i.test(blocker),
   );
-  /* A MISSING COVER LETTER IS A BLOCKER ON A FORM THAT ASKS FOR ONE. This line used to read "worth
-     telling the applicant about, but it is not a blocker: the form is filled and sendable without
-     it", and it is not sendable without it. /submission/approve refuses a packet with 422 when
-     cover_letter_supported is true and no cover letter is recorded, so leaving `safe` alone here
-     produced the one outcome that is worse than either honest answer: a packet described to her as
-     ready, with a Send button that cannot work. It reaches `safe` below rather than only
-     attention_reason. This branch is only ever populated when the form HAS a cover-letter control,
-     because packetForCoverLetterCapability returns no issue when `supported` is false. */
-  const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
+  /* WHETHER THIS EMPLOYER'S FORM MARKS THE COVER LETTER REQUIRED, measured here off the same
+   * required-field scan `blockers` already carries, so the ONE measurement below can answer both
+   * this run's readiness question and, once written to cover_letter_required, the question
+   * finalApprovalCoverLetterIssue (lib/applicationReview.ts) asks at /submission/approve. See
+   * coverLetterAttentionDisposition (lib/portalSubmission.ts) for why the split below reads this
+   * and not `coverLetterSupported`. */
+  const coverLetterRequired = blockersRequireCoverLetter([
+    ...blockers,
+    ...(discoveryResult?.blockers ?? []),
+  ]);
+  /* A MISSING COVER LETTER IS A BLOCKER ONLY ON A FORM THAT REQUIRES ONE. It reaches `safe` below,
+   * rather than only attention_reason, exactly when finalApprovalCoverLetterIssue would also refuse
+   * the send: a REQUIRED letter Litos could not produce is a Send button /submission/approve returns
+   * 422 on, so calling that packet ready would be a promise the server will not keep. An OPTIONAL
+   * letter's failure is Litos's own shortfall on a document nobody asked for - see
+   * cover_letter_skipped_reason below - and parking an otherwise-complete application over it is
+   * exactly what happened to Sage packet aae653a3-2d5a-4f3e-ba3b-afea4219df37: 17 filled fields, no
+   * other blocker, needs_attention/required_document anyway, and a retry that could never have
+   * cleared it. This branch is only ever populated when the form HAS a cover-letter control, because
+   * packetForCoverLetterCapability returns no issue when `supported` is false. */
+  const coverLetterDisposition = coverLetterAttentionDisposition(coverLetterOutcome.coverLetterIssue, coverLetterRequired);
+  const coverLetterAttention = coverLetterDisposition.blocking;
   /* A transcript she attached that this run could not carry, and it gates `safe` below for a
    * different reason than the cover letter does.
    *
@@ -8841,16 +8867,15 @@ async function prepareManaged(
     /* Measured, not assumed. `blockers` here is the merge of the discovery pass's required-field
      * scan and the fill run's, which is the same evidence every other required field on this form
      * is judged by. Written only when the form HAS a cover-letter control: on a portal with no such
-     * control there is nothing to require and nothing was looked at, and `undefined` says so. */
-    ...(coverLetterSupported
-      ? {
-        cover_letter_required: blockersRequireCoverLetter([
-          ...blockers,
-          ...(discoveryResult?.blockers ?? []),
-        ]),
-      }
-      : {}),
+     * control there is nothing to require and nothing was looked at, and `undefined` says so.
+     * The SAME measurement, not a second call to blockersRequireCoverLetter, so this field and the
+     * `safe` gate above can never disagree about what this run found. */
+    ...(coverLetterSupported ? { cover_letter_required: coverLetterRequired } : {}),
     cover_letter_attached: Boolean(packet.coverLetter),
+    // See ApplicationReviewState.cover_letter_skipped_reason: the informational twin of
+    // coverLetterAttention above, populated exactly when that array is not. Written unconditionally,
+    // undefined included, so a prior run's note cannot survive a re-prepare that no longer has one.
+    cover_letter_skipped_reason: coverLetterDisposition.skippedReason,
     /* Whether this form has somewhere to put a transcript, measured by the discovery pass.
      *
      * Written including false, because the SUBMIT run re-derives its attach decision from this flag
@@ -9024,7 +9049,15 @@ export function resolvePacketAuditQuestionFixpoint(
         postingCountryCode,
         asOf,
       );
-      return normalize(packetMayBeWithEmployer ? refreshed : reopenUnfitClosedChoiceQuestions(refreshed));
+      /* Snapped between the refresh and the re-open, and INSIDE this transform rather than once
+       * before the fixpoint starts - see snapStoredAnswersToProfileFieldOptions's own header for
+       * why that placement is load-bearing (the un-snapped value is a stable fixed point of
+       * refresh+reopen alone, so a snap applied only to the fixpoint's initial input is undone on
+       * the first pass). Skipped once the packet may already be with the employer, same as the
+       * re-open: a sent record keeps its stored answers verbatim. */
+      return normalize(packetMayBeWithEmployer
+        ? refreshed
+        : reopenUnfitClosedChoiceQuestions(snapStoredAnswersToProfileFieldOptions(refreshed)));
     },
   );
 }
@@ -9396,7 +9429,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       );
     }
     const packet = transcriptOutcome.packet;
-    const coverLetterAttention = builtOutcome.coverLetterIssue ? [builtOutcome.coverLetterIssue] : [];
+    // coverLetterAttention/coverLetterDisposition are computed further down, once sanitizedBlockers
+    // exists: like the managed path, whether this employer's form REQUIRES the letter can only be
+    // read off the required-field scan the fill just produced, not off builtOutcome alone. See the
+    // comment beside coverLetterDisposition below.
     // See the managed path's transcriptAttention: this holds back a send that nothing else refuses.
     const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
 
@@ -9526,6 +9562,13 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       screenshot,
     );
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
+    /* Same measurement and same split as the managed path: see coverLetterDisposition there for why
+     * this reads cover_letter_required rather than cover_letter_supported. This path has no separate
+     * discovery-pass blocker list to merge in, so sanitizedBlockers - this fill's own required-field
+     * scan, against a control buildPacket left empty either way - is the whole of the evidence. */
+    const coverLetterRequired = blockersRequireCoverLetter(sanitizedBlockers);
+    const coverLetterDisposition = coverLetterAttentionDisposition(builtOutcome.coverLetterIssue, coverLetterRequired);
+    const coverLetterAttention = coverLetterDisposition.blocking;
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
     const questionMetadataMeasurementComplete = questionMetadataMeasurementIsComplete({
       discoveryFailed: discoveryFailures.length > 0,
@@ -9581,11 +9624,11 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
      * text is downstream of it and cannot weaken it. */
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
-      // coverLetterAttention counts here for the same reason it gates `safe` on the managed path:
-      // on a form with a cover-letter control, a packet with no cover letter recorded is one that
-      // /submission/approve will refuse with 422, so calling it ready is a promise the send cannot
-      // keep. Folded into attentionCount rather than blockerCount because it is our failure to
-      // report, not a field the employer's page left empty.
+      // coverLetterAttention counts here for the same reason it gates `safe` on the managed path,
+      // and like there it is empty unless coverLetterRequired: a REQUIRED letter Litos could not
+      // produce is a Send button /submission/approve will refuse with 422, so calling it ready would
+      // be a promise the send cannot keep. Folded into attentionCount rather than blockerCount
+      // because it is our failure to report, not a field the employer's page left empty.
       //
       // discoveryFailures is a separate and independent reason to hold the same send: the first
       // says the packet is missing something we owed it, the second says we never read the form
@@ -9620,11 +9663,14 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       ...(questionMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
       cover_letter_supported: coverLetterSupported,
       // Same measurement as the managed path, off this path's own required-field scan. See
-      // ApplicationReviewState.cover_letter_required.
-      ...(coverLetterSupported
-        ? { cover_letter_required: blockersRequireCoverLetter(sanitizedBlockers) }
-        : {}),
+      // ApplicationReviewState.cover_letter_required. The SAME variable `safe` above was gated on,
+      // not a second call, so this field and the gate can never disagree about what this run found.
+      ...(coverLetterSupported ? { cover_letter_required: coverLetterRequired } : {}),
       cover_letter_attached: Boolean(packet.coverLetter),
+      // See ApplicationReviewState.cover_letter_skipped_reason and the managed path's identical
+      // field: informational twin of coverLetterAttention, written (undefined included) on every
+      // prepare so a stale note cannot outlive the run that produced it.
+      cover_letter_skipped_reason: coverLetterDisposition.skippedReason,
       // Written here for the same reason it is written on the managed patch: the submit run reads
       // this flag instead of probing, so a prepare that measured the capability and did not record
       // it sends an application missing a document the preview showed attached.
@@ -11598,6 +11644,8 @@ export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
   regenerationRequired?: boolean;
+  /** The routing probe could not run. A retry, not a rebuild. See ApplicantEmailRouteUnknownError. */
+  routeCheckUnavailable?: boolean;
   /* The packet's own resume file is gone from storage, so no packet could be assembled at all. */
   packetDocumentExpired?: boolean;
   /* The applicant-facing sentence from a ManagedActionBudgetError, or null. A string rather than a
@@ -11626,14 +11674,14 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
+  const { captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
   const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
   /* preClickProvenByLedger joins the needs_attention list rather than falling to 'failed', and that
      is load-bearing rather than cosmetic. submitRequestDisposition treats an unclaimed
      needs_attention row as re-runnable and a 'failed' one as not, so a packet released by the
      ledger proof has to land here or the release buys nothing: the claim would come off and the
      packet would still refuse to send. */
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || destinationUnverifiedBeforeSend || uncertainAfterClaim || preClickProvenByLedger || providerSessionFailure
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || routeCheckUnavailable || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || packetDrift || destinationUnverifiedBeforeSend || uncertainAfterClaim || preClickProvenByLedger || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -11642,6 +11690,13 @@ export function submissionFailureOutcome(input: {
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
       : regenerationRequired
         ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
+      /* NAMED APART FROM THE ARM ABOVE, because the recovery is the opposite one. That sentence
+         tells her to rebuild the packet; this one would have her rebuild a packet that is fine, to
+         fix a network probe that a retry fixes. Nothing was sent either way - both stop before a
+         browser session opens - so the promise at the end is the same and only the instruction
+         differs. */
+      : routeCheckUnavailable
+        ? 'Litos could not reach the check that confirms where this employer’s reply would go, so it did not send. Nothing was sent to the employer. This one is worth trying again in a few minutes; the application itself is fine.'
       : packetDocumentExpired
         /* Ranked here for the same reason as its neighbours, and it is the earliest stop of the
            whole family: buildPacket throws before a browser session is opened, so nothing was
@@ -12287,6 +12342,14 @@ export function submissionFailureReview(
      rather than by decision. */
   const requiredFieldConfirmation = error instanceof ManagedRequiredFieldConfirmationError;
   const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
+  /* THE ROUTE COULD NOT BE CHECKED, which is a retry rather than a rebuild.
+   *
+   * Ranked beside regenerationRequired because it stops at the same place - resolveFrozenApplicantEmail
+   * runs before any browser session opens, so nothing was filled and nothing was sent - but it owes
+   * the opposite sentence. Until this existed a thrown deliverability probe was caught as `null` and
+   * reported as a regeneration hold, which told the applicant to rebuild a packet that was never
+   * broken and could not be fixed by rebuilding it. */
+  const routeCheckUnavailable = error instanceof ApplicantEmailRouteUnknownError;
   /* The third member of the same family as the two branches above, and it arrives with proof.
      buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
      is called at all, and it records submitActionAppended: false to say so. So the click provably
@@ -12366,7 +12429,7 @@ export function submissionFailureReview(
   const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
     packetDriftIssues: packetDrift?.issues,
     destinationUnverifiedBeforeSend: destinationUnverified,
     /* SUPPRESSED BY THE PROOF, and this is where defect 2 is actually fixed. uncertainAfterClaim's

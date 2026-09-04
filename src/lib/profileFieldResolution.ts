@@ -109,6 +109,21 @@ export type ResolvedProfileField = {
  * Intents whose answer is a fact already stored on the profile. A blocker naming one of these
  * is by definition a Litos defect rather than missing user data, which is what
  * profileBackedBlockerLabels reports on.
+ *
+ * 'minor' is deliberately NOT here despite being a PROFILE_BACKED_KEYS-shaped education intent.
+ * Every other member is a fact onboarding actually asks and db/schema.ts actually stores; a minor
+ * is neither (see ApplicationProfileLike's `minor` field comment in questionDiscovery.ts).
+ *
+ * This set is NOT what profileBackedBlockerLabels reports on, whatever the paragraph above implies
+ * for its other members - see that function's own docstring: it is deliberately unfiltered by
+ * PROFILE_BACKED_KEYS and asks only whether resolveProfileField had something to say. This set's
+ * one real consumer is isProfileBackedKey, called from profileAnswerAliases alone, to decide
+ * whether an already-resolved answer is confident enough to snap onto a synthetic profile field and
+ * run back through profileFieldCandidates' alias ladder - the treatment 'school' and 'major' get,
+ * building candidate phrasings for a closed-list control. Listing 'minor' here would tell that
+ * snapping step to treat a minor as a known fact worth aliasing the moment some future rule
+ * resolves one, the same way it treats a school or a major today - the same distinction that keeps
+ * every self-declaration in db/schema.ts's onboarding block out of this set.
  */
 export const PROFILE_BACKED_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
   'phone_country',
@@ -177,6 +192,78 @@ export function usableOptions(options: readonly string[] | null | undefined): st
     out.push(trimmed);
   }
   return out;
+}
+
+/**
+ * Input types whose value can only ever be TYPED, so no option list attached to one is a menu.
+ *
+ * THE DEFECT THIS NAMES, measured live 2026-09-03 on Hudson River Trading packet 4a79eec1
+ * (greenhouse, account mehekmandal05@gmail.com). The run parked on the speculative GPA alias fill -
+ * action label `gpa`, value the stored profile number "3.89" - with
+ * `no option matched "3.89" (the list offered: "No options")`. A GPA is a NUMBER. "No option
+ * matched" is not a true sentence about it: nothing was ever offered to match against, and even a
+ * full menu is not what a numeric entry control wants. The run was held on a category error.
+ *
+ * THE SAME ERROR ARRIVES FROM THE OTHER SIDE ON PINPOINT, which attaches `["Yes","No"]` to its
+ * `number` fields (measured across the ten-board sweep). There a numeric answer - years of Python,
+ * a salary - IS judged against a two-row menu it can never be a member of, and chooseClosestOption
+ * is asked to rank "5" against "Yes" and "No".
+ *
+ * ONE FAULT, TWO FACES, and it is worth stating as one: the control's own input type and its option
+ * list are each allowed to declare "this is a menu" on their own, and neither is ever checked
+ * against the other. Greenhouse's GPA box is a menu on the strength of a role with nothing behind
+ * it; Pinpoint's number box is a menu on the strength of options that do not belong to it. This set
+ * is the check that was missing - a type on this list cannot hold an option, so an option list is
+ * evidence about something else and must not be allowed to capture the answer.
+ *
+ * DELIBERATELY POSITIVE EVIDENCE ONLY, and `text` is deliberately absent. This file's own header
+ * warns that managed discovery reports `text` for every control it walks, react-selects included,
+ * so "nothing here may depend on inputType being accurate". Nothing here does: every type below is
+ * one the DOM states outright and one a searchable combobox never renders - react-select's search
+ * box is always `<input type="text">` - so trusting these names cannot mistake a real menu for a
+ * text field. A control reporting `text` falls through untouched, exactly as before.
+ *
+ * `textarea` is not here. It is already outside every closed-choice gate, and adding it would
+ * change the checkbox/multi-select reading of a control this rule has no measurement about.
+ *
+ * `search` IS NOT HERE EITHER, AND THAT EXCLUSION IS THE ONE THIS SET WOULD HAVE GOT WRONG.
+ * Select2 v4 renders its combobox search field as `<input type="search" class="select2-search__
+ * field">` - the very class stratus's own CHOICE_SHELL_CLASSES matches on to recognise a choice
+ * control. So `search` is a type a real searchable menu DOES render, and admitting it here would
+ * mint a Lever Select2 degree picker as free entry and refuse to snap her answer onto the
+ * employer's own row. That is the worse bug in the opposite direction, and it is exactly what this
+ * whole set exists to avoid, so the rule stands: a type qualifies only if no combobox in the corpus
+ * renders it. `password` is left out for the plainer reason that it has no measurement behind it
+ * and nothing to gain: no profile answer is ever resolved into one.
+ */
+export const FREE_ENTRY_INPUT_TYPE =
+  /^(?:number|tel|email|url|date|datetime-local|month|week|time|range)$/i;
+
+/**
+ * Does this control's option list BIND its answer - is the value one the applicant picks from that
+ * list, rather than one she types?
+ *
+ * The single predicate both directions of the fault above go through. Two clauses, and each one is
+ * a fact the other cannot supply:
+ *
+ *   1. There has to BE a list. An empty or placeholder-only inventory is not a menu with the answer
+ *      missing from it, it is no menu at all, and judging an answer against nothing is how "3.89"
+ *      came back as `no option matched`. usableOptions is the same placeholder filter every other
+ *      caller uses, so a "Select..." row cannot make a list look real here either.
+ *   2. The control has to be ABLE to hold a list. A `number` box cannot, whatever rows some probe
+ *      hung on it, so on Pinpoint the Yes/No pair is discarded and the number is typed.
+ *
+ * SAFETY INVARIANT THIS PRESERVES EXACTLY: a stored answer is never judged against an empty list.
+ * That was already true by clause 1 falling out of `usableOptions(...).length === 0` at each call
+ * site; it is now true by name in one place. See reviewedComboboxOptionKept.test.ts, "a combobox
+ * whose menu was never read is returned exactly as stored".
+ */
+export function optionsBindTheAnswer(
+  inputType: string | undefined | null,
+  options: readonly string[] | null | undefined,
+): boolean {
+  if (usableOptions(options).length === 0) return false;
+  return !FREE_ENTRY_INPUT_TYPE.test((inputType ?? '').trim());
 }
 
 type NumericRange = { min: number; max: number };
@@ -1290,14 +1377,35 @@ export function resolveProfileField(
      parameter's own note there: it is where the POSTING is, and omitting it only ever refuses. */
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* THE CLOCK THIS RESOLUTION IS ASKED AGAINST, passed straight through to resolveKnownAnswer for
+     the same reason the two above are. Defaulted, so every existing caller keeps the wall clock it
+     already had and nothing about a live fill changes. It exists because the callers that HAVE an
+     `asOf` were silently losing it here: current enrollment, study year, availability window, years
+     of experience and the age attestation are all decided from a date, and every one of them can
+     arrive on a control with an option list. A caller pinning a moment for the rest of its
+     resolution and getting `new Date()` from this one is a disagreement that only shows up on the
+     dates it straddles. */
+  asOf?: Date,
 ): ResolvedProfileField | null {
   const label = normalizeDiscoveredLabel(shape.label);
   if (!label) return null;
-  /* The option list goes IN as well as being matched against on the way out, and only one rule
-     reads it there. A declared absence of standardized test scores has no canonical spelling, so
-     the resolver needs the form's own list to say it; everything else is decided from the label and
-     the profile, and then snapped onto the list below exactly as before. */
-  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode, shape.options ?? undefined);
+  /* THE ONE LIST THIS FUNCTION IS ALLOWED TO JUDGE AN ANSWER AGAINST, decided once at the top so no
+   * branch below can reach past it to `shape.options` and reintroduce the split.
+   *
+   * `null` here means "this control's answer is TYPED", and it means it for one of two reasons that
+   * optionsBindTheAnswer keeps together on purpose: there is no usable list, or the control is a
+   * free-entry type that cannot hold one. Measured on Hudson River Trading 4a79eec1 (2026-09-03)
+   * for the first and on Pinpoint's `["Yes","No"]`-on-`number` fields for the second; see
+   * FREE_ENTRY_INPUT_TYPE for why those are one defect rather than two.
+   *
+   * EVERY consumer of the list moves behind this, INCLUDING the one that reads it on the way in.
+   * standardizedTestAnswer needs the form's own wording for a declared absence, and "N/A" chosen
+   * off a Yes/No pair hung on a salary box is the same category error in the other direction: it
+   * would put a word into a numeric control because a list nobody checked said the word existed.
+   * A control whose answer is typed is answered from the profile and the label, as it always was
+   * when no list had been read at all. */
+  const bindingOptions = optionsBindTheAnswer(shape.inputType, shape.options) ? shape.options : null;
+  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode, bindingOptions ?? undefined, asOf);
   if (!known || !('value' in known)) return null;
   const base = known.value.trim();
   if (!base) return null;
@@ -1308,7 +1416,7 @@ export function resolveProfileField(
   // this family and on no other.
   const eeo = EEO_QUESTION.test(label);
   if (key === 'languages' && /^checkbox$/i.test(shape.inputType ?? '')) {
-    const selected = exactCheckboxLanguageSelections(ap, shape.options);
+    const selected = exactCheckboxLanguageSelections(ap, bindingOptions);
     if (!selected) return null;
     return {
       key,
@@ -1330,7 +1438,7 @@ export function resolveProfileField(
    * permission off, which is the one thing this feature promises never to do. So the gate is now
    * the same call the resolver and the pre-script make, and there is one gate rather than three. */
   if (consentAcknowledgementAnswer(label, ap, jdText)) {
-    const chosen = chooseConsentOption(shape.options);
+    const chosen = chooseConsentOption(bindingOptions);
     return {
       key,
       // No option list is a checkbox or a free-text control: the plain acceptance value is right.
@@ -1338,13 +1446,13 @@ export function resolveProfileField(
       // signal the runner turns into "left for you" rather than selecting something.
       value: chosen ?? base,
       candidates: [base],
-      matchedOption: usableOptions(shape.options).length === 0 ? false : chosen !== null,
+      matchedOption: usableOptions(bindingOptions).length === 0 ? false : chosen !== null,
     };
   }
   const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base, label);
-  let matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  let matched = eeo ? chooseEeoOption(label, base, bindingOptions) : chooseClosestOption(candidates, bindingOptions);
   if (matched === null && PRONOUNS_QUESTION.test(label)) {
-    matched = equivalentPronounOption(base, shape.options);
+    matched = equivalentPronounOption(base, bindingOptions);
   }
   if (key === 'referral_source_default' && matched === null) {
     // The employer's own site, under the employer's own name for it. Only reached once the standard
@@ -1352,7 +1460,7 @@ export function resolveProfileField(
     // list has to say which entry that is, and say it unambiguously. See employerOwnSiteOption.
     const evidenced = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
     if (isCompanySiteReferralClaim(evidenced)) {
-      matched = employerOwnSiteOption(usableOptions(shape.options)) ?? null;
+      matched = employerOwnSiteOption(usableOptions(bindingOptions)) ?? null;
     }
     /* HER STANDING ANSWER, UNDER THE BOARD'S OWN WORDING, AND THEN "OTHER".
      *
@@ -1366,7 +1474,7 @@ export function resolveProfileField(
      * "University job board" is a claim she cannot make. Before this the question came back blank
      * and held a complete application; now it is answered the way she asked for it to be. */
     if (matched === null && isJobBoardReferralClaim(evidenced)) {
-      const options = usableOptions(shape.options);
+      const options = usableOptions(bindingOptions);
       /* namedJobBoardOption is last because it says the MOST: it names one particular board, where
        * her standing answer is the generic fact. It is only correct once the two entries that state
        * that fact more exactly - the generic wording, then "Other" - are both absent from the list,
@@ -1378,7 +1486,7 @@ export function resolveProfileField(
         ?? null;
     }
   }
-  if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {
+  if (key === 'referral_source_default' && usableOptions(bindingOptions).length > 0 && matched === null) {
     return null;
   }
   return {

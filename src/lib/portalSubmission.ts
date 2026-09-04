@@ -45,6 +45,7 @@ import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
   readManagedFinalSubmitChooser,
   readManagedFinalSubmitNoClick,
+  readManagedSubmitOutcome,
 } from './managedSubmitOutcome';
 import { receiptProof } from './receiptProof';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from './workableApplicationUrl';
@@ -2629,13 +2630,156 @@ function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: S
   });
 }
 
+/* ─── A BARE HUMAN WORD IS NOT AN ADDRESS ─────────────────────────────────────────────────────
+ *
+ * The anchors these speculative fills carry are the words a person would say: 'GPA', 'Graduation
+ * Date', 'End date year'. The runner turns one into a control by matching label text - exact first,
+ * then any label CONTAINING the anchor - and takes `.first()` of what comes back. On a form with
+ * two controls whose labels both carry the word, DOM order decides which one gets typed into, and
+ * nothing in this repo knows that happened.
+ *
+ * MEASURED 2026-09-03 on Hudson River Trading packet 4a79eec1 (greenhouse, job 8052083). That form
+ * asks for the GPA twice, deliberately:
+ *
+ *   question_68000287  "What is your overall college/university GPA?", a 13-band react-select whose
+ *                      options include "3.76 - 4.0" - the band she reviewed and chose.
+ *   question_68000289  a bare <input type="text">, captioned "We recognize that the options above
+ *                      may not cover all global grading systems. Please feel free to write in your
+ *                      GPA below without conversion, along with the corresponding scale..." - which
+ *                      is where a raw "3.89" belongs.
+ *
+ * Against the live markup the anchor 'GPA' gave 0 exact hits and 4 loose ones, and `.first()` was
+ * the BAND's label. The run opened the band control, typed "3.89" into its react-select search box,
+ * filtered thirteen options down to none, and read react-select's own empty-menu notice back to her
+ * as the employer's offer: `no option matched "3.89" (the list offered: "No options")`. The whole
+ * application parked on that one field and nothing reached the employer.
+ *
+ * WHAT THIS RESOLVES, AND THE ONE CHOICE IT WILL NOT MAKE. The packet already carries every control
+ * discovery found, each with the employer's own label, the control's measured shape and its durable
+ * selector, so this repo can compute the same candidate set the runner is about to and does not have
+ * to leave the choice to DOM order. It acts only where the packet PROVES that the anchor names a
+ * control which cannot hold this value - a closed list whose read options do not contain it, or a
+ * measured combobox/listbox/select with no read list vouching for it. Then, and only then:
+ *
+ *   exactly one candidate left that could hold it, and unanswered -> bind the fill to ITS selector
+ *   none left, or more than one                                   -> emit nothing
+ *
+ * Where no candidate is provably wrong - two education rows each offering "End date year", say -
+ * this stands aside entirely and the plain label fill goes out byte for byte as before. Choosing
+ * between controls that could each legitimately take the value is the runner's `.first()`, and
+ * overruling it from here would be swapping one blind guess for another.
+ */
+function managedAnchorNamesQuestion(anchor: string, questionLabel: string): boolean {
+  const normalized = normalizedFailedFieldLabel(questionLabel);
+  if (!normalized) return false;
+  const escaped = anchor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^| )${escaped}(?: |$)`).test(normalized);
+}
+
+/**
+ * Whether the packet PROVES this control cannot hold this value.
+ *
+ * Read options are the stronger evidence and come first: a list that was actually read says exactly
+ * what the control accepts. With no list read, the control's measured shape is the evidence -
+ * combobox, listbox and native select are closed by construction (see measuredClosedListShape), and
+ * a raw profile value no read list has vouched for cannot be typed into one. Absence of both is not
+ * evidence of anything, and returns false.
+ */
+function managedAnchorCandidateRefusesValue(
+  packet: SubmissionPacket,
+  item: SubmissionPacket['questions'][number],
+  value: string,
+): boolean {
+  const options = packetReadOptionsForQuestion(packet, item);
+  if (options) {
+    const wanted = value.trim().toLowerCase();
+    return !options.some((option) => option.trim().toLowerCase() === wanted);
+  }
+  return measuredClosedListShape(reviewQuestionPortalInputType(item)) !== null;
+}
+
+type ManagedAnchorResolution = { kind: 'bind'; selector: string } | { kind: 'refuse' };
+
+function managedAnchorResolution(
+  packet: SubmissionPacket,
+  text: string,
+  value: string | undefined,
+): ManagedAnchorResolution | undefined {
+  const wanted = value?.trim();
+  if (!wanted) return undefined;
+  const anchor = normalizedFailedFieldLabel(text);
+  if (!anchor) return undefined;
+  const named = packet.questions.filter((item) => managedAnchorNamesQuestion(anchor, item.question));
+  // One control, or none this repo can see: the runner has nothing to choose between, or no
+  // evidence reached the packet at all. Either way the existing label fill is unchanged.
+  if (named.length < 2) return undefined;
+  // An exact label match wins in the runner before the loose pass ever runs, so a single control
+  // spelled exactly like the anchor is already resolved deterministically and is left alone.
+  if (named.filter((item) => normalizedFailedFieldLabel(item.question) === anchor).length === 1) return undefined;
+  const holders = named.filter((item) => !managedAnchorCandidateRefusesValue(packet, item, wanted));
+  // Nothing here is provably the wrong control. Not this function's choice to make.
+  if (holders.length === named.length) return undefined;
+  if (holders.length !== 1) return { kind: 'refuse' };
+  const [holder] = holders;
+  /* Already answered means the reviewed-question chain owns this control and fills it at its own
+   * selector with the answer of record. Firing here as well would spend a second action on a value
+   * that is not hers, and MANAGED_ACTION_LIMIT is 120 with a real Greenhouse packet already
+   * reconstructing to exactly that. The alias has nowhere left to go, so it goes nowhere. */
+  if (holder.answer?.trim()) return { kind: 'refuse' };
+  /* No failed-control guard here, deliberately. One was written, and mutating it left every test in
+   * ambiguousLabelAnchor.test.ts green: managedActionTargetsFailedField, the last-line invariant at
+   * the end of the build, already strips an id-scoped action at a failed control, and it matches
+   * `#question_68000289` against controlId `question_68000289` by the same regex it uses for every
+   * other builder. A guard that cannot be made to fail is not defence in depth, it is a line that
+   * makes a test look covered. The boundary is asserted end to end in that file instead. */
+  const selector = durablePortalSelector(reviewQuestionPortalSelector(holder));
+  // A control with no durable handle cannot be addressed precisely, and addressing it by the same
+  // ambiguous label is the defect this whole function exists to end.
+  if (!selector) return { kind: 'refuse' };
+  return { kind: 'bind', selector };
+}
+
 function managedFillByLabelUnlessHandled(
   actions: ManagedBrowserAction[],
   packet: SubmissionPacket,
   text: string,
   value: string | undefined,
   label: string,
+  /* OPT-IN, AND OFF EVERYWHERE BUT GPA, BECAUSE "NOT ON THE READ LIST" IS NOT "CANNOT HOLD IT".
+   *
+   * managedAnchorCandidateRefusesValue treats a read option list as proof of what a control accepts.
+   * That is true of the GPA band, whose thirteen bands are the whole of what it offers. It is FALSE
+   * of an education year menu, whose read list is routinely a truncated window. Measured on a
+   * two-row education section with row 0 published as ['2024','2025','2026','2027'] and row 1
+   * offering 2028, resolution refuses row 0, finds row 1 the sole survivor, and binds
+   *
+   *   {"type":"fill","selector":"#end-year--1","value":"2028","label":"education_end_year"}
+   *
+   * which is her SECOND education entry. Leaving that anchor on the label fill lands it on row 0
+   * through the runner's own resolution, correctly. The same shape moves "May" to #end-month--1 when
+   * row 0 spells months numerically. So generalising this to all eleven anchors fixes GPA and breaks
+   * the education row on the same submission.
+   *
+   * Scoped rather than repaired because the repair needs a way to tell a complete option read from a
+   * truncated one, and the packet carries no such signal. Widening this flag without that signal
+   * reintroduces the regression above; the fixture that catches it is the two-row education section
+   * with row 0 as a combobox, in ambiguousLabelAnchor.test.ts. */
+  resolveAmbiguousAnchor = false,
 ) {
+  const resolution = resolveAmbiguousAnchor ? managedAnchorResolution(packet, text, value) : undefined;
+  if (resolution?.kind === 'refuse') return;
+  /* The id-scoped fill deliberately runs ahead of managedSpeculativeLabelFillSuppressed, whose own
+   * doc comment scopes it to LABEL-resolved fills. That guard stands the ladder down because a
+   * label-resolved guess could land on the answered control; a selector taken from the packet's own
+   * discovery record for a DIFFERENT, unanswered control cannot. On the HRT packet the two rules
+   * disagree precisely there: the suppression sees her answered band and drops "3.89" entirely,
+   * which is right about the band and leaves the write-in empty. A control whose option read FAILED
+   * is still never filled: managedActionTargetsFailedField strips this action by id at the end of
+   * the build, exactly as it strips every other builder's. */
+  if (resolution?.kind === 'bind') {
+    managedFill(actions, resolution.selector, value, label);
+    return;
+  }
   if (managedSpeculativeLabelFillSuppressed(packet, text, value)) return;
   managedFillByLabel(actions, text, value, label);
 }
@@ -6796,6 +6940,48 @@ export function blockersRequireCoverLetter(blockers: readonly string[] | undefin
   return (blockers ?? []).some((blocker) => COVER_LETTER_REQUIRED_BLOCKER.test(blocker ?? ''));
 }
 
+export type CoverLetterAttentionDisposition = {
+  /* Fed straight into the `safe`/directPreparationIsSafe conjunction both prepare paths compute.
+   * Non-empty ONLY when the employer's own form required a letter Litos could not produce - the one
+   * case /submission/approve's finalApprovalCoverLetterIssue would also refuse. */
+  blocking: string[];
+  /* The SAME sentence, read by nobody's send gate. See ApplicationReviewState.cover_letter_skipped_reason. */
+  skippedReason?: string;
+};
+
+/**
+ * Whether a cover-letter prepare failure should hold a fill run back, or merely tell her about it.
+ *
+ * THE SPLIT THIS CLOSES: packetForCoverLetterCapability's coverLetterIssue fires whenever a
+ * SUPPORTED form's cover letter could not be generated or attached, with no opinion on whether the
+ * employer actually asked for one - it cannot have one, since it runs before the fill that would
+ * measure `required`. Both prepare paths used to fold that sentence into `safe` unconditionally,
+ * which is the exact reasoning finalApprovalCoverLetterIssue (lib/applicationReview.ts) was fixed to
+ * stop using: cover_letter_supported means the form has somewhere to put a PDF, never that the
+ * employer wants one, and JazzHR/Breezy/a bare "Attach / Dropbox / Enter manually" trio with no
+ * required marker all carry it true. Measured live on Sage packet
+ * aae653a3-2d5a-4f3e-ba3b-afea4219df37 (2026-09-04): a Greenhouse managed run filled all 17 fields,
+ * left no unanswered required question and no other blocker, and still parked needs_attention /
+ * required_document on an optional letter alone - while the same packet's dashboard copy read "does
+ * not require one" and /submission/approve, asked the RIGHT question, would have said yes.
+ *
+ * So this asks cover_letter_required (lib/portalSubmission.ts's own blockersRequireCoverLetter, off
+ * the run's required-field scan) rather than cover_letter_supported, which is the one fact
+ * finalApprovalCoverLetterIssue already trusts. A REQUIRED failure is unchanged: it still blocks,
+ * because a Send button the approve route will refuse 422 is worse than an honest stop. An OPTIONAL
+ * failure is Litos's own shortfall on a document nobody asked for, not evidence the application is
+ * incomplete, and downgrades to an informational note the send gate never reads.
+ */
+export function coverLetterAttentionDisposition(
+  coverLetterIssue: string | undefined,
+  coverLetterRequired: boolean,
+): CoverLetterAttentionDisposition {
+  if (!coverLetterIssue) return { blocking: [] };
+  return coverLetterRequired
+    ? { blocking: [coverLetterIssue] }
+    : { blocking: [], skippedReason: coverLetterIssue };
+}
+
 /* ELEMENT IDENTITY, AND WHY THE SECOND DOCUMENT IS EXCLUDED BY IT RATHER THAN BY A NAME.
  *
  * On the direct Playwright path the run holds the live page, so it does not have to reason about how
@@ -7550,8 +7736,11 @@ function pushFixedFieldActions(
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
+      /* The two anchors the resolution is enabled for. A GPA band's read list IS the whole of what
+       * it accepts, so "3.89 is not among these thirteen" really does prove the band cannot hold it.
+       * See the flag's own comment for why that reasoning does not travel to the education rows. */
+      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa', true);
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question', true);
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
@@ -11852,6 +12041,15 @@ export function assertManagedApplicationFinalSubmitSelected(
     );
   }
   if (chooser.outcome === 'selected') return;
+  /* THE CONFIRMATION PROOF IS THE BETTER WITNESS TO THIS ONE, so step aside and let it speak.
+   * When the caller-bound application form was unavailable there was no chooser run to prove
+   * anything about; the runner says so in the same breath it emits the unbound confirmation pass.
+   * Throwing here made this barrier answer first with "Litos could not read the managed
+   * final-submit chooser proof" - an internal check name - and the five application_scope_* reasons
+   * the confirmation proof carries could never reach the operator at all. The caller runs
+   * assertManagedRequiredFieldsConfirmed immediately after this, and that read is strictly
+   * stronger: it names the refusal, and it releases only through the pre-press gate. */
+  if (chooser.outcome === 'application_scope_invalid') return;
   const noClick = readManagedFinalSubmitNoClick(
     result,
     MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
@@ -12002,6 +12200,39 @@ function observedManagedSubmitWithheld(result: unknown): boolean {
   return proof.passes.every((pass) => isRecord(pass) && pass.submissionOutcome === 'blocked');
 }
 
+/* THE OTHER HALF OF THE SAME READ, AND THE ONLY THING THAT OUTRANKS AN UNBOUND PASS.
+ *
+ * A payload whose pass proves no submit control was ever bound, on a run that separately reports
+ * pressing one, is CONTRADICTORY - and a contradiction is not evidence of a no-send. Whichever half
+ * is wrong, the honest reading of the pair is PR 506's: the click state is unknown. So a claimed
+ * press disqualifies the unbound branch outright and sends the pass back to the strict checks it
+ * cannot pass, which is exactly where it went before that branch existed.
+ *
+ * Deliberately not the negation of observedManagedSubmitWithheld. That function answers "did the
+ * runner positively report withholding", where silence is not a yes. This one answers "did anything
+ * claim a press", where silence is not a yes either. Both must stay false on a silent payload, and
+ * a single boolean cannot do that.
+ */
+function observedManagedSubmitPressClaimed(result: unknown): boolean {
+  if (!isRecord(result)) return false;
+  /* readManagedSubmitOutcome is the canonical read of this field, and submissionProvablyNotSent
+   * already uses this exact expression for this exact purpose - refusing to believe a no-send from
+   * a result that contradicts itself about the press. Ask it first, so a nuance added there reaches
+   * this gate too. */
+  if (readManagedSubmitOutcome(result)?.pressed === true) return true;
+  /* But the canonical read normalizes with `pressed === true`, which cannot tell an explicit denial
+   * from a key that is simply absent - and absence is the shape this gate is protecting against.
+   * `pressed: 1`, `pressed: 'true'`, and an outcome carrying `state: 'confirmed'` with the `pressed`
+   * key dropped all normalized to false, read as "no claim", and released the packet.
+   *
+   * So: no submitOutcome AT ALL is not a claim - that absence is the truncated-retained-result case
+   * the unbound branch exists for, and treating it as a claim would close the branch permanently.
+   * But once the runner HAS written an outcome record, only an explicit `false` is a denial. Silence
+   * inside a record that is otherwise describing the submit is not a denial. */
+  const outcome = result.submitOutcome;
+  return isRecord(outcome) && outcome.pressed !== false;
+}
+
 function confirmationContractError(message: string, submitWithheld = false): never {
   if (submitWithheld) {
     throw new ManagedRequiredFieldConfirmationError(
@@ -12047,6 +12278,14 @@ function confirmationContractError(message: string, submitWithheld = false): nev
 const UNRESOLVED_ENTRY_MAX_LENGTH = 400;
 
 /** The runner's own fixed sentences. Constants in its source, carrying no employer text. */
+/* The two sentences the runner writes on a pass that bound nothing. Named rather than inlined
+ * because unboundScopeProof now REQUIRES one of them: without that clause a pass carrying
+ * `unresolved: []` satisfied every other clause, and the applicant was handed the bare reason token
+ * - `application_scope_missing` - with the sentence explaining it gone. That is the defect the
+ * unbound branch exists to remove, reachable inside the branch itself. */
+const UNBOUND_APPLICATION_SCOPE_MESSAGE = 'The caller-bound application form was unavailable at submit time';
+const UNBOUND_SECURITY_CODE_MESSAGE = 'The security code controls did not retain the exact caller-supplied code';
+
 const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
   'A required field on the form has no label Litos can read, and is still empty',
   'Required-field readiness scan failed',
@@ -12054,6 +12293,12 @@ const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
   'Bound submit control or application form was replaced before submission',
   'Bound application form or submit identity changed during confirmation',
   'Litos could not bind required-field validation to the selected application form',
+  /* The two synthetic passes' own sentences, managed-browser.js:15398 and :15458. Without these the
+   * only text a scope refusal could offer the applicant was UNATTRIBUTED_REQUIRED_BLOCKER - "a
+   * required answer is still missing" - which names the wrong problem on a form Litos never
+   * reached, and sends her to fill in fields that were not the reason it stopped. */
+  UNBOUND_APPLICATION_SCOPE_MESSAGE,
+  UNBOUND_SECURITY_CODE_MESSAGE,
 ]);
 
 /** What the applicant is told when a blocker cannot be attributed to a control on this form. */
@@ -12091,6 +12336,247 @@ export function managedApplicationProofIsRequired(
   return !(standingChallenge && initialSubmitOutcome?.pressed === false);
 }
 
+/* EVERY REFUSAL THE MANAGED RUNNER CAN NAME, MIRRORED FROM stratus-browser-cloud.
+ *
+ * A v4 run that correctly refuses its own press reports why in `pass.blockerReason`. Any value not
+ * named here was rejected as contractError('blocker reason') — still fail-closed, nothing is sent,
+ * but the real cause is replaced by an opaque one, so the operator and the applicant are told that
+ * a submission failed without being told what stopped it. A Workable v4 run that refused because
+ * the page reached for an unbound network transport read as a generic contract violation for as
+ * long as this list was five entries long.
+ *
+ * This is a DIAGNOSIS vocabulary, not a safety gate: the gate is `submissionOutcome`, which is
+ * 'blocked' whenever any reason is present. Widening this list can therefore never let a send
+ * through that would otherwise have been stopped.
+ *
+ * ADD, NEVER REMOVE. A reason the runner has stopped emitting is still in flight on a run that
+ * started before the deploy, and removing it turns that run's report back into an opaque failure.
+ * `blocker reasons stay in sync with the managed runner` pins this list against the runner source.
+ */
+export const MANAGED_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  // Chooser and scope binding: the control this run bound is not the control it would press.
+  'submit_node_replaced', // the bound submit element was replaced before the press
+  'ambiguous_submit', // more than one control tied for final submit (v3 chooser outcome)
+  'form_identity_changed', // the bound form's identity changed between scan and press
+  'no_submit_control', // no submit control was selected at all (v3 chooser outcome)
+  'submit_chooser_changed', // the chooser's selection changed between scan and press
+  // Caller-supplied values: what was confirmed is no longer what would be sent.
+  'successful_address_changed', // a confirmed application value or file changed after confirmation
+  'security_code_binding_changed', // the verification code's bound control changed before the press
+  'security_code_payload_unaddressed', // the exact code reached no successful native payload control
+  // Application scope: the caller-bound form was unusable at submit time.
+  'application_scope_missing', // the bound application form was not found
+  'application_scope_ambiguous', // the scope selector matched more than one form
+  'application_scope_not_form', // the bound scope resolved to a node that is not a form
+  'application_scope_detached', // the bound scope left the document before the press
+  'application_scope_unavailable', // the scope could not be read at all
+  // Transport binding, before the press: the exact native request could not be pinned.
+  'submit_payload_unverifiable', // the native submit transport or payload could not be bound
+  'submit_transport_unsupported', // the form's method, target or enctype is outside atomic submit v4
+  'submit_transport_unpinned', // the page attempted an unbound network transport
+  'submit_transport_guard_unavailable', // the transport gate could not be armed or authorized
+  // Activation guard, while arming: the submit-time binding could not be fixed.
+  'submit_activation_guard_unavailable', // the submit-time binding guard could not be armed
+  'submit_activation_binding_changed', // the binding fingerprint changed before arming completed
+  // Activation witnesses, during the press: the press was not the one that was authorized.
+  'submit_binding_changed_during_activation', // the gate blocked without naming a narrower reason
+  'submit_click_failed', // the press itself threw
+  'submit_identity_changed', // the bound form or submitter identity changed mid-activation
+  'protected_surface_mutated', // a protected node was mutated during activation
+  'submit_activation_unobserved', // the guard produced no verdict for the activation
+  'submit_event_unobserved', // no submit event was seen
+  'submit_event_canceled', // the submit event was default-prevented
+  'submit_document_bubble_missing', // the submit event never bubbled to the document
+  'submit_window_bubble_missing', // the submit event never bubbled to the window
+  'submit_bubble_witness_missing', // a required bubble witness was missing at finalize
+  'submit_formdata_unobserved', // no formdata event accompanied the submit
+  'post_click_binding_changed', // the binding no longer matched after the click
+  // Native request matching, after the press: the observed request is not the bound one.
+  'submit_request_unobserved', // no native document request followed the press
+  'submit_multiple_native_requests', // more than one native document request followed the press
+  'submit_method_changed', // the observed request's method differed from the bound one
+  'submit_destination_changed', // the observed request's URL differed from the bound one
+  'submit_enctype_changed', // the observed request's enctype differed from the bound one
+  'submit_payload_changed', // the observed request's payload differed from the bound one
+  'submit_transport_release_failed', // the matched request could not be released to the network
+  /* THE ACTIVATION GUARD'S OWN WITNESSES, and the eight this list first missed.
+   *
+   * managed-browser.js reports these through `unchanged(reason, event)` rather than by assigning
+   * blockerReason, and five of them are BUILT AT RUNTIME - `eventType(event) + '_binding_changed'`,
+   * where the type comes from `ordinaryActivationEvents` and falls back to 'activation' when the
+   * getter throws. A scan for reason LITERALS cannot see a name that does not exist as a literal,
+   * which is why they were absent while every other reason was accounted for.
+   *
+   * Their absence was not merely a reporting gap. contractError('blocker reason') is NOT
+   * fail-closed: confirmationContractError releases when submitWithheld is true, and the runner
+   * sets pressed:false on exactly these blocks - after the click. So an unlisted post-press reason
+   * took the release path rather than the unknown one. All eight are post-press and none belongs in
+   * MANAGED_PRE_PRESS_BLOCKER_REASONS: listing them here routes them to the tail throw, where that
+   * set makes them unknown. */
+  'pointerdown_binding_changed', // a pointerdown listener saw the binding change mid-activation
+  'mousedown_binding_changed', // a mousedown listener saw the binding change mid-activation
+  'focus_binding_changed', // a focus listener saw the binding change mid-activation
+  'click_binding_changed', // a click listener saw the binding change mid-activation
+  'activation_binding_changed', // same, when the event's type could not be read
+  'submit_capture_binding_changed', // the capture-phase submit witness saw the binding change
+  'submit_document_bubble_binding_changed', // the document-bubble witness saw the binding change
+  'submit_window_bubble_binding_changed', // the window-bubble witness saw the binding change
+]);
+
+/* THE REFUSALS THAT PROVE THEMSELVES BY PRECEDING THE PRESS.
+ *
+ * A strict subset of the list above, and the subset is the safety argument. `unboundScopeProof`
+ * below accepts a pass that fingerprints NOTHING - no form, no submit control - and reports it as
+ * "blocked, nothing sent". That verdict is only sound when the reason it carries is one that can
+ * physically only be reached before a control is pressed. Every reason here is decided while the
+ * scope is being resolved (managed-browser.js:14257-14280) or while a caller-supplied value is
+ * being re-checked, in both cases before any submit handle exists.
+ *
+ * A POST-press reason must never appear here. 'submit_request_unobserved' means the click already
+ * happened and its request went missing; reading that as "nothing was sent" is exactly the false
+ * release this whole gate exists to prevent, so it stays out even though a run carrying it also has
+ * no useful fingerprints to show.
+ */
+export const MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  'application_scope_missing',
+  'application_scope_ambiguous',
+  'application_scope_not_form',
+  'application_scope_detached',
+  'application_scope_unavailable',
+  'successful_address_changed',
+]);
+
+/* WHICH REFUSALS PROVE THE BUTTON WAS NEVER PRESSED.
+ *
+ * MANAGED_BLOCKER_REASONS is a diagnosis vocabulary - it decides whether a refusal arrives with its
+ * cause. This set decides something else entirely, and getting the two confused is what made the
+ * widening from five reasons to thirty-eight a regression rather than an improvement.
+ *
+ * The tail throw hands back ManagedRequiredFieldConfirmationError, which extends NoSubmitControlError
+ * and which submissionFailureReview reads as "the click provably did not happen" - clearing
+ * submitted_at, receipt and unverified_submission and releasing the packet to be sent again. That
+ * verdict is only true for a reason decided BEFORE the click. While the allowlist was five entries
+ * long every reason in it was pre-press and the equivalence held silently; at thirty-eight it does
+ * not, and a run that pressed Send came back as one that never did.
+ *
+ * 'submit_request_unobserved' means the click happened and its request went missing.
+ * 'submit_transport_release_failed' is worse: the native request was matched and replayed TO THE
+ * NETWORK, and only the release confirmation was lost. Reading either as "nothing was sent" files
+ * the application a second time.
+ *
+ * MEMBERSHIP IS BY RUNNER SITE, NOT BY HOW THE NAME READS. A reason earns a place here only if
+ * EVERY site that assigns it is upstream of submitHandle.click(). Two names that sound pre-press
+ * are deliberately absent because they are assigned on both sides of the click:
+ * 'submit_transport_unpinned' (pre-press at managed-browser.js recordBlockedAncillaryTransport, and
+ * post-press from decideSubmitTransportGate) and 'submit_transport_unsupported' (pre-press from the
+ * transport binding and from armActivation, post-press from requestMatchesNativeBinding). An
+ * ambiguous reason is treated as post-press, because the failure directions are not symmetric:
+ * calling a pre-press stop "unknown" costs one packet a manual check, and calling a post-press stop
+ * "proven not sent" costs the applicant a duplicate application to a real employer.
+ *
+ * ADD ONLY AFTER READING THE RUNNER. A name landing in MANAGED_BLOCKER_REASONS is a reporting
+ * change; a name landing here is a release decision. */
+export const MANAGED_PRE_PRESS_BLOCKER_REASONS: ReadonlySet<string> = new Set([
+  // The chooser refused before it ever had a control to press.
+  'submit_node_replaced',
+  'ambiguous_submit',
+  'form_identity_changed',
+  'no_submit_control',
+  'submit_chooser_changed',
+  // A caller-supplied value stopped matching while the form was still being filled.
+  'successful_address_changed',
+  'security_code_binding_changed',
+  'security_code_payload_unaddressed',
+  // The application scope was never resolved, so no submit handle was ever taken.
+  'application_scope_missing',
+  'application_scope_ambiguous',
+  'application_scope_not_form',
+  'application_scope_detached',
+  'application_scope_unavailable',
+  // The transport could not be bound, and binding precedes the click.
+  'submit_payload_unverifiable',
+  'submit_transport_guard_unavailable',
+  // The activation guard refused while arming, which is also before the click.
+  'submit_activation_guard_unavailable',
+  'submit_activation_binding_changed',
+]);
+
+/* THE ONE PASS SHAPE THAT PROVES NO PRESS BY PROVING THERE WAS NOTHING TO PRESS.
+ *
+ * The contract below asks every pass for the identity of the form it bound and the control it
+ * pressed, because for a pass that pressed something those are the only evidence that the press was
+ * the authorized one. Two of the runner's emissions cannot answer, and their inability IS the
+ * report: managed-browser.js:15390 refuses because the caller-bound application form was unusable,
+ * and 15458 refuses because the security-code controls did not retain the exact code. Neither ever
+ * resolved a scope, so neither has a fingerprint to give.
+ *
+ * Until this branch existed both died at contractError('scope kind') / ('scope identity'), which
+ * discards the pass wholesale - so the six reasons above could never surface, and the operator was
+ * handed the name of an internal check instead of the cause. Worse, the correct "nothing was sent"
+ * classification then rested entirely on observedManagedSubmitWithheld reading submitOutcome.pressed
+ * === false out of the same payload the service had just declared unreadable. Any run reaching this
+ * service without that field - an older runner, a truncated retained result - flipped to
+ * ManagedConfirmationUnprovenError and told the applicant Litos had pressed Send.
+ *
+ * WHAT MAKES IT SAFE TO ACCEPT, stated as the property rather than the field list: a press is an
+ * event on a submit control, so a pass that never identified one cannot have pressed. That is
+ * carried by submitFingerprint === null AND submitMatchCount === 0 together - no control was named
+ * and none matched - alongside an empty attempt record and a reason that could only have been
+ * decided beforehand. Every clause is required; a pass that satisfies all but one is NOT admitted
+ * here, it falls through to the strict checks and is rejected exactly as it is today. The caller
+ * adds one more clause this function cannot see: observedManagedSubmitPressClaimed. A payload that
+ * says it pressed never takes this branch, however well-formed the pass is.
+ *
+ * THE TWO SCOPE-SIDE COMBINATIONS ARE PINNED RATHER THAN RANGED, because they are the two the
+ * runner writes and nothing should be able to invent a third. 15390 reports honestly that it bound
+ * nothing (scopeKind null, formMatchCount 0). 15458 reports scopeKind 'form' with formMatchCount 1
+ * while still carrying a null formFingerprint - a form was located, never identified - which is a
+ * half-claim this service tolerates but does not rely on: with the submit side unclaimed, the form
+ * side proves nothing either way. `the runner writes no third unbound scope shape` pins both.
+ *
+ * The scope side and the reason are pinned INDEPENDENTLY, so a reason the runner only writes on one
+ * of the two shapes is accepted on either. That is deliberate rather than overlooked: binding each
+ * reason to the shape it ships with today would break the moment stratus makes 15458 report the
+ * honest unbound shape, and the safety property does not need the binding - it holds on every
+ * combination, because all six reasons are decided before any submit handle exists.
+ */
+function unboundScopeProof(pass: Record<string, unknown>, pressReported: boolean | null): boolean {
+  /* A VERIFICATION PASS CANNOT SPEAK FOR THE APPLICATION. The verification phase only exists
+   * because an application phase preceded it, so "this phase bound nothing" says nothing about
+   * whether the application was already sent. finalSubmitPressed is run-scoped in
+   * managed-browser.js and is never cleared between phases, which makes an explicit `pressed:
+   * false` on a continuation a statement about the WHOLE run - that is strong enough, and it is
+   * what the runner actually sends. Silence is not: with no submitOutcome at all a phase-0 press is
+   * unobservable, and releasing there re-applies to an employer that already has the application.
+   * An application pass keeps silence, because a truncated result is the case this branch exists
+   * for and there is no earlier phase to have pressed. */
+  if (pass.submitKind === 'verification' && pressReported !== false) return false;
+  const scope = pass.scope;
+  if (!isRecord(scope)) return false;
+  /* An ABSENT scopeKind is not a null one. Older runners omit the key entirely, and they also never
+   * build these synthetic passes, so treating the two as interchangeable would admit a third
+   * combination on top of the two the runner writes — for no case that exists. Present-and-null is
+   * a statement ("I resolved no scope"); missing is silence, and silence takes the strict path. */
+  const scopeSide = (scope.scopeKind === null && scope.formMatchCount === 0)
+    || (scope.scopeKind === 'form' && scope.formMatchCount === 1);
+  return scopeSide
+    && scope.formFingerprint === null
+    && scope.submitFingerprint === null
+    && scope.submitMatchCount === 0
+    && scope.requiredControlCount === 0
+    && scope.sameNode === false
+    && pass.submissionOutcome === 'blocked'
+    && pass.retries === 0
+    && Array.isArray(pass.requiredControls) && pass.requiredControls.length === 0
+    && Array.isArray(pass.attempts) && pass.attempts.length === 0
+    && typeof pass.blockerReason === 'string'
+    && MANAGED_UNBOUND_SCOPE_BLOCKER_REASONS.has(pass.blockerReason)
+    /* The runner's own sentence must be present, or the reason token reaches the applicant alone. */
+    && Array.isArray(pass.unresolved)
+    && pass.unresolved.some((entry) => entry === UNBOUND_APPLICATION_SCOPE_MESSAGE
+      || entry === UNBOUND_SECURITY_CODE_MESSAGE);
+}
+
 /**
  * Require the remote runner's per-field proof before this service records a receipt. The action
  * itself is the pre-click barrier. This read is the independent reporting barrier, so an older
@@ -12105,6 +12591,13 @@ export function assertManagedRequiredFieldsConfirmed(
    * past a never-returning arrow when the const carries an explicit type, and every guard below
    * depends on that narrowing to keep reading `result` and `pass` as records. */
   const submitWithheld = observedManagedSubmitWithheld(result);
+  const pressClaimed = observedManagedSubmitPressClaimed(result);
+  /* Three-valued on purpose: true, false, or "the runner said nothing". The verification clause in
+   * unboundScopeProof needs to tell an explicit denial from silence, which a boolean cannot. */
+  const pressReported: boolean | null = isRecord(result) && isRecord(result.submitOutcome)
+    && typeof result.submitOutcome.pressed === 'boolean'
+    ? result.submitOutcome.pressed
+    : null;
   const contractError: (detail: string) => never = (detail) => confirmationContractError(detail, submitWithheld);
   if (!isRecord(result)) contractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
@@ -12143,28 +12636,33 @@ export function assertManagedRequiredFieldsConfirmed(
       'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
       'requiredControlCount', 'sameNode',
     ], ['scopeKind'])) contractError('scope proof');
-    if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
-      contractError('scope kind');
+    /* Read once, ahead of the identity checks it excuses, and it excuses NOTHING ELSE. A pass that
+     * misses the shape by any clause is not unbound, so it arrives at the same two contract errors
+     * it hits today. See unboundScopeProof for why a fingerprintless pass can be believed. */
+    const unboundScope = !pressClaimed && unboundScopeProof(pass, pressReported);
+    if (!unboundScope) {
+      if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
+        contractError('scope kind');
+      }
+      if (!opaqueFingerprint(pass.scope.formFingerprint)
+        || !opaqueFingerprint(pass.scope.submitFingerprint)
+        || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
+        || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
+        || (pass.scope.requiredControlCount as number) < 0
+        || (pass.scope.requiredControlCount as number) > 500) contractError('scope identity');
     }
-    if (!opaqueFingerprint(pass.scope.formFingerprint)
-      || !opaqueFingerprint(pass.scope.submitFingerprint)
-      || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
-      || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
-      || (pass.scope.requiredControlCount as number) < 0
-      || (pass.scope.requiredControlCount as number) > 500) contractError('scope identity');
     if (pass.submissionOutcome !== 'clicked' && pass.submissionOutcome !== 'blocked') {
       contractError('submission outcome');
     }
-    const blockerReasons = new Set([
-      'submit_node_replaced', 'ambiguous_submit', 'form_identity_changed', 'no_submit_control',
-      'submit_chooser_changed',
-    ]);
     if (pass.blockerReason !== undefined
-      && (typeof pass.blockerReason !== 'string' || !blockerReasons.has(pass.blockerReason))) {
+      && (typeof pass.blockerReason !== 'string' || !MANAGED_BLOCKER_REASONS.has(pass.blockerReason))) {
       contractError('blocker reason');
     }
     if (typeof pass.blockerReason === 'string') blockerFailures.push(pass.blockerReason);
-    if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced') {
+    /* sameNode false ordinarily means the bound submit node was swapped under the runner, and only
+     * 'submit_node_replaced' explains that. An unbound pass never bound a node to compare, so its
+     * false is the absence of a comparison rather than a failed one. */
+    if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced' && !unboundScope) {
       contractError('detached node reason');
     }
     if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) contractError('retries');
@@ -12239,6 +12737,32 @@ export function assertManagedRequiredFieldsConfirmed(
   if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) contractError('confirmed with failures');
   if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) contractError('blocked without failure');
   if (proof.status !== 'confirmed') {
+    /* A refusal only releases the packet when every reason it carries was decided before the click,
+     * and when the runner has not separately said it pressed. Anything else is an UNKNOWN outcome:
+     * the send may have landed, so the claim is kept and the row stays for a human to resolve.
+     * ManagedRequiredFieldConfirmationError is not merely a message here - it is the release. */
+    const postPressReason = blockerFailures.find(
+      (reason) => !MANAGED_PRE_PRESS_BLOCKER_REASONS.has(reason),
+    );
+    /* NO `blockerFailures.length > 0` QUALIFIER ON THE PRESS CLAIM. The runner's commonest refusal
+     * carries its failures in `unresolved` and NO blockerReason at all, so a qualifier keyed on the
+     * reason list exempts exactly the shape a claimed press arrives on. `finalSubmitPressed` is
+     * run-scoped in managed-browser.js and is not cleared between phases, so every security-code
+     * continuation result inherits `pressed: true` from the phase-0 application press: a phase-1
+     * verification pass blocked on the code control would otherwise be reported as "Litos did not
+     * press submit" about a run whose application submit was pressed. */
+    if (postPressReason !== undefined || pressClaimed) {
+      const cause = postPressReason !== undefined
+        ? `the refusal was decided after the click was already under way (${postPressReason})`
+        : 'the run reported a press its own proof does not describe';
+      /* The reason travels WITH the refusal. The commit that widened this vocabulary existed to
+       * stop a refusal arriving as an internal check name; a fixed sentence here would re-hide
+       * every one of them behind one indistinguishable string. */
+      throw new ManagedConfirmationUnprovenError(
+        `Litos could not prove the send run withheld its press (${cause}), so whether submit was`
+        + ' pressed is unknown',
+      );
+    }
     throw new ManagedRequiredFieldConfirmationError([...allFailures, ...blockerFailures]);
   }
 }

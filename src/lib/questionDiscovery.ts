@@ -3,6 +3,7 @@ import {
   referralAnswer as referrerDeclarationAnswer,
   graduationWindowAnswer as graduationWindowDeclarationAnswer,
 } from './heldAnswerQuestions';
+import { applicantChoseStoredAnswerInRound } from './applicantAnswer';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -126,6 +127,15 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   gpa?: string;
   gpa_scale?: string;
   major?: string;
+  /**
+   * NOT ON THE STORED PROFILE TODAY. No onboarding question and no db/schema.ts column populate
+   * this - `major` is the only discipline fact the profile carries (see db/schema.ts, application
+   * profile table). Declared here only so the 'minor' case in resolveKnownAnswer has a real,
+   * typed absence to check rather than an invented one, the same way every other education field
+   * on this type declines when unset. See classifyFieldIntent's MINOR_QUESTION for why a label
+   * naming a minor must never fall through to `school` or `major` instead.
+   */
+  minor?: string;
   languages?: string[] | null;
   skills?: string[] | null;
   eeo_prefs?: Record<string, string> | null;
@@ -2195,6 +2205,38 @@ function comparableAnswer(value: string): string {
 }
 
 /**
+ * THE ANSWER CARRIES A REVIEW SHE MADE IN THIS ROUND - the only signal in this file that a human
+ * has actually attended to a question, rather than a value the product computed for her.
+ *
+ * The round check is what makes it hard to launder. Pinning answer_reviewed_at to the packet's own
+ * questions_reviewed_at stops a review recorded in an earlier round from standing in for one in
+ * this round, so a refresh cannot carry a stale claim of attention forward across a re-fill.
+ */
+export function answerCarriesCurrentApplicantReview(
+  /* `answer` is required and non-null: both callers type it `string`, and the two lines that
+   * bracket this call in sensitiveQuestionFor - `question.answer.trim().length > 0` and
+   * comparableAnswer's own `value.trim()` - would throw on a null anyway. Accepting one here only
+   * advertised a shape the neighbours cannot survive. The provenance fields stay `unknown` because
+   * the refresh's call site holds them that way. */
+  question: { answer: string; answer_source?: unknown; answer_reviewed_at?: unknown },
+  questionsReviewedAt: string | undefined,
+): boolean {
+  /* An ADAPTER onto the canonical predicate, not a copy of it. This call site holds the question
+   * as a loose record whose provenance fields are `unknown`, so it narrows them and delegates;
+   * everything about what counts as her current-round answer is decided in applicantAnswer.ts and
+   * nowhere else. Writing the comparison out here is what let the fill run and the send gate
+   * disagree about the same record. */
+  return applicantChoseStoredAnswerInRound(
+    {
+      answer: question.answer,
+      answer_source: typeof question.answer_source === 'string' ? question.answer_source : undefined,
+      answer_reviewed_at: typeof question.answer_reviewed_at === 'string' ? question.answer_reviewed_at : undefined,
+    },
+    questionsReviewedAt,
+  );
+}
+
+/**
  * DID THE APPLICANT HERSELF MAKE THIS DECLARATION, on this exact question, for this exact answer.
  *
  * THE DEAD END THIS OPENS, traced end to end on packet 4a79eec1 (Hudson River Trading, greenhouse)
@@ -2236,12 +2278,22 @@ function comparableAnswer(value: string): string {
  *   - NOT A NEVER_FILL LABEL. An SSN or a CAPTCHA is refused whatever anybody confirms; those are
  *     not declarations Litos may carry at all. Same order as the gate below, so the two agree.
  *   - THE ANSWER IS NOT BLANK. A blank is not a declaration and cannot have been affirmed.
- *   - THE CONFIRMATION NAMES THIS QUESTION'S CURRENT TEXT, byte for byte. The stored claim is what
- *     makes a rename detectable: a confirmation made against the United States wording must not
- *     carry over to a United Kingdom one, and for this applicant those two have different true
- *     answers. Byte equality rather than questionKey, matching every other exact-identity test in
- *     this codebase, because a rename that folds to the same key is still a different sentence in
- *     front of an employer.
+ *   - THE CONFIRMATION NAMES THIS QUESTION'S CURRENT CONTROL. The stored claim is what makes a
+ *     rename detectable: a confirmation made against the United States wording must not carry over
+ *     to a United Kingdom one, and for this applicant those two have different true answers. Still
+ *     not questionKey, which folds case and whitespace and would let a rename that happens to
+ *     collapse to the same key stand as a different sentence in front of an employer.
+ *
+ *     THE MATCH IS servedLabelMatchesStoredControl AND NOT BYTE EQUALITY, because the two strings being
+ *     compared here reach this line from opposite sides of the serve boundary. The mint writes the
+ *     STORED label (mergeSubmittedApplicationReviewQuestions writes `answer_confirmed_of:
+ *     question.question`); `question.question` on the record handed to this function has already
+ *     been through normalizeStoredPortalQuestions, because every caller resolves the packet before
+ *     reading it. On a row whose stored label carries a required marker those are different strings
+ *     for one control, so byte equality here would accept the mint and then refuse to read it back
+ *     on the very next request - a confirmation recorded, a 200 returned, and the gate still shut.
+ *     Same predicate as the mint gate, so the writer and the reader cannot drift into disagreeing
+ *     about whether she confirmed something.
  *
  * The answer half needs no test here: answer_confirmed_of is an ANSWER-CLAIM, so the merge drops it
  * the moment the answer changes and no confirmation can survive onto a value it was not made for.
@@ -2259,7 +2311,66 @@ export function applicantConfirmedSensitiveAnswer(question: {
   if (!label || !isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return false;
   if (!(question.answer ?? '').trim()) return false;
-  return typeof question.answer_confirmed_of === 'string' && question.answer_confirmed_of === label;
+  return typeof question.answer_confirmed_of === 'string'
+    && servedLabelMatchesStoredControl(question.answer_confirmed_of, label);
+}
+
+/**
+ * DOES THIS SELF-IDENTIFICATION ANSWER STATE WHAT HER STORED PROFILE STATES, IN THE EMPLOYER'S WORDS?
+ *
+ * ONE RULE, TWO READERS, AND THE DRIFT BETWEEN THEM IS THE DEFECT THIS EXTRACTION FIXES.
+ * refreshKnownQuestionAnswers has kept a demographic answer written in the control's vocabulary
+ * since the Verkada hispanic fix: her profile says "Female", the employer's control offers
+ * "Woman / Man / Non-binary", resolution chose one for the other, and the refresh keeps the
+ * employer's spelling rather than overwriting it with hers. The R-004 send gate was never told. It
+ * asked ONE question of the value branch - does the resolver compute this same string, byte for
+ * byte - and a respelled answer never does, by construction.
+ *
+ * So the two readers disagreed about the same record: the refresh said "this is her profile answer,
+ * keep it" and the gate said "nobody has vouched for this, refuse the send". Measured on packet
+ * 4a79eec1 (Hudson River Trading, greenhouse), where "what is your gender?" was reported as needing
+ * her confirmation for an answer that came from her profile and nowhere else, on a control her
+ * profile spelling is not even offered by. Extracting the rule is what stops that recurring: adding
+ * a third way for an answer to state her profile value now changes both readers or neither.
+ *
+ * THE PRINCIPLE, which is narrower than "the machine may fill in demographics". She supplied her
+ * profile deliberately, once, and that IS her declaration; re-asking her per application is the
+ * product distrusting a statement she already made. What must still refuse is the machine INVENTING
+ * a legal answer her profile does not cover, which is what R-004 is the logged incident for.
+ *
+ * THE DISCRIMINATOR IS RECOMPUTED, NEVER ASSERTED, and that is the whole of why this is safe.
+ * `resolverValue` is what resolveKnownAnswer answers for this label FROM HER STORED PROFILE ROW on
+ * this very call. Nothing on the question record, and nothing in any request body, can move it. So
+ * this is not "a record claims it came from her profile"; it is "her profile, read now, says this".
+ * Correct her eeo_prefs and every answer that no longer states the new value stops passing on the
+ * next read, with no record to go stale and no cache to invalidate.
+ *
+ * selfIdentificationAnswerStates IS THE EXACT CONVERSE OF chooseEeoOption, which is what makes it
+ * the right test rather than a loosening. An answer it accepts is one resolution ITSELF would have
+ * chosen from a list offering only that answer, for the profile value in hand: her own spelling, the
+ * one curated equivalent (Female / Woman), the federal race category that wholly contains her stated
+ * subgroup, or the single option a stored yes/no polarity affirms or denies. And it is a refusal for
+ * a refusal and a claim for a claim, never one for the other, so a machine that put "Woman" on a
+ * profile holding no gender is still refused: an unset preference resolves to
+ * "Decline to self-identify", and a decline does not state a claim.
+ *
+ * DELIBERATELY NOT KEYED ON answer_option_source OR answer_override_of, tempting as both are. Those
+ * record that a snap or an override happened and are written only by resolution, the fill and the
+ * merge, so they look like the provenance marker this rule wants. They are the wrong ones. Each is
+ * a claim about the PAST, so it needs derivationIsCurrent beside it to say the profile has not moved
+ * since, which is a second thing to keep honest when comparing against the profile as it is now
+ * needs none; and a record written by a path that does not snap carries neither, so keying on them
+ * would make the gate's verdict depend on which code wrote a row rather than on what her profile
+ * says. The refresh keeps reading them for its own decision, which is a different one: whether to
+ * OVERWRITE the employer's spelling with hers.
+ */
+export function selfIdentificationAnswerStatesProfileValue(
+  label: string,
+  resolverValue: string,
+  answer: string,
+): boolean {
+  if (!label || !answer.trim() || !EEO_QUESTION.test(label)) return false;
+  return selfIdentificationAnswerStates(label, resolverValue, answer);
 }
 
 export function sensitiveQuestionRequiresAttention(
@@ -2275,6 +2386,15 @@ export function sensitiveQuestionRequiresAttention(
    * on file", which is what a caller that cannot supply one honestly means, and what every record
    * written before the field existed is. */
   confirmation?: { answer_confirmed_of?: unknown },
+  /* DID SHE ANSWER THIS ONE HERSELF, IN THIS ROUND. Defaults to false, which is exactly the
+   * behaviour every caller had before this parameter existed.
+   *
+   * BESIDE answer_confirmed_of RATHER THAN INSTEAD OF IT, and the two are not interchangeable. A
+   * confirmation is her word about ONE question and clears the gate wherever it applies; this is a
+   * weaker signal - an answer bearing an applicant_review stamp in the packet's current round - and
+   * it is admitted in ONE branch only, the one where the resolver explicitly declined and there is
+   * therefore no profile value for a machine claim to contradict. See the two branches below. */
+  applicantReviewed: boolean = false,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
@@ -2288,7 +2408,51 @@ export function sensitiveQuestionRequiresAttention(
     answer_confirmed_of: confirmation?.answer_confirmed_of,
   })) return false;
   const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
-  return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
+  /* THE RESOLVER ANSWERED, SO ITS ANSWER IS THE CROSS-CHECK AND A REVIEW DOES NOT OVERRIDE IT.
+   *
+   * This branch is the only place a work-eligibility or self-identification answer is ever
+   * compared against what her profile actually says, and R-004 is what happens without it: a
+   * stored "Yes" to "are you legally authorized to work in the United States?" reaching a federal
+   * control while the profile says work_authorized false. An earlier cut of this change let a
+   * current-round review short-circuit the whole function, which removed exactly that check for
+   * every label the resolver answers. It stays first, and it stays unconditional.
+   */
+  if (known && 'value' in known) {
+    if (comparableAnswer(known.value) === comparableAnswer(answer)) return false;
+    /* THE SAME DECLARATION, IN THE EMPLOYER'S OWN WORDS. Byte equality above is the strict form of
+     * "her profile says this" and it is not the only form: resolution writes her value in the
+     * control's own vocabulary, so what reaches the employer is routinely the employer's spelling of
+     * her own statement, on a list her spelling is not offered by. This is NOT the escape hatch the
+     * declined branch below carries and does not read a review stamp, a confirmation or any other
+     * record field: it compares her profile, read on this call, against the answer. See the
+     * predicate for why an answer it accepts is one resolution itself would have chosen. */
+    return !selfIdentificationAnswerStatesProfileValue(label, known.value, answer);
+  }
+  /* THE RESOLVER DECLINED, AND UNTIL NOW THAT MADE THE QUESTION UNSENDABLE BY ANY ANSWER.
+   *
+   * Measured live 2026-09-03, Exa packet 73768339 (ashby), on the label "do you require visa
+   * sponsorship to work in your selected location? if so, which one? and when does your visa
+   * expire?". resolveKnownAnswer returns skipReason "work-eligibility question left for you", so
+   * there is no value to compare and the old expression returned true for EVERY answer - her own
+   * reviewed paragraph, and a bare "Yes", both measured true. The dashboard offered no control
+   * that cleared it, because no answer could: the send was refused permanently.
+   *
+   * A declined resolve means R-004 will not let the PRODUCT declare her work eligibility. It does
+   * not mean she may not declare it herself - "left for you" is precisely an instruction to her.
+   * There is no profile value to contradict here, which is why the escape hatch lives in this
+   * branch and only this one.
+   *
+   * NEVER_FILL_PATTERNS is deliberately ABOVE this and stays absolute: an SSN, a licence number, a
+   * captcha or a recording consent is never cleared by a review.
+   *
+   * Deliberately `'skipReason' in known` and not merely "no value": resolveKnownAnswer also returns
+   * null, which means no rule recognised the label at all rather than a rule declining it. Only the
+   * explicit decline was measured, and only the explicit decline carries the "left for you"
+   * instruction this branch relies on, so an unrecognised sensitive label keeps refusing exactly as
+   * it did before. Widen it when there is a measurement, not before.
+   */
+  if (known && 'skipReason' in known) return !applicantReviewed;
+  return true;
 }
 
 /**
@@ -2310,14 +2474,31 @@ export function sensitiveQuestionRequiresAttention(
  * something the refresh never returns.
  */
 export function reviewQuestionRequiresAttention(
-  question: { question: string; answer: string; answer_confirmed_of?: unknown },
+  question: {
+    question: string;
+    answer: string;
+    answer_confirmed_of?: unknown;
+    answer_source?: unknown;
+    answer_reviewed_at?: unknown;
+  },
   ap: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  /* The packet's own review round, so a question she answered herself in THIS round can satisfy a
+   * gate the resolver has declined to answer for her. Omitting it is fail-closed: every question
+   * then reads as unreviewed and the gate behaves exactly as it did before.
+   *
+   * COMPUTED HERE RATHER THAN AT THE CALL SITES, for the reason the block above gives about the
+   * record parameter. answerCarriesCurrentApplicantReview takes a record and a round and returns a
+   * bare boolean, and a bare boolean passed positionally is the easiest argument in this file to
+   * drop, invert or hand the wrong round: doing it once, next to the record it is about, is what
+   * stops a caller silently reverting the declined-resolver fix. */
+  questionsReviewedAt?: string,
 ): boolean {
   return sensitiveQuestionRequiresAttention(
     question.question, question.answer, 'text', ap, jdText, postingCountry, postingCountryCode, question,
+    answerCarriesCurrentApplicantReview(question, questionsReviewedAt),
   );
 }
 
@@ -2524,11 +2705,11 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       consent_permission_granted_at?: unknown;
       answer_confirmed_of?: unknown;
     };
-    const applicantReviewedCurrentAnswer = Boolean(
-      question.answer.trim()
-      && withProvenance.answer_source === 'applicant_review'
-      && typeof withProvenance.answer_reviewed_at === 'string'
-      && withProvenance.answer_reviewed_at === questionsReviewedAt,
+    /* Shared with the sensitive-question gate, so the refresh and the gate cannot disagree about
+     * what counts as her own current-round answer. */
+    const applicantReviewedCurrentAnswer = answerCarriesCurrentApplicantReview(
+      withProvenance,
+      questionsReviewedAt,
     );
     const derivedFrom = typeof withProvenance.answer_option_source === 'string'
       ? withProvenance.answer_option_source
@@ -2713,12 +2894,20 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
        * control still hits. Byte inequality keeps the branch inert only when the resolver really did
        * recompute the answer to itself, and that row falls through to the branch at the bottom which
        * already returns it, provenance and all. */
+      /* THE VOCABULARY HALF NOW LIVES IN selfIdentificationAnswerStatesProfileValue, unchanged, and
+       * so do the EEO subject test and the non-blank answer beside it: this conjunction is exactly
+       * what it was. It moved because the R-004 send gate has to ask the same thing of the same
+       * record, and the two answering it differently is the shipped defect - this branch kept a
+       * respelled demographic answer while the gate reported it as needing her confirmation.
+       *
+       * THE OTHER TWO CONDITIONS STAY HERE AND ARE NOT THE GATE'S. The byte inequality is about THIS
+       * branch being inert when the resolver recomputed the answer to itself. derivationIsCurrent is
+       * about whether to OVERWRITE the employer's spelling with hers, which needs a claim about the
+       * past; the gate compares against the profile as it is now and needs none. */
       if (label
-        && question.answer.trim()
-        && EEO_QUESTION.test(label)
         && question.answer.trim() !== known.value.trim()
         && derivationIsCurrent(derivedFrom, known.value)
-        && selfIdentificationAnswerStates(label, known.value, question.answer)) return question;
+        && selfIdentificationAnswerStatesProfileValue(label, known.value, question.answer)) return question;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
       /* 'covers' keeps the reviewed range because the profile still sits inside it, exactly as
        * the boolean rule always did and for any parseable two-part range. 'incomparable' keeps it
@@ -2955,6 +3144,12 @@ const CURRENT_ENROLLMENT_QUESTION =
   /\bcurrently\s+enrolled\b|\bcurrent\s+student\b|\benrolled\s+in\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:a\s+)?(?:degree\s+)?program\b|\breturn(?:ing)?\s+to\s+(?:school|college|university)\b/i;
 const MAJOR_QUESTION =
   /\bmajor\b|field of study|course of study|degree subject|\bdiscipline\b|\bcourse\b[^?]{0,80}\benrolled\b|\benrolled\b[^?]{0,80}\bcourse\b/i;
+/* THE MINOR, WHICH IS NOT THE MAJOR AND IS NOT THE SCHOOL.
+ *
+ * "field of study" is a phrase MAJOR_QUESTION treats as a major synonym, and "field of study -
+ * minor" contains it literally - without a rule ahead of MAJOR_QUESTION that phrasing would be
+ * answered with the stored major. See classifyFieldIntent for where this is consulted and why. */
+const MINOR_QUESTION = /\bminors?\b/i;
 const LANGUAGE_QUESTION =
   /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
 const PROGRAMMING_LANGUAGE_QUESTION =
@@ -3135,7 +3330,7 @@ export const WORK_AUTHORIZATION_DETAIL_QUESTION =
 const FUTURE_OR_OTHER_PROGRAMME_QUESTION =
   /\b(?:plan(?:ning)?\s+to\s+pursue|intend(?:ing)?\s+to\s+pursue|following\s+graduation|after\s+(?:you\s+)?(?:graduat\w+|completing)|further\s+education|additional\s+degree|next\s+degree|potential\s+(?:master|masters|ph\.?d|doctorate))\b/i;
 const CURRENT_PROGRAMME_KEYS = new Set<ProfileKey>([
-  'school', 'degree', 'major', 'graduation_date', 'graduation_month', 'graduation_year',
+  'school', 'degree', 'major', 'minor', 'graduation_date', 'graduation_month', 'graduation_year',
   'education_start_date', 'education_end_date', 'study_year', 'gpa', 'gpa_scale',
 ]);
 // "Please confirm the month and year of your high school graduation" is a DATE request wearing a
@@ -5466,7 +5661,7 @@ export type ProfileKey =
   | 'phone' | 'phone_country' | 'address_city' | 'address_state' | 'address_country'
   | 'linkedin_url' | 'github_url' | 'portfolio_url' | 'other_url' | 'citizenship' | 'date_of_birth'
   | 'availability_date' | 'availability_term' | 'current_employer' | 'most_recent_employer' | 'school' | 'degree' | 'graduation_date' | 'desired_salary'
-  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major'
+  | 'graduation_month' | 'graduation_year' | 'current_enrollment' | 'study_year' | 'gpa' | 'gpa_scale' | 'major' | 'minor'
   | 'education_start_date' | 'education_end_date'
   | 'languages' | 'onsite_commitment' | 'referral_source_default';
 
@@ -5545,6 +5740,39 @@ const SCHOOL_NOUN = /\b(school|university|college|institution)\b/i;
  * words are only ambiguous next to a school noun. */
 const SCHOOL_ATTRIBUTE_QUALIFIER =
   /\bmajors?\b|\bminors?\b|\bdisciplines?\b|\bfields?\s+of\s+study\b|\bdegrees?\b|\bprograms?\b|\blocations?\b|\bcit(?:y|ies)\b|\bstates?\b|\bcountr(?:y|ies)\b/i;
+/* THE ACADEMIC MINOR, versus every other "minor" a job form ever means.
+ *
+ * MINOR_QUESTION's bare `\bminors?\b` (see its own comment, above near MAJOR_QUESTION) has no way
+ * to tell "school minor" from "Do you have any minor children?" - both contain the word. MEASURED
+ * against the corpus: "Do you have any minor children?", "Emergency contact (must not be a minor)",
+ * "felony or minor offense", "minor infractions on your driving record", "minor injuries" and "Are
+ * you a minor?" all contain the bare word and none of them name a field of study, but the bare
+ * keyword alone cannot see that - the same shape of collision SCHOOL_ATTRIBUTE_QUALIFIER and
+ * KEYWORD_SUBJECT_QUALIFIER already exist to catch for the school and major rules.
+ *
+ * `ap.minor` declines on every application today (see its own comment on ApplicationProfileLike),
+ * so none of these six labels have produced a wrong answer yet - the moment onboarding starts
+ * populating it, "Do you have any minor children?" would be answered with a stored academic minor.
+ * This qualifies MINOR_QUESTION the same way those two qualify their bare keywords: an academic cue
+ * must be present, and a disqualifying cue must not be - see the two constants below and their use
+ * at MINOR_QUESTION's call site. */
+const MINOR_ACADEMIC_CUE =
+  /\bschools?\b|\buniversit(?:y|ies)\b|\bcolleges?\b|\bfields?\s+of\s+study\b|\bdegrees?\b|\bmajors?\b|\bconcentrations?\b|\bacademic\b|\bstudy\b|\bprograms?\b/i;
+/* Age, family and severity words a "minor" question uses when it does not mean the academic one.
+ * "a minor" alone (not just "are you a minor") is deliberate: it also catches "must not be a
+ * minor" on an emergency-contact field, which asks about someone else's age, not the applicant's
+ * field of study or even her own age. */
+const MINOR_NON_ACADEMIC_CUE =
+  /\bchild(?:ren)?\b|\bdependents?\b|\bunder\s+(?:18|eighteen)\b|\ba\s+minors?\b|\boffenses?\b|\binfractions?\b|\bconvictions?\b|\binjur(?:y|ies)\b|\bdamage\b|\bsurgery\b|\brepairs?\b/i;
+const MINOR_STANDALONE_LABEL_MAX_WORDS = 3;
+/* "Minor" and "Minor (if any)" are real field names - short enough that no other word is present to
+ * serve as a cue either way. Bounded the same way FIELD_NAME_LABEL_MAX_WORDS bounds
+ * labelNamesProfileField: a label this short that contains the word already IS the field it names. */
+function isStandaloneMinorLabel(label: string): boolean {
+  const core = (label ?? '').replace(/[()*:•]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!core) return false;
+  return core.split(' ').length <= MINOR_STANDALONE_LABEL_MAX_WORDS;
+}
 const PHONE_NOUN = /\b(phone|mobile)\b/i;
 /* A label that ASKS FOR a phone number, however much captured junk surrounds the ask. No word
  * budget on purpose: the label this exists for is teamtailor's, which welds the placeholder and
@@ -5834,6 +6062,62 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (/\bname\s+of\s+(?:the\s+|your\s+)?(?:(?:current(?:ly)?|most\s+recent|latest|last|previous|prior|attending|attended|graduated?|graduating|enrolled)\s+(?:or\s+)?){1,3}(?:school|university|college|institution)\b/i.test(l)
     && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
     && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
+  /* A LABEL NAMING THE MINOR IS NEITHER THE MAJOR NOR THE SCHOOL.
+   *
+   * MEASURED live on api.trylitos.com 2026-09-04, Belvedere Trading "Software Engineer Intern -
+   * Summer 2027" (Lever, packet c4413bff-5a08-423f-852c-5d60bd360f3b, account
+   * mehekmandal05@gmail.com). The discovered questions were, in order, "name of school ✱" and
+   * "school major", both answered correctly, then "school minor" - answered with the stored
+   * UNIVERSITY, stating a minor the applicant does not have. "school minor" matches none of the
+   * explicit school phrasings above (no select verb, no "name of", no participle), so it fell all
+   * the way to the bare-keyword school fallback below: SCHOOL_NOUN matches "school", and nothing
+   * before this line claims the label. The same collision reaches the major rule from the other
+   * side - "field of study - minor" contains the literal phrase MAJOR_QUESTION treats as a major
+   * synonym, so without a check here it would be answered "Computer Science" as if it were the
+   * major.
+   *
+   * Checked ahead of MAJOR_QUESTION and the school bare keyword for the same reason MAJOR_QUESTION
+   * is already checked ahead of that fallback - see "select your college major" above, and
+   * SCHOOL_ATTRIBUTE_QUALIFIER's own note that these two words are only ambiguous beside a school
+   * noun. There is no `minor` field on the stored profile: ApplicationProfileLike carries school,
+   * degree, major, gpa and gpa_scale for education and nothing else (see db/schema.ts - `major` is
+   * the only discipline column). The 'minor' case in resolveKnownAnswer is what actually declines,
+   * on that absence; this rule's only job is to keep every broader rule from guessing at a fact
+   * nobody stored.
+   *
+   * BUT THE BARE WORD IS NOT ENOUGH ON ITS OWN, and unqualified it is a trap the Belvedere fix did
+   * not close. MEASURED against the corpus: "Do you have any minor children?", "Emergency contact
+   * (must not be a minor)", "felony or minor offense", "minor infractions on your driving record",
+   * "minor injuries" and "Are you a minor?" all contain the bare word `\bminors?\b` and none of them
+   * ask for a field of study - a minor CHILD, a minor OFFENSE and a minor INJURY are three different
+   * words that happen to spell the same as the academic one. Every one of those six declines today
+   * for the same reason "school minor" would answer correctly if asked: `ap.minor` is unset, so the
+   * 'minor' case below has nothing to answer with either way. The moment onboarding starts
+   * populating it, "Do you have any minor children?" would be handed a stored academic minor as its
+   * answer - a real wrong answer, not a blank. So this is qualified now, the same shape
+   * SCHOOL_ATTRIBUTE_QUALIFIER and KEYWORD_SUBJECT_QUALIFIER already qualify their own bare
+   * keywords with: an academic cue (school/university/major/degree/...) must be present, or the
+   * label must be short enough to essentially BE the field name ("Minor", "Minor (if any)") - and
+   * neither is enough when an age/family/severity word (child, "a minor", offense, injury, ...)
+   * says this "minor" is not the academic one. See MINOR_ACADEMIC_CUE, MINOR_NON_ACADEMIC_CUE and
+   * isStandaloneMinorLabel, defined beside SCHOOL_ATTRIBUTE_QUALIFIER above.
+   *
+   * "Are you a minor?" bare deliberately stays OUT of this key rather than being routed to it: it
+   * is the same age attestation AGE_ATTESTATION_QUESTION/BELOW_AGE_18_QUESTION already exist to
+   * answer (ageAttestationAnswer runs at the top of resolveKnownAnswer, ahead of this function), and
+   * MINOR_NON_ACADEMIC_CUE's `\ba\s+minors?\b` is what keeps it there instead of falling into an
+   * academic decline that would mask a question the age rule could actually have answered from a
+   * stored date of birth on a label phrased just slightly differently. Classifying it null here is
+   * correct even though today's AGE_ATTESTATION_QUESTION does not itself contain "minor" - null
+   * leaves it for the essay drafter/held-question path rather than this rule inventing a discipline
+   * fact nobody has.
+   *
+   * Compound labels ("Major and minor", "Field of study (major or minor)") still classify 'minor'
+   * and still decline - MINOR_ACADEMIC_CUE's own `major` alternative sees "major" sitting right next
+   * to "minor" and calls that academic, which it is. Declining is the honest answer for one control
+   * asking for both facts when only one of them is on file; see the test that pins this. */
+  if (MINOR_QUESTION.test(l) && !MINOR_NON_ACADEMIC_CUE.test(l)
+    && (MINOR_ACADEMIC_CUE.test(l) || isStandaloneMinorLabel(l))) return 'minor';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (EDUCATION_ATTENDANCE_DATE_QUESTION.test(l)) {
@@ -5855,6 +6139,19 @@ function classifyFieldIntent(label: string, type?: string, jdText?: string): Pro
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
+  /* NOT hardened with SCHOOL_ATTRIBUTE_QUALIFIER the way the two explicit phrasings above are -
+   * tried, and reverted, because this bare keyword is exactly what "high school city", "high
+   * school gpa" and "high school degree" (see questionIsScopedToHighSchool's test) rely on
+   * resolving to 'school' in the first place: classifyField's own wrapper is what nulls them,
+   * by reading CURRENT_PROGRAMME_KEYS + questionIsScopedToHighSchool AFTER this function returns,
+   * and a label this branch refuses never reaches that gate at all. Adding the qualifier here
+   * (SCHOOL_ATTRIBUTE_QUALIFIER matches "city") took that safety net away from "high school city"
+   * and let it fall through to the address_city bare keyword instead - answered "Dubai" from a
+   * university profile that was never asked. MAJOR_QUESTION, the degree pattern and MINOR_QUESTION
+   * above already intercept every major/minor/degree label before it reaches here, which is what
+   * "mirror the major rule" actually means: an earlier, dedicated rule for the attribute, not a
+   * qualifier bolted onto this one. GPA is covered too, but from inside labelNamesProfileField
+   * itself (KEYWORD_SUBJECT_QUALIFIER, shared by every bare keyword in this file). */
   if (labelNamesProfileField(l, SCHOOL_NOUN)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
 
@@ -7000,6 +7297,62 @@ function truncateReviewQuestionLabel(label: string): string {
 export function normalizeReviewQuestionLabel(raw: string): string {
   const label = normalizeDiscoveredLabel(raw);
   return label ? truncateReviewQuestionLabel(label) : '';
+}
+
+/**
+ * IS THIS THE LABEL THE SERVER ITSELF PUT IN FRONT OF HER FOR THAT STORED CONTROL?
+ *
+ * THE DEFECT, MEASURED 2026-09-04 on the Exa "Software Engineer, Intern" packet 73768339 (ashby).
+ * Four required essay questions, every one already drafted and answered. The dashboard walked them
+ * one per screen, each "Save and next" sent PUT /applications/:id/review/answers carrying
+ * `confirmed: true` for that one question, and every one of the four returned 200. A reload came
+ * back to "1 of 4", the same question, the same 365-character answer. Twelve confirmations across
+ * three full passes minted nothing at all, and `unapprovedLitosDraftQuestionLabels` still named all
+ * four, so the send gate would have refused too. There was no exit.
+ *
+ * ONE STRING, TWO SPELLINGS. The row holds the employer's label as the run captured it, required
+ * marker and all - "Why do you want to work at Exa? *". Every read path serves it through
+ * normalizeStoredPortalQuestions, which rewrites `question` to normalizeReviewQuestionLabel's
+ * output - "Why do you want to work at Exa?" - and persists nothing. The dashboard posts back the
+ * list it was SHOWN, so the body carries the normalized spelling while the row keeps the raw one,
+ * and mergeSubmittedApplicationReviewQuestions cannot repair the divergence even in principle: it
+ * writes `question: question.question` on purpose, because a public body may not rename a control.
+ * So the two spellings are permanent, and every equality test that crosses the serve boundary
+ * fails for as long as the packet exists.
+ *
+ * Both tests that crossed it are in that merge. `applicantConfirmedAnswer` refused to mint her
+ * claim, and `exactReviewedIdentityUnchanged` refused to carry one already minted - so the loop had
+ * a second turn of the screw waiting even if the first had passed.
+ *
+ * WHY THIS IS THE HONEST BAR RATHER THAN A LOOSENING. The guard those tests implement is real: the
+ * id fallback lets a submitted question match while carrying a different label, so a body must not
+ * be able to rename a control, flag it confirmed, and mint "she read this exact text" onto text its
+ * own request never contained. What it must accept is exactly the spellings THIS SERVER could have
+ * put in front of her for that stored row, and there are two: the stored bytes themselves, and the
+ * one string normalizeReviewQuestionLabel makes of them. Both are server-produced. Neither is
+ * supplied by the caller.
+ *
+ * SO IT IS ONE-DIRECTIONAL, AND THAT IS THE WHOLE OF WHY IT IS NOT questionKey WITH BETTER MANNERS.
+ * The candidate is compared against the STORED label's own normalization; the candidate is never
+ * normalized itself. `"  Can you work onsite?  "` against a stored `"Can you work onsite?"` is
+ * therefore still a rename and still invalidates - the server never serves that string, so a body
+ * carrying it is not echoing anything - while `"Why do you want to work at Exa?"` against a stored
+ * `"Why do you want to work at Exa? *"` is exactly what the dashboard was handed. Folding both
+ * sides would have admitted the first as well, and applicationReview.test.ts says, correctly, that
+ * it must not.
+ *
+ * A REAL RENAME IS STILL REFUSED, which is the property the gate exists for: "...in the United
+ * States?" and "...in the United Kingdom?" reduce to different strings, have different true answers
+ * for this applicant, and never meet here.
+ *
+ * Exact equality first, so anything the old byte tests accepted these accept - including a label the
+ * normalizer reduces to nothing (an opaque identifier), which then matches only itself rather than
+ * every other unreadable label on the form.
+ */
+export function servedLabelMatchesStoredControl(storedLabel: string, candidateLabel: string): boolean {
+  if (storedLabel === candidateLabel) return true;
+  const served = normalizeReviewQuestionLabel(storedLabel);
+  return served !== '' && served === candidateLabel;
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -8765,6 +9118,12 @@ export function resolveKnownAnswer(
         const value = majorAnswer(ap);
         return value ? { value } : null;
       }
+    /* Always null today: `ap.minor` has nowhere to come from (see the field's own comment on
+     * ApplicationProfileLike). That is the decline this whole rule exists to produce - see
+     * MINOR_QUESTION in classifyFieldIntent for what it stops a minor-naming label from being
+     * misread as instead. */
+    case 'minor':
+      return ap.minor ? { value: ap.minor } : null;
     case 'languages':
       return languageAnswer(label, ap);
     default:

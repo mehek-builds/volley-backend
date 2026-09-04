@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../db';
 import {
   application_artifacts,
@@ -6,15 +6,50 @@ import {
   application_submission_events,
   applications,
   artifacts,
+  monitored_jobs,
 } from '../db/schema';
 import {
+  atsPostingKey,
   freezePostingIdentity,
   type FrozenPostingIdentity,
   type SubmissionAttemptBinding,
 } from './submissionAttemptLedger';
 import { parseCanonicalFreeVersionedDocumentBinding } from './canonicalFreeDocumentBinding';
+import { isGreenhouseLegacyHostRedirect } from './workableApplicationUrl';
 
 export type CanonicalPacketBindingExecutor = Pick<typeof db, 'select'>;
+/** Opening a new attempt may record the landed URL on a canonical row that never stored one. */
+export type NewPacketAttemptExecutor = Pick<typeof db, 'select' | 'update'>;
+
+const GREENHOUSE_LEGACY_ORIGIN = 'https://boards.greenhouse.io';
+const GREENHOUSE_CURRENT_ORIGIN = 'https://job-boards.greenhouse.io';
+
+/**
+ * Greenhouse retired boards.greenhouse.io with a 301 onto job-boards.greenhouse.io that carries the
+ * path and query across byte-for-byte (workableApplicationUrl.ts, measured 2026-09-04). Since #929
+ * the runner is allowed to land there, so the identity frozen for an attempt names the CURRENT
+ * origin while every canonical row written before the move, and every packet URL still built on
+ * the legacy embed host, names the OLD one. Measured on Railway prod 2026-09-04: 45 of the last 30
+ * days' packet-linked rows hold the legacy origin, and each of them failed the origin tier below
+ * on its first landed run. The two origins are one employer boundary. The equivalence is applied
+ * here, inside the one comparison every strict site funnels through (attempt-open, attempt
+ * projection, canonical sync, and the authoritative projection's posting_mismatch), so no site
+ * can accept what another refuses.
+ */
+function comparablePortalOrigin(origin: string | null): string | null {
+  return origin === GREENHOUSE_LEGACY_ORIGIN ? GREENHOUSE_CURRENT_ORIGIN : origin;
+}
+
+export function sameApplicationPageOrigin(left: string | null, right: string | null): boolean {
+  return comparablePortalOrigin(left) === comparablePortalOrigin(right);
+}
+
+/** Exact URL equality, or Greenhouse's measured legacy-host twin in either direction. */
+export function sameApplicationPageUrl(left: string | null, right: string | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return isGreenhouseLegacyHostRedirect(left, right) || isGreenhouseLegacyHostRedirect(right, left);
+}
 
 export class CanonicalPacketBindingError extends Error {
   constructor(readonly code:
@@ -52,14 +87,16 @@ export function frozenPostingIdentitiesMatch(
 ): boolean {
   if (frozen.companyRole && candidate.companyRole !== frozen.companyRole) return false;
   if (frozen.jobId && candidate.jobId !== frozen.jobId) return false;
-  if (frozen.portalIdentity && candidate.portalIdentity !== frozen.portalIdentity) return false;
+  if (frozen.portalIdentity && !sameApplicationPageOrigin(candidate.portalIdentity, frozen.portalIdentity)) {
+    return false;
+  }
   if (frozen.postingKey) return candidate.postingKey === frozen.postingKey;
   if (frozen.jobId) return candidate.jobId === frozen.jobId;
   return Boolean(
     frozen.companyRole
     && candidate.companyRole === frozen.companyRole
     && frozen.portalUrl
-    && candidate.portalUrl === frozen.portalUrl,
+    && sameApplicationPageUrl(candidate.portalUrl, frozen.portalUrl),
   );
 }
 
@@ -185,19 +222,93 @@ function oneExactCandidate(
 }
 
 /**
+ * A canonical row created from a monitored job id alone stores no portal URL: routes/resume.ts
+ * writes the reconstructed URL only when the request names an application, and the runner derives
+ * the page it lands on from that same job id later. Measured on Railway prod 2026-09-04: 174 of
+ * 646 packet-linked canonical rows, across 18 accounts, carry a null portal_url (Hudson River
+ * Trading application f10ece44 among them). Once a run has landed, the frozen identity carries an
+ * origin and a provider key the row never stored, so the strict match reads that absence as a
+ * difference and the packet is refused at open with CANONICAL_PACKET_BINDING_MISSING.
+ *
+ * Relaxing the match instead would move the refusal to AFTER the press: attempt projection,
+ * canonical sync and the authoritative projection all re-read the row strictly and would report
+ * posting_mismatch once the employer already held the application. So the row is completed, not
+ * the comparison: the landed URL is recorded on the row, once, at the moment it becomes known, and
+ * every later strict read sees a URL-bearing row exactly as if creation had stored it.
+ *
+ * The write is bounded on every side. Only a row whose portal_url is null, whose immutable job id
+ * equals the frozen one, and whose company and role agree may be completed; a row that holds any
+ * URL is never touched, and job_id is never written. The landed URL must name the same posting
+ * as the monitored job the row was created from: its ATS posting key (host-agnostic, so the
+ * legacy and current Greenhouse hosts agree) must equal the key of that job's own apply or posting
+ * URL. A review URL edited onto another posting fails that check and stays unbindable, as it does
+ * for a row that stored a URL. No monitored job, no key, or no landed URL means no write. The
+ * caller holds the submission-user transaction lock, so the update is serialized with every other
+ * covered write for the account and the revision bump it triggers.
+ */
+async function recordLandedPortalOnUrlLessCanonicalRow(
+  executor: NewPacketAttemptExecutor,
+  candidates: Array<typeof applications.$inferSelect>,
+  input: { userId: string; postingIdentity: FrozenPostingIdentity },
+): Promise<typeof applications.$inferSelect | null> {
+  const frozen = input.postingIdentity;
+  if (!frozen.portalUrl || !frozen.postingKey || !frozen.jobId) return null;
+  const urlLess = [...new Map(candidates
+    .filter((candidate) => candidate.portal_url === null
+      && typeof candidate.job_id === 'string'
+      && candidate.job_id.trim().toLowerCase() === frozen.jobId
+      && (!frozen.companyRole || freezePostingIdentity({
+        company: candidate.company_name,
+        role: candidate.role,
+        job_id: candidate.job_id,
+      }, null).companyRole === frozen.companyRole))
+    .map((candidate) => [candidate.id, candidate])).values()];
+  if (urlLess.length === 0) return null;
+  if (urlLess.length !== 1) throw new CanonicalPacketBindingError('CANONICAL_PACKET_BINDING_AMBIGUOUS');
+  const row = urlLess[0]!;
+  const [job] = await executor.select({
+    applyUrl: monitored_jobs.apply_url,
+    postingUrl: monitored_jobs.posting_url,
+  }).from(monitored_jobs).where(eq(monitored_jobs.id, row.job_id!)).limit(1);
+  if (!job) return null;
+  const jobKey = atsPostingKey(job.applyUrl) ?? atsPostingKey(job.postingUrl);
+  if (!jobKey || jobKey !== frozen.postingKey) return null;
+  const [recorded] = await executor.update(applications)
+    .set({ portal_url: frozen.portalUrl, updated_at: new Date() })
+    .where(and(
+      eq(applications.id, row.id),
+      eq(applications.user_id, input.userId),
+      eq(applications.job_id, row.job_id!),
+      isNull(applications.portal_url),
+    ))
+    .returning();
+  if (!recorded) return null;
+  return canonicalApplicationMatchesFrozenPosting(recorded, frozen) ? recorded : null;
+}
+
+/**
  * Resolve the canonical row before an attempt is opened. The caller must already hold the shared
  * submission-user transaction lock. A new employer boundary may open only for the packet currently
  * selected by the canonical row. Immutable artifact links recover historical receipts, but they
- * cannot revive a superseded packet or silently establish a missing mutable pointer.
+ * cannot revive a superseded packet or silently establish a missing mutable pointer. The strict
+ * match decides first; only when it finds nothing may a URL-less row be completed with the landed
+ * URL (see recordLandedPortalOnUrlLessCanonicalRow), after which it is returned as the exact row.
  */
 export async function canonicalApplicationForNewPacketAttempt(
-  executor: CanonicalPacketBindingExecutor,
+  executor: NewPacketAttemptExecutor,
   input: { userId: string; packetId: string; postingIdentity: FrozenPostingIdentity },
 ): Promise<typeof applications.$inferSelect> {
-  return oneExactCandidate(
-    await currentPacketPointerCandidates(executor, input),
-    input.postingIdentity,
-  );
+  const candidates = await currentPacketPointerCandidates(executor, input);
+  try {
+    return oneExactCandidate(candidates, input.postingIdentity);
+  } catch (error) {
+    if (!(error instanceof CanonicalPacketBindingError) || error.code !== 'CANONICAL_PACKET_BINDING_MISSING') {
+      throw error;
+    }
+    const completed = await recordLandedPortalOnUrlLessCanonicalRow(executor, candidates, input);
+    if (!completed) throw error;
+    return completed;
+  }
 }
 
 /**

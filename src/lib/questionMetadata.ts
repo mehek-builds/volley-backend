@@ -4,6 +4,7 @@ import {
   discoveredFieldIsRequired,
   isConsentRefusingWording,
   normalizeReviewQuestionLabel,
+  REVIEWED_PICK_EXACT_OPTION_TYPE,
   SINGLE_CHOICE_EXACT_OPTION_TYPE,
   type DiscoveredQuestion,
 } from './questionDiscovery';
@@ -12,7 +13,14 @@ import {
   managedOptionProbeExpectsClosedControl,
   type SupportedPortal,
 } from './portalSubmission';
-import { usableOptions } from './profileFieldResolution';
+import {
+  comparableOption,
+  FREE_ENTRY_INPUT_TYPE,
+  isProfileBackedKey,
+  profileAnswerAliases,
+  profileFieldIntent,
+  usableOptions,
+} from './profileFieldResolution';
 
 export type QuestionMetadataBlocker = {
   kind: 'missing_question_text' | 'missing_exact_options';
@@ -57,6 +65,29 @@ export function discoveredQuestionControlType(
 ): string {
   const inputType = field.inputType.trim().toLowerCase() || 'text';
   const role = field.role?.trim().toLowerCase();
+  /* A FREE-ENTRY TYPE IS THE ONE FACT NEITHER OF THE TWO RULES BELOW MAY OVERRULE.
+   *
+   * This function mints `portal_input_type`, which is the single value every downstream consumer
+   * reads to decide TYPED versus PICKED - measuredClosedListShape picks the fill action from it,
+   * CLOSED_CONTROL_TYPE raises the missing-options blocker from it, and the keep/re-open gates in
+   * questionDiscovery.ts judge a stored answer from it. Both rules below could mint a menu from
+   * half the evidence, and neither ever checked the other half:
+   *
+   *   role alone      -> a react-select shell with an EMPTY menu is still called `combobox`;
+   *   options alone   -> a list hung on a control that cannot hold one still promotes it.
+   *
+   * Measured live 2026-09-03, Hudson River Trading packet 4a79eec1: a run parked on the GPA fill
+   * with `no option matched "3.89" (the list offered: "No options")` - react-select's own empty-menu
+   * placeholder read back as though it were the employer's list. Measured on Pinpoint across the
+   * ten-board sweep, from the other side: `["Yes","No"]` arrives attached to `number` fields, where
+   * a years-of-experience or salary answer is then ranked against a two-row menu it can never join.
+   *
+   * FREE_ENTRY_INPUT_TYPE is positive evidence only and never includes `text`, which is what
+   * managed discovery reports for every control it walks including react-selects. So a real
+   * searchable combobox is untouched by this line and still reaches the role rule below; only a
+   * control whose type the DOM states outright, and states as one react-select never renders, is
+   * held to its own type here. */
+  if (FREE_ENTRY_INPUT_TYPE.test(inputType)) return inputType;
   if (role === 'combobox' || role === 'listbox') return role;
   if (inputType === 'text' && usableOptions(field.options).length > 0) return 'combobox';
   return inputType;
@@ -76,6 +107,11 @@ export function discoveredQuestionNeedsExactOptionsBeforeResolution(
 ): boolean {
   const inputType = field.inputType.trim().toLowerCase();
   const role = field.role?.trim().toLowerCase();
+  /* The same rule discoveredQuestionControlType now states, at the one other place a bare `role`
+   * could speak for a control over its own type. A free-entry control has no option inventory to
+   * wait for, so holding its resolution until one arrives waits forever: the list is never coming,
+   * and the answer it was holding is a number that only ever needed typing. */
+  if (FREE_ENTRY_INPUT_TYPE.test(inputType)) return false;
   return EXACT_OPTIONS_BEFORE_RESOLUTION_TYPE.test(inputType) || role === 'listbox';
 }
 
@@ -341,6 +377,180 @@ export function reopenUnfitClosedChoiceQuestions<T extends StoredClosedChoiceQue
     if (question.answer_draft !== undefined && question.answer.trim()) {
       const { answer_draft: _staleDraft, ...rest } = question;
       return rest as T;
+    }
+    return question;
+  });
+}
+
+/**
+ * THE STORED ANSWER, WRITTEN THE WAY THE EMPLOYER'S OWN CONTROL WRITES IT - for a PROFILE-BACKED
+ * field, when nothing else in the pipeline ever re-snaps one.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com, Sage Greenhouse packet
+ * aae653a3-2d5a-4f3e-ba3b-afea4219df37. "When do you expect to graduate?" is a required `combobox`
+ * offering Spring 2027 / Fall 2027 / Spring 2028 / Fall 2028 / Spring 2029 / Fall 2029 / 2030 or
+ * later; her profile stores `grad_date: "May 2028"`. She picked "Spring 2028" through PUT
+ * /applications/:id/review/answers - exactly the option resolveProfileField would also have chosen,
+ * since graduationDateLadder already carries the May-is-Spring/December-is-Fall mapping - and the
+ * save genuinely stored it: `answer: "Spring 2028"`, `answer_option_source: "May 2028"` recording
+ * the snap, and no `answer_source`, because mergeSubmittedApplicationReviewQuestions's own
+ * anti-laundering gate (submittedIsMachineValue) correctly declines to stamp a machine echo as her
+ * choice. See the 2026-08-13 "802 answers" comment in routes/applications.ts for why that refusal
+ * is right and is not touched here.
+ *
+ * refreshKnownQuestionAnswers then ran on the very next read, GET /applications/:id/submission, and
+ * had nothing to keep "Spring 2028" with: it is not a parseable date/number BAND
+ * (storedOptionAnswerIsCurrent demands one to even look at answer_option_source), the label is not
+ * an EEO subject (selfIdentificationAnswerStatesProfileValue is scoped to those), and there was no
+ * surviving answer_source to satisfy reviewedAnswerIsAnOfferedOption. So execution fell to the
+ * bottom of that function and overwrote it with resolveKnownAnswer's raw, un-snapped "May 2028" -
+ * off every option the control offers, which the dashboard's own answered-check then reads as
+ * blank. The applicant was asked the same question again: pick Spring 2028, Save, reverts to May
+ * 2028, asked again, forever.
+ *
+ * refreshKnownQuestionAnswers cannot fix this itself - it decides an answer from the label and the
+ * profile alone and, by design, never consults a control's option list (see that function's own
+ * header). Snapping the decided answer onto a real control is profileFieldResolution.ts's job; this
+ * is the missing pass that carries that snap onto the STORED record on every read, so the refresh's
+ * un-snapped overwrite is corrected within the same pass rather than left standing until the next
+ * save re-derives it and only for as long as that lasts.
+ *
+ * NOT THE SAME MECHANISM AS PR #892 / #897, DELIBERATELY, though the shape looks identical. Both of
+ * those (open, unmerged, on other sessions' branches as of this writing) build a pass with this
+ * exact name and this exact seam for the EEO self-identification family - Female/Woman, race
+ * widening, decline wordings - and #897's own header spends several paragraphs on why that family
+ * needs a narrower rule than a plain alias search (never write a decline, never widen a specific
+ * answer to a coarser one, never let two options spelling the same thing pick by DOM order).
+ * Reimplementing that contested territory a third way here would be exactly the parallel
+ * implementation this fix has to avoid, so EEO labels are left untouched by this function entirely:
+ * the gate below is `isProfileBackedKey(profileFieldIntent(label))`, and profileFieldIntent returns
+ * null for every EEO label by construction (classifyField's own short-circuit - see
+ * profileAnswerAliases's header for the same fact used the same way), so an EEO row is a no-op here
+ * whether or not either of those PRs has landed. What this covers is everything
+ * PROFILE_BACKED_KEYS names and neither PR touches at all: graduation windows, GPA bands, school
+ * names, degree wording, major, referral sources, study year, current enrollment.
+ *
+ * THE CONTROL SET IS THE WIDER ONE THAT MAY KEEP A FIT ANSWER (REVIEWED_PICK_EXACT_OPTION_TYPE),
+ * NOT THE NARROWER ONE THAT MAY BLANK AN UNFIT ONE (SINGLE_CHOICE_EXACT_OPTION_TYPE /
+ * storedAnswerMatchesNoExactOption), and that distinction is not a detail here - it is the entire
+ * reason this defect reached production. combobox is excluded from the narrow set on purpose: a
+ * searchable combobox can hold an answer the DOM's first read never enumerated, so blanking an
+ * unfit-LOOKING answer there would destroy a correct one. WRITING a captured option onto the record
+ * is not that act - it can only ever replace an off-list value with one the control provably
+ * offers, never invent or blank - so it is safe on the wider set, the same argument
+ * reviewedAnswerIsAnOfferedOption already relies on for the keep direction. The graduation control
+ * measured above is a combobox, which is exactly why nothing protected it before.
+ *
+ * RUNS INSIDE THE refresh -> snap -> reopen COMPOSITION, ON EVERY PASS, not once before
+ * packetQuestionFixpoint starts. That placement was checked, not assumed: packetQuestionFixpoint
+ * re-applies its transform to its own output, and "the raw, un-snapped resolver value" is a STABLE
+ * fixed point of refresh + reopen alone (once `known.value === question.answer`, refresh's own
+ * equality branch keeps it forever) while the snapped value is not, so a snap applied only to the
+ * fixpoint's initial input is undone on pass one and the chain settles on the wrong value - measured
+ * by hand-tracing this exact composition before choosing where to call it. Composing the snap
+ * between the refresh and the re-open, inside the transform, makes the SNAPPED value the transform's
+ * own fixed point instead, and it settles in at most two passes (verified for this family: it never
+ * writes answer_override_of, which is the field #897's own header shows drifting across passes when
+ * a snap runs inside this same loop - that drift is specific to the override-currency chain and is
+ * not reachable through the plain alias match this function performs).
+ *
+ * WHAT IT WRITES BESIDE THE ANSWER. A snapped answer is a MACHINE value, so every claim made about
+ * the string it replaced is dropped (answer_source above all - keeping it would assert a review
+ * that never happened), and `answer_option_source` is set to the pre-snap string, matching the
+ * shape mergeSubmittedApplicationReviewQuestions already writes for the same kind of value. Two
+ * offered options denoting the same alias refuse rather than guessing, same as every other matcher
+ * in this family.
+ */
+export function snapStoredAnswersToProfileFieldOptions<T extends StoredClosedChoiceQuestion>(
+  questions: readonly T[],
+): T[] {
+  return questions.map((question) => {
+    const answer = question.answer.trim();
+    if (!answer) return question;
+    /* HER OWN PROVENANCE IS NEVER THIS FUNCTION'S TO REWRITE - a review finding against this PR,
+     * fixed here before landing.
+     *
+     * refreshKnownQuestionAnswers's override branch (derivationIsCurrent, questionDiscovery.ts)
+     * deliberately KEEPS an applicant's off-list typed correction across a refresh: she disagreed
+     * with the resolver on the review screen, and that disagreement survives for as long as
+     * answer_override_of still names what the resolver currently computes. Measured: a degree
+     * override "Master's Degree" (answer_override_of "Master of Science in Computer Science") on a
+     * list offering "Master's" survives refresh untouched - and then reached here. combobox is in
+     * REVIEWED_PICK_EXACT_OPTION_TYPE, "Master's" is one of educationLevelLadder's own aliases of her
+     * text, it is the control's only match, and without this guard the code below rewrote her
+     * override to "Master's" and stripped answer_source/answer_override_of/answer_confirmed_of along
+     * with it - laundering a live, current disagreement into a silent machine echo on the very next
+     * read.
+     *
+     * This function exists only for UNPROVENANCED machine values (see the header above): an answer
+     * nobody has claimed, snapped onto the control's own wording so a plain alias match does not
+     * strand it. A row that already carries a claim - answer_source 'applicant_review', or an
+     * answer_override_of/answer_confirmed_of naming what it was reviewed against - is not that, and
+     * is returned exactly as it stands, whether or not any alias below would have matched it.
+     * refreshKnownQuestionAnswers is the only place that judges whether her claim is still current;
+     * this function does not get a second, looser opinion on the same record. */
+    const provenance = question as T & {
+      answer_source?: unknown;
+      answer_override_of?: unknown;
+      answer_confirmed_of?: unknown;
+    };
+    if (
+      provenance.answer_source === 'applicant_review'
+      || typeof provenance.answer_override_of === 'string'
+      || typeof provenance.answer_confirmed_of === 'string'
+    ) {
+      return question;
+    }
+    const controlType = question.portal_input_type?.trim().toLowerCase() ?? '';
+    if (!REVIEWED_PICK_EXACT_OPTION_TYPE.test(controlType)) return question;
+    const offered = usableOptions(question.options);
+    if (offered.length === 0) return question;
+    /* Already on the list VERBATIM - trim + lowercase, the SAME equivalence
+     * reviewedAnswerIsAnOfferedOption and storedAnswerMatchesNoExactOption use, and deliberately NOT
+     * comparableOption's punctuation fold - so nothing to snap.
+     *
+     * A review finding against this PR: comparableOption folds apostrophes/hyphens/punctuation, so a
+     * stored "Bachelor's Degree" against an offered "Bachelors Degree" used to compare equal here and
+     * this fast path called it "already on the list" and returned early, leaving the apostrophe
+     * mismatch standing on the record. storedAnswerMatchesNoExactOption then judged that same row by
+     * the stricter byte equality every other matcher in this family uses, found no exact match, and
+     * reopenUnfitClosedChoiceQuestions blanked an answer this function had just declared fine -
+     * exactly the deadlock this whole mechanism exists to prevent, self-inflicted by its own
+     * optimization. This fast path is only ever a shortcut for an answer that is ALREADY the
+     * control's exact spelling; anything else must fall through to the alias loop below, whose own
+     * comparableOption match still finds "Bachelors Degree" and writes the control's exact spelling
+     * onto the record, same as any other alias. */
+    const answerLower = answer.toLowerCase();
+    if (offered.some((option) => option.trim().toLowerCase() === answerLower)) return question;
+    const label = normalizeReviewQuestionLabel(question.question);
+    if (!label || !isProfileBackedKey(profileFieldIntent(label))) return question;
+    for (const alias of profileAnswerAliases(label, answer)) {
+      const key = comparableOption(alias);
+      if (!key) continue;
+      const matches = offered.filter((option) => comparableOption(option) === key);
+      if (matches.length !== 1) continue;
+      const withProvenance = question as T & {
+        answer_source?: unknown;
+        answer_reviewed_at?: unknown;
+        answer_option_source?: unknown;
+        answer_override_of?: unknown;
+        consent_permission_granted_at?: unknown;
+        consent_permission_version?: unknown;
+        answer_confirmed_of?: unknown;
+        answer_state?: unknown;
+      };
+      const {
+        answer_source: _answerSource,
+        answer_reviewed_at: _answerReviewedAt,
+        answer_option_source: _answerOptionSource,
+        answer_override_of: _answerOverrideOf,
+        consent_permission_granted_at: _consentGrantedAt,
+        consent_permission_version: _consentVersion,
+        answer_confirmed_of: _answerConfirmedOf,
+        answer_state: _answerState,
+        ...rest
+      } = withProvenance;
+      return { ...rest, answer: matches[0], answer_option_source: answer } as unknown as T;
     }
     return question;
   });

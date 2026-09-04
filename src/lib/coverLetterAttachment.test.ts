@@ -26,9 +26,12 @@ import { storedCoverLetter } from './coverLetterService';
 import {
   MANAGED_ACTION_LIMIT,
   buildManagedPortalActions,
+  coverLetterAttentionDisposition,
   coverLetterUploadSelector,
   type SubmissionPacket,
 } from './portalSubmission';
+import { preparedSubmissionStatus } from './submissionAuthorization';
+import { attentionCategoriesForReasons } from './submissionTerminalCause';
 import { coverLetterObjectKeyToAttach, preparationEvidenceBlockers } from '../routes/submissionRunner';
 
 // __dirname rather than import.meta.url: tsconfig.api.json compiles this tree as CommonJS. Same
@@ -221,7 +224,18 @@ test('a fill that carried a cover letter and recorded none is reported, not hidd
   );
 });
 
-test('a cover letter Litos could not attach stops the packet being called ready', () => {
+/* THIS TEST USED TO ASSERT THE UNCONDITIONAL VERSION: any cover letter Litos could not attach,
+ * REQUIRED or not, stopped the packet being called ready, on the reasoning "no cover letter means
+ * /submission/approve returns 422". That reasoning stopped being true the day
+ * finalApprovalCoverLetterIssue (applicationReview.ts) was fixed to refuse only when
+ * cover_letter_required is true - cover_letter_supported only ever meant the form has a file
+ * control, never that the employer asked for one - and this gate was not updated with it. Measured
+ * live on Sage packet aae653a3-2d5a-4f3e-ba3b-afea4219df37 (2026-09-04): 17 filled fields, zero
+ * unanswered required questions, zero other blockers, and needs_attention/required_document anyway,
+ * on a form whose own dashboard copy read "does not require one". See coverLetterAttentionDisposition
+ * (portalSubmission.ts) for the fix and coverLetterAttachmentDisposition.test-style coverage below
+ * for the behavior this test now pins instead. */
+test('a REQUIRED cover letter Litos could not attach stops the packet being called ready', () => {
   const runner = routeSource('submissionRunner.ts');
 
   // Managed path: the term is in the `safe` conjunction, not only in attention_reason.
@@ -230,8 +244,7 @@ test('a cover letter Litos could not attach stops the packet being called ready'
   assert.match(
     managedSafe,
     /coverLetterAttention\.length === 0/,
-    'on a form with a cover-letter control, no cover letter means /submission/approve returns 422, '
-    + 'so the run must not describe the packet as ready',
+    'coverLetterAttention must still gate `safe`, whatever decides what goes into it',
   );
 
   // Direct path: same fact, folded into the attention count directPreparationIsSafe reads.
@@ -243,6 +256,75 @@ test('a cover letter Litos could not attach stops the packet being called ready'
   const directSafe = runner.match(/const safe = directPreparationIsSafe\(\{[\s\S]{0,1600}?\}\);/)?.[0] ?? '';
   assert.ok(directSafe, 'the direct prepare must still compute a `safe`');
   assert.match(directSafe, /attentionCount: discoveryAttention\.length \+ coverLetterAttention\.length/);
+
+  // AND NEITHER PATH MAY FEED coverLetterAttention DIRECTLY FROM coverLetterIssue ANY MORE. Both
+  // must route it through coverLetterAttentionDisposition, which is the one place the required
+  // question gets asked. A direct `? [coverLetterIssue] : []` here would be the regression this
+  // whole file exists to catch.
+  assert.equal(
+    (runner.match(/coverLetterAttentionDisposition\(/g) ?? []).length,
+    2,
+    'both prepare paths must ask coverLetterAttentionDisposition, not decide coverLetterAttention themselves',
+  );
+  assert.doesNotMatch(
+    runner,
+    /const coverLetterAttention = (?:coverLetterOutcome|builtOutcome)\.coverLetterIssue \? \[/,
+    'coverLetterAttention must not be built straight off coverLetterIssue, unconditionally, again',
+  );
+});
+
+/* THE OPTIONAL HALF OF THE SAME FIX, composed from the exact pure functions both prepare paths call
+ * (coverLetterAttentionDisposition -> the `safe` gate's coverLetterAttention term ->
+ * preparedSubmissionStatus), rather than re-derived arithmetic. This is the real wiring, exercised
+ * without a browser: `safe` is `blockers.length === 0 && ... && coverLetterAttention.length === 0
+ * && ...`, so holding every other term at "clean" and varying only the cover-letter term proves what
+ * changes when an optional letter fails to prepare and nothing else is wrong with the packet - which
+ * is exactly the Sage aae653a3 shape. */
+const SAGE_COVER_LETTER_ISSUE = 'We could not safely prepare your cover letter for this one, so it '
+  + 'is not attached. Everything else is filled in, and you can write or retry a cover letter from '
+  + 'your dashboard.';
+
+test('an optional cover letter that could not be prepared does not park an otherwise-clean run', () => {
+  const disposition = coverLetterAttentionDisposition(SAGE_COVER_LETTER_ISSUE, false);
+  assert.deepEqual(disposition.blocking, [], 'an optional failure must not gate `safe`');
+  assert.equal(disposition.skippedReason, SAGE_COVER_LETTER_ISSUE, 'but it must not vanish either');
+
+  // Composed exactly as both prepare paths compose it: coverLetterAttention.length is one term in a
+  // larger `&&` chain. With every other term clean, this is what `safe` evaluates to.
+  const safe = disposition.blocking.length === 0;
+  assert.equal(safe, true);
+  assert.equal(
+    preparedSubmissionStatus({ safe, standingConsentEnabled: false }),
+    'ready_for_final_approval',
+    'a fully filled application must not stall on a document nobody required',
+  );
+  // The note is never mistaken for a stop: it carries no attention_categories at all, since it never
+  // reaches attentionReasons/attention_reason.
+  assert.deepEqual(attentionCategoriesForReasons([]), []);
+});
+
+test('a required cover letter that could not be prepared still parks the run for required_document', () => {
+  const disposition = coverLetterAttentionDisposition(SAGE_COVER_LETTER_ISSUE, true);
+  assert.deepEqual(disposition.blocking, [SAGE_COVER_LETTER_ISSUE]);
+  assert.equal(disposition.skippedReason, undefined, 'a blocking issue is not also a quiet note');
+
+  const safe = disposition.blocking.length === 0;
+  assert.equal(safe, false);
+  assert.equal(
+    preparedSubmissionStatus({ safe, standingConsentEnabled: false }),
+    'needs_attention',
+    'a required document Litos could not produce must still stop the run',
+  );
+  // attentionCategoriesForReasons is the same classifier attentionReasons feeds into
+  // attention_categories; a required cover-letter sentence must still read as required_document, the
+  // category the applicant's "1 remaining" banner is built from.
+  assert.deepEqual(attentionCategoriesForReasons(disposition.blocking), ['required_document']);
+});
+
+test('both prepare paths write cover_letter_skipped_reason from the disposition, not from coverLetterIssue directly', () => {
+  const runner = routeSource('submissionRunner.ts');
+  const written = runner.match(/cover_letter_skipped_reason: coverLetterDisposition\.skippedReason,/g) ?? [];
+  assert.equal(written.length, 2, 'both the managed and direct prepare paths must write the note');
 });
 
 /* The degrade that became reachable the moment the approved_at term came out. buildPacket now goes

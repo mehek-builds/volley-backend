@@ -29,9 +29,23 @@
  *   2. Lever and Ashby publish no company name at all, so the postings' own prose is read instead:
  *      the brand as a whole word, or the company's domain on an off-ATS link.
  *   3. Neither -> `cannot-tell`, which is NOT a pass. It is a board somebody has to open.
+ *
+ * WHAT IS RED AND WHAT IS ONLY REPORTED.
+ *
+ * Two unrelated things can go wrong here: a board can belong to a company that is not the one we
+ * filed it under (ours), or a board can have no postings this week and a token that stopped
+ * resolving (theirs). They shared an exit code until 2026-09-03, and the cost was that the check
+ * spent whole days red over one third-party 404 while sitting green through a run where 196
+ * Greenhouse boards, Airbnb among them, returned nothing at all.
+ *
+ * `named-mismatch` decides the exit code now, plus a source THIS change added whose board does not
+ * resolve, plus any bucket so far over its ceiling that the run is a non-result rather than a
+ * verdict. Everything else prints and annotates. The reasoning, the measurements behind the
+ * ceilings, and the rule itself live in src/lib/sourceIdentityVerdict.ts.
  */
 
-import { writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -45,6 +59,7 @@ const { JOB_SOURCES } = await import('../src/lib/jobSources.ts');
 const { fetchSourceJobs } = await import('../src/lib/jobMonitor.ts');
 const { identityCheck, portalNameAgrees } = await import('../src/lib/sponsorIdentity.ts');
 const { pollSourcesWithinBudget, retryTransient } = await import('../src/lib/jobPollScheduler.ts');
+const { judgeSourceIdentity } = await import('../src/lib/sourceIdentityVerdict.ts');
 
 /* Boards where no name is published and the postings name a BRAND rather than the company, checked
    by hand. The evidence is here so the judgement can be re-checked or overturned, and so a run that
@@ -124,7 +139,54 @@ await pollSourcesWithinBudget(selected, record, {
 });
 process.stderr.write('\n');
 
+/**
+ * WHICH SOURCES DID THIS CHANGE INTRODUCE?
+ *
+ * A board that has been on the list for weeks and starts returning 404 is the company moving. A
+ * token that has never been polled by anything and does not resolve is a typo in a hand-written
+ * string, and it is ours. Telling those apart needs the catalog as it stood before this change,
+ * which is what SOURCE_IDENTITY_BASE_SHA points at (the workflow passes the pull request's base,
+ * and checks out with fetch-depth 0 so the object is actually present).
+ *
+ * Membership is tested by asking whether the token STRING appears anywhere in the base catalog,
+ * not by parsing it: the two files that hold sources use different shapes (tuples here, generated
+ * JSON objects in the discovery file) and a parser for both is a second thing to keep correct.
+ * The failure mode of the substring test is calling a new token old, which loses a check nobody
+ * had before rather than inventing one.
+ *
+ * Returns null when the base cannot be read at all, which the report states outright. A missing
+ * diff must never manufacture a failure.
+ */
+function addedSourceKeys() {
+  const base = process.env.SOURCE_IDENTITY_BASE_SHA?.trim();
+  if (!base) return null;
+  const root = join(HERE, '..');
+  try {
+    const baseCatalog = ['src/lib/jobSources.ts', 'src/data/jobSources100k.ts']
+      .map((file) => execFileSync('git', ['show', `${base}:${file}`], {
+        cwd: root,
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+        /* Capture git's stderr instead of letting it through, so a missing base object is reported
+           once, by the message below, rather than twice in two different voices. */
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }))
+      .join('\n');
+    return new Set(
+      selected
+        .filter((source) => !baseCatalog.includes(`'${source.board_token}'`)
+          && !baseCatalog.includes(`"${source.board_token}"`))
+        .map((source) => `${source.ats_name}/${source.board_token}`),
+    );
+  } catch (error) {
+    console.log(`Could not read the catalog at ${base}, so newly added sources were not identified: `
+      + `${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 results.sort((a, b) => a.company_name.localeCompare(b.company_name));
+const judgement = judgeSourceIdentity(results, selected.length, addedSourceKeys());
 const bucket = (name) => results.filter((row) => row.verdict === name);
 
 for (const row of bucket('named-mismatch')) {
@@ -144,43 +206,25 @@ if (asJson) {
   console.log(`\nWrote ${path}`);
 }
 
-const counts = ['named-ok', 'prose-ok', 'cleared-by-hand', 'named-mismatch', 'cannot-tell', 'empty', 'unreachable', 'dead']
-  .map((name) => `${bucket(name).length} ${name}`);
-console.log(`\n${results.length} sources: ${counts.join(', ')}.`);
-
-/* WHAT FAILS THE BUILD, and why the rest only prints.
- *
- * `named-mismatch` and `dead` fail. Both are statements the board itself made and neither can come
- * back on its own: the employer published a name that is not ours, or the token does not exist.
- *
- * `empty`, `cannot-tell` and `unreachable` do NOT fail, because each is a state a healthy source
- * passes through. A company with no open roles this week has an empty board and postings again next
- * week; Lever and Ashby publish no name, so three postings that never say the brand prove nothing;
- * a timeout is the network. Failing on any of them makes the check a weather report on hundreds of
- * third-party boards, which goes red on pull requests that touched none of them - and a check that is
- * red by default is a check nobody reads on the day it finds a real mislabelling.
- *
- * They still print, in full, every run. The cost of that split is that a board empty for good
- * decays quietly rather than failing, so the printed EMPTY list is worth reading when it grows.
- *
- * UNREACHABLE IS CAPPED, because "not fatal" one board at a time is not the same as "not fatal" for
- * the whole catalog. Nothing above distinguishes a bad minute from the check not running at all: a runner
- * with no egress, or a provider changing its response envelope so every normalizer throws (those
- * errors carry no HTTP status, so they land here too), would put every source in this bucket and
- * exit 0 having verified nothing. That is the silent zero this file was written to end - the
- * sources table sat empty in production for months because an empty board and a working board
- * looked identical to every check we had. Past the ceiling the run is not a pass, it is a
- * non-result, and it says so. The floor keeps a handful of flaky boards on a short --only run from
- * tripping it. */
-const unreachable = bucket('unreachable').length;
-const unreachableCeiling = Math.max(5, Math.floor(selected.length * 0.1));
-if (unreachable > unreachableCeiling) {
-  console.log(`\nNOT A RESULT: ${unreachable} of ${selected.length} boards were unreachable, over the `
-    + `ceiling of ${unreachableCeiling}. That is the check failing to run, not the sources failing.`);
+/* Annotations put the liveness list on the pull request itself rather than 1000 lines into a log,
+   which is the whole reason it is safe for those verdicts to stop failing the build: they became
+   more visible, not less. Only inside Actions, where the syntax means something. */
+if (process.env.GITHUB_ACTIONS === 'true') {
+  for (const annotation of judgement.annotations) console.log(annotation);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    try {
+      appendFileSync(process.env.GITHUB_STEP_SUMMARY, judgement.stepSummary);
+    } catch (error) {
+      console.log(`Could not write the step summary: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
 
-process.exit(
-  bucket('named-mismatch').length + bucket('dead').length > 0 || unreachable > unreachableCeiling
-    ? 1
-    : 0,
-);
+console.log(`\n${judgement.report.join('\n')}`);
+
+if (judgement.failures.length > 0) {
+  console.log('\nWHY THIS RUN IS RED:');
+  for (const failure of judgement.failures) console.log(`  - ${failure}`);
+}
+
+process.exit(judgement.exitCode);

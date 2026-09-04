@@ -445,3 +445,361 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
     else process.env.CARD_GATE_FROM = previousGate;
   }
 });
+
+/**
+ * Written 2026-09-04 investigating live dashboard sign-outs: a token that had not reached its own
+ * exp claim, was not epoch-revoked, and was not version-stale was still rejected, and the old bare
+ * `catch { return invalid }` left no way to tell which of the six checks actually fired. These
+ * tests pin that every rejection now logs its own reason (with the token's own claims decoded for
+ * cross-reference, even when the signature itself is what failed) and, just as importantly, that
+ * the response a caller sees is byte-for-byte the same 401 as before -- this is an observability
+ * fix, not a behaviour change. Each one fails loudly if `logRejectedToken` is ever deleted or its
+ * call sites drift: there is no source-text pin here, only "did the right structured line appear".
+ */
+test('token rejections are diagnosable: each invalid path logs its own reason without changing what the caller sees', async (t) => {
+  const previousSecret = process.env.JWT_SIGNING_SECRET;
+  const secret = 'test-signing-secret-32-chars-minimum!!';
+  process.env.JWT_SIGNING_SECRET = secret;
+  const secretBytes = new TextEncoder().encode(secret);
+
+  const requestWithLog = (token: string): { request: FastifyRequest; warnCalls: Array<{ fields: unknown; msg: string }> } => {
+    const warnCalls: Array<{ fields: unknown; msg: string }> = [];
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+      log: {
+        warn: (fields: unknown, msg: string) => { warnCalls.push({ fields, msg }); },
+        error: () => {},
+      },
+    } as unknown as FastifyRequest;
+    return { request, warnCalls };
+  };
+
+  const outcome = () => {
+    const calls: Array<{ status: number; body: unknown }> = [];
+    const reply = {
+      status(status: number) {
+        return { send(body: unknown) { calls.push({ status, body }); } };
+      },
+    } as unknown as FastifyReply;
+    return { reply, calls };
+  };
+
+  /** Asserts exactly one structured rejection line was logged and returns its `tokenRejection`
+   *  payload, so each sub-test can check both the reason and whatever claims it decoded. */
+  const soleRejection = (warnCalls: Array<{ fields: unknown; msg: string }>) => {
+    assert.equal(warnCalls.length, 1, 'expected exactly one token-rejection log line');
+    assert.equal(warnCalls[0].msg, 'requireAuth rejected a presented token');
+    return (warnCalls[0].fields as { tokenRejection: Record<string, unknown> }).tokenRejection;
+  };
+
+  const chainableRow = (row: Record<string, unknown>) => {
+    const promise = Promise.resolve([row]);
+    return Object.assign(promise, { limit: () => promise });
+  };
+
+  try {
+    await t.test('a token signed with a different secret: verify_threw, claims still decoded for cross-reference, still an ordinary 401', async () => {
+      const foreignToken = await new SignJWT({ userId: 'user-log-1', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(new TextEncoder().encode('a-completely-different-secret-32-chars!!'));
+      const { request, warnCalls } = requestWithLog(foreignToken);
+      const { reply, calls } = outcome();
+      await requireAuth(request, reply);
+
+      const rejection = soleRejection(warnCalls);
+      assert.equal(rejection.reason, 'verify_threw');
+      assert.equal(rejection.verifyErrorName, 'JWSSignatureVerificationFailed');
+      // The payload is base64url, not encryption, so decodeJwt still reads it even though the
+      // signature is exactly what failed -- this is the fact that makes the log line useful for
+      // cross-referencing against the account's live DB row after the fact.
+      assert.equal(rejection.claimUserId, 'user-log-1');
+      assert.equal(rejection.claimSessionVersion, 0);
+      assert.equal(typeof rejection.claimIat, 'number');
+
+      assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+      assert.equal(request.jwtPayload, undefined);
+    });
+
+    /* Measured on litos-api 2026-09-04 15:39:03Z: the signature held, the user-row select threw
+       "Failed query: select session_valid_from, ..." with the pool's connect timeout on its cause,
+       and the old catch answered 401. The dashboard reads a 401 as an expired session, clears the
+       stored token and sends the applicant to /login mid-flow. A check that could not run is an
+       outage, not a rejection: 503, Retry-After, and the token stays. */
+    const outcomeWithHeaders = () => {
+      const calls: Array<{ status: number; headers: Record<string, string>; body: unknown }> = [];
+      const reply = {
+        status(status: number) {
+          const headers: Record<string, string> = {};
+          const chain = {
+            header(name: string, value: string) { headers[name] = value; return chain; },
+            send(body: unknown) { calls.push({ status, headers, body }); },
+          };
+          return chain;
+        },
+      } as unknown as FastifyReply;
+      return { reply, calls };
+    };
+    const poolTimeout = () => {
+      const cause = Object.assign(new Error('timeout exceeded when trying to connect'), { code: 'ETIMEDOUT' });
+      const failure = new Error('Failed query: select "session_valid_from", "session_version" from "users" where "users"."id" = $1 limit $2');
+      (failure as Error & { cause?: unknown }).cause = cause;
+      return failure;
+    };
+    const selectThatThrows = (failure: Error) => mock.method(db, 'select', (() => ({
+      from: () => ({ where: () => ({ limit: () => Promise.reject(failure) }) }),
+    })) as unknown as typeof db.select);
+
+    await t.test('a valid token whose user-row read throws: lookup_unavailable, 503 with Retry-After, and NOT a 401', async () => {
+      const token = await new SignJWT({ userId: 'user-log-db', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = selectThatThrows(poolTimeout());
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcomeWithHeaders();
+        await requireAuth(request, reply);
+        const rejection = soleRejection(warnCalls);
+        assert.equal(rejection.reason, 'lookup_unavailable');
+        assert.equal(rejection.verifyErrorName, 'Error');
+        assert.match(String(rejection.verifyErrorMessage), /^Failed query: select/u);
+        // The driver's own fault travels with the line, code first, so the next reader sees the
+        // pool timeout and not only the query it interrupted.
+        assert.equal(rejection.verifyErrorCause, 'ETIMEDOUT timeout exceeded when trying to connect');
+        assert.equal(rejection.claimUserId, 'user-log-db');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 503);
+        assert.equal(calls[0].headers['Retry-After'], '2');
+        assert.deepEqual(calls[0].body, { error: 'Your session could not be checked right now. Try again in a moment.' });
+        assert.equal(request.jwtPayload, undefined);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('optionalAuth answers the same 503 for a presented token it could not check, never the anonymous page', async () => {
+      const token = await new SignJWT({ userId: 'user-log-db-2', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = selectThatThrows(poolTimeout());
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcomeWithHeaders();
+        await optionalAuth(request, reply);
+        assert.equal(soleRejection(warnCalls).reason, 'lookup_unavailable');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 503);
+        assert.equal(request.jwtPayload, undefined);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a signature that fails is still verify_threw and still 401: the split changes nothing for a bad token', async () => {
+      const foreignToken = await new SignJWT({ userId: 'user-log-3', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(new TextEncoder().encode('a-completely-different-secret-32-chars!!'));
+      // The DB is never reached for a bad signature, so a throwing select proves the order too.
+      const select = selectThatThrows(new Error('must not be reached'));
+      try {
+        const { request, warnCalls } = requestWithLog(foreignToken);
+        const { reply, calls } = outcomeWithHeaders();
+        await requireAuth(request, reply);
+        const rejection = soleRejection(warnCalls);
+        assert.equal(rejection.reason, 'verify_threw');
+        assert.equal(rejection.verifyErrorCause, undefined);
+        assert.equal(calls[0].status, 401);
+        assert.equal(select.mock.callCount(), 0);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a token missing userId: no_user_id, still an ordinary 401', async () => {
+      const token = await new SignJWT({ isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const { request, warnCalls } = requestWithLog(token);
+      const { reply, calls } = outcome();
+      await requireAuth(request, reply);
+      assert.equal(soleRejection(warnCalls).reason, 'no_user_id');
+      assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+    });
+
+    await t.test('a token for a userId with no row: user_not_found, still an ordinary 401', async () => {
+      const token = await new SignJWT({ userId: 'user-deleted', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = mock.method(db, 'select', (() => ({
+        from: () => ({ where: () => ({ limit: async () => [] }) }),
+      })) as unknown as typeof db.select);
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(soleRejection(warnCalls).reason, 'user_not_found');
+        assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a token minted before the account epoch: issued_before_epoch, still an ordinary 401', async () => {
+      const token = await new SignJWT({ userId: 'user-epoch', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt(Math.floor(Date.now() / 1000) - 3600)
+        .sign(secretBytes);
+      const select = mock.method(db, 'select', (() => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{
+              session_valid_from: new Date(),
+              session_version: 0,
+              email: 'epoch@example.com',
+              is_guest: false,
+              guest_expires_at: null,
+            }],
+          }),
+        }),
+      })) as unknown as typeof db.select);
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(soleRejection(warnCalls).reason, 'issued_before_epoch');
+        assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a token whose sessionVersion is behind the stored one: session_version_stale, still an ordinary 401', async () => {
+      const token = await new SignJWT({ userId: 'user-version', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = mock.method(db, 'select', (() => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{
+              session_valid_from: null,
+              session_version: 1,
+              email: 'version@example.com',
+              is_guest: false,
+              guest_expires_at: null,
+            }],
+          }),
+        }),
+      })) as unknown as typeof db.select);
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        const rejection = soleRejection(warnCalls);
+        assert.equal(rejection.reason, 'session_version_stale');
+        assert.equal(rejection.claimSessionVersion, 0);
+        assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a guest token past its own expiry: guest_expired, still an ordinary 401', async () => {
+      const token = await new SignJWT({ userId: 'user-guest', isGuest: true, authMethod: 'guest', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = mock.method(db, 'select', (() => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{
+              session_valid_from: null,
+              session_version: 0,
+              email: null,
+              is_guest: true,
+              guest_expires_at: new Date(Date.now() - 1000),
+            }],
+          }),
+        }),
+      })) as unknown as typeof db.select);
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(soleRejection(warnCalls).reason, 'guest_expired');
+        assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a non-guest token for a row that is now a guest: guest_flag_mismatch, still an ordinary 401', async () => {
+      const token = await new SignJWT({ userId: 'user-flag', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = mock.method(db, 'select', (() => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [{
+              session_valid_from: null,
+              session_version: 0,
+              email: null,
+              is_guest: true,
+              guest_expires_at: new Date(Date.now() + 60_000),
+            }],
+          }),
+        }),
+      })) as unknown as typeof db.select);
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(soleRejection(warnCalls).reason, 'guest_flag_mismatch');
+        assert.deepEqual(calls, [{ status: 401, body: { error: 'Invalid or expired token' } }]);
+      } finally {
+        select.mock.restore();
+      }
+    });
+
+    await t.test('a session that verifies cleanly logs nothing at all', async () => {
+      const token = await new SignJWT({ userId: 'user-ok', isGuest: false, authMethod: 'password', sessionVersion: 0 })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .sign(secretBytes);
+      const select = mock.method(db, 'select', (() => ({
+        from: () => ({
+          where: () => chainableRow({
+            session_valid_from: null,
+            session_version: 0,
+            email: 'ok@example.com',
+            is_guest: false,
+            guest_expires_at: null,
+            billing_provider: null,
+            billing_customer_id: null,
+            created_at: new Date('2020-01-01T00:00:00.000Z'),
+            onboarding_completed_at: new Date('2020-01-01T00:00:00.000Z'),
+          }),
+        }),
+      })) as unknown as typeof db.select);
+      try {
+        const { request, warnCalls } = requestWithLog(token);
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(warnCalls.length, 0, 'a valid session must not log a rejection');
+        assert.equal(calls.length, 0);
+        assert.equal(request.jwtPayload?.userId, 'user-ok');
+      } finally {
+        select.mock.restore();
+      }
+    });
+  } finally {
+    if (previousSecret === undefined) delete process.env.JWT_SIGNING_SECRET;
+    else process.env.JWT_SIGNING_SECRET = previousSecret;
+  }
+});

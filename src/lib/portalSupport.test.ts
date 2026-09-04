@@ -453,10 +453,26 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /function monitoredApplicationUrlForGenerate\([\s\S]{0,160}posting: ActionPostingRow \| null/);
   assert.match(resumeRoute, /canonicalMonitoredPortalUrl\([\s\S]{0,180}job\.external_id/);
   assert.match(resumeRoute, /const effectiveJobId = body\.job_id \?\? ownedCanonicalApplication\?\.job_id/);
-  assert.match(resumeRoute, /const canonicalApplicationPortalUrl = body\.application[\s\S]{0,180}effectiveJobId[\s\S]{0,180}monitoredApplicationUrl/);
+  // canonicalApplicationPortalUrlFor must decide on effectiveJobId FIRST, unconditionally on
+  // whether the caller sent `application` - a job-id-only packet (no `application` in the body)
+  // gets the reconstructed monitored URL rather than falling through to `undefined`. See
+  // src/routes/resume.canonicalPortalUrl.test.ts for the behavioural half of this proof.
+  assert.match(resumeRoute, /export function canonicalApplicationPortalUrlFor\([\s\S]{0,400}if \(effectiveJobId\) return monitoredApplicationUrl;/);
+  assert.match(
+    resumeRoute,
+    /const canonicalApplicationPortalUrl = canonicalApplicationPortalUrlFor\(\s*effectiveJobId,\s*monitoredApplicationUrl,\s*body\.application,\s*\)/,
+  );
   assert.match(resumeRoute, /effectiveJobId && !monitoredApplicationUrl[\s\S]{0,180}code: 'job_not_available'/);
-  assert.match(resumeRoute, /: canonicalSupportedPortalUrl\(body\.application\.portal_url, body\.application\.ats_name\)[\s\S]{0,100}\?\? body\.application\.portal_url/);
+  assert.match(resumeRoute, /return canonicalSupportedPortalUrl\(application\.portal_url, application\.ats_name\)[\s\S]{0,100}\?\? application\.portal_url/);
   assert.doesNotMatch(resumeRoute, /monitoredApplicationUrlForGenerate\(resolvedPosting\)\s*\?\?/);
+  // Regenerating against an EXISTING canonical row (body.application_id supplied) skips the insert
+  // above entirely, so without a second write site here, one of the pre-fix null-portal_url rows
+  // stays null forever for anyone who hits "regenerate" on it rather than creating a fresh
+  // application - the fix would only ever reach a brand new row otherwise.
+  assert.match(
+    resumeRoute,
+    /else if \(canonicalApplicationPortalUrl && ownedCanonicalApplication && !ownedCanonicalApplication\.portal_url\)[\s\S]{0,900}tx\.update\(applications\)[\s\S]{0,200}isNull\(applications\.portal_url\)/,
+  );
   const jdMatchRoute = routeSource('jdMatch.ts');
   assert.match(jdMatchRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,120}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(resumeRoute, /portal_url: canonicalApplicationPortalUrl/);

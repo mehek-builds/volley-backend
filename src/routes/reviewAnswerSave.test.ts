@@ -559,6 +559,79 @@ for (const [name, evidence] of SEND_EVIDENCE) {
   });
 }
 
+/* `failed` READS THE ROW THE SAME WAY, NOT THE STATUS LIST.
+ *
+ * reviewAnswerSaveDisposition names five statuses outright (submitted, awaiting_security_code,
+ * preparing, filling, submitting, submit_requested-with-a-claim, ready_for_final_approval) and falls
+ * through to employerMayHoldApplication for everything else, `failed` included. That is deliberate:
+ * a packet audit that fails before any browser interaction is exactly the ordinary case this route
+ * exists for (see 'an application still being prepared accepts the save' above), and a blanket reject
+ * on the status word alone would refuse that one too. What the row carries decides it, exactly as it
+ * already does for needs_attention just above - same four facts, same predicate, same 409.
+ *
+ * Measured live 2026-09-04, Hudson River Trading application 4a79eec1-5c65-4dd4-8e72-e119fbfbd733:
+ * `ready_for_final_approval` with the send gate clear (see hrtPacketSendPathComposition.test.ts), a
+ * submit-request run attempted, and the run failed on an unrelated GPA-control defect (#920, since
+ * fixed) after the attempt was already under way. A row that reaches an employer's page and stops
+ * there is precisely the case `submission_attempted_at` exists to flag; `failed` never clears it. */
+const FAILED_SEND_EVIDENCE: Array<[string, Partial<ApplicationReviewState>]> = [
+  ['a recorded submit attempt', { submission_attempted_at: STOPPED_AT }],
+  ['the employer\'s own confirmation', {
+    receipt: {
+      confirmation_text: 'Thanks for applying to kos.',
+      final_url: `${PORTAL_URL}/confirmation`,
+      captured_at: STOPPED_AT,
+    },
+  }],
+  ['an unresolved unverified submission', {
+    unverified_submission: { at: STOPPED_AT, cause: 'no_confirmation_state', portal_url: PORTAL_URL },
+  }],
+  ['a standing security code wall', {
+    security_code: { digits: 6, requested_at: STOPPED_AT, submit_was_authorized: true },
+  }],
+];
+
+for (const [name, evidence] of FAILED_SEND_EVIDENCE) {
+  test(`a failed run carrying ${name} refuses the save with the honest code, and is left untouched`, async () => {
+    const id = await applicationWith(stoppedRun({ status: 'failed', ...evidence }));
+
+    const response = await saveAnswers(id, 'No');
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE');
+    assert.equal(
+      response.json().error,
+      'These answers can no longer be edited from this application’s current submission state',
+      'the sentence the dashboard is required to render verbatim on the press that triggers this',
+    );
+
+    const persisted = await storedReview(id);
+    assert.equal(persisted.questions[0].answer, '',
+      'a failed row that may already be at an employer is refused exactly like a needs_attention one');
+    assert.equal(persisted.questions_reviewed_at, undefined, 'no review round is minted on a refusal');
+    assert.equal(persisted.status, 'failed', 'the refusal does not touch the status either');
+  });
+}
+
+/* AND `failed` IS NOT COLLATERAL EITHER. A packet audit can fail before the run ever reaches the
+ * employer's page - the ordinary shape of a `failed` row - and that packet's whole remaining ask can
+ * be exactly the answer this route exists to store. Asserted with every one of the four evidence
+ * fields absent, so a future change that starts keying this off the status word alone fails here
+ * first rather than only in the four tests above. */
+test('a failed run carrying no send evidence still accepts the save', async () => {
+  const id = await applicationWith(stoppedRun({
+    status: 'failed',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+  }));
+
+  const response = await saveAnswers(id, 'No');
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'No');
+  assert.equal(persisted.status, 'failed', 'a save leaves the status exactly where it found it');
+});
+
 /* HER LOOK IS THE RELEASE. The resolution route records 'not_sent' only after she has opened the
  * employer page and answered, releases the claim, and promises "Litos can send it again whenever
  * you are ready". Measured on the Easy Dynamics Rippling packet (2026-08-20): the promise was
@@ -660,6 +733,130 @@ test('a save that landed answers 200 with no saved flag on it', async () => {
 
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(response.json().saved, undefined);
+});
+
+/* THE OTHER LOST RACE, WHICH REACHED HER AS A CRASH CARRYING THE STATEMENT.
+ *
+ * The three tests above stage the race the row can show: the run commits, the exact-spec predicate
+ * matches nothing, and the route answers 202. Production had a second one that never got that far.
+ * Every write to generated_resumes fires the submission-authority revision guard from a BEFORE
+ * trigger; the guard takes the per-user advisory lock with pg_try_advisory_xact_lock - TRY, never
+ * wait - and RAISES 40001 the instant anything else on the account holds it. A managed run holds it
+ * for its whole transaction, and the dashboard's own 2.5-second poll holds it for a few
+ * milliseconds. drizzle wraps that raise in a DrizzleQueryError whose message is `Failed query:
+ * <the whole UPDATE>\nparams: <every bound value>`, and nothing caught it.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com, Exa packet 73768339: this save answered
+ * 500 with that statement in the body, the dashboard printed "Internal Server Error", and the
+ * identical save answered 200 the moment the run finished.
+ *
+ * STAGED WITH A TRIGGER that raises exactly what the shipped guard raises, for the same reason the
+ * lost-CAS test above uses one: the interleaving cannot be produced from outside the process. The
+ * counter makes it the transient case - one refusal, then out of the way - which is the shape a
+ * poll produces and the shape a retry is for.
+ */
+async function installAuthorityGuard(refusals: 'once' | 'always'): Promise<void> {
+  /* THE ATTEMPT COUNTER IS A SEQUENCE, and it has to be. The raise aborts the statement's whole
+   * transaction - which is the very property that makes a retry safe - so a counter kept in a table
+   * is rolled back with it and every attempt reads "first attempt" forever. nextval is exempt from
+   * rollback, so it is the one thing in Postgres that can remember an attempt the database has
+   * un-remembered. Measured: a table-backed counter made the 'once' guard refuse without end. */
+  await pglite.exec(`
+    CREATE SEQUENCE IF NOT EXISTS litos_test_guard_attempts;
+    ALTER SEQUENCE litos_test_guard_attempts RESTART WITH 1;
+    CREATE OR REPLACE FUNCTION litos_test_authority_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF nextval('litos_test_guard_attempts') > ${refusals === 'once' ? '1' : '2147483647'}
+        THEN RETURN NEW; END IF;
+      RAISE EXCEPTION 'submission authority changed concurrently; retry the request'
+        USING ERRCODE = '40001';
+    END $$;
+    DROP TRIGGER IF EXISTS litos_test_authority_guard ON generated_resumes;
+    CREATE TRIGGER litos_test_authority_guard BEFORE UPDATE ON generated_resumes
+      FOR EACH ROW EXECUTE FUNCTION litos_test_authority_guard();
+  `);
+}
+
+async function removeAuthorityGuard(): Promise<void> {
+  await pglite.exec('DROP TRIGGER IF EXISTS litos_test_authority_guard ON generated_resumes');
+}
+
+/* THE COMMON CASE, AND THE ONE THE APPLICANT SHOULD NEVER SEE AT ALL. The guard refused once and
+ * then let go, which is what a poll holding the lock for four milliseconds looks like. The raise
+ * happens in a BEFORE trigger, so the statement aborted before touching anything: retrying it is
+ * retrying a write that provably did not happen, and the retried statement is byte-identical, exact
+ * -spec predicate included, so it can only land on the row this request read. */
+test('a save the authority guard refuses once still lands', async () => {
+  const id = await applicationWith(stoppedRun());
+  await installAuthorityGuard('once');
+
+  let response;
+  try {
+    response = await saveAnswers(id, 'No');
+  } finally {
+    await removeAuthorityGuard();
+  }
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().saved, undefined, 'it landed, so it carries no lost-race discriminator');
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'No', 'and her answer is on the row, not merely reported');
+});
+
+/* AND WHEN IT NEVER LETS GO, IT IS STILL NOT AN ERROR ABOUT HER APPLICATION. Nothing was written -
+ * the same proof the retry rests on - so "your answers did not land, they are still on this screen"
+ * is exactly true, and that sentence is what the dashboard already renders for 202 + saved:false
+ * (REVIEW_ANSWERS_SAVE_RACED). A 500 said none of it, and said it with the UPDATE attached. */
+test('a save the authority guard never lets through answers 202, not 500', async () => {
+  const id = await applicationWith(stoppedRun());
+  await installAuthorityGuard('always');
+
+  let response;
+  try {
+    response = await saveAnswers(id, 'No');
+  } finally {
+    await removeAuthorityGuard();
+  }
+
+  assert.equal(response.statusCode, 202, response.body);
+  assert.equal(response.json().saved, false,
+    'the body must say the save did not land, or a client that only reads the body cannot tell');
+
+  /* THE LEAK, ASSERTED SEPARATELY FROM THE STATUS, because fixing one without the other still ships
+   * the statement. The 500 body carried the whole UPDATE, its jsonb_set, its `spec = $4::jsonb`
+   * predicate and its bound-parameter shape to a browser. No response on this route may contain any
+   * of it, whatever status it wears. */
+  for (const forbidden of ['Failed query', 'jsonb_set', 'generated_resumes', 'params:']) {
+    assert.ok(!response.body.includes(forbidden),
+      `the response leaks server internals: ${forbidden} appears in ${response.body.slice(0, 400)}`);
+  }
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, '', 'and nothing of this save reached the row');
+  assert.equal(persisted.questions_reviewed_at, undefined);
+});
+
+/* THE SAME GUARD ON THE SIBLING ROUTE, which shares this one's 202 + saved:false contract to the
+ * byte. Ticking a "Your turn" checkbox while a run works the packet must not 500 either. */
+test('a checklist tick the authority guard refuses answers 202, not 500', async () => {
+  const id = await applicationWith(stoppedRun());
+  await installAuthorityGuard('always');
+
+  let response;
+  try {
+    response = await app.inject({
+      method: 'POST',
+      url: `/applications/${id}/review/attention-acks`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { item_id: 'line-1', label: 'Upload your transcript on the company page', acknowledged: true },
+    });
+  } finally {
+    await removeAuthorityGuard();
+  }
+
+  assert.equal(response.statusCode, 202, response.body);
+  assert.equal(response.json().saved, false);
+  assert.ok(!response.body.includes('Failed query'), 'and it does not ship the statement');
 });
 
 /* THE OTHER SILENT 200, WHICH THIS ROUTE ALSO ANSWERED FOR MONTHS AFTER IT COULD SAVE.
@@ -881,4 +1078,149 @@ test('confirming a value the resolver disputes records the override beside the c
   assert.equal(persisted.questions[0].answer_source, 'applicant_review');
   assert.equal(persisted.questions[0].answer_override_of, RESOLVED,
     'which resolution she disagreed with, so the refresh keeps her value while the profile stands');
+});
+
+/* A FROZEN ANSWER THAT SAYS WHERE THE CORRECTION GOES.
+ *
+ * MEASURED LIVE 2026-09-04, account mehekmandal05@gmail.com. Flow Traders packet
+ * 8dc65cd0-cab5-4af2-a1d8-2583766fd2d4 (greenhouse) at `ready_for_final_approval`. The dashboard
+ * drew "Answer 1 question", opened the per-question editor with the essay pre-filled, accepted her
+ * typing, and Save came back 409 REVIEW_ANSWERS_NOT_EDITABLE - every time, on an essay containing a
+ * factual error she had to correct before the application went out.
+ *
+ * THE REFUSAL IS NOT WHAT CHANGED, and these tests are written to fail if it ever is. This route
+ * writes answers and nothing else, so a save here would leave the preview screenshot the applicant
+ * approves describing a form built from different answers. reviewAnswerSaveDisposition is right and
+ * stays right: the assertions below check the row afterwards for exactly that reason.
+ *
+ * WHAT CHANGED IS THAT THE 409 NAMES THE EXIT. preparedRunCanRestart already admits this shape, and
+ * submit-request with `restart: true` carries the corrected answers into a fresh fill and a fresh
+ * preview - answers and picture moving in one request. The neighbouring 409 on submit-request
+ * already holds itself to this standard in its own comment: a correct refusal that names neither the
+ * reason nor the way out is indistinguishable from a bug.
+ */
+function readyForFinalApproval(extra: Partial<ApplicationReviewState> = {}): ApplicationReviewState {
+  return stoppedRun({
+    status: 'ready_for_final_approval',
+    attention_reason: undefined,
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    preview_screenshot_url: 'https://screenshots.litos.test/8dc65cd0-preview.png',
+    questions: [{ ...HELD_QUESTION, answer: 'I traded on the CME desk for three years.' }],
+    ...extra,
+  });
+}
+
+test('a filled packet still refuses the in-place save, and now names the route that lands the correction', async () => {
+  const id = await applicationWith(readyForFinalApproval());
+
+  const response = await saveAnswers(id, 'I traded on the CBOT desk for two years.');
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE',
+    'the code does not move: this is still a refusal of THIS route');
+  assert.equal(response.json().restart_with_answers, true,
+    'and the refusal says the correction has somewhere to go');
+  assert.match(response.json().error, /restart true/,
+    'naming the flag by the name the route actually takes, not a gesture at "try elsewhere"');
+  assert.match(response.json().error, /submit-request/,
+    'and the route it goes on');
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'I traded on the CME desk for three years.',
+    'the invariant is untouched: no answer landed underneath the filled form and its preview');
+  assert.equal(persisted.status, 'ready_for_final_approval', 'and nothing moved the packet');
+  assert.equal(persisted.questions_reviewed_at, undefined, 'no review round was minted on a refusal');
+});
+
+test('a filled packet whose run has been claimed keeps the sentence with no exit in it', async () => {
+  const id = await applicationWith(readyForFinalApproval({
+    submission_claimed_at: STOPPED_AT,
+    submission_claim_id: 'claim-1',
+  }));
+
+  const response = await saveAnswers(id, 'I traded on the CBOT desk for two years.');
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE');
+  assert.equal(response.json().restart_with_answers, false,
+    'preparedRunCanRestart refuses a claimed run, so there is no exit and none may be offered');
+  assert.equal(
+    response.json().error,
+    'These answers can no longer be edited from this application’s current submission state',
+    'the generic sentence is what a packet with no way back still gets',
+  );
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'I traded on the CME desk for three years.');
+});
+
+/* THE SEND-EVIDENCE HALF, held to the same rule from the other side. preparedRunCanRestart asks only
+ * about the claim; a row carrying a receipt or an open unverified submission may already be at the
+ * employer whatever its status word says, and the answers on it are the record of what was given. */
+for (const [name, evidence] of [
+  ['the employer\'s own confirmation', {
+    receipt: {
+      confirmation_text: 'Thanks for applying to kos.',
+      final_url: `${PORTAL_URL}/confirmation`,
+      captured_at: STOPPED_AT,
+    },
+  }],
+  ['an unresolved unverified submission', {
+    unverified_submission: { at: STOPPED_AT, cause: 'no_confirmation_state' as const, portal_url: PORTAL_URL },
+  }],
+  ['a recorded submit attempt', { submission_attempted_at: STOPPED_AT }],
+] as Array<[string, Partial<ApplicationReviewState>]>) {
+  test(`a filled packet carrying ${name} is offered no restart route`, async () => {
+    const id = await applicationWith(readyForFinalApproval(evidence));
+
+    const response = await saveAnswers(id, 'I traded on the CBOT desk for two years.');
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().restart_with_answers, false,
+      'a refilled form would be a second application, so this refusal has no exit to name');
+    assert.equal(
+      response.json().error,
+      'These answers can no longer be edited from this application’s current submission state',
+    );
+  });
+}
+
+/* THE ROUTE THE REFUSAL NAMES ACTUALLY CARRIES THE CORRECTION - AND RE-OPENS THE APPROVAL.
+ *
+ * A 409 that names an exit is worse than one that names none if the exit does not go where it says.
+ * Two facts have to hold on submit-request for the sentence above to be honest, and neither is
+ * something this route can assert by injecting: a restart books a browser run.
+ *
+ *   IT TAKES HER ANSWERS.   The posted `questions` become submittedQuestions, are merged and
+ *                           normalised, and the review the restart writes is built FROM that list.
+ *                           If the route ignored the body on a restart it would refill the company's
+ *                           form with the same wrong essay, which is a restart and not a correction.
+ *   IT RE-OPENS THE AUDIT.  freshSubmitRequestReview drops preview_screenshot_url, final_approved_at
+ *                           and filled_fields. This is the half that keeps the invariant the 409
+ *                           exists for: the correction can only land together with the discarding of
+ *                           the picture it would otherwise have contradicted, so an approved packet
+ *                           and the packet that was audited still cannot diverge.
+ *
+ * Read off the source for the same reason submissionStateMachine.test.ts reads this route off the
+ * source - what is being pinned is a composition, and the alternative is booting a browser.
+ */
+test('the restart the refusal names is fed the posted answers and re-opens the approval', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const route = await readFile('src/routes/applications.ts', 'utf8');
+  const submitRequest = route.slice(route.indexOf("'/applications/:id/submit-request'"));
+
+  assert.match(submitRequest, /const submittedQuestions = parsed\.data\.questions as ApplicationReviewQuestion\[\]/,
+    'the posted answers are what the restart resolves against');
+  assert.match(submitRequest, /const next = freshSubmitRequestReview\(current, canonicalSubmittedQuestions, submittedReviewedAt\)/,
+    'and the review the restart writes is built from them, not from the stored list it is replacing');
+
+  const restartGate = submitRequest.indexOf("restartable && parsed.data.restart === true");
+  const answerMerge = submitRequest.indexOf('const submittedQuestions = parsed.data.questions');
+  assert.ok(restartGate > 0 && answerMerge > restartGate,
+    'and the restart falls THROUGH to that merge rather than returning early: an exit that skipped it '
+    + 'would refill the form with the answer she is trying to correct');
+
+  const fresh = route.slice(route.indexOf('export function freshSubmitRequestReview'));
+  for (const cleared of ['preview_screenshot_url: undefined', 'final_approved_at: undefined', 'filled_fields: undefined']) {
+    assert.ok(fresh.slice(0, 2500).includes(cleared),
+      `the restart must clear ${cleared} - the corrected answer and the picture of the filled form move together or the invariant is gone`);
+  }
 });

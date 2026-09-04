@@ -60,6 +60,74 @@ test('the global error boundary preserves client errors and hides server interna
   });
 });
 
+/* THE SHAPE THE 40001 ACTUALLY ARRIVES IN, which is not the shape the assertion above describes.
+ *
+ * The bare `{ code: '40001' }` above never reaches this function from a route. Every write goes to
+ * Postgres through drizzle-orm, and drizzle 0.45 does not rethrow the pg error: it wraps it in a
+ * DrizzleQueryError whose own `code` is undefined, whose `cause` is the pg error, and whose message
+ * is `Failed query: <the whole statement>` followed by every bound parameter. Read only at the top
+ * level, the branch above therefore fired for nothing real, and the submission-authority revision
+ * guard's raise - which the guard's own text asks the caller to retry - fell through to a bare 500.
+ *
+ * Measured live 2026-09-04 on packet 73768339: PUT /applications/:id/review/answers answered 500
+ * while a managed run held the per-user lock. The two assertions below are the wrapper as drizzle
+ * builds it, and the proof that the statement text never survives into the response. */
+test('the 40001 the database actually raises is recognised through drizzle’s wrapper', async () => {
+  const { toPublicError } = await import('./index');
+
+  const pgError = Object.assign(new Error('submission authority changed concurrently; retry the request'), {
+    code: '40001',
+  });
+  const wrapped = Object.assign(
+    new Error('Failed query: update "generated_resumes" set "spec" = jsonb_set(...)\nparams: ...'),
+    { query: 'update "generated_resumes" ...', params: [], cause: pgError },
+  );
+
+  assert.deepEqual(toPublicError(wrapped), {
+    statusCode: 503,
+    message: 'This account changed at the same time. Try the request again.',
+    retryAfterSeconds: 1,
+  });
+  assert.ok(!toPublicError(wrapped).message.includes('Failed query'),
+    'the statement and its bound parameters must never be part of what a client is told');
+});
+
+/* AND THE HANDLER ABOVE HAS TO BE INSTALLED BEFORE THE ROUTES IT IS SUPPOSED TO COVER.
+ *
+ * Fastify gives each encapsulated plugin the error handler that exists AT THE MOMENT THAT PLUGIN IS
+ * CREATED, and every `await fastify.register(...)` finishes creating its context before the next
+ * line runs. Installed after that block - where it lived until 2026-09-04 - toPublicError covered
+ * the handful of routes declared directly on the root instance and nothing else: every application,
+ * submission, resume and auth route fell through to Fastify's built-in handler, which serializes the
+ * thrown error verbatim. That is how a write conflict shipped `{"statusCode":500,"error":"Internal
+ * Server Error","message":"Failed query: update \\"generated_resumes\\" set ..."}` - statement,
+ * predicate and every bound parameter, the stored spec included - to a browser, and why the
+ * dashboard printed the literal words "Internal Server Error" at an applicant.
+ *
+ * ASSERTED ON THE SOURCE because the ordering is the whole mechanism and no injected request can
+ * distinguish it: a plugin registered by a test after buildApp() returns inherits the handler under
+ * either ordering, which is exactly why this went unnoticed. Same technique as
+ * routes/packetAuditRoutes.test.ts and routes/jobMonitor.floor.test.ts. */
+test('the global error handler is installed before any route plugin is registered', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync('src/index.ts', 'utf8');
+
+  const handlerAt = source.indexOf('fastify.setErrorHandler(');
+  const firstRoutePluginAt = source.indexOf('await fastify.register(captchaStallRoutes)');
+  assert.ok(handlerAt > 0, 'the global error handler must still exist');
+  assert.ok(firstRoutePluginAt > 0, 'the route registration block must still start where this test looks');
+  assert.ok(
+    handlerAt < firstRoutePluginAt,
+    'setErrorHandler must precede the route plugins, or none of them are covered by it and every '
+      + 'thrown error is serialized to the client verbatim',
+  );
+
+  /* The CORS and multipart plugins stay in front of it: neither declares a route, and moving the
+   * handler above them would change what a rejected preflight answers. */
+  assert.ok(source.indexOf('await fastify.register(cors,') < handlerAt);
+  assert.ok(source.indexOf('await fastify.register(multipart,') < handlerAt);
+});
+
 const ATS_ORIGIN = 'https://job-boards.greenhouse.io';
 const EVIL_ORIGIN = 'https://evil.example.com';
 const SITE_ORIGIN = 'https://trylitos.com';

@@ -26,6 +26,12 @@
 
 ### Fixed
 
+- A question naming a MINOR ("school minor", "Field of study - minor") is no longer answered with
+  the applicant's university or major. "school minor" matched nothing but the bare-keyword school
+  fallback and was answered with the stored school; "field of study - minor" matched the major
+  rule's "field of study" synonym and would have been answered with the stored major. Both rules
+  now recognize a label naming a minor and decline it ahead of either, since no onboarding
+  question and no profile column store one.
 - An auto-seeded recent-experience selection no longer makes a one-bullet entry unconditionally
   mandatory on the base resume. An upload that finds a candidate seeds it with no confirmation, and a
   sparse auto-pick was demanded by the required-entry check while the bullet floor (whose sparse
