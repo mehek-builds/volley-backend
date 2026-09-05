@@ -12,6 +12,7 @@ import {
 } from '../lib/parkedConfirmedReceipt';
 import {
   application_profile,
+  applications,
   career_page_sources,
   generated_resumes,
   monitored_jobs,
@@ -213,7 +214,7 @@ import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
 import { objectStorageUsesRailway } from '../lib/objectStorage';
-import { storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
+import { stampSelectedResumeLinkAttachedAt, storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON, relearnedFormReadingAcknowledgement } from '../lib/packetResumeRestore';
 import {
@@ -1895,6 +1896,22 @@ export async function repairParkedConfirmedProjection(
   const attemptBinding = submissionAttemptBindingFromEvent(opening);
   if (attemptBinding.packetId !== row.id || attemptBinding.userId !== row.user_id) {
     return { kind: 'no_exact_attempt' };
+  }
+  /* COMPLETE THE ONE ABSENT VALUE FIRST. Every link linkGeneratedPacketToCanonicalApplication
+   * selected before it learned to stamp attached_at carries NULL where the classifier wants the
+   * application's own clock (Bear Robotics b822b998: `link.attached_at=null`, the whole reason).
+   * Copying the application's value onto an absent link stamp asserts nothing new - the
+   * application already says when its resume was attached - and a link that disagrees is left to
+   * keep disagreeing, so the projection below still refuses what it should. */
+  const [canonicalForPacket] = await db.select({ id: applications.id }).from(applications).where(and(
+    eq(applications.user_id, row.user_id),
+    eq(applications.legacy_generated_resume_id, row.id),
+  )).limit(1);
+  if (canonicalForPacket) {
+    const stamped = await stampSelectedResumeLinkAttachedAt(db, { userId: row.user_id, applicationId: canonicalForPacket.id });
+    if (stamped) {
+      log.info({ applicationId: row.id, canonicalApplicationId: canonicalForPacket.id }, 'selected resume link stamped from the application clock');
+    }
   }
   const committed = await commitVerifiedSubmissionConfirmed(row, attemptBinding, {
     capturedAt: parked.receipt.captured_at,
