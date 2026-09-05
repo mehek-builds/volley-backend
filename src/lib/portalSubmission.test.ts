@@ -69,6 +69,8 @@ import {
   readManagedReceipt,
   chooseSubmitControl,
   READ_CONTROL_LABEL,
+  BREEZY_RESUME_ATTACHED_SELECTOR,
+  BREEZY_RESUME_PARSE_TIMEOUT_MS,
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 import { AUTOMATIC_CONSENT_ACCEPTANCE_VERSION } from './automationConsent';
@@ -6256,6 +6258,29 @@ test('Breezy uses one full-name field and never splits it into first and last', 
   for (const label of ['first_name', 'last_name']) {
     assert.equal(actions.some((a) => a.label === label), false, `Breezy has no ${label} field`);
   }
+});
+
+/* Measured on Bear Robotics b822b998 (2026-09-05 01:20Z, send run 646d76e0): the upload answered
+ * 200, every field was filled, Submit was pressed, and Breezy kept the form with "one or more
+ * required fields above hasn't been completed" - its apply() reads candidate.resume, which its own
+ * upload handler sets only in the callback of GET /resume/parse. The plan now waits for the page's
+ * proof that the callback ran: the file-name link Breezy renders from candidate.resume.file_name. */
+test('Breezy waits for its own resume-parse callback before anything else touches the form', () => {
+  const actions = buildManagedPortalActions('breezy', capturePacket, true);
+  const upload = actions.findIndex((a) => a.type === 'upload' && a.label === 'resume');
+  assert.ok(upload >= 0, 'the resume upload is planned');
+  const wait = actions[upload + 1];
+  assert.equal(wait?.type, 'waitForSelector', 'the wait follows the upload immediately');
+  assert.equal(wait?.selector, BREEZY_RESUME_ATTACHED_SELECTOR);
+  assert.equal(wait?.label, 'breezy_resume_attached');
+  assert.equal(wait?.optional, true, 'a tenant that never renders the link degrades to the old behaviour');
+  assert.equal(wait?.timeout, BREEZY_RESUME_PARSE_TIMEOUT_MS);
+  assert.ok(BREEZY_RESUME_PARSE_TIMEOUT_MS > 10_000, 'resume parsing outlives the ordinary fill timeout');
+  // The wait names the rendered link inside .section-header, never the upload button's own label.
+  assert.match(BREEZY_RESUME_ATTACHED_SELECTOR, /^\.section-header .*a\.bzyLinkColor$/);
+  // A packet with no resume plans neither the upload nor the wait.
+  const bare = buildManagedPortalActions('breezy', { ...capturePacket, resume: undefined as unknown as Buffer, resumeName: undefined as unknown as string }, true);
+  assert.equal(bare.some((a) => a.label === 'breezy_resume_attached'), false);
 });
 
 test('Breezy touches neither its honeypot nor its two consent checkboxes on an unlicensed run', () => {

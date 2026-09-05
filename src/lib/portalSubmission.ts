@@ -6340,6 +6340,13 @@ const RIPPLING_COVER_LETTER_SELECTOR = 'input[type="file"][data-testid="input-co
 //
 // Note cName is ONE full-name field, not a first/last pair, so this family does not split the name.
 const BREEZY_RESUME_SELECTOR = 'input[type="file"][name="cResume"]';
+/* The file-name link Breezy renders only after its resume-parse callback sets candidate.resume;
+ * see the breezy branch of buildManagedPortalActions. Scoped to .section-header so the upload
+ * button's own "Attached" label (a different element, same model) is not mistaken for it. */
+export const BREEZY_RESUME_ATTACHED_SELECTOR = '.section-header .file-input-container a.bzyLinkColor';
+/* Resume parsing is a remote service call on Breezy's side; measured well past the 10 s fill
+ * timeout on the Bear Robotics run above, so the wait gets its own bound. */
+export const BREEZY_RESUME_PARSE_TIMEOUT_MS = 45_000;
 
 // Breezy takes its long-form answer as `textarea[name="cSummary"]`, not a file, so there is no
 // cover-letter FILE input for hasCoverLetterUpload() to find. Deliberately a never-matching
@@ -8015,6 +8022,34 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="cPhoneNumber"]', packet.phone, 'phone');
     managedFill(actions, 'input[name="cAddress"]', packet.city, 'location');
     managedUpload(actions, BREEZY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    /* BREEZY DOES NOT COUNT THE RESUME AS ATTACHED UNTIL ITS OWN PARSE CALL COMES BACK.
+     *
+     * Measured on Bear Robotics b822b998, 2026-09-05 01:20Z (send run 646d76e0): every field filled,
+     * the file uploaded (POST /api/portal/<tenant>/upload answered 200), Submit pressed - and the
+     * page kept the form, showing "It looks like one or more required fields above hasn't been
+     * completed. Please fix and resubmit." while the screenshot taken a moment later already read
+     * "Attached" beside the file name. Breezy's portal.js (assets-cdn.breezy.hr) explains both
+     * halves: onFileSelect uploads, then calls getParseResumeByUrl - GET /resume/parse?...&url= -
+     * and only in THAT callback sets candidate.resume = { file_name, url }. apply() refuses with
+     * ERRORS.MISSING_REQUIRED whenever isResumeRequiredIncomplete(): resume_required is "required"
+     * and candidate.resume.file_name is unset. Parsing a resume takes seconds; the fill's remaining
+     * actions took less, so the press arrived first and Breezy correctly refused an application
+     * whose own model said it carried no resume.
+     *
+     * The proof the model is set is the page's own: '<a ng-if="candidate.resume.file_name"
+     * class="bzyLinkColor">' renders the file name in .section-header only once the callback has
+     * run. Waiting for it makes every later action - and the press - see the resume Breezy sees.
+     * Optional and bounded: a tenant that never renders the link (or has no resume requirement)
+     * degrades to today's behaviour instead of failing the run. */
+    if (packet.resume && packet.resumeName) {
+      actions.push({
+        type: 'waitForSelector',
+        selector: BREEZY_RESUME_ATTACHED_SELECTOR,
+        label: 'breezy_resume_attached',
+        optional: true,
+        timeout: BREEZY_RESUME_PARSE_TIMEOUT_MS,
+      });
+    }
     // textarea[name="cSummary"] is left alone: it is candidate-authored positioning, the same
     // judgement already made for Workable's `headline`.
     // gdprAgreement is never filled HERE: on a submit run whose packet licenses it, the guarded
