@@ -604,7 +604,7 @@ test('automatic verification records one remote managed continuation without exp
   // where buildManagedVerificationActions was ten - and it is the shape whose selector, chooser
   // policy and contract version the runner validates field by field.
   assert.match(continuation, /const codeActions = securityCodeContinuationActions\(initialActions, prepared\.code, result\.url\) \?\? prepared\.actions/);
-  assert.match(continuation, /receiptResult = await continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions, \{/);
+  assert.match(continuation, /receiptResult = await continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, codeActions, \{/);
   assert.match(continuation, /continuation_resumed: true/);
   assert.doesNotMatch(continuation, /continuation_token:/i);
   const receipt = source.slice(end, source.indexOf("fastify.log.info({ applicationId: row.id }", end));

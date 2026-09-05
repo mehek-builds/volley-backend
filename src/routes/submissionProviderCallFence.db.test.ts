@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { SignJWT } from 'jose';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api';
 import pg from 'pg';
 import * as schema from '../db/schema';
@@ -48,6 +48,8 @@ let lockSubmissionAttemptUser:
   typeof import('../lib/submissionAttemptLedger').lockSubmissionAttemptUser;
 let lockSubmissionProviderCallUser:
   typeof import('../lib/submissionAttemptLedger').lockSubmissionProviderCallUser;
+let SubmissionProviderCallLockTimeoutError:
+  typeof import('../lib/submissionAttemptLedger').SubmissionProviderCallLockTimeoutError;
 let withProviderCallFence: typeof import('../lib/submissionAccountFence').withProviderCallFence;
 let authoritativeSubmissionProjection:
   typeof import('../lib/authoritativeSubmissionProjection').authoritativeSubmissionProjection;
@@ -127,7 +129,8 @@ before(async () => {
   /* VERCEL is deliberately unset: it pins the backend pool to one connection (db/index.ts), and
    * every assertion here needs a parked provider call plus a concurrent reader. */
   ({ db: backendDb, pool: backendPool } = await import('../db'));
-  ({ lockSubmissionAttemptUser, lockSubmissionProviderCallUser } = await import('../lib/submissionAttemptLedger'));
+  ({ lockSubmissionAttemptUser, lockSubmissionProviderCallUser, SubmissionProviderCallLockTimeoutError } =
+    await import('../lib/submissionAttemptLedger'));
   ({ withProviderCallFence } = await import('../lib/submissionAccountFence'));
   ({ authoritativeSubmissionProjection } = await import('../lib/authoritativeSubmissionProjection'));
   const { resumeRoutes } = await import('./resume');
@@ -280,4 +283,73 @@ test('an account deletion drain waits for an in-flight provider call and then fe
       && 'code' in error
       && error.code === 'SUBMISSION_ACCOUNT_DELETION_DRAINING',
   );
+});
+
+/* THE 2026-09-05 UNBOUNDED-WAIT INVESTIGATION, AGAINST A REAL CONTENDED LOCK.
+ *
+ * lockSubmissionProviderCallUser's acquire has no timeout of its own; a holder that never releases
+ * `submission-provider-call:<userId>` queued out every later call for that account forever, with no
+ * error and no way to tell "busy" from "wedged" - see submissionAccountFence.ts's
+ * PROVIDER_CALL_LOCK_TIMEOUT_MS for the full incident reasoning. submissionProviderCallLockTimeout.
+ * test.ts already pins the exact statement sequence and the 55P03 classification against a fake
+ * executor; what only a real server can prove is that SET LOCAL lock_timeout actually turns a
+ * contended pg_advisory_xact_lock into that error, on the wall clock, without disturbing the holder.
+ */
+test('a bounded acquire on a genuinely contended lock times out, and the holder is unaffected', { timeout: 120_000 }, async (context) => {
+  if (!postgresAvailable) return context.skip('local PostgreSQL binaries are unavailable');
+  const { userId } = await fencedUserWithPacket();
+  const parked = await parkedProviderCall(userId);
+  try {
+    const startedAt = Date.now();
+    await assert.rejects(
+      backendDb.transaction((tx: any) => lockSubmissionProviderCallUser(tx, userId, { lockTimeoutMs: 300 })),
+      (error: unknown) => {
+        assert.ok(error instanceof SubmissionProviderCallLockTimeoutError);
+        assert.equal((error as { code: string }).code, 'SUBMISSION_PROVIDER_CALL_LOCK_TIMEOUT');
+        return true;
+      },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs >= 300, `expected the wait to last the full requested 300ms, took ${elapsedMs}ms`);
+    // Generous ceiling: this proves the wait was BOUNDED, not that it was fast. A real hang before
+    // this fix would have left this assertion waiting for the outer 120s test timeout instead.
+    assert.ok(elapsedMs < 30_000, `expected the timeout to fire near 300ms, took ${elapsedMs}ms`);
+  } finally {
+    // THE INVARIANT THIS FIX MUST NOT TOUCH: the timed-out waiter above must not have disturbed the
+    // holder's own lock in any way. If it had, releasing here would find nothing to release, or the
+    // parked call's own `withProviderCallFence` would already have rejected.
+    parked.release();
+    await parked.finished;
+  }
+});
+
+test('withProviderCallFence itself surfaces the typed timeout end to end, before the callback runs', { timeout: 120_000 }, async (context) => {
+  if (!postgresAvailable) return context.skip('local PostgreSQL binaries are unavailable');
+  const { userId } = await fencedUserWithPacket();
+  const parked = await parkedProviderCall(userId);
+  let callbackRan = false;
+  try {
+    await assert.rejects(
+      withProviderCallFence(userId, async () => { callbackRan = true; }, { lockTimeoutMs: 300 }),
+      SubmissionProviderCallLockTimeoutError,
+    );
+    assert.equal(callbackRan, false, 'the fenced callback must never run when the lock wait itself times out');
+  } finally {
+    parked.release();
+    await parked.finished;
+  }
+});
+
+test('an uncontended bounded acquire succeeds immediately and resets lock_timeout before returning', { timeout: 120_000 }, async (context) => {
+  if (!postgresAvailable) return context.skip('local PostgreSQL binaries are unavailable');
+  const { userId } = await fencedUserWithPacket();
+  await backendDb.transaction(async (tx: any) => {
+    const startedAt = Date.now();
+    await lockSubmissionProviderCallUser(tx, userId, { lockTimeoutMs: 300 });
+    assert.ok(Date.now() - startedAt < 300, 'an uncontended acquire must not wait anywhere near the timeout');
+    // Proves the reset actually reaches PostgreSQL, not only that this file's own code calls it: a
+    // lock_timeout left live here would silently bound whatever this same transaction does next.
+    const setting = await tx.execute(sql`show lock_timeout`);
+    assert.equal(setting.rows[0].lock_timeout, '0', 'lock_timeout must be back to its default (off) after a successful acquire');
+  });
 });

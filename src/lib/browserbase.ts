@@ -1445,6 +1445,17 @@ export async function runManagedBrowser(
      * dispatch time inside the account fence, so a lock wait never erodes the window.
      */
     scanDeadlineMs?: number;
+    /**
+     * Combined with this call's own deadline signal (never replacing it) via AbortSignal.any, so a
+     * process-wide shutdown can unstick a fetch that would otherwise sit until
+     * MANAGED_PREPARE_FILL_DEADLINE_MS (420s) elapses on its own. See
+     * getManagedRunShutdownSignal (lib/managedRunLifecycle.ts) and the two account-fenced wrappers
+     * in routes/submissionRunner.ts that pass it on every call this file receives in production.
+     * Aborting this never itself writes anything to the row - the caller's own catch handles a
+     * rejected fetch exactly like any other provider failure, and the actual honest-terminal-state
+     * write is index.ts's SIGTERM handler, racing the same clock from the other side.
+     */
+    externalSignal?: AbortSignal;
   } = {},
 ): Promise<ManagedBrowserResult> {
   if (options.timeoutMs !== undefined) assertManagedBrowserTimeout(options.timeoutMs, 'Managed Stratus run');
@@ -1500,7 +1511,10 @@ export async function runManagedBrowser(
       + `or a scan correlation; first mutating action: ${uncorrelatedMutation.type}`,
     );
   }
-  const signal = effectiveTimeoutMs === undefined ? undefined : AbortSignal.timeout(effectiveTimeoutMs);
+  const deadlineSignal = effectiveTimeoutMs === undefined ? undefined : AbortSignal.timeout(effectiveTimeoutMs);
+  const signal = deadlineSignal && options.externalSignal
+    ? AbortSignal.any([deadlineSignal, options.externalSignal])
+    : deadlineSignal ?? options.externalSignal;
   const { baseUrl, headers } = await managedStratusAuthorization(signal);
   const expectedSubmissionAttempt = managedSubmissionAttempt(
     options.submissionAttempt ?? scanPair?.submissionAttempt,
@@ -1551,6 +1565,8 @@ export async function continueManagedBrowser(
     requestBudget?: ManagedBrowserRequestBudget;
     providerDeadlineAt?: string;
     minimumDispatchBudgetMs?: number;
+    /** Same combine-never-replace contract as runManagedBrowser's own externalSignal - see its doc. */
+    externalSignal?: AbortSignal;
   },
 ): Promise<ManagedBrowserResult> {
   if (options.timeoutMs !== undefined) assertManagedBrowserTimeout(options.timeoutMs, 'Managed Stratus continuation');
@@ -1569,8 +1585,11 @@ export async function continueManagedBrowser(
   } else if (options.providerDeadlineAt !== undefined || options.minimumDispatchBudgetMs !== undefined) {
     throw new Error('Managed Stratus provider deadline requires a pre-gate request budget');
   }
-  const signal = options.requestBudget?.signal
+  const deadlineSignal = options.requestBudget?.signal
     ?? (options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs));
+  const signal = deadlineSignal && options.externalSignal
+    ? AbortSignal.any([deadlineSignal, options.externalSignal])
+    : deadlineSignal ?? options.externalSignal;
   const providerDeadlineAt = options.providerDeadlineAt
     ?? (options.timeoutMs !== undefined ? new Date(Date.now() + options.timeoutMs).toISOString() : undefined);
   managedProviderDeadline(providerDeadlineAt, true);

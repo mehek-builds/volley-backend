@@ -54,6 +54,32 @@ export const SUBMISSION_NOT_SENT_PROOF_KINDS = [
   'employer_verification_pending_not_filed',
   'provider_definitive_rejection',
   'extension_cancelled_before_press',
+  /* THE FOURTH WITNESS, alongside employer_rejected_not_filed's employer answer and the applicant's
+   * own look. `typed_pre_click_stop` is barred once `boundary_authorized` exists (see
+   * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS below) because that proof only ever asked "does an
+   * authorization exist on this attempt", and an authorization existing is not evidence about
+   * whether a press happened - which is exactly why a machine may not use it to close an attempt
+   * post-authorization.
+   *
+   * This proof kind asks a narrower, stronger question about the SAME run that was authorized:
+   * did Stratus's own run-progress record prove the click was never reached? It is written only for
+   * an attempt whose stop error is a ManagedBrowserAssertionFailureError or
+   * ManagedBrowserPreSubmitCrashError - both constructed in browserbase.ts's
+   * managedBrowserRequestError ONLY when managedBrowserProgressAllowsPreSubmitRetry(progress) held:
+   * submitPressed, applicationSubmitPressed and verificationSubmitPressed all false, and
+   * employerOutcome (if present) exactly 'not_attempted'. That is the identical proof this codebase
+   * already trusts to let runWithManagedPreSubmitCrashRetry retry an authorized attempt
+   * automatically - a decision at least as consequential as closing the ledger - so it is not a
+   * guess about this run, it is Stratus's own contained-transport witness.
+   *
+   * Measured 2026-09-05, Pony.ai application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt
+   * b624e034: boundary_authorized was recorded, then the run died re-filling the Workable phone
+   * widget (`workable_phone_value_visible` / the `filled_field:phone` proof that follows it) before
+   * confirmAndSubmit was ever reached. No proof kind admissible after authorization could describe
+   * that, so the attempt could only be closed as blocked_unverified, and the applicant was told
+   * Litos had pressed Send and asked to check the employer's portal for an application that was
+   * never attempted. */
+  'run_progress_proven_not_pressed',
 ] as const;
 
 export type SubmissionNotSentProofKind = typeof SUBMISSION_NOT_SENT_PROOF_KINDS[number];
@@ -170,6 +196,10 @@ const PROOF_KIND_SET = new Set<string>(SUBMISSION_NOT_SENT_PROOF_KINDS);
 const PRE_CLICK_ONLY_PROOFS = new Set<SubmissionNotSentProofKind>([
   'typed_pre_click_stop',
   'extension_cancelled_before_press',
+  /* Same contradiction as its two neighbours: this proof also asserts the click never happened, so
+   * a press_observed event standing beside it on the same attempt is a logical contradiction and
+   * must fold to invalid_sequence exactly like theirs does. */
+  'run_progress_proven_not_pressed',
 ]);
 /* THE PROOFS STRONG ENOUGH TO CLOSE AN ATTEMPT AFTER AUTHORIZATION, ALONGSIDE HER OWN LOOK.
  *
@@ -194,6 +224,12 @@ const AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS = new Set<SubmissionNotSentProofK
   'applicant_checked_not_sent',
   'applicant_checked_all_possible_destinations_not_sent',
   'employer_rejected_not_filed',
+  /* THE THIRD MACHINE WITNESS, admitted for the same reason employer_rejected_not_filed was: it is
+   * not a guess about whether authorization implies a press, it is Stratus's own run-progress record
+   * for THIS exact run proving submitPressed (and both its typed kinds) stayed false all the way to
+   * the stop. See the proof kind's own definition in SUBMISSION_NOT_SENT_PROOF_KINDS for the full
+   * story and the measured packet. */
+  'run_progress_proven_not_pressed',
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /* FIVE MINUTES, THE CAP THIS FILE ALREADY ENFORCES, NOT THREE.
@@ -507,6 +543,96 @@ export class SubmissionAccountDeletionDrainError extends Error {
   }
 }
 
+/* Thrown by lockSubmissionProviderCallUser's bounded form when SET LOCAL lock_timeout expires before
+ * pg_advisory_xact_lock acquires `submission-provider-call:<userId>`. Structurally this can only fire
+ * BEFORE the caller's own provider call starts - see lockSubmissionProviderCallUser - but that alone
+ * does not prove the employer boundary was never reached FOR THIS ATTEMPT: unlike
+ * SubmissionAccountDeletionDrainError, a lock timeout fires precisely because some other call still
+ * holds the key, which could be a concurrent attempt on the same account. submissionRunner.ts's
+ * submissionFailureReview accordingly requires ledger.employerBoundaryReached === false, not just
+ * this type, before it treats a stop as provably pre-click. See PROVIDER_CALL_LOCK_TIMEOUT_MS below
+ * for why 55P03 here is a class of stop this codebase has to name, not swallow as a bare Error: an
+ * untyped throw here would classify 'unclassified' the same way the 2026-09-02 drift refusal and
+ * destination-probe refusal did before they were typed, and read the row as an uncertain send it
+ * plainly is not. */
+export class SubmissionProviderCallLockTimeoutError extends Error {
+  readonly code = 'SUBMISSION_PROVIDER_CALL_LOCK_TIMEOUT';
+
+  constructor(lockTimeoutMs: number, options: { cause?: unknown } = {}) {
+    super(
+      `Timed out after ${lockTimeoutMs}ms waiting for an earlier submission provider call for this account to finish`,
+      options,
+    );
+    this.name = 'SubmissionProviderCallLockTimeoutError';
+  }
+}
+
+/**
+ * How long a bounded lockSubmissionProviderCallUser call will wait for an earlier one on the same
+ * account before giving up with SubmissionProviderCallLockTimeoutError. Shared by every caller that
+ * opts into a bound - withProviderCallFence (submissionAccountFence.ts) and createFencedBrowserSession
+ * (browserProviderResourceCleanup.ts) - rather than defined in either, because both need the identical
+ * value and neither may import it from the other: submissionAccountFence.ts already imports
+ * databaseNow from browserProviderResourceCleanup.ts, so the reverse import would cycle.
+ *
+ * THIS IS BOUNDED BY VOLLEY-BACKEND'S OWN REQUEST LIFETIME, NOT BY STRATUS'S. As of #974, stratus can
+ * legitimately take up to MANAGED_PREPARE_FILL_DEADLINE_MS (420s) to fill a long form, because
+ * stratus's OWN execution host - its Railway-hosted local runner - can wait that long
+ * (MAX_RUN_TIMEOUT_MS 480s, validated against MAX_PROVIDER_DEADLINE_MS 8min; see browserbase.ts's
+ * comment on that constant). That budget belongs to stratus's infrastructure, not this backend's.
+ * volley-backend itself is still a single Vercel function: vercel.json's `api/index.ts` maxDuration
+ * is 300s and untouched by #974, so the request making an outbound call through either caller above -
+ * the one the lock wait and the provider call it guards both run inside - is killed by the PLATFORM at
+ * 300s regardless of what stratus itself would still be willing to do. Nothing either caller wraps,
+ * and no wait for it, can usefully exceed that 300s ceiling: a second call queued behind a first one
+ * already running long would have too little of its OWN 300s budget left to dispatch anything by the
+ * time it got the lock - exactly the gap assertManagedBrowserRequestBudgetAtClock's
+ * minimumDispatchBudgetMs already refuses to dispatch into - so it was never going to complete in the
+ * same request either way. The only question this constant answers is how quickly a WEDGED holder
+ * gets reported instead of hanging silently until Vercel kills the request with no trace, which is
+ * what happens today with no bound at all.
+ *
+ * 240s (4 minutes) sits comfortably above what a typical call needs - 420-480s describe stratus's OWN
+ * worst-case ceiling, which this backend's own 300s platform limit already makes largely unreachable
+ * from in here regardless - while still leaving a full 60s of this request's own 300s budget for the
+ * timeout error to surface, for recordSubmissionRunnerFailure to close the ledger attempt, and for a
+ * response to reach the caller: strictly better than the platform silently killing the request with
+ * nothing written, which is what happens today once a wait runs that long.
+ *
+ * providerCallLockTimeoutCeiling.test.ts asserts this stays under vercel.json's own maxDuration, the
+ * way boundaryLeaseCeiling.test.ts and browserbase.test.ts already guard their sibling budget
+ * constants - both of which have moved more than once. If Vercel's maxDuration ever rises to actually
+ * accommodate stratus's current ceilings, or if MANAGED_PREPARE_FILL_DEADLINE_MS or
+ * SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS move again, this needs re-deriving against the new
+ * numbers, not just left alone - and that test will fail loudly rather than let it drift unnoticed.
+ */
+export const PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
+
+/* Comfortably above any duration this codebase's own managed-call ceilings could plausibly reach
+ * (MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS is 8 minutes as of #974) while still catching the concrete
+ * mistake a wrong unit would produce - seconds mistaken for milliseconds is a too-SMALL value, which
+ * a positive-integer check alone cannot distinguish from a deliberately short test timeout, but
+ * milliseconds mistaken for microseconds or nanoseconds overshoots by 1000x or more and lands well
+ * past this ceiling. Postgres's own `lock_timeout` GUC tops out far higher (a signed 32-bit int of
+ * milliseconds, ~24.8 days); this is deliberately much tighter than that hardware ceiling. */
+const LOCK_TIMEOUT_SANITY_CEILING_MS = 10 * 60 * 1000;
+
+/* Postgres `lock_not_available`, the SQLSTATE SET LOCAL lock_timeout raises when it expires.
+ *
+ * READ THE CAUSE CHAIN, NOT JUST THE ERROR, for the exact reason applicationFacts.ts's
+ * isUndefinedColumnError does: a failed statement surfaces here as a DrizzleQueryError whose own
+ * `code` is undefined and whose `cause` is the pg error actually carrying 55P03. Testing `error.code`
+ * alone would silently never match on this repo's Drizzle version, exactly as it silently never
+ * matched 42703 there. Bounded depth for the same reason: a cause that points at itself must not spin. */
+function isLockNotAvailableError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if ((current as { code?: string }).code === '55P03') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** Refuse any new employer capability after account deletion has fenced the user. */
 export async function assertSubmissionAccountNotDraining(
   executor: Pick<SubmissionAttemptLedgerExecutor, 'select'>,
@@ -596,12 +722,56 @@ export async function lockSubmissionAttemptUser(
  *
  * Keep this key PER USER, never per posting: "one provider call at a time for one account" is what
  * stops two managed runs racing the same employer session.
+ *
+ * BOUNDED FOR A PROVIDER CALL, UNBOUNDED FOR EVERYTHING ELSE, as of 2026-09-05. This acquire has no
+ * timeout of its own: a holder that never releases - a stratus hang that somehow outlives
+ * MANAGED_PREPARE_FILL_DEADLINE_MS, a connection left half-dead so its transaction's
+ * rollback-on-error never runs - queues out every later call for that account forever, with no error
+ * and no way to distinguish "busy" from "wedged". `options.lockTimeoutMs`, when given, sets a
+ * transaction-scoped `lock_timeout` before the acquire and turns that wedge into a catchable
+ * SubmissionProviderCallLockTimeoutError instead. Account deletion (account.ts) calls this with NO
+ * options, on purpose: it must keep waiting out a real in-flight call no matter how long that call
+ * legitimately takes, because giving up early is the one thing that would let deletion and a live
+ * provider call overlap. withProviderCallFence (submissionAccountFence.ts) and
+ * createFencedBrowserSession (browserProviderResourceCleanup.ts) - the only two callers that fence an
+ * actual outbound provider POST rather than guaranteeing deletion ordering - opt into
+ * PROVIDER_CALL_LOCK_TIMEOUT_MS, above, for the same reason.
  */
 export async function lockSubmissionProviderCallUser(
   executor: Pick<typeof db, 'execute'>,
   userId: string,
+  options: { lockTimeoutMs?: number } = {},
 ): Promise<void> {
-  await executor.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`submission-provider-call:${userId}`}, 0::bigint))`);
+  const acquire = () => executor.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`submission-provider-call:${userId}`}, 0::bigint))`,
+  );
+  if (options.lockTimeoutMs === undefined) {
+    await acquire();
+    return;
+  }
+  const { lockTimeoutMs } = options;
+  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs <= 0 || lockTimeoutMs > LOCK_TIMEOUT_SANITY_CEILING_MS) {
+    throw new Error(`lockSubmissionProviderCallUser lock timeout must be a positive integer of milliseconds, at most ${LOCK_TIMEOUT_SANITY_CEILING_MS}`);
+  }
+  /* set_config, not `SET LOCAL ... = ${...}`: SET's own grammar takes a literal, never a bind
+   * parameter, so a dynamic value can only reach it through string interpolation. set_config is an
+   * ordinary function and takes one; passing `true` for its is_local argument is the functional
+   * equivalent of SET LOCAL, reverting on its own at this transaction's COMMIT or ROLLBACK even if the
+   * explicit reset below never runs. */
+  await executor.execute(sql`select set_config('lock_timeout', ${`${lockTimeoutMs}ms`}, true)`);
+  try {
+    await acquire();
+  } catch (error) {
+    if (isLockNotAvailableError(error)) throw new SubmissionProviderCallLockTimeoutError(lockTimeoutMs, { cause: error });
+    throw error;
+  }
+  /* Reached only when the lock was actually acquired: a timed-out acquire above throws INSIDE this
+   * transaction, which Postgres aborts on any error, so nothing further can run on it until the
+   * caller's own rollback regardless. Reset promptly on the success path because withProviderCallFence
+   * holds this exact transaction open for the whole provider call that follows the return from here -
+   * leaving a short lock_timeout live for that entire duration would let it silently catch some
+   * unrelated lock a future change acquires on the same executor while the fence is still held. */
+  await executor.execute(sql`reset lock_timeout`);
 }
 
 /* The same serialization asked without waiting, for a best-effort reader that must never queue

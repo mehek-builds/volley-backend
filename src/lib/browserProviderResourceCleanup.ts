@@ -19,6 +19,7 @@ import {
   assertSubmissionAccountNotDraining,
   lockSubmissionAttemptUser,
   lockSubmissionProviderCallUser,
+  PROVIDER_CALL_LOCK_TIMEOUT_MS,
   SubmissionAccountDeletionDrainError,
 } from './submissionAttemptLedger';
 
@@ -92,8 +93,14 @@ export async function createFencedBrowserSession(input: {
      *
      * The binding UPDATE below still fires the revision trigger, which takes the ledger key - but
      * as the last statement before commit, so it holds it for milliseconds instead of across the
-     * POST, which is the entire point. */
-    await lockSubmissionProviderCallUser(tx, input.userId);
+     * POST, which is the entire point.
+     *
+     * BOUNDED, like withProviderCallFence and for the identical reason: this is a second, direct
+     * caller of the same shared key, so a holder wedged here - this 15s-bounded POST hanging past
+     * its own bound, or this transaction's connection going half-dead - would silently lock out
+     * every future provider call for the account, managed or not, exactly like an unbounded
+     * withProviderCallFence acquire would. See PROVIDER_CALL_LOCK_TIMEOUT_MS. */
+    await lockSubmissionProviderCallUser(tx, input.userId, { lockTimeoutMs: PROVIDER_CALL_LOCK_TIMEOUT_MS });
     try {
       await assertSubmissionAccountNotDraining(tx, input.userId);
     } catch (error) {

@@ -38,7 +38,10 @@ import {
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
 import { ManagedBrowserAssertionFailureError, ManagedBrowserPreSubmitCrashError } from '../lib/browserbase';
 import { submitRequestDisposition } from '../lib/submissionSafety';
-import { SubmissionAccountDeletionDrainError } from '../lib/submissionAttemptLedger';
+import {
+  SubmissionAccountDeletionDrainError,
+  SubmissionProviderCallLockTimeoutError,
+} from '../lib/submissionAttemptLedger';
 
 const CLAIMED_AT = '2026-08-11T12:00:00.000Z';
 
@@ -91,6 +94,44 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.equal(persisted.submission_claim_id, undefined);
     assert.equal(persisted.unverified_submission, undefined);
     assert.match(persisted.attention_reason ?? '', /Account deletion paused/);
+  });
+
+  test('a provider-call lock timeout releases a pre-boundary claim, PROVEN by the ledger', () => {
+    /* Unlike the account-deletion drain above, a lock timeout fires precisely because something
+       else still holds the key - so this type alone does not prove the employer boundary was never
+       reached, only that THIS run's own callback never started. The release requires the ledger's
+       own employerBoundaryReached: false, the same proof every other untyped stop below needs. */
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new SubmissionProviderCallLockTimeoutError(240_000),
+      undefined,
+      { employerBoundaryReached: false },
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_claimed_at, undefined);
+    assert.equal(persisted.submission_claim_id, undefined);
+    assert.equal(persisted.unverified_submission, undefined);
+    assert.match(persisted.attention_reason ?? '', /did not finish in time/);
+    assert.match(persisted.attention_reason ?? '', /Nothing has been sent/);
+  });
+
+  test('a provider-call lock timeout WITHOUT that ledger proof keeps the claim, uncertain', () => {
+    /* The one case this guards against: a concurrent holder of the SAME per-user key that might be
+       mid-press on this exact attempt. Neither omitted ledger evidence nor a boundary already
+       reached may release - both must fall through to the ordinary uncertain-after-claim exit,
+       exactly like any other stop this function cannot type or prove. */
+    for (const ledger of [{}, { employerBoundaryReached: true }, { employerBoundaryReached: null }] as const) {
+      const persisted = submissionFailureReview(
+        claimedRunning(),
+        new SubmissionProviderCallLockTimeoutError(240_000),
+        undefined,
+        ledger,
+      );
+      assert.notEqual(persisted.submission_claimed_at, undefined,
+        `ledger evidence ${JSON.stringify(ledger)} must not release the claim`);
+      assert.notEqual(persisted.unverified_submission, undefined,
+        `ledger evidence ${JSON.stringify(ledger)} must exit through the unverified-resolution route`);
+    }
   });
 
   test('an action-budget stop exits by ordinary re-run, because the builder threw before the click', () => {
@@ -188,8 +229,16 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.equal(persisted.unverified_submission, undefined);
     assert.doesNotMatch(persisted.attention_reason || '', /temporary secure-browser/);
     assert.doesNotMatch(persisted.attention_reason || '', /again in a few minutes/);
-    assert.match(persisted.attention_reason || '', /Nothing has been sent/);
-    assert.match(persisted.attention_reason || '', /could not prove one of the answers/);
+    assert.match(persisted.attention_reason || '', /nothing has gone to the employer/i);
+    // Names the exact field the runner's own label pointed at, generically derived rather than
+    // hardcoded - see assertionAppliesField.
+    assert.match(persisted.attention_reason || '', /re-filling the phone field/);
+    assert.doesNotMatch(persisted.attention_reason || '', /pressed Send/i);
+    // DETERMINISTIC, NOT TEMPORARY: browserbase.ts documents this refusal as reproducing on every
+    // attempt, so the sentence must never promise a retry will "very likely succeed" - that was the
+    // regression this pins. It must instead say the retry will likely stop at the same place.
+    assert.doesNotMatch(persisted.attention_reason || '', /very likely succeed/i);
+    assert.match(persisted.attention_reason || '', /very likely stop at the same place/i);
     // The exact failed proof, evidence included, is what the row records for whoever debugs it.
     assert.match(persisted.submission_error || '', /expected exactly one match/);
     assert.match(persisted.submission_error || '', /workable_phone_readback_evidence=/);

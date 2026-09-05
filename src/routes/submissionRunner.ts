@@ -188,7 +188,7 @@ import {
   unverifiedSubmissionReason,
   type ManagedReceiptResult,
 } from '../lib/managedSubmitOutcome';
-import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
+import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord, type SubmissionStopReason } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
   advanceCanonicalApplicationPreparedSend,
@@ -342,6 +342,17 @@ import {
 } from '../lib/submissionSafety';
 import { resolveRevision } from '../lib/buildInfo';
 import {
+  attachManagedRunBoundaryCompletion,
+  getManagedRunShutdownSignal,
+  isManagedRunBoundaryReached,
+  markManagedRunBoundaryReached,
+  registerManagedRun,
+  RUN_OWNER_ID,
+  unregisterManagedRun,
+  type ManagedRunPhase,
+  type ManagedRunRegistrationToken,
+} from '../lib/managedRunLifecycle';
+import {
   autoRunShouldPrepare,
   dailySubmissionCap,
   hasTimeForAnotherApplication,
@@ -371,6 +382,7 @@ import {
   submissionAttemptRetrySafety,
   submissionAttemptsOpenedToday,
   SubmissionAccountDeletionDrainError,
+  SubmissionProviderCallLockTimeoutError,
   type SubmissionBoundaryAuthorization,
   type SubmissionAttemptBinding,
   type SubmissionAttemptEventKind,
@@ -561,6 +573,13 @@ function preparedReviewPatch(authorization: StandingAuthorization, safe: boolean
   const now = new Date().toISOString();
   return {
     status: 'submitting',
+    // Best-effort completeness, not a load-bearing write: every row this feature actually recovers
+    // today is caught while still 'preparing'/'filling' (see managedRunLifecycle.ts's
+    // RELEASABLE_IN_FLIGHT_STATUSES-mirroring scope), and a 'submitting' row is always left to the
+    // existing #912 stalled-submitting arm regardless of what this field says. Stamped anyway so
+    // the identity is not silently absent the moment a row crosses into 'submitting', in case a
+    // future change ever extends release to a pre-claim submitting row.
+    run_owner: RUN_OWNER_ID,
     submission_authorization: {
       source: 'standing_consent',
       authorized_at: now,
@@ -914,17 +933,53 @@ export async function assertFinalRunnerBoundaryClear(
   return result.authorization;
 }
 
-/** Keep provider preparation inside the same user-fence critical section as its final drain check. */
+/**
+ * The one place every managed provider call in this file decides whether a SIGTERM's shutdown
+ * signal may abort it - see boundaryReached's own doc in lib/managedRunLifecycle.ts.
+ *
+ * NEVER PAST THE EMPLOYER BOUNDARY. A row is marked boundary-reached before submit() is ever
+ * entered (processSubmissionApplication's own conservative mark), so by the time any of submit()'s
+ * own provider calls run - the final application-submit press, a security-code verification press,
+ * or the read-only calls beside them - isManagedRunBoundaryReached(packetId) already answers true
+ * for this packet. Aborting the fetch that presses "submit" (or that recovers what a prior press
+ * did) makes it impossible to tell whether the employer received it; process.exit() then truncates
+ * the one reconciliation that could have answered that question. So those calls get no signal at
+ * all: a SIGTERM will not abort them, and the shutdown handler instead WAITS for them (see
+ * attachManagedRunBoundaryCompletion and index.ts's releaseManagedRunsBeforeExit) rather than racing
+ * past them.
+ *
+ * Every call still made before that mark - prepare()'s discovery, option-probe and fill runs - gets
+ * the signal exactly as before, so a SIGTERM can still unstick a prepare-path fetch that would
+ * otherwise sit out its own multi-minute deadline past the process's own shutdown window.
+ *
+ * A packet id the registry has no entry for at all defaults to "still abortable", matching this
+ * file's existing fail-open discipline elsewhere - see isManagedRunBoundaryReached's own doc.
+ */
+export function managedProviderCallSignalFor(packetId: string): AbortSignal | undefined {
+  return isManagedRunBoundaryReached(packetId) ? undefined : getManagedRunShutdownSignal();
+}
+
+/** Keep provider preparation inside the same user-fence critical section as its final drain check.
+ * Also the one place every prepare-path stratus call in this file passes the process-wide shutdown
+ * signal (lib/managedRunLifecycle.ts), so a SIGTERM does not leave this fetch waiting out its own
+ * deadline unobserved - see runManagedBrowser's externalSignal doc in lib/browserbase.ts. Past the
+ * employer boundary the same call carries no signal at all - see managedProviderCallSignalFor. */
 async function runManagedBrowserWithAccountFence(
   userId: string,
+  packetId: string,
   ...args: Parameters<typeof runManagedBrowser>
 ): Promise<ManagedBrowserResult> {
-  return withProviderCallFence(userId, () => runManagedBrowser(...args));
+  const [portalUrl, actions, options] = args;
+  return withProviderCallFence(userId, () => runManagedBrowser(portalUrl, actions, {
+    ...options,
+    externalSignal: managedProviderCallSignalFor(packetId),
+  }));
 }
 
 /** Keep every retained-session provider POST behind the account drain until the call finishes. */
 async function continueManagedBrowserWithAccountFence(
   userId: string,
+  packetId: string,
   continuationToken: Parameters<typeof continueManagedBrowser>[0],
   actions: Parameters<typeof continueManagedBrowser>[1],
   options: Parameters<typeof continueManagedBrowser>[2],
@@ -963,6 +1018,7 @@ async function continueManagedBrowserWithAccountFence(
       requestBudget,
       providerDeadlineAt,
       minimumDispatchBudgetMs: options.minimumDispatchBudgetMs!,
+      externalSignal: managedProviderCallSignalFor(packetId),
     });
   });
 }
@@ -3454,7 +3510,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
   }
 
   try {
-    const continued = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {
+    const continued = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions, {
       submissionAttempt: continuationSubmissionAttempt,
       requestBudget,
       providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
@@ -3882,6 +3938,11 @@ async function claimPreparation(row: ResumeRow): Promise<ResumeRow | null> {
   const preparing = nextReview(current, {
     status: 'preparing',
     submission_run_id: current.submission_run_id ?? randomUUID(),
+    // This process's identity, so a later boot can tell "the process that owned this died without
+    // cleaning up" from "a run that is still going" - see RUN_OWNER_ID's own doc and
+    // managedRunBootSweep.ts. This is the run's first write, the earliest point a process identity
+    // can be attached to it.
+    run_owner: RUN_OWNER_ID,
     submission_claimed_at: undefined,
     submission_claim_id: undefined,
   });
@@ -7899,6 +7960,11 @@ async function prepareManaged(
   await writeReview(row, nextReview(current, {
     status: 'filling',
     submission_run_id: runId,
+    // Re-stamped here too (claimPreparation already wrote it moving into 'preparing'): this is the
+    // run's other natural "just started" write, and re-asserting the same value costs nothing while
+    // covering any future caller that reaches 'filling' without having gone through claimPreparation
+    // first. See RUN_OWNER_ID's own doc.
+    run_owner: RUN_OWNER_ID,
     submission_error: undefined,
     progress_screenshot_url: undefined,
     progress_stage: 'Opening the company form',
@@ -7968,6 +8034,7 @@ async function prepareManaged(
    * run budget. See MANAGED_PREPARE_SCAN_OPTIONS for why it is 280s and not more. */
   const discoveryResult = await runManagedBrowserWithAccountFence(
     row.user_id,
+    row.id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
     MANAGED_PREPARE_SCAN_OPTIONS,
@@ -8247,6 +8314,7 @@ async function prepareManaged(
     }))];
     const result = await runManagedBrowserWithAccountFence(
       row.user_id,
+      row.id,
       applicationUrl,
       actions,
       // Option-probe clicks open dropdowns to read their choices: a mutation that never submits, so
@@ -8798,6 +8866,7 @@ async function prepareManaged(
    * fatal below, so it is the one run that asks stratus to wait for the capture. */
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
+    row.id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
     MANAGED_PREPARE_FILL_OPTIONS,
@@ -9431,6 +9500,7 @@ async function prepareManagedAttendedAccountGate(
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
+    row.id,
     applicationUrl,
     buildManagedAttendedAccountProbeActions(portal),
     { screenshot: false },
@@ -10894,6 +10964,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // than the one that submits.
     const captchaProbe = await runManagedBrowserWithAccountFence(
       row.user_id,
+      row.id,
       applicationUrl,
       buildManagedCaptchaProbeActions(),
       { screenshot: false },
@@ -11015,6 +11086,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     try {
       result = await runManagedBrowserWithAccountFence(
         row.user_id,
+        row.id,
         applicationUrl,
         initialActions,
         {
@@ -11035,6 +11107,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           // ephemeral scan correlation too; its extracts alone would not.
           const evidenceRun = await runManagedBrowserWithAccountFence(
             row.user_id,
+            row.id,
             applicationUrl,
             buildWorkablePhoneEvidenceActions(),
             { screenshot: false, scanCorrelation: true },
@@ -11472,7 +11545,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           }
           try {
             // Exactly one bounded continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {
+            receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions, {
               submissionAttempt: securityCodeSubmissionAttempt,
               requestBudget: continuationRequestBudget,
               providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
@@ -11579,7 +11652,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         expectedApplicationUrl: applicationUrl,
         observe: async (continuationToken) => {
           receiptObservationStarted = true;
-          const observed = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, [], {
+          const observed = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, [], {
             screenshot: true,
             submissionAttempt: receiptObservationSubmissionAttempt,
             // This continuation is read-only, but it still must not hold the runner or a provider
@@ -12204,6 +12277,27 @@ export type SubmissionFailureOutcome =
      before it can ever be written, with withTerminalCause catching whatever gets past it. */
   | { status: TerminalRunStatus; attentionReason: string; attentionCategories: ApplicationAttentionCategory[] };
 
+/** Turn a runner assertion label into a phrase an applicant can read, without naming any one field
+ * by hand. `filled_field:<name>` becomes "the &lt;name&gt; field" (underscores/colons in the name
+ * turned to spaces); any of the Workable phone-widget labels (`phone_country_open`,
+ * `phone_country_close`, `phone_country_option`, or anything starting `workable_phone_` - see
+ * portalSubmission.ts's WORKABLE_PHONE_* label constants) collapse to the one plain phrase an
+ * applicant recognises, "the phone field", instead of surfacing the widget's own internal step name;
+ * and an unrecognised or missing label falls back to the same cause-neutral phrase the rest of this
+ * file already uses for "some answer, unspecified" - deliberately NOT the raw label with underscores
+ * swapped for spaces, which read as internal telemetry ("the workable phone value visible field")
+ * rather than a field an applicant filled in. */
+export function assertionAppliesField(label: string | null | undefined): string {
+  if (!label) return 'one of the answers it typed';
+  const fieldMatch = /^filled_field:(.+)$/.exec(label);
+  if (fieldMatch) {
+    const name = fieldMatch[1]!.replace(/[_:]+/g, ' ').trim();
+    return name ? `the ${name} field` : 'one of the answers it typed';
+  }
+  if (/^(?:workable_)?phone(?:_|:|$)/.test(label)) return 'the phone field';
+  return 'one of the answers it typed';
+}
+
 export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
@@ -12220,6 +12314,12 @@ export function submissionFailureOutcome(input: {
      NOT one in fact. See the arm below for what that inheritance was costing the applicant. */
   requiredFieldConfirmation?: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
+  /* The failing action's own label, as the runner spelled it (e.g. `filled_field:phone`), when
+   * fieldProofFailedBeforeSubmit came from a ManagedBrowserAssertionFailureError. Used to name WHICH
+   * field the sentence below is about instead of speaking only in the abstract - derived generically
+   * from the label rather than hardcoded to any one field, so a future assertion on a different
+   * field gets the same treatment for free. */
+  fieldProofFailedLabel?: string | null;
   /* The exact issue strings from a EmployerBoundPacketDriftError, or undefined. Strings rather than
      a boolean for the same reason actionBudgetStop is a string: packetDriftAttentionReason composes
      the sentence from them and names the binding that moved, and re-deriving that here would be a
@@ -12238,7 +12338,7 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
+  const { captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, fieldProofFailedLabel, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
   const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
   /* preClickProvenByLedger joins the needs_attention list rather than falling to 'failed', and that
      is load-bearing rather than cosmetic. submitRequestDisposition treats an unclaimed
@@ -12323,7 +12423,21 @@ export function submissionFailureOutcome(input: {
            submission_error, and the blockers the run produced are surfaced on their own. */
         ? 'Litos filled this application in and found the button that sends it, but could not confirm one of the required answers had been accepted, so it did not press it. Nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
       : fieldProofFailedBeforeSubmit
-        ? 'Litos filled this application in, but could not prove one of the answers it typed was still on the form, so it stopped before pressing the button that sends it. Nothing has been sent and there is no confirmation to look for. Retrying will very likely stop at the same place, so open it when you have a minute and finish it off.'
+        /* NAMES THE STEP GENERICALLY, derived from the runner's own label rather than hardcoded to
+           any one field, because assertionAppliesField below strips a `filled_field:` prefix off
+           whatever label the assertion carries. Measured on Pony.ai fdcf4ccb, ledger attempt
+           b624e034: the label was `filled_field:phone` and the applicant was told instead that
+           "Litos pressed Send" and sent to check the employer's portal, for a run that died
+           re-filling the phone widget before confirmAndSubmit was ever reached. */
+        /* DETERMINISTIC, NOT TEMPORARY. browserbase.ts's ManagedBrowserAssertionFailureError
+           documents exactly this refusal as reproducing on every attempt - it is the required
+           extract assertion doing its fail-closed job on a page whose DOM no longer matches the
+           proof selector, not a sandbox crash. Telling her to retry because "the page will settle"
+           promised a fix that never arrives; the honest promise is that this needs the field's read
+           fixed, not another attempt. ManagedBrowserPreSubmitCrashError is the transient sibling and
+           does not reach this arm - it is typed separately (providerSessionFailureBeforeSubmit) and
+           takes the "temporary secure-browser error ... try again in a few minutes" sentence below. */
+        ? `Litos could not finish this application: it stopped while re-filling ${assertionAppliesField(fieldProofFailedLabel)}, before the button that sends it was ever pressed, so nothing has gone to the employer. Retrying will very likely stop at the same place until this field's read is fixed, so open it when you have a minute and finish it off.`
       : destinationUnverifiedBeforeSend
         /* RANKED WITH THE PRE-CLICK FAMILY, mirroring classifySubmissionStop exactly. The probe is
            a separate read-only run made before the fill-and-submit list is assembled, so nothing
@@ -12650,6 +12764,51 @@ export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
 
+/* THE STOP REASONS BACKED BY STRATUS'S OWN RUN-PROGRESS RECORD, and the ONLY ones
+ * releasedClaimProofKind below may credit with `run_progress_proven_not_pressed`. Each is set only
+ * by submissionFailureReview's fieldProofFailedBeforeSubmit or providerSessionFailureBeforeSubmit,
+ * which browserbase.ts's managedBrowserRequestError constructs (ManagedBrowserAssertionFailureError,
+ * ManagedBrowserPreSubmitCrashError) ONLY when managedBrowserProgressAllowsPreSubmitRetry held for
+ * Stratus's own reported progress - see the proof kind's own definition in
+ * SUBMISSION_NOT_SENT_PROOF_KINDS for the full story. */
+const RUN_PROGRESS_BACKED_STOP_REASONS = new Set<SubmissionStopReason>([
+  'field_proof_failed_before_submit',
+  'provider_session_failure_before_submit',
+]);
+
+/**
+ * Which not-sent proof kind actually backs a released claim, derived from the run's OWN typed stop
+ * rather than assumed from whether the attempt happens to carry a boundary_authorized event.
+ *
+ * THE BUG THIS REPLACES. recordSubmissionRunnerFailure used to reason "an authorization already
+ * exists on this attempt, so any release found here must be the run-progress proof" and minted
+ * `run_progress_proven_not_pressed` on that inference alone. But `failed.submission_claim_id` is
+ * also cleared, unconditionally, by preClickNoSubmitReview - the NoSubmitControlError /
+ * ManagedRequiredFieldConfirmationError arm submissionFailureReview delegates to for
+ * assertManagedRequiredFieldsConfirmed's pressClaimed guard - and that release has nothing to do
+ * with Stratus's run-progress record. Crediting it with `run_progress_proven_not_pressed` would
+ * write a proof kind that was never actually observed, letting a stop that is NOT provably
+ * run-progress-backed slip past the ledger's own admissibility rule
+ * (submissionAttemptLedger.ts's AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS), which exists precisely to
+ * refuse an unproven machine claim once an authorization is on record.
+ *
+ * The fix asks the run's own typed stop (`submission_stop.reason`, written by submissionFailureReview
+ * on every arm including the ones that release outright) rather than re-deriving "was this
+ * run-progress-backed" from the error type a second time here. Everything that is not one of the two
+ * run-progress-backed reasons writes the general `typed_pre_click_stop` kind instead - including the
+ * no-submit-control release - and if that arrives after an authorization already exists, the
+ * ledger's own admissibility rule is what decides its fate (folding it to 'invalid_sequence'), not a
+ * proof kind manufactured here to dodge that rule.
+ */
+export function releasedClaimProofKind(
+  stopReason: SubmissionStopReason | undefined,
+  authorizedAlready: boolean,
+): SubmissionNotSentProofKind {
+  return authorizedAlready && stopReason !== undefined && RUN_PROGRESS_BACKED_STOP_REASONS.has(stopReason)
+    ? 'run_progress_proven_not_pressed'
+    : 'typed_pre_click_stop';
+}
+
 /**
  * Linearize a runner failure against authorization, terminal evidence, and the packet projection.
  * A stale caller either updates the exact still-current attempt or writes nothing.
@@ -12709,7 +12868,45 @@ export async function recordSubmissionRunnerFailure(
     const boundary = attemptId
       ? await submissionBoundaryAuthorization(row.user_id, attemptId, { executor: tx })
       : null;
-    if (boundary) {
+    /* CHECKED FIRST, ahead of `boundary`, and that order is the fix. Before this, `if (boundary)`
+     * ran unconditionally whenever an authorization existed on the attempt and overwrote whatever
+     * `failed` had already correctly worked out - including a run submissionFailureReview had just
+     * PROVEN pre-click from its own progress record (runProgressProvenNeverPressed) and released the
+     * claim for. An authorization existing is a fact about the ATTEMPT; `failed.submission_claim_id`
+     * being cleared is a fact about what THIS run's own evidence just proved, and the second must
+     * outrank the first or every one of those releases is undone one line later.
+     *
+     * Measured 2026-09-05, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt b624e034:
+     * boundary_authorized was on record, submissionFailureReview correctly proved the run died
+     * re-filling the Workable phone widget before confirmAndSubmit and released the claim, and this
+     * block used to run anyway and reinstate the unverified_submission record it had just cleared -
+     * telling the applicant Litos had pressed Send. */
+    if (attemptId && !failed.submission_claim_id) {
+      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+      if (!opening) throw new Error('Submission attempt reservation was not durably recorded');
+      const binding = submissionAttemptBindingFromEvent(opening);
+      /* releasedClaimProofKind reads the run's OWN typed stop (submission_stop.reason) rather than
+       * inferring the proof kind from `authorizedAlready` alone - see its doc comment for the
+       * defect that inference caused. Only the two run-progress-backed reasons may be credited with
+       * `run_progress_proven_not_pressed` once an authorization exists; every other pre-click
+       * release, including the no-submit-control one, writes `typed_pre_click_stop` and lets the
+       * ledger's own admissibility rule (submissionAttemptLedger.ts,
+       * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS) decide whether that is admissible after
+       * authorization. */
+      const authorizedAlready = exactEvents.some((event) => event.event_kind === 'boundary_authorized');
+      const proofKind = releasedClaimProofKind(failed.submission_stop?.reason, authorizedAlready);
+      await appendSubmissionAttemptEvent({
+        ...binding,
+        eventId: submissionAttemptEventId(attemptId, 'not_sent_proven', proofKind),
+        eventKind: 'not_sent_proven',
+        proofKind,
+        evidenceCode: failed.submission_stop?.reason ?? proofKind,
+      }, { executor: tx });
+    } else if (boundary) {
+      /* THE AMBIGUOUS CASES ONLY, now that a provable pre-click stop is handled above: a press was
+       * observed with no confirmation, or the run died during or after confirmAndSubmit with no
+       * network witness either way. Neither is provable, so the claim stays held and the row gets
+       * the resolvable unverified_submission record exactly as before. */
       const securityCode = mergeManagedSecurityCodeEvidence(
         latestReview.security_code,
         failed.security_code,
@@ -12733,17 +12930,6 @@ export async function recordSubmissionRunnerFailure(
           ? [...new Set([...failed.attention_categories, 'unverified_submission' as const])]
           : ['unverified_submission'],
       });
-    } else if (attemptId && !failed.submission_claim_id) {
-      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
-      if (!opening) throw new Error('Submission attempt reservation was not durably recorded');
-      const binding = submissionAttemptBindingFromEvent(opening);
-      await appendSubmissionAttemptEvent({
-        ...binding,
-        eventId: submissionAttemptEventId(attemptId, 'not_sent_proven', 'typed-runner-stop'),
-        eventKind: 'not_sent_proven',
-        proofKind: 'typed_pre_click_stop',
-        evidenceCode: failed.submission_stop?.reason ?? 'typed_pre_click_stop',
-      }, { executor: tx });
     }
 
     const updated = await tx.update(generated_resumes).set({
@@ -12837,6 +13023,30 @@ export function submissionFailureReview(
       attention_categories: ['evidence_gap'],
     });
   }
+  /* Thrown by withProviderCallFence's lock acquire, strictly before the fenced provider call it
+   * guards can start - see SubmissionProviderCallLockTimeoutError and PROVIDER_CALL_LOCK_TIMEOUT_MS.
+   * NOT THE SAME SHAPE AS THE DRAIN ABOVE, despite the family resemblance, and that difference is why
+   * this arm alone among the ones above also requires ledger.employerBoundaryReached === false.
+   * SubmissionAccountDeletionDrainError is safe to release unconditionally because account.ts waits
+   * out this exact key UNBOUNDED before it can even insert the drain row - so by the time that error
+   * is observable, any provider call that was holding the key has structurally already finished.
+   * A lock timeout is the opposite shape: it fires precisely BECAUSE something else still holds the
+   * key when this caller gives up, which the claim mechanism should mean is always a different
+   * posting for this account - but this function is documented and used as safe in isolation, not
+   * only under whatever defense-in-depth its one current caller happens to also apply, so it earns
+   * its release from ledger fact the same way every untyped stop below already does, rather than
+   * from the error's type alone. When the ledger cannot say employerBoundaryReached is false - not
+   * consulted, or true - this falls through to the same uncertain-after-claim treatment any other
+   * unclassified post-claim stop gets. */
+  if (error instanceof SubmissionProviderCallLockTimeoutError && ledger.employerBoundaryReached === false) {
+    return nextReview(current, {
+      status: 'needs_attention',
+      ...preClickNoSubmitReleasePatch(),
+      submission_error: error.message,
+      attention_reason: 'An earlier attempt on this account was still running and did not finish in time, so Litos stopped before contacting the employer. Nothing has been sent. Try this one again in a few minutes.',
+      attention_categories: ['evidence_gap'],
+    });
+  }
   if (error instanceof FinalSubmissionAuthorizationChangedError) {
     return nextReview(current, {
       status: 'ready_for_final_approval',
@@ -12862,6 +13072,30 @@ export function submissionFailureReview(
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailureBeforeSubmit = error instanceof ManagedBrowserPreSubmitCrashError;
   const fieldProofFailedBeforeSubmit = error instanceof ManagedBrowserAssertionFailureError;
+  const fieldProofFailedLabel = error instanceof ManagedBrowserAssertionFailureError
+    ? error.assertionLabel
+    : null;
+  /* THE RUN'S OWN WITNESS THAT THE CLICK NEVER HAPPENED, DISTINCT FROM THE LEDGER'S.
+   *
+   * preClickProvenByLedger (below) answers "did this attempt ever get boundary_authorized or
+   * press_observed" - and once authorization exists, that answer is permanently true, which is
+   * exactly right for the ledger's own admissibility rule (see submissionAttemptLedger.ts's
+   * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS) but says nothing about what THIS run, which was
+   * granted that authorization, actually did with it.
+   *
+   * Both ManagedBrowserAssertionFailureError and ManagedBrowserPreSubmitCrashError are constructed
+   * in browserbase.ts's managedBrowserRequestError ONLY when managedBrowserProgressAllowsPreSubmitRetry
+   * held for Stratus's own reported run-progress: submitPressed, applicationSubmitPressed and
+   * verificationSubmitPressed all false, and employerOutcome (if present) exactly 'not_attempted'.
+   * That is the same proof this codebase already trusts to let runWithManagedPreSubmitCrashRetry
+   * retry an authorized attempt automatically, so treating it as proof for closing the ledger and
+   * releasing the claim is not a new risk, it is reusing an existing one.
+   *
+   * Measured 2026-09-05, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt b624e034:
+   * boundary_authorized was on record, so preClickProvenByLedger read true-crossed (false) and this
+   * run's own contained-transport proof was the only thing left that could say what actually
+   * happened - and until this existed, nothing here asked it. */
+  const runProgressProvenNeverPressed = fieldProofFailedBeforeSubmit || providerSessionFailureBeforeSubmit;
   const providerSessionFailure = providerSessionFailureBeforeSubmit || isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
   /* THE PROOF THIS FUNCTION NEVER HAD, and the reason 69 employers on one account were blocked by
@@ -12986,22 +13220,31 @@ export function submissionFailureReview(
    * answer is proof about THIS run only, which is exactly the scope of the claim being released -
    * the claim was taken by this run. Anything an earlier attempt left on the row is untouched by
    * the release and keeps blocking through employerMayHoldApplication, so widening the release here
-   * cannot let a second application out behind an unresolved first one. */
-  const releasesClaim = uncertainAfterClaim && (provablyNotSent || preClickProvenByLedger);
+   * cannot let a second application out behind an unresolved first one.
+   *
+   * runProgressProvenNeverPressed joins the same disjunction for the same reason, on the narrower
+   * evidence described above it: it is proof about THIS run's OWN progress record, so widening the
+   * release to include it cannot let a second application out behind an unresolved first one
+   * either - it only ever says this run, specifically, never pressed anything. */
+  const releasesClaim = uncertainAfterClaim
+    && (provablyNotSent || preClickProvenByLedger || runProgressProvenNeverPressed);
   /* A claim held with no proof behind it. Every such row must leave here with a door, and the only
      door that fits a state nobody can classify is the applicant's own look at the employer page. */
   const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, fieldProofFailedLabel, externalGate, providerSessionFailure,
     packetDriftIssues: packetDrift?.issues,
     destinationUnverifiedBeforeSend: destinationUnverified,
     /* SUPPRESSED BY THE PROOF, and this is where defect 2 is actually fixed. uncertainAfterClaim's
        sentence is "The final submission was attempted, but Litos could not verify the employer
        confirmation. Check the portal or your email before trying again." Every word of it is false
        of a run that never reached the boundary, and it is the sentence that sent the applicant to
-       inspect an employer portal for an attempt that did not happen. */
-    uncertainAfterClaim: uncertainAfterClaim && !preClickProvenByLedger,
+       inspect an employer portal for an attempt that did not happen.
+       Also suppressed by runProgressProvenNeverPressed, for the same reason: fieldProofFailedBeforeSubmit
+       and providerSessionFailure already outrank this sentence below in the ranking, so in practice
+       this only guards against a future reordering silently reviving the false claim. */
+    uncertainAfterClaim: uncertainAfterClaim && !preClickProvenByLedger && !runProgressProvenNeverPressed,
     preClickProvenByLedger,
     currentAttentionReason: current.attention_reason,
   });
@@ -13107,6 +13350,27 @@ export async function finishSecurityCodeSubmission(
 // is still sitting at their dashboard when they press submit on a Paylocity job, and deriving
 // "away" from "consented" would take fill-and-hand-off away from exactly the people who opted into
 // the product most. Provenance is a property of the caller, so the caller passes it.
+/** Which registry phase (lib/managedRunLifecycle.ts) a row's status corresponds to, or null when it
+ * names no in-flight managed phase at all - the shape processSubmissionApplication reaches for
+ * every status this function's own gates already treat as "nothing to do here". `submit_requested`
+ * maps to 'preparing' because claimPreparation, a few lines below, is about to move it there before
+ * any provider call happens. */
+export function managedRunPhaseForStatus(
+  status: ApplicationReviewState['status'] | undefined,
+): ManagedRunPhase | null {
+  switch (status) {
+    case 'submit_requested':
+    case 'preparing':
+      return 'preparing';
+    case 'filling':
+      return 'filling';
+    case 'submitting':
+      return 'submitting';
+    default:
+      return null;
+  }
+}
+
 export async function processSubmissionApplication(
   applicationId: string,
   fastify: FastifyInstance,
@@ -13116,16 +13380,45 @@ export async function processSubmissionApplication(
   const row = rows[0];
   if (!row) return null;
   let activeRow = row;
+  /* REGISTERED HERE, FOR THE WHOLE STEP, AND NOWHERE ELSE. This is the one function every managed
+   * prepare and every managed submit passes through - the cron's unattended sweep and both
+   * dashboard-triggered callers in routes/applications.ts all call this and nothing lower - so it is
+   * the single choke point that can register a run on the way in and guarantee it is unregistered on
+   * the way out, success, handled failure or uncaught throw alike. See lib/managedRunLifecycle.ts:
+   * a SIGTERM only ever looks at what is registered, so a phase this function never reaches (nothing
+   * to register for) is a phase the shutdown handler correctly never tries to release either. */
+  const initialReview = readApplicationReview(activeRow.spec);
+  const initialPhase = managedRunPhaseForStatus(initialReview?.status);
+  let registrationToken: ManagedRunRegistrationToken | undefined;
+  if (initialPhase) {
+    registrationToken = registerManagedRun({
+      packetId: row.id,
+      userId: row.user_id,
+      runId: initialReview?.submission_run_id,
+    });
+    /* Already claimed (or mid security-code continuation) the moment this function was called -
+     * the employer boundary was reached in some EARLIER call, not this one, so this run must never
+     * be a shutdown/boot-sweep release candidate regardless of how long the recovery below takes. */
+    if (submissionClaimIsHeld(initialReview) || managedSecurityCodeContinuationRecoveryIsHeld(initialReview)) {
+      markManagedRunBoundaryReached(row.id);
+    }
+  }
   try {
     let review = readApplicationReview(activeRow.spec);
     if (submissionClaimIsHeld(review) || managedSecurityCodeContinuationRecoveryIsHeld(review)) {
       const attemptBinding = await persistedRunnerAttemptBinding(activeRow, review!);
-      const recovery = await recoverManagedSubmissionTerminalResult(
+      /* Captured BEFORE the await, and attached to the registry right away, so a SIGTERM landing
+       * mid-recovery can find and wait on this exact promise - see attachManagedRunBoundaryCompletion
+       * and index.ts's releaseManagedRunsBeforeExit. This row was already marked boundary-reached
+       * above (or in an earlier call this process made), so the attach is never a no-op here. */
+      const recoveryPromise = recoverManagedSubmissionTerminalResult(
         activeRow,
         review!,
         attemptBinding,
         fastify,
       );
+      attachManagedRunBoundaryCompletion(row.id, recoveryPromise);
+      const recovery = await recoveryPromise;
       if (recovery !== 'not_recoverable') {
         const recovered = await db.select().from(generated_resumes)
           .where(eq(generated_resumes.id, applicationId)).limit(1);
@@ -13150,7 +13443,25 @@ export async function processSubmissionApplication(
       if (prepared[0]) activeRow = prepared[0];
       review = readApplicationReview(activeRow.spec);
     }
-    if (review?.status === 'submitting') await submit(activeRow, fastify);
+    if (review?.status === 'submitting') {
+      /* CONSERVATIVELY MARKED HERE, NOT AT THE EXACT CLAIM INSTANT INSIDE submit(). submit() itself
+       * is not instrumented with the registry - threading a mark-boundary callback through claimSubmission
+       * and every one of submit()'s own held/refused early returns would touch a security-sensitive
+       * function for a bookkeeping concern that does not need that depth, since 'submitting' is
+       * already excluded from release wholesale (see managedRunLifecycle.ts and
+       * managedRunRestartRelease.ts - the #912 stalled-submitting arm owns any row in this status
+       * regardless of what this flag says). So this errs the safe direction instead: a row is
+       * treated as boundary-reached (never a release candidate) from the moment it is handed to
+       * submit(), which is at or before the earliest point submit() could actually claim it, never
+       * after. */
+      markManagedRunBoundaryReached(row.id);
+      /* Same capture-then-attach discipline as the recovery promise above: submit() is now this
+       * packet's boundary-reached work in flight, so a SIGTERM must be able to find and wait on this
+       * exact promise rather than exiting over it. */
+      const submitPromise = submit(activeRow, fastify);
+      attachManagedRunBoundaryCompletion(row.id, submitPromise);
+      await submitPromise;
+    }
   } catch (error) {
     const cause = error instanceof SubmissionExecutionError ? error.submissionCause : error;
     fastify.log.error({
@@ -13159,6 +13470,8 @@ export async function processSubmissionApplication(
       ...privateRunnerStepDiagnostic(cause),
     }, 'Application runner step failed');
     await fail(activeRow, error);
+  } finally {
+    if (initialPhase && registrationToken !== undefined) unregisterManagedRun(row.id, registrationToken);
   }
   const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   return refreshed[0] ? readApplicationReview(refreshed[0].spec) : null;

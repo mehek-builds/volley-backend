@@ -62,7 +62,16 @@ import {
   managedInitialSubmissionAttempt,
   finalBoundaryAuthorizationMatches,
   undecidedOptionalQuestionLabels,
+  managedProviderCallSignalFor,
 } from './submissionRunner';
+import {
+  getManagedRunShutdownSignal,
+  markManagedRunBoundaryReached,
+  registerManagedRun,
+  resetManagedRunRegistryForTests,
+  resetManagedRunShutdownSignalForTests,
+  triggerManagedRunShutdown,
+} from '../lib/managedRunLifecycle';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels } from '../lib/submissionSafety';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
@@ -3581,10 +3590,18 @@ test('every managed provider start, continuation POST, and direct session creati
   const bodyStart = fenceSource.indexOf('export async function withProviderCallFence');
   assert.ok(bodyStart > 0, 'the provider call fence must be one named, testable function');
   const fenceBody = fenceSource.slice(bodyStart);
-  assert.ok(fenceBody.includes('lockSubmissionProviderCallUser(tx, userId)'));
+  // Bounded since 2026-09-05: the fence's own acquire must always resolve to a real
+  // PROVIDER_CALL_LOCK_TIMEOUT_MS-derived value, never the unbounded two-argument form
+  // account.ts's deletion drain uses. A prefix match on `(tx, userId, {` alone would equally
+  // accept a caller that regressed to passing `{}` (or dropped the `?? PROVIDER_CALL_LOCK_TIMEOUT_MS`
+  // fallback) and still silently waited forever - this pins the actual default-composition
+  // expression, not just that a third argument of some shape is present.
+  assert.ok(fenceBody.includes('lockTimeoutMs: options.lockTimeoutMs ?? PROVIDER_CALL_LOCK_TIMEOUT_MS'),
+    'the fence must resolve a real lock timeout, not merely pass some object as a third argument');
+  assert.ok(fenceBody.includes('lockSubmissionProviderCallUser(tx, userId, {'));
   assert.ok(!fenceBody.includes('lockSubmissionAttemptUser('),
     'the provider fence must not hold the ledger key across a provider call');
-  assert.ok(fenceBody.indexOf('lockSubmissionProviderCallUser(tx, userId)')
+  assert.ok(fenceBody.indexOf('lockSubmissionProviderCallUser(tx, userId, {')
     < fenceBody.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
   assert.ok(fenceBody.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
     < fenceBody.indexOf('return call({'));
@@ -3603,8 +3620,23 @@ test('every managed provider start, continuation POST, and direct session creati
   const fenceEnd = runnerSource.indexOf('\n}', fenceStart) + 2;
   const fence = runnerSource.slice(fenceStart, fenceEnd);
   assert.ok(fenceStart > 0);
+  /* Destructured, not forwarded as a bare `...args` spread, since this wrapper now also merges the
+   * process-wide shutdown signal (lib/managedRunLifecycle.ts) into the options object every call
+   * carries - see the file header on getManagedRunShutdownSignal for why a SIGTERM has to be able
+   * to unstick this exact fetch. The property this test polices is unchanged: the call still lands
+   * INSIDE withProviderCallFence, never beside or before it. */
   assert.ok(fence.indexOf('withProviderCallFence(userId,')
-    < fence.indexOf('runManagedBrowser(...args)'));
+    < fence.indexOf('runManagedBrowser(portalUrl, actions,'));
+  /* NOT UNCONDITIONAL ANY MORE. A SIGTERM must still be able to unstick an in-flight prepare-path
+   * stratus call, but it must NEVER reach a call at or past the employer boundary - see
+   * managedProviderCallSignalFor's own doc, just above this wrapper, for why aborting the fetch
+   * that presses "submit" makes it impossible to tell whether the employer received the press. Both
+   * fenced wrappers route through that one function rather than calling
+   * getManagedRunShutdownSignal() directly, so the decision is made in exactly one place. */
+  assert.ok(fence.includes('externalSignal: managedProviderCallSignalFor(packetId)'),
+    'the prepare-path wrapper must decide the signal through the one shared boundary-aware helper');
+  assert.ok(!fence.includes('getManagedRunShutdownSignal()'),
+    'the wrapper itself must never call getManagedRunShutdownSignal() unconditionally any more');
   assert.equal(
     [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
     1,
@@ -3625,6 +3657,11 @@ test('every managed provider start, continuation POST, and direct session creati
     < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
   assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
     < continuationFence.indexOf('return continueManagedBrowser('));
+  assert.ok(continuationFence.includes('externalSignal: managedProviderCallSignalFor(packetId)'),
+    'the continuation wrapper must decide the signal through the same shared boundary-aware helper - '
+    + 'a security-code verification press must never be aborted by a SIGTERM either');
+  assert.ok(!continuationFence.includes('getManagedRunShutdownSignal()'),
+    'the continuation wrapper itself must never call getManagedRunShutdownSignal() unconditionally any more');
   assert.equal(
     [...runnerSource.matchAll(/\bcontinueManagedBrowser\(/g)].length,
     1,
@@ -3635,6 +3672,14 @@ test('every managed provider start, continuation POST, and direct session creati
     4,
     'all three managed continuation call sites must use the account fence',
   );
+
+  /* THE HELPER ITSELF: gated on the registry's own boundary mark, and nothing else. */
+  const signalHelperStart = runnerSource.indexOf('function managedProviderCallSignalFor(');
+  const signalHelperEnd = runnerSource.indexOf('\n}', signalHelperStart) + 2;
+  const signalHelper = runnerSource.slice(signalHelperStart, signalHelperEnd);
+  assert.ok(signalHelperStart > 0, 'the signal-selection logic must be one named, testable function');
+  assert.match(signalHelper, /isManagedRunBoundaryReached\(packetId\)\s*\?\s*undefined\s*:\s*getManagedRunShutdownSignal\(\)/,
+    'past the boundary the call must carry no signal at all - not a signal that merely started pre-aborted');
 
   const resourceSource = readFileSync(join(__dirname, '../lib/browserProviderResourceCleanup.ts'), 'utf8');
   const createStart = resourceSource.indexOf('export async function createFencedBrowserSession(');
@@ -3648,17 +3693,80 @@ test('every managed provider start, continuation POST, and direct session creati
    * withProviderCallFence, in the one place that took the key directly instead of through it.
    *
    * The deletion fence is untouched by the swap: account deletion takes BOTH keys (asserted
-   * above, ledger first), so holding the provider-call key alone still excludes a drain. */
+   * above, ledger first), so holding the provider-call key alone still excludes a drain.
+   *
+   * Bounded since 2026-09-05, the same as withProviderCallFence and for the identical reason: a
+   * second direct caller of this shared key left unbounded would silently reintroduce the exact
+   * wedge-locks-out-every-future-call defect this file's own header describes. Pinning the resolved
+   * `PROVIDER_CALL_LOCK_TIMEOUT_MS` expression, not just a bare call with some object literal,
+   * because the latter would equally accept a caller that regressed to passing `{}`. */
   assert.ok(!create.includes('await lockSubmissionAttemptUser('),
     'a 15s provider POST must not hold the key every write on the account needs');
+  assert.ok(create.includes('lockSubmissionProviderCallUser(tx, input.userId, { lockTimeoutMs: PROVIDER_CALL_LOCK_TIMEOUT_MS })'),
+    'createFencedBrowserSession must resolve a real lock timeout, not call the unbounded form');
   assert.ok(create.indexOf('reserveBrowserProviderResource({')
-    < create.indexOf('await lockSubmissionProviderCallUser(tx, input.userId)'));
-  assert.ok(create.indexOf('await lockSubmissionProviderCallUser(tx, input.userId)')
+    < create.indexOf('lockSubmissionProviderCallUser(tx, input.userId, {'));
+  assert.ok(create.indexOf('lockSubmissionProviderCallUser(tx, input.userId, {')
     < create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)'));
   assert.ok(create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)')
     < create.indexOf('await createReservedBrowserSession('));
   assert.ok(create.indexOf('await createReservedBrowserSession(')
     < create.indexOf('provider_resource_id: session.id'));
+});
+
+test('a submit-path provider call carries no shutdown signal once its packet is boundary-reached; a prepare-path call still does', () => {
+  /* This exercises the EXACT mechanism runManagedBrowserWithAccountFence and
+   * continueManagedBrowserWithAccountFence call on every managed provider request -
+   * managedProviderCallSignalFor(packetId) - against the real registry from
+   * lib/managedRunLifecycle.ts, not a text search. It reproduces precisely what
+   * processSubmissionApplication does before calling submit(): register the run, then mark its
+   * boundary reached (conservatively, before submit() is ever entered) - and proves the wrapper's
+   * own signal decision flips from "abortable" to "never aborted" at exactly that point, for the
+   * SAME packet id every one of submit()'s own fenced calls would pass. */
+  try {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+
+    registerManagedRun({ packetId: 'packet-prepare', userId: 'user-1' });
+    registerManagedRun({ packetId: 'packet-submit', userId: 'user-1' });
+
+    // Prepare-path: boundary not yet reached, so a SIGTERM must still be able to unstick this call -
+    // this is the discovery/option-probe/fill run inside prepareManaged.
+    assert.equal(
+      managedProviderCallSignalFor('packet-prepare'),
+      getManagedRunShutdownSignal(),
+      'a prepare-path call must still carry the shutdown signal',
+    );
+
+    // The exact write processSubmissionApplication makes before it ever calls submit() (or, for an
+    // already-claimed row, before its own recovery call) - see submissionRunner.ts's own
+    // "CONSERVATIVELY MARKED HERE" comment just above that call.
+    markManagedRunBoundaryReached('packet-submit');
+
+    // Submit-path: the final application-submit press, and both security-code verification
+    // continuations, all resolve packetId to 'packet-submit' - so all three must now get `undefined`,
+    // never the shutdown signal, however many times this is asked.
+    assert.equal(
+      managedProviderCallSignalFor('packet-submit'),
+      undefined,
+      'a call at or past the employer boundary must never carry the shutdown signal',
+    );
+    assert.equal(managedProviderCallSignalFor('packet-submit'), undefined, 'and this must hold on every call, not just the first');
+
+    // The prepare-path packet is unaffected by another packet's boundary being marked - this is a
+    // per-packet decision, not a process-wide one once any run reaches the boundary.
+    assert.equal(managedProviderCallSignalFor('packet-prepare'), getManagedRunShutdownSignal());
+
+    // Even after the process-wide shutdown signal actually fires (the real SIGTERM path), the
+    // submit-path packet still gets no signal at all - it was never wired in, so there is nothing
+    // for the abort to reach.
+    triggerManagedRunShutdown();
+    assert.equal(managedProviderCallSignalFor('packet-submit'), undefined);
+    assert.equal(getManagedRunShutdownSignal().aborted, true, 'the prepare-path signal itself did fire');
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
 });
 
 test('the dashboard poll repair reader tries the ledger key and never queues behind a provider call', async () => {

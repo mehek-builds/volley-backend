@@ -120,7 +120,13 @@ test('the authority key stays account-wide, never per packet', () => {
  * bounded at 15s, and it held the very key the revision trigger takes on every write, so each
  * session creation made 15 seconds of that account's writes answer 503. Same shape as the 280s
  * managed prepare submissionAccountFence.ts was split out for; missed then because this one takes
- * the key directly instead of through withProviderCallFence. */
+ * the key directly instead of through withProviderCallFence.
+ *
+ * BOUNDED SINCE 2026-09-05, for the identical reason withProviderCallFence's own acquire is: a
+ * second direct caller of this shared key left unbounded would silently reintroduce the exact
+ * wedge-locks-out-every-future-call defect PROVIDER_CALL_LOCK_TIMEOUT_MS exists to close. Pinning
+ * the resolved lockTimeoutMs expression, not just a bare call, so a caller that regressed to `{}`
+ * (still unbounded) cannot pass this test. */
 test('the fenced provider POST does not hold the key every write needs', () => {
   const fenced = slice(
     providerCleanup,
@@ -128,7 +134,11 @@ test('the fenced provider POST does not hold the key every write needs', () => {
     '\nasync function markResourceGone',
   );
   assert.match(fenced, /createReservedBrowserSession\(/u, 'the external POST is still inside the fence');
-  assert.match(fenced, /lockSubmissionProviderCallUser\(tx, input\.userId\)/u);
+  assert.match(
+    fenced,
+    /lockSubmissionProviderCallUser\(tx, input\.userId, \{ lockTimeoutMs: PROVIDER_CALL_LOCK_TIMEOUT_MS \}\)/u,
+    'must resolve a real lock timeout, not call the unbounded form',
+  );
   assert.doesNotMatch(fenced, /lockSubmissionAttemptUser\(tx/u,
     'holding the ledger key across a 15s provider POST is what made the account read-only');
 });
