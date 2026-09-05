@@ -154,6 +154,7 @@ import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
 import { canonicalApplicationForNewPacketAttempt } from '../lib/canonicalPacketBinding';
+import { legacyUnverifiedPressDecision, legacyUnverifiedSubmissionRecord } from '../lib/legacyUnverifiedPress';
 import {
   appendSubmissionAttemptEvent,
   ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
@@ -4341,6 +4342,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           new Date(),
         ),
       };
+      /* THE LEGACY PRESS SHOWS ITS CARD. The dashboard draws "I found it there / It is not there"
+       * from `unverified_submission`; a pre-ledger row that refuses every later packet on its posting
+       * never had one (lib/legacyUnverifiedPress.ts). Publish the reading here so the applicant can
+       * answer on the row the refusal sends her to. Nothing is written by this read. */
+      const legacyUnverified = legacyUnverifiedSubmissionRecord(review);
+      if (legacyUnverified) review = { ...review, unverified_submission: legacyUnverified };
       let handoff_packet_valid = true;
       if ((review.status === 'filling' || review.status === 'needs_attention') && review.browser_session_id) {
         const audit = await currentAcknowledgedPacketAudit(row, {
@@ -5243,9 +5250,55 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )).limit(1).for('update');
         const current = locked ? readApplicationReview(locked.spec) : null;
         if (!locked || !current) return { kind: 'no_review' as const };
-        const pending = current.unverified_submission;
+        /* THE PRESS THAT WAS ONLY EVER A SENTENCE. A pre-ledger runner recorded its uncertain press
+         * as attention_reason prose and nothing else (lib/legacyUnverifiedPress.ts). The duplicate
+         * guard reads that prose and refuses every later packet on the posting, and this route was
+         * the one exit it named - which answered 409 not_waiting, because the record it reads was
+         * never written. Read the prose as the record, so her answer has somewhere to land. */
+        const pending = current.unverified_submission ?? legacyUnverifiedSubmissionRecord(current);
         if (!pending) return { kind: 'not_waiting' as const, review: current };
         if (pending.resolution) return { kind: 'already_resolved' as const, review: current };
+        const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+        const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+        const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+        if (Number.isNaN(databaseNow.getTime())) throw new Error('Database outcome clock was unavailable');
+        const now = databaseNow.toISOString();
+        if (pending.legacy_prose) {
+          const packetEvents = await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
+          const decision = legacyUnverifiedPressDecision({
+            current,
+            pending,
+            found: parsed.data.found,
+            events: packetEvents,
+            now,
+          });
+          if (decision.kind !== 'resolve') return { kind: decision.kind };
+          /* "Not there" closes every reconstructed attempt on this packet that never reached the
+           * employer with the same proof the modern arm writes below, in this transaction, so the
+           * ledger cannot keep refusing at the duplicate gate what the row now says was never sent. */
+          for (const opening of decision.closeOpenings) {
+            await appendSubmissionAttemptEvent({
+              ...submissionAttemptBindingFromEvent(opening),
+              eventId: submissionAttemptEventId(opening.attempt_id, 'not_sent_proven', 'applicant-checked-not-sent'),
+              eventKind: 'not_sent_proven',
+              proofKind: 'applicant_checked_not_sent',
+              evidenceCode: 'applicant_checked_not_sent',
+              observedAt: databaseNow,
+            }, { executor: tx });
+          }
+          const [updated] = await tx.update(generated_resumes).set({
+            spec: reviewSpec(decision.review),
+            ...(decision.pipelineStage
+              ? { pipeline_stage: decision.pipelineStage, pipeline_stage_at: databaseNow }
+              : {}),
+          }).where(and(
+            eq(generated_resumes.id, locked.id),
+            eq(generated_resumes.user_id, userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+          )).returning({ id: generated_resumes.id });
+          if (!updated) throw new Error('UNVERIFIED_LEGACY_WRITE_CONFLICT');
+          return { kind: 'resolved' as const, review: decision.review };
+        }
         const claimId = current.submission_claim_id;
         if (!claimId) return { kind: 'authority_missing' as const };
         const events = (await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx }))
@@ -5264,11 +5317,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const safety = submissionAttemptRetrySafety(events);
         if (safety.kind !== 'blocked_unverified') return { kind: 'authority_conflict' as const };
         const binding = submissionAttemptBindingFromEvent(opening);
-        const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
-        const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
-        const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
-        if (Number.isNaN(databaseNow.getTime())) throw new Error('Database outcome clock was unavailable');
-        const now = databaseNow.toISOString();
         const resolved = {
           ...pending,
           resolution: parsed.data.found ? 'sent' as const : 'not_sent' as const,
