@@ -240,6 +240,24 @@ export type ManagedSubmitOutcome = {
    * way forever with nobody able to learn why. Evidence for a person resolving an unverified
    * press; never the thing a verdict rests on, because analytics POSTs are write-shaped too. */
   network: SubmitNetworkEntry[] | null;
+  /* WHETHER STRATUS'S OWN NETWORK WATCH (armSubmitNetworkWatch, stratus-browser-cloud) SAW A SUBMIT
+   * REQUEST LEAVE THE BROWSER AT ALL, distinct from whether one is present in `network` above:
+   * `network` can be null or empty simply because this runner predates network capture, or because
+   * the capture window missed it, and neither of those is evidence the request was never sent. This
+   * field is the positive-or-negative claim armSubmitNetworkWatch itself makes after watching the
+   * click: true once it observed a matching request (whether or not `network` above also carries the
+   * entry), false when it watched the click and specifically saw NO request reach the bound submit
+   * endpoint before its window closed (the click fired, nothing left the browser - a disabled
+   * button, a client-side validation trap, or a JS error in the click handler), and null (the
+   * default, same reasoning as `pending` above) when no runner has reported this yet.
+   *
+   * unverifiedSubmissionReason uses this to choose among the three things that can be true about a
+   * pending Workable submit: the request was never issued (this field false), it was issued and is
+   * unanswered (this field true or null, together with `pending`/a status-less network entry), or it
+   * was issued and answered with a non-success status (a `network` entry with a numeric `status`).
+   * ASSUMED SHAPE for the stratus-browser-cloud counterpart: a boolean `submit_request_seen` field
+   * alongside `network` on the same `submitOutcome` object read here. */
+  submitRequestSeen: boolean | null;
 };
 
 export type SubmitNetworkEntry = {
@@ -325,6 +343,7 @@ export function readManagedSubmitOutcome(result: MaybeOutcome | null | undefined
     message: typeof value.message === 'string' ? value.message.slice(0, 1000) : null,
     formStillPresent: typeof value.formStillPresent === 'boolean' ? value.formStillPresent : null,
     pending: value.pending === true,
+    submitRequestSeen: typeof value.submit_request_seen === 'boolean' ? value.submit_request_seen : null,
     network: readSubmitNetwork(value.network),
   };
 }
@@ -1456,6 +1475,26 @@ export function pressReachedOnlyChallengePlatform(
   return challenged;
 }
 
+/* CASE (c) OF THE THREE-WAY PENDING SENTENCE (see unverifiedSubmissionReason below): the LAST
+ * network entry that came back with a real numeric status at all, regardless of which host it went
+ * to - deliberately looser than pressReachedOnlyChallengePlatform and boundEmployerSubmitNetworkEntry
+ * above, both of which only ever narrow toward a VERDICT (a machine decision this system acts on).
+ * This is evidence inside a sentence a person still has to read and answer, never a verdict, so it
+ * is allowed to name "some request came back with some status" even when that request cannot be
+ * proven to be the posting's own bound submit call. readSubmitNetwork already normalises a status
+ * under 100 (0, a network error/CORS block/abort) to null, so a non-null return here is always a
+ * real HTTP response. */
+function lastDefiniteNetworkStatus(network: readonly SubmitNetworkEntry[] | null | undefined): number | null {
+  if (!network) return null;
+  for (let i = network.length - 1; i >= 0; i -= 1) {
+    const status = network[i]!.status;
+    // A 2xx/3xx is the success shape this whole sentence is contrasting against - naming "status
+    // 204" as "not the success answer" would be a false claim about the one status that IS one.
+    if (typeof status === 'number' && (status < 200 || status >= 400)) return status;
+  }
+  return null;
+}
+
 /* THE TWO SENTENCES FOR AN ATTEMPT THAT NEVER PRESSED ANYTHING.
  *
  * Every arm of unverifiedSubmissionReason asserts a press, and its cause vocabulary has no "never
@@ -1528,6 +1567,10 @@ export function unverifiedSubmissionReason(input: {
    * human-verification widget is stronger, more specific evidence than a disabled button, and the
    * two are not expected to coexist on the same page anyway. */
   pending?: boolean;
+  /* See ManagedSubmitOutcome.submitRequestSeen. Asked ahead of `pending` and the network-status read
+   * below: a network watch that positively saw NO request leave the browser is stronger, more
+   * specific evidence than either "no status came back" or "no network array was captured at all". */
+  submitRequestSeen?: boolean | null;
 }): string {
   /* ASKED FIRST, ahead of every cause arm, because no cause can outrank it. The causes below are
    * all descriptions of how a press ended; if the ledger says no press was made, none of them
@@ -1552,6 +1595,19 @@ export function unverifiedSubmissionReason(input: {
       + 'release this saved application. The filled-form proof and every next action stay in this '
       + 'dashboard.';
   }
+  /* CASE (a) OF THREE: THE SUBMIT REQUEST WAS NEVER ISSUED. Stronger, more specific evidence than
+   * `pending` or a missing/status-less network entry: armSubmitNetworkWatch positively watched the
+   * click and saw nothing leave the browser toward the employer, rather than simply not having
+   * captured anything. Ended with the same "It is not there" call the challenge branch above uses,
+   * not the two-way ask below, because a click that never produced a request is as strong a claim
+   * that nothing went through as a human-verification wall is. */
+  if (input.cause === 'no_confirmation_state' && input.submitRequestSeen === false) {
+    return 'Litos pressed Send, but no request ever left the browser toward the employer’s server: '
+      + 'the click registered, and nothing was sent, so this application very likely did not go '
+      + 'through. Litos cannot claim a receipt for a request that was never made. Choose “It is not '
+      + 'there” below to record that nothing was sent and release this saved application. The '
+      + 'filled-form proof and every next action stay in this dashboard.';
+  }
   /* THE HONEST VERSION OF "NO CONFIRMATION STATE": the page had not finished answering, not that
    * the press produced nothing to wait for. Same next step as the generic sentence below - she still
    * has to look and say what she found - because a still-pending request can resolve either way
@@ -1565,14 +1621,27 @@ export function unverifiedSubmissionReason(input: {
       + 'by hand in the meantime, because two applications to the same posting count against you and '
       + 'cannot be taken back.';
   }
-  const what = input.cause === 'run_timed_out'
-    ? 'Litos pressed Send and the secure browser was cut off before the employer’s answer came back, '
-      + 'so it does not know whether this application went through.'
-    : input.cause === 'provider_error'
-      ? 'Litos pressed Send and the secure browser failed before it could read the employer’s answer, '
-        + 'so it does not know whether this application went through.'
-      : 'Litos pressed Send and the page never showed a confirmation it could read, so it does not '
-        + 'know whether this application went through.';
+  /* CASE (c) OF THREE: THE REQUEST WAS ISSUED AND ANSWERED, WITH A STATUS THE PAGE ITSELF NEVER
+   * SURFACED. A definite non-success status is real, specific evidence that something other than a
+   * quiet success happened - but it is not proof of a refusal (a proven refusal takes the separate
+   * 'employer_refused' verdict and never reaches this function at all), so the ending stays the
+   * two-way ask rather than the "It is not there" call the two branches above use. */
+  const answeredStatus = input.cause === 'no_confirmation_state'
+    ? lastDefiniteNetworkStatus(input.network)
+    : null;
+  const what = answeredStatus !== null
+    ? `Litos pressed Send, and the request came back from the employer’s server with status `
+      + `${answeredStatus} - not the success answer a confirmation depends on - but the page itself `
+      + 'never showed anything Litos could read, so it does not know whether this application went '
+      + 'through.'
+    : input.cause === 'run_timed_out'
+      ? 'Litos pressed Send and the secure browser was cut off before the employer’s answer came '
+        + 'back, so it does not know whether this application went through.'
+      : input.cause === 'provider_error'
+        ? 'Litos pressed Send and the secure browser failed before it could read the employer’s '
+          + 'answer, so it does not know whether this application went through.'
+        : 'Litos pressed Send and the page never showed a confirmation it could read, so it does '
+          + 'not know whether this application went through.';
   /* What the page said travels on the record (unverified_submission.observed_page_text), never
    * inside this sentence: the dashboard passes attention_reason through its technical-error
    * filter, and an observed "Internal Server Error" or "HTTP 502" replaced the whole warning with

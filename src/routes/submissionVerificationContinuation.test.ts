@@ -40,6 +40,42 @@ test('a held managed claim retrieves its exact terminal result before any relaun
   assert.doesNotMatch(recovery, /runManagedBrowser\(|continueManagedBrowser(?:WithAccountFence)?\(/);
 });
 
+/* THE PONY.AI GAP ON THE ASYNC RECOVERY PATH: recoverManagedSubmissionTerminalResult's own
+ * persistUnverified used to hardcode "Litos could not prove the final employer result..." for
+ * EVERY unverified fold, even once it had read a real ManagedSubmitOutcome (with its `pending` flag)
+ * off the recovered result a few lines later. A still-pending Workable "Submitting…" button folded
+ * through this path got the wrong, generic sentence the same way the synchronous path's did before
+ * its own fix - the honest "still showing Submitting…" sentence never had a way to reach here. */
+test('the async recovery fold computes its unverified sentence from the recovered outcome, pending included', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const recoveryStart = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
+  const claimStart = runner.indexOf('async function claimSubmission(', recoveryStart);
+  const recovery = runner.slice(recoveryStart, claimStart);
+  assert.ok(recoveryStart > 0 && claimStart > recoveryStart);
+
+  const persistStart = recovery.indexOf('const persistUnverified = async (');
+  const persistEnd = recovery.indexOf('let terminal;', persistStart);
+  const persist = recovery.slice(persistStart, persistEnd);
+  assert.ok(persistStart >= 0 && persistEnd > persistStart);
+  // The generic sentence must be reached only when there is no outcome to reason from - never
+  // unconditionally, which is exactly the bug: it used to be the ONLY sentence this closure could
+  // produce, no matter what readManagedSubmitOutcome(result) below had already read.
+  assert.match(persist, /const attentionReason = outcome\s*\n\s*\? unverifiedSubmissionReason\(/);
+  assert.match(persist, /pending: outcome\.pending === true/);
+  assert.match(persist, /: 'Litos could not prove the final employer result/);
+
+  // Both call sites reached AFTER the outcome is read (readManagedSubmitOutcome(result) below) must
+  // actually pass it through, or the fix above is wired to a closure argument nothing ever supplies.
+  const afterOutcomeRead = recovery.slice(recovery.indexOf('const outcome = readManagedSubmitOutcome(result);'));
+  const proofCatch = afterOutcomeRead.slice(
+    afterOutcomeRead.indexOf('} catch (error) {'),
+    afterOutcomeRead.indexOf('if (challenge) {'),
+  );
+  assert.match(proofCatch, /persistUnverified\(\s*\n\s*error instanceof Error[\s\S]*?\n\s*outcome,\s*\n\s*\);/);
+  const verdictFold = afterOutcomeRead.slice(afterOutcomeRead.indexOf('const verdict = exactManagedSubmitVerdict('));
+  assert.match(verdictFold, /persistUnverified\(\s*\n\s*`The recovered managed result was \$\{verdict\.kind\}`,\s*\n\s*\[\],\s*\n\s*terminal\.resultId,\s*\n\s*outcome,\s*\n\s*\);/);
+});
+
 test('a lost initial challenge response enters the durable continuation state before acknowledgement', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = runner.indexOf('async function recoverManagedInitialSecurityCodeChallenge(');

@@ -1266,6 +1266,108 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
     assert.match(reason, /human-verification challenge/);
     assert.doesNotMatch(reason, /still showing/);
   });
+
+  /* THE THREE-WAY SENTENCE: whether Stratus's own network watch says a Workable submit request (a)
+   * never left the browser, (b) is still pending an answer, or (c) came back with a definite,
+   * non-success status the page itself never surfaced. Coordinates with the stratus-browser-cloud
+   * counterpart's armSubmitNetworkWatch, which is expected to report a boolean `submit_request_seen`
+   * on the same submitOutcome object `network` already travels on. */
+  describe('the three-way sentence for a pending submit tells her which of three things is true', () => {
+    test('(a) submitRequestSeen: false says the request never left the browser, and asks for a definite answer', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        submitRequestSeen: false,
+      });
+      assert.match(reason, /no request ever left the browser/);
+      assert.match(reason, /It is not there/);
+      assert.doesNotMatch(reason, /still showing/);
+      assert.doesNotMatch(reason, /tell Litos which you found/i);
+    });
+
+    test('(a) outranks a status read off the network array, because it is stronger evidence', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        submitRequestSeen: false,
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 422 }],
+      });
+      assert.match(reason, /no request ever left the browser/);
+      assert.doesNotMatch(reason, /status 422/);
+    });
+
+    test('(b) pending outranks a network status - "still waiting" is the more specific, more recent fact', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        pending: true,
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 500 }],
+      });
+      assert.match(reason, /still showing/);
+      assert.doesNotMatch(reason, /status 500/);
+    });
+
+    test('(c) a definite non-success status is named when nothing stronger applies', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        portalUrl: 'https://apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply/',
+        cause: 'no_confirmation_state',
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/BA5FFDBC71/apply', status: 500 }],
+      });
+      assert.match(reason, /status 500/);
+      assert.match(reason, /not the success answer a confirmation depends on/);
+      // Still a two-way ask, unlike (a): a definite status is real evidence but not proof of a
+      // refusal (a proven one takes the separate 'employer_refused' verdict, never this function).
+      assert.match(reason, /tell Litos which you found/i);
+    });
+
+    test('(c) a 2xx/3xx status is never named as "not the success answer" - it is one', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 204 }],
+      });
+      assert.doesNotMatch(reason, /status 204/);
+      assert.match(reason, /never showed a confirmation it could read/);
+    });
+
+    test('(c) reads the LAST status with a real answer, skipping a later transport failure (null status)', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        network: [
+          { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 503 },
+          { method: 'GET', url: 'https://apply.workable.com/analytics', status: null, failure: 'aborted' },
+        ],
+      });
+      assert.match(reason, /status 503/);
+    });
+
+    test('with no evidence at all, the generic sentence is unchanged', () => {
+      const reason = unverifiedSubmissionReason({ atsName: 'workable', cause: 'no_confirmation_state' });
+      assert.match(reason, /never showed a confirmation it could read/);
+    });
+  });
+});
+
+describe('readManagedSubmitOutcome parses submitRequestSeen defensively', () => {
+  test('true and false are read through', () => {
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null, submit_request_seen: true },
+    })?.submitRequestSeen, true);
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null, submit_request_seen: false },
+    })?.submitRequestSeen, false);
+  });
+
+  test('absent, or a non-boolean value, normalises to null - not evidence either way', () => {
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null },
+    })?.submitRequestSeen, null);
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null, submit_request_seen: 'yes' },
+    })?.submitRequestSeen, null);
+  });
 });
 
 describe('the state has a way out of it', () => {
