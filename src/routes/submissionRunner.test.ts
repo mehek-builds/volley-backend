@@ -3514,8 +3514,15 @@ test('every managed provider start, continuation POST, and direct session creati
   const fenceEnd = runnerSource.indexOf('\n}', fenceStart) + 2;
   const fence = runnerSource.slice(fenceStart, fenceEnd);
   assert.ok(fenceStart > 0);
+  /* Destructured, not forwarded as a bare `...args` spread, since this wrapper now also merges the
+   * process-wide shutdown signal (lib/managedRunLifecycle.ts) into the options object every call
+   * carries - see the file header on getManagedRunShutdownSignal for why a SIGTERM has to be able
+   * to unstick this exact fetch. The property this test polices is unchanged: the call still lands
+   * INSIDE withProviderCallFence, never beside or before it. */
   assert.ok(fence.indexOf('withProviderCallFence(userId,')
-    < fence.indexOf('runManagedBrowser(...args)'));
+    < fence.indexOf('runManagedBrowser(portalUrl, actions,'));
+  assert.ok(fence.includes('externalSignal: getManagedRunShutdownSignal()'),
+    'a SIGTERM must be able to abort an in-flight prepare-path stratus call');
   assert.equal(
     [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
     1,
@@ -3536,6 +3543,8 @@ test('every managed provider start, continuation POST, and direct session creati
     < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
   assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
     < continuationFence.indexOf('return continueManagedBrowser('));
+  assert.ok(continuationFence.includes('externalSignal: getManagedRunShutdownSignal()'),
+    'a SIGTERM must be able to abort an in-flight security-code continuation call too');
   assert.equal(
     [...runnerSource.matchAll(/\bcontinueManagedBrowser\(/g)].length,
     1,

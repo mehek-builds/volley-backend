@@ -871,3 +871,125 @@ test('/health probes the model through an injectable call, once per burst', asyn
     await app.close();
   }
 });
+
+test('the managed-run acceptance gate refuses only the two routes that start a new run, before auth', async () => {
+  /* Modelled on "submission cutover runs before auth" directly above: the property under test is
+   * identical in shape - a 503 has to win over the route's own 401, proving this hook runs at
+   * onRequest, ahead of requireAuth - but the trigger and the scope are this feature's own
+   * (managedRunsAcceptingNewWork, not SUBMISSION_CUTOVER_MODE), and it is far narrower: everything
+   * except the two doors a brand-new managed run walks in through stays open, including every
+   * OTHER submission and application route. */
+  const {
+    buildApp,
+    releaseManagedRunsBeforeExit,
+  } = await import('./index');
+  const {
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+  const applicationId = '11111111-2222-4333-8444-555555555555';
+  const app = await buildApp(HEALTH_TEST_OPTIONS);
+  await app.ready();
+  try {
+    const beforeShutdown = await app.inject({
+      method: 'POST',
+      url: '/applications/managed-prepare',
+    });
+    assert.equal(beforeShutdown.statusCode, 401, 'unaffected before any shutdown signal');
+
+    // Flip the flag the same way the SIGTERM handler does, without touching a real registry entry
+    // or a real database - the release loop below finds nothing registered and returns at once.
+    await releaseManagedRunsBeforeExit({ info() {}, warn() {}, error() {} });
+
+    const prepare = await app.inject({ method: 'POST', url: '/applications/managed-prepare' });
+    assert.equal(prepare.statusCode, 503);
+    assert.equal(prepare.json().code, 'MANAGED_RUN_SHUTDOWN');
+    assert.equal(prepare.headers['cache-control'], 'no-store');
+    assert.equal(prepare.headers['retry-after'], '5');
+
+    const submitRequest = await app.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/submit-request`,
+    });
+    assert.equal(submitRequest.statusCode, 503);
+    assert.equal(submitRequest.json().code, 'MANAGED_RUN_SHUTDOWN');
+
+    // Everything else keeps its ordinary auth boundary - the gate named exactly two routes and
+    // must not have fenced anything wider.
+    for (const request of [
+      { method: 'GET' as const, url: '/applications/board' },
+      { method: 'GET' as const, url: `/applications/${applicationId}/submission` },
+      { method: 'POST' as const, url: `/applications/${applicationId}/submission/approve` },
+      { method: 'PUT' as const, url: `/applications/${applicationId}/review/answers` },
+    ]) {
+      const response = await app.inject(request);
+      assert.equal(response.statusCode, 401, `${request.method} ${request.url} must stay open`);
+    }
+
+    // Not asserting 200: this suite's DATABASE_URL is unreachable, so /health legitimately answers
+    // 503 of its OWN accord (see "/health identifies the deployable service and revision contract"
+    // above) regardless of this gate. What this gate must not do is add ITS OWN opinion to a route
+    // it was never supposed to touch - so assert the absence of this feature's code, not a status
+    // code /health already has its own independent contract for.
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    assert.notEqual(health.json().code, 'MANAGED_RUN_SHUTDOWN', 'a public, unauthenticated route is unaffected');
+  } finally {
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+    await app.close();
+  }
+});
+
+test('releaseManagedRunsBeforeExit is bounded by its deadline, not by how long a release takes', async () => {
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    registerManagedRun,
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunRegistryForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  registerManagedRun({ packetId: 'packet-never-resolves', userId: 'user-1', phase: 'filling' });
+  let releaseWasCalled = false;
+  const neverResolvingRelease = (() => {
+    releaseWasCalled = true;
+    return new Promise(() => {
+      /* deliberately never settles - the whole point is proving the caller does not wait for it */
+    });
+  }) as unknown as typeof import('./lib/managedRunRestartRelease')['releaseOrphanedManagedRun'];
+
+  try {
+    const startedAt = Date.now();
+    await releaseManagedRunsBeforeExit(
+      { info() {}, warn() {}, error() {} },
+      { release: neverResolvingRelease, deadlineMs: 50 },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(releaseWasCalled, true, 'the release attempt must actually have been made');
+    assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('releaseManagedRunsBeforeExit stops accepting new work and aborts the shutdown signal even with nothing registered', async () => {
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    getManagedRunShutdownSignal,
+    managedRunsAcceptingNewWork,
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  try {
+    assert.equal(managedRunsAcceptingNewWork(), true);
+    await releaseManagedRunsBeforeExit({ info() {}, warn() {}, error() {} });
+    assert.equal(managedRunsAcceptingNewWork(), false);
+    assert.equal(getManagedRunShutdownSignal().aborted, true);
+  } finally {
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
