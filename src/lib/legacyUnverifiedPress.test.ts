@@ -16,8 +16,11 @@ import { applicantFoundSubmissionReceiptText } from './authoritativeSubmissionPr
 import { isLegacyUnverifiedAttemptReason } from './duplicateApplication';
 import {
   LEGACY_PRESS_NOT_THERE_REASON,
+  ledgerUnverifiedPressRecord,
   legacyUnverifiedPressDecision,
   legacyUnverifiedSubmissionRecord,
+  packetLedgerSummary,
+  readPacketAttempts,
 } from './legacyUnverifiedPress';
 import type { SubmissionAttemptEventRecord } from './submissionAttemptLedger';
 
@@ -176,6 +179,7 @@ describe('her answer over the pre-ledger press', () => {
     assert.equal(decision.kind, 'resolve');
     if (decision.kind !== 'resolve') return;
     assert.deepEqual(decision.closeOpenings, [], 'her word that it is there closes nothing as not sent');
+    assert.equal(decision.confirmOpening, null, 'a reconstructed open is not a press to confirm');
     assert.equal(decision.pipelineStage, 'applied');
     const { review } = decision;
     assert.equal(review.status, 'submitted');
@@ -190,11 +194,11 @@ describe('her answer over the pre-ledger press', () => {
     });
   });
 
-  test('a ledger fact that the boundary was reached outranks the prose, for either answer', () => {
+  test('a ledger press with no lease and no outcome is answered, not refused', () => {
     const pressed = event({ id: 'p1', event_id: 'p1', event_kind: 'press_observed', source: 'managed_browser', evidence_code: 'submit_pressed' });
     for (const found of [true, false]) {
       const decision = legacyUnverifiedPressDecision({ current, pending, found, events: [event({}), pressed], now: NOW });
-      assert.deepEqual(decision, { kind: 'authority_conflict' }, `found=${found}`);
+      assert.equal(decision.kind, 'resolve', `found=${found}: a press with no live lease and no confirmation is hers to answer`);
     }
   });
 
@@ -213,20 +217,168 @@ describe('the routes read the same record', () => {
     const source = await readFile('src/routes/applications.ts', 'utf8');
     assert.match(
       source,
-      /const pending = current\.unverified_submission \?\? legacyUnverifiedSubmissionRecord\(current\);/,
-      'the resolution route reads the prose where the record is absent',
+      /const pending = current\.unverified_submission\s*\?\? legacyUnverifiedSubmissionRecord\(current\)\s*\?\? \(packetEvents \? ledgerUnverifiedPressRecord\(current, packetEvents\) : null\);/,
+      'the resolution route reads the prose, then the ledger, where the record is absent',
     );
     assert.match(
       source,
-      /if \(pending\.legacy_prose\) \{[\s\S]*?legacyUnverifiedPressDecision\(\{/,
-      'the legacy arm decides through the one tested function',
+      /if \(pending\.legacy_prose \|\| pending\.ledger_attempt\) \{[\s\S]*?submissionBoundaryAuthorization\(userId, attempt\.attemptId, \{ executor: tx \}\)[\s\S]*?legacyUnverifiedPressDecision\(\{[\s\S]*?leases,/,
+      'the packet-level arm reads every pressed attempt’s lease and decides through the one tested function',
     );
+    assert.match(
+      source,
+      /kind: 'packet_press_refused' as const, decision, ledger: packetLedgerSummary\(events\)/,
+      'a refusal carries the ledger it is naming',
+    );
+    assert.match(source, /code: 'UNVERIFIED_PACKET_PRESS_REFUSED',/);
+    assert.match(
+      source,
+      /eventId: submissionAttemptEventId\(decision\.confirmOpening\.attempt_id, 'submission_confirmed', 'applicant-found-submission'\)/,
+      '"found it" over one press confirms that press in the ledger',
+    );
+    assert.match(source, /'\/applications\/:id\/submission\/attempts',/, 'the ledger is readable by its owner');
     const getRoute = source.slice(source.indexOf("'/applications/:id/submission',"));
     const getBody = getRoute.slice(0, getRoute.indexOf('return reply.send({'));
     assert.match(
       getBody,
-      /const legacyUnverified = legacyUnverifiedSubmissionRecord\(review\);\s*if \(legacyUnverified\) review = \{ \.\.\.review, unverified_submission: legacyUnverified \};/,
-      'the read publishes the reading in the field the dashboard card reads',
+      /const legacyUnverified = legacyUnverifiedSubmissionRecord\(review\)\s*\?\? \(review\.status === 'needs_attention'[\s\S]*?ledgerUnverifiedPressRecord\(review, await submissionAttemptEventsForPacket\([\s\S]*?if \(legacyUnverified\) review = \{ \.\.\.review, unverified_submission: legacyUnverified \};/,
+      'the read publishes either reading in the field the dashboard card reads',
     );
+  });
+});
+
+/* THE PRESS THE ROW FORGOT. Fixture: Notion a4b7295c on 2026-09-05 - refused for "already pressed
+ * Send on ... at Notion" with no record on the row and no claim, so only the ledger knows. */
+describe('the press the row forgot is read from the ledger and answered', () => {
+  const NOTION_URL = 'https://jobs.ashbyhq.com/notion/3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c/application';
+  const PRESSED_AT = new Date('2026-09-04T22:40:12.000Z');
+  const pressedAttempt = 'c2222222-c4cc-414d-9a44-c7943d8effb9';
+  /* One attempt's events share their binding (run, claim, packet version, posting), as the ledger's
+   * own consistency rule requires; a fixture that forgets that classifies as invalid_sequence. */
+  const notionEvent = (overrides: Partial<SubmissionAttemptEventRecord>) => event({
+    attempt_id: pressedAttempt,
+    source: 'managed_browser',
+    portal_url: NOTION_URL,
+    company_name: 'Notion',
+    role: 'Software Engineer Intern (Summer 2027)',
+    company_role: 'notion::software engineer intern (summer 2027)',
+    job_id: '3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c',
+    submission_run_id: 'run-notion',
+    submission_claim_id: pressedAttempt,
+    packet_version: 'e'.repeat(64),
+    ...overrides,
+  });
+  const pressedEvents = [
+    notionEvent({ id: 'n1', event_id: 'n1', observed_at: new Date('2026-09-04T22:39:00.000Z'), created_at: new Date('2026-09-04T22:39:00.000Z') }),
+    notionEvent({ id: 'n2', event_id: 'n2', event_kind: 'boundary_authorized', evidence_code: 'final_submission_boundary', boundary_activation_id: 'act-1', boundary_expires_at: new Date('2026-09-04T22:45:00.000Z'), observed_at: new Date('2026-09-04T22:40:00.000Z'), created_at: new Date('2026-09-04T22:40:00.000Z') }),
+    notionEvent({ id: 'n3', event_id: 'n3', event_kind: 'press_observed', evidence_code: 'submit_pressed', observed_at: PRESSED_AT, created_at: PRESSED_AT }),
+  ];
+  const notionRow = deepgramLegacyRow({
+    portal_url: NOTION_URL,
+    attention_reason: 'Not sent: Litos already pressed Send on Software Engineer Intern (Summer 2027) at Notion and could not confirm what came back.',
+    submission_run_id: undefined,
+  });
+
+  test('the newest press without an outcome names the record', () => {
+    const record = ledgerUnverifiedPressRecord(notionRow, pressedEvents);
+    assert.deepEqual(record, {
+      at: PRESSED_AT.toISOString(),
+      cause: 'no_confirmation_state',
+      portal_url: NOTION_URL,
+      submission_run_id: 'run-notion',
+      ledger_attempt: pressedAttempt,
+    });
+    assert.equal(legacyUnverifiedSubmissionRecord(notionRow), null, 'the duplicate sentence is not the legacy sentence');
+  });
+
+  test('nothing is read where nothing pressed, where the row already knows, or where a confirmation stands', () => {
+    assert.equal(ledgerUnverifiedPressRecord(notionRow, [event({})]), null, 'a reconstructed open is not a press');
+    assert.equal(ledgerUnverifiedPressRecord(notionRow, []), null);
+    assert.equal(
+      ledgerUnverifiedPressRecord(deepgramLegacyRow({ unverified_submission: { at: NOW, cause: 'run_timed_out' } }), pressedEvents),
+      null,
+      'a row that carries its own record is answered on that record',
+    );
+    const confirmed = [...pressedEvents, notionEvent({ id: 'n4', event_id: 'n4', event_kind: 'submission_confirmed', evidence_code: 'managed_application_receipt', observed_at: new Date('2026-09-04T22:41:00.000Z'), created_at: new Date('2026-09-04T22:41:00.000Z') })];
+    assert.equal(ledgerUnverifiedPressRecord(notionRow, confirmed), null, 'a confirmed attempt is owed a projection, not a question');
+  });
+
+  test('"it is not there" closes the press once its lease has lapsed', () => {
+    const pending = ledgerUnverifiedPressRecord(notionRow, pressedEvents)!;
+    const lapsed = new Map([[pressedAttempt, { active: false, expiresAt: '2026-09-04T22:45:00.000Z' }]]);
+    const decision = legacyUnverifiedPressDecision({ current: notionRow, pending, found: false, events: pressedEvents, leases: lapsed, now: NOW });
+    assert.equal(decision.kind, 'resolve');
+    if (decision.kind !== 'resolve') return;
+    assert.deepEqual(decision.closeOpenings.map((opening) => opening.attempt_id), [pressedAttempt]);
+    assert.equal(decision.confirmOpening, null);
+    assert.equal(decision.review.unverified_submission?.resolution, 'not_sent');
+    assert.equal(decision.review.unverified_submission?.ledger_attempt, pressedAttempt);
+  });
+
+  test('a live employer lease is waited for, exactly as the row-bound arm waits', () => {
+    const pending = ledgerUnverifiedPressRecord(notionRow, pressedEvents)!;
+    const live = new Map([[pressedAttempt, { active: true, expiresAt: '2026-09-05T03:30:00.000Z' }]]);
+    for (const found of [true, false]) {
+      assert.deepEqual(
+        legacyUnverifiedPressDecision({ current: notionRow, pending, found, events: pressedEvents, leases: live, now: NOW }),
+        { kind: 'lease_active', expiresAt: '2026-09-05T03:30:00.000Z' },
+        `found=${found}`,
+      );
+    }
+  });
+
+  test('"I found it there" confirms the one press, and refuses to guess between two', () => {
+    const pending = ledgerUnverifiedPressRecord(notionRow, pressedEvents)!;
+    const one = legacyUnverifiedPressDecision({ current: notionRow, pending, found: true, events: pressedEvents, now: NOW });
+    assert.equal(one.kind, 'resolve');
+    if (one.kind !== 'resolve') return;
+    assert.equal(one.confirmOpening?.attempt_id, pressedAttempt);
+    assert.equal(one.review.status, 'submitted');
+    assert.equal(one.pipelineStage, 'applied');
+    const secondPress = 'd3333333-c4cc-414d-9a44-c7943d8effb9';
+    const two = [
+      ...pressedEvents,
+      notionEvent({ id: 'm1', event_id: 'm1', attempt_id: secondPress, submission_claim_id: secondPress, submission_run_id: 'run-notion-2', observed_at: new Date('2026-09-05T01:00:00.000Z'), created_at: new Date('2026-09-05T01:00:00.000Z') }),
+      notionEvent({ id: 'm2', event_id: 'm2', attempt_id: secondPress, submission_claim_id: secondPress, submission_run_id: 'run-notion-2', event_kind: 'press_observed', evidence_code: 'submit_pressed', observed_at: new Date('2026-09-05T01:01:00.000Z'), created_at: new Date('2026-09-05T01:01:00.000Z') }),
+    ];
+    const twoPending = ledgerUnverifiedPressRecord(notionRow, two)!;
+    assert.equal(twoPending.ledger_attempt, secondPress, 'the newest press names the record');
+    assert.deepEqual(
+      legacyUnverifiedPressDecision({ current: notionRow, pending: twoPending, found: true, events: two, now: NOW }),
+      { kind: 'authority_conflict', conflict: 'ambiguous_press' },
+    );
+    const notThere = legacyUnverifiedPressDecision({ current: notionRow, pending: twoPending, found: false, events: two, now: NOW });
+    assert.equal(notThere.kind, 'resolve');
+    if (notThere.kind === 'resolve') {
+      assert.deepEqual(notThere.closeOpenings.map((opening) => opening.attempt_id).sort(), [pressedAttempt, secondPress].sort(), '"not there" closes both presses');
+    }
+  });
+
+  test('a confirmation anywhere on the packet refuses either answer', () => {
+    const confirmed = [...pressedEvents, notionEvent({ id: 'n4', event_id: 'n4', event_kind: 'submission_confirmed', evidence_code: 'managed_application_receipt', observed_at: new Date('2026-09-04T22:41:00.000Z'), created_at: new Date('2026-09-04T22:41:00.000Z') })];
+    const pending = legacyUnverifiedSubmissionRecord(deepgramLegacyRow())!;
+    for (const found of [true, false]) {
+      assert.deepEqual(
+        legacyUnverifiedPressDecision({ current: deepgramLegacyRow(), pending, found, events: confirmed, now: NOW }),
+        { kind: 'authority_conflict', conflict: 'confirmed' },
+        `found=${found}`,
+      );
+    }
+  });
+
+  test('the ledger summary says what each attempt is, in order', () => {
+    const summary = packetLedgerSummary([...pressedEvents, event({})]);
+    assert.deepEqual(summary.map((attempt) => [attempt.attempt_id, attempt.source, attempt.safety]), [
+      ['a3578398-c4cc-414d-9a44-c7943d8effb9', 'legacy_backfill', 'blocked_unverified:opened'],
+      [pressedAttempt, 'managed_browser', 'blocked_unverified:pressed'],
+    ]);
+    assert.deepEqual(summary[1]!.events.map((entry) => entry.kind), ['attempt_opened', 'boundary_authorized', 'press_observed']);
+    assert.equal(readPacketAttempts(pressedEvents)[0]!.pressed, true);
+    /* A press whose sequence the ledger cannot fully validate is still a press: "a real or ambiguous
+       send", as the duplicate guard already reads it. */
+    const torn = [pressedEvents[0]!, event({ id: 'n3', event_id: 'n3', attempt_id: pressedAttempt, event_kind: 'press_observed', evidence_code: 'submit_pressed', observed_at: PRESSED_AT, created_at: PRESSED_AT })];
+    const tornReading = readPacketAttempts(torn)[0]!;
+    assert.equal(tornReading.safety.kind === 'blocked_unverified' && tornReading.safety.reason, 'invalid_sequence');
+    assert.equal(tornReading.pressed, true);
   });
 });

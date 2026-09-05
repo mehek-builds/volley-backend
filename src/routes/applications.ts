@@ -154,7 +154,13 @@ import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
 import { canonicalApplicationForNewPacketAttempt } from '../lib/canonicalPacketBinding';
-import { legacyUnverifiedPressDecision, legacyUnverifiedSubmissionRecord } from '../lib/legacyUnverifiedPress';
+import {
+  ledgerUnverifiedPressRecord,
+  legacyUnverifiedPressDecision,
+  legacyUnverifiedSubmissionRecord,
+  packetLedgerSummary,
+  readPacketAttempts,
+} from '../lib/legacyUnverifiedPress';
 import {
   appendSubmissionAttemptEvent,
   ATTEMPT_NEVER_REACHED_EMPLOYER_EVIDENCE,
@@ -4351,7 +4357,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * from `unverified_submission`; a pre-ledger row that refuses every later packet on its posting
        * never had one (lib/legacyUnverifiedPress.ts). Publish the reading here so the applicant can
        * answer on the row the refusal sends her to. Nothing is written by this read. */
-      const legacyUnverified = legacyUnverifiedSubmissionRecord(review);
+      const legacyUnverified = legacyUnverifiedSubmissionRecord(review)
+        ?? (review.status === 'needs_attention' && !review.unverified_submission && !review.receipt && !review.submitted_at
+          ? ledgerUnverifiedPressRecord(review, await submissionAttemptEventsForPacket(request.jwtPayload!.userId, row.id))
+          : null);
       if (legacyUnverified) review = { ...review, unverified_submission: legacyUnverified };
       let handoff_packet_valid = true;
       if ((review.status === 'filling' || review.status === 'needs_attention') && review.browser_session_id) {
@@ -4431,6 +4440,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ).map((question) => question.question),
         ...(await unattemptedPacketSubmissionAuthority(request.jwtPayload!.userId, row.id, review.status, request.log)),
       });
+    },
+  );
+
+  /* WHAT THE LEDGER SAYS. Read-only, hers only: every attempt on this packet with its events and the
+   * retry-safety reading the send gate and the duplicate guard actually decide from. The refusals
+   * those gates write name the ledger ("Litos already pressed Send on ..."); this is where the
+   * applicant, or the next session, can read the ledger they are naming. */
+  fastify.get(
+    '/applications/:id/submission/attempts',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const userId = request.jwtPayload!.userId;
+      const events = await submissionAttemptEventsForPacket(userId, row.id);
+      const leases: Record<string, { active: boolean; expires_at: string }> = {};
+      for (const attempt of readPacketAttempts(events)) {
+        if (!attempt.pressed) continue;
+        const boundary = await submissionBoundaryAuthorization(userId, attempt.attemptId);
+        if (boundary) leases[attempt.attemptId] = { active: boundary.active, expires_at: boundary.expiresAt };
+      }
+      return reply.send({ application_id: row.id, attempts: packetLedgerSummary(events), leases });
     },
   );
 
@@ -5262,7 +5293,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * guard reads that prose and refuses every later packet on the posting, and this route was
          * the one exit it named - which answered 409 not_waiting, because the record it reads was
          * never written. Read the prose as the record, so her answer has somewhere to land. */
-        const pending = current.unverified_submission ?? legacyUnverifiedSubmissionRecord(current);
+        const packetEvents = current.unverified_submission
+          ? null
+          : await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
+        const pending = current.unverified_submission
+          ?? legacyUnverifiedSubmissionRecord(current)
+          ?? (packetEvents ? ledgerUnverifiedPressRecord(current, packetEvents) : null);
         if (!pending) return { kind: 'not_waiting' as const, review: current };
         if (pending.resolution) return { kind: 'already_resolved' as const, review: current };
         const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
@@ -5270,16 +5306,39 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
         if (Number.isNaN(databaseNow.getTime())) throw new Error('Database outcome clock was unavailable');
         const now = databaseNow.toISOString();
-        if (pending.legacy_prose) {
-          const packetEvents = await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
+        if (pending.legacy_prose || pending.ledger_attempt) {
+          /* THE PACKET-LEVEL ANSWER. The row carries no claim, so her answer is decided over the
+           * packet's whole ledger (lib/legacyUnverifiedPress.ts): a confirmation anywhere refuses,
+           * a press under a live employer lease waits for it to lapse, and otherwise every attempt
+           * with no outcome is closed or the one press is confirmed, in this transaction. */
+          const events = packetEvents ?? await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
+          const leases = new Map<string, { active: boolean; expiresAt: string }>();
+          for (const attempt of readPacketAttempts(events)) {
+            if (!attempt.pressed) continue;
+            const boundary = await submissionBoundaryAuthorization(userId, attempt.attemptId, { executor: tx });
+            if (boundary) leases.set(attempt.attemptId, { active: boundary.active, expiresAt: boundary.expiresAt });
+          }
           const decision = legacyUnverifiedPressDecision({
             current,
             pending,
             found: parsed.data.found,
-            events: packetEvents,
+            events,
+            leases,
             now,
           });
-          if (decision.kind !== 'resolve') return { kind: decision.kind };
+          if (decision.kind === 'lease_active') return { kind: 'lease_active' as const, expiresAt: decision.expiresAt };
+          if (decision.kind !== 'resolve') {
+            return { kind: 'packet_press_refused' as const, decision, ledger: packetLedgerSummary(events) };
+          }
+          if (decision.confirmOpening) {
+            await appendSubmissionAttemptEvent({
+              ...submissionAttemptBindingFromEvent(decision.confirmOpening),
+              eventId: submissionAttemptEventId(decision.confirmOpening.attempt_id, 'submission_confirmed', 'applicant-found-submission'),
+              eventKind: 'submission_confirmed',
+              evidenceCode: 'applicant_found_submission',
+              observedAt: databaseNow,
+            }, { executor: tx });
+          }
           /* "Not there" closes every reconstructed attempt on this packet that never reached the
            * employer with the same proof the modern arm writes below, in this transaction, so the
            * ledger cannot keep refusing at the duplicate gate what the row now says was never sent. */
@@ -5461,6 +5520,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           error: 'The current employer send window is still active. Wait for it to close before choosing No.',
           code: 'SUBMISSION_AUTHORIZATION_ACTIVE',
           activation_expires_at: result.expiresAt,
+        });
+      }
+      if (result.kind === 'packet_press_refused') {
+        const { decision } = result;
+        return reply.status(409).send({
+          error: decision.kind === 'authority_conflict' && decision.conflict === 'confirmed'
+            ? 'Litos’s ledger already holds an employer confirmation for this application, so there is no '
+              + 'unverified press to answer here. Litos did not change the application.'
+            : decision.kind === 'authority_conflict'
+              ? 'Litos’s ledger holds more than one press on this application and cannot tell which one '
+                + 'the employer has, so it cannot record that you found it. Litos did not change the application.'
+              : 'Litos has no employer page to record this application against. Litos did not change the application.',
+          code: 'UNVERIFIED_PACKET_PRESS_REFUSED',
+          conflict: decision.kind === 'authority_conflict' ? decision.conflict : 'no_portal_url',
+          ledger: result.ledger,
         });
       }
       if (result.kind === 'authority_missing' || result.kind === 'authority_conflict') {
