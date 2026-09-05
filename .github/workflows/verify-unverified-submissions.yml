@@ -1,0 +1,89 @@
+# Litos verifies an unverified send on its own (lib/submissionVerificationSweep.ts).
+#
+# A press whose page never showed a receipt parks the packet at unverified_submission. Every half
+# hour this calls /internal/verify-unverified-submissions, which for each such packet: re-reads the
+# stored submit response (a bound 2xx on the posting's own endpoint is the employer accepting and
+# files the packet as sent); releases what the runner's own record proves never left the browser
+# (no bound request issued, or challenge-vendor traffic only) once the send lease has expired; opens
+# the employer's page read-only and records what it saw as evidence on the card; and runs the inbox
+# reconciler for the accounts it touched. Nothing is asked of the applicant. Idempotent by
+# construction: every write is guarded by the ledger's own safety recomputation.
+name: verify-unverified-submissions
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+# One run at a time. Each resolve is idempotent (a packet already submitted is left exactly as it
+# is), so overlap is safe, but serialising keeps each run's counts legible.
+concurrency:
+  group: verify-unverified-submissions
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Worst case for the retry loop is 3 attempts x 300s (--max-time) plus two 15s backoffs,
+    # ~15.5 minutes. 20 leaves headroom without masking a genuinely stuck run for hours.
+    timeout-minutes: 20
+    steps:
+      - name: Run the unverified-submission verification sweep
+        env:
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          API_BASE: ${{ vars.LITOS_API_BASE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${INTERNAL_CRON_SECRET}" ] || [ -z "${API_BASE}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET and LITOS_API_BASE must both be set on this repository."
+            echo "They must match the Railway API production configuration."
+            exit 1
+          fi
+
+          # Retries only a connection that never reached the app - see the header comment for why
+          # curl's own --retry is wrong here. `if http_status=$(...)` is deliberate: a command used
+          # as an if-condition is exempt from `set -e`, so a failed connection attempt does not kill
+          # the script, it falls through to the retry/backoff below instead.
+          max_attempts=3
+          attempt=1
+          while true; do
+            if http_status=$(curl -sS \
+              --max-time 300 \
+              -o response.json \
+              -w '%{http_code}' \
+              -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+              "${API_BASE}/internal/verify-unverified-submissions?limit=100"); then
+              break
+            fi
+            if [ "${attempt}" -ge "${max_attempts}" ]; then
+              echo "::error::Could not reach ${API_BASE} after ${max_attempts} attempts - the connection never completed (DNS, TLS, or a refused/reset connection), so no response was ever received."
+              exit 1
+            fi
+            echo "Connection attempt ${attempt} did not reach ${API_BASE}; retrying in 15 seconds (${attempt}/${max_attempts})."
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+
+          echo "status=${http_status}"
+          cat response.json
+          echo
+
+          {
+            echo "### Unverified submission verification sweep"
+            echo ""
+            echo '```json'
+            cat response.json
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${http_status}" = 401 ] || [ "${http_status}" = 503 ]; then
+            echo "::error::Reconcile refused to run (HTTP ${http_status}) - check the cron secret in the Railway project."
+            exit 1
+          fi
+
+          if [ "${http_status}" != 200 ]; then
+            echo "::error::Reconcile call failed with unexpected status ${http_status}."
+            exit 1
+          fi

@@ -1213,7 +1213,7 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
     // The exact wording of the sentence packet 13bccb2d carried. A needs_attention packet that has
     // been claimed cannot be re-run, so this told her to do something that would 409.
     assert.doesNotMatch(reason, /before trying again/i);
-    assert.match(reason, /tell Litos which you found/i);
+    assert.match(reason, /Nothing is needed from you/i);
   });
 
   test('it says not to apply by hand in the meantime, and why', () => {
@@ -1247,7 +1247,7 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
     // Still tells her where to look and what a sent application looks like - the next step is
     // unchanged, only the diagnosis is corrected.
     assert.match(reason, /apply\.workable\.com\/pony-dot-ai\/j\/BA5FFDBC71\/apply/);
-    assert.match(reason, /tell Litos which you found/i);
+    assert.match(reason, /Nothing is needed from you/i);
   });
 
   test('pending is ignored for every cause other than no_confirmation_state', () => {
@@ -1280,9 +1280,9 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
         submitRequestSeen: false,
       });
       assert.match(reason, /no request ever left the browser/);
-      assert.match(reason, /It is not there/);
+      assert.match(reason, /release this saved application/);
       assert.doesNotMatch(reason, /still showing/);
-      assert.doesNotMatch(reason, /tell Litos which you found/i);
+      assert.doesNotMatch(reason, /Nothing is needed from you/i);
     });
 
     test('(a) outranks a status read off the network array, because it is stronger evidence', () => {
@@ -1318,7 +1318,7 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
       assert.match(reason, /not the success answer a confirmation depends on/);
       // Still a two-way ask, unlike (a): a definite status is real evidence but not proof of a
       // refusal (a proven one takes the separate 'employer_refused' verdict, never this function).
-      assert.match(reason, /tell Litos which you found/i);
+      assert.match(reason, /Nothing is needed from you/i);
     });
 
     test('(c) a 2xx/3xx status is never named as "not the success answer" - it is one', () => {
@@ -1792,10 +1792,10 @@ describe('the human-verification press sentence', () => {
       atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state', network: MEASURED,
     });
     assert.match(reason, /human-verification check instead of submitting/);
-    assert.match(reason, /Choose “It is not there”/);
+    assert.match(reason, /release this saved application on its own/);
     assert.match(reason, /stay in this dashboard/);
     assert.doesNotMatch(reason, /Open https:\/\//);
-    assert.doesNotMatch(reason, /Litos will send this one for you/);
+    assert.doesNotMatch(reason, /Nothing is needed from you/);
   });
 
   test('one request to the employer withdraws the claim, whatever else was spoken to', () => {
@@ -1806,7 +1806,7 @@ describe('the human-verification press sentence', () => {
       atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state', network: reached,
     });
     assert.doesNotMatch(reason, /human-verification check/);
-    assert.match(reason, /Litos will send this one for you/);
+    assert.match(reason, /Nothing is needed from you/);
   });
 
   test('no challenge platform means the ordinary sentence, and so does no record at all', () => {
@@ -1847,10 +1847,10 @@ describe('the challenge-on-screen sentence', () => {
       network: LEVER_PRESS, challengeOnScreen: true,
     });
     assert.match(reason, /put up a human-verification challenge/);
-    assert.match(reason, /Choose “It is not there”/);
+    assert.match(reason, /release this saved application on its own/);
     assert.match(reason, /stay in this dashboard/);
     assert.doesNotMatch(reason, /Open https:\/\//);
-    assert.doesNotMatch(reason, /Litos will send this one for you/);
+    assert.doesNotMatch(reason, /Nothing is needed from you/);
   });
 
   test('without the runner sighting, the same press keeps the ordinary sentence', () => {
@@ -1858,7 +1858,7 @@ describe('the challenge-on-screen sentence', () => {
       atsName: 'lever', portalUrl: LEVER_PORTAL, cause: 'no_confirmation_state', network: LEVER_PRESS,
     });
     assert.doesNotMatch(reason, /human-verification/);
-    assert.match(reason, /Litos will send this one for you/);
+    assert.match(reason, /Nothing is needed from you/);
   });
 
   test('a sighting on a cut-off run never claims the press ran into a check', () => {

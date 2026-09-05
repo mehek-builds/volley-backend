@@ -1607,7 +1607,31 @@ export type ApplicationReviewState = {
      * Origin plus path, method, and a status or a failure text. Evidence for the person (or the
      * next session) resolving this record: a 200 on the board's submit path reads very differently
      * from a 422 or a request that never returned. Never used to decide anything automatically. */
-    network?: { method: string; url: string; status: number | null; failure?: string }[];
+    network?: {
+      method: string;
+      url: string;
+      status: number | null;
+      failure?: string;
+      /* The runner's bounded, redacted read of the response body and its content type (stratus
+       * #193). What lets the verification sweep re-read a bound success or a refusal code later. */
+      body_excerpt?: string;
+      content_type?: string;
+    }[];
+    /* The runner's tri-state endpoint binding read: false means a binding existed for this ATS and
+     * no request ever matched it; null/absent means no binding, so nothing can be concluded. */
+    submit_request_seen?: boolean | null;
+    /* The runner stopped watching while the page still showed a pending submit control. */
+    pending?: true;
+    /* LITOS'S OWN LOOKS AT THE EMPLOYER'S PAGE after the press (lib/submissionVerificationSweep.ts):
+     * when, where, what it saw, and the picture. Evidence that replaces the instruction to the
+     * applicant to go and look; never by itself a reason to mark the packet submitted. */
+    employer_page_checks?: Array<{
+      checked_at: string;
+      url: string;
+      outcome: 'form_open_no_record' | 'applied_marker' | 'receipt_visible' | 'posting_closed' | 'unreadable';
+      page_text_excerpt?: string;
+      screenshot_url?: string;
+    }>;
     /* The runner reported a rendered CAPTCHA still standing after the press. Evidence for the
      * person resolving this record, and what selects the human-check sentence. */
     challenge_on_screen?: true;
