@@ -884,7 +884,6 @@ test('the managed-run acceptance gate refuses only the two routes that start a n
     releaseManagedRunsBeforeExit,
   } = await import('./index');
   const {
-    resetManagedRunAcceptanceForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
   const applicationId = '11111111-2222-4333-8444-555555555555';
@@ -934,7 +933,6 @@ test('the managed-run acceptance gate refuses only the two routes that start a n
     const health = await app.inject({ method: 'GET', url: '/health' });
     assert.notEqual(health.json().code, 'MANAGED_RUN_SHUTDOWN', 'a public, unauthenticated route is unaffected');
   } finally {
-    resetManagedRunAcceptanceForTests();
     resetManagedRunShutdownSignalForTests();
     await app.close();
   }
@@ -944,12 +942,11 @@ test('releaseManagedRunsBeforeExit is bounded by its deadline, not by how long a
   const { releaseManagedRunsBeforeExit } = await import('./index');
   const {
     registerManagedRun,
-    resetManagedRunAcceptanceForTests,
     resetManagedRunRegistryForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
 
-  registerManagedRun({ packetId: 'packet-never-resolves', userId: 'user-1', phase: 'filling' });
+  registerManagedRun({ packetId: 'packet-never-resolves', userId: 'user-1' });
   let releaseWasCalled = false;
   const neverResolvingRelease = (() => {
     releaseWasCalled = true;
@@ -969,7 +966,6 @@ test('releaseManagedRunsBeforeExit is bounded by its deadline, not by how long a
     assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
   } finally {
     resetManagedRunRegistryForTests();
-    resetManagedRunAcceptanceForTests();
     resetManagedRunShutdownSignalForTests();
   }
 });
@@ -979,7 +975,6 @@ test('releaseManagedRunsBeforeExit stops accepting new work and aborts the shutd
   const {
     getManagedRunShutdownSignal,
     managedRunsAcceptingNewWork,
-    resetManagedRunAcceptanceForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
 
@@ -989,7 +984,6 @@ test('releaseManagedRunsBeforeExit stops accepting new work and aborts the shutd
     assert.equal(managedRunsAcceptingNewWork(), false);
     assert.equal(getManagedRunShutdownSignal().aborted, true);
   } finally {
-    resetManagedRunAcceptanceForTests();
     resetManagedRunShutdownSignalForTests();
   }
 });
@@ -1007,12 +1001,11 @@ test('releaseManagedRunsBeforeExit waits for an in-flight employer-boundary run 
     attachManagedRunBoundaryCompletion,
     markManagedRunBoundaryReached,
     registerManagedRun,
-    resetManagedRunAcceptanceForTests,
     resetManagedRunRegistryForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
 
-  registerManagedRun({ packetId: 'packet-at-boundary', userId: 'user-1', phase: 'submitting' });
+  registerManagedRun({ packetId: 'packet-at-boundary', userId: 'user-1' });
   markManagedRunBoundaryReached('packet-at-boundary');
   let reconciled = false;
   const reconciliation = new Promise<void>((resolve) => {
@@ -1031,7 +1024,6 @@ test('releaseManagedRunsBeforeExit waits for an in-flight employer-boundary run 
     assert.equal(reconciled, true, 'the function must not return before the boundary-reached promise settled');
   } finally {
     resetManagedRunRegistryForTests();
-    resetManagedRunAcceptanceForTests();
     resetManagedRunShutdownSignalForTests();
   }
 });
@@ -1046,12 +1038,11 @@ test('releaseManagedRunsBeforeExit leaves a still-in-flight boundary run alone a
     attachManagedRunBoundaryCompletion,
     markManagedRunBoundaryReached,
     registerManagedRun,
-    resetManagedRunAcceptanceForTests,
     resetManagedRunRegistryForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
 
-  registerManagedRun({ packetId: 'packet-never-reconciles', userId: 'user-1', phase: 'submitting' });
+  registerManagedRun({ packetId: 'packet-never-reconciles', userId: 'user-1' });
   markManagedRunBoundaryReached('packet-never-reconciles');
   attachManagedRunBoundaryCompletion('packet-never-reconciles', new Promise(() => {
     /* deliberately never settles */
@@ -1071,7 +1062,6 @@ test('releaseManagedRunsBeforeExit leaves a still-in-flight boundary run alone a
     assert.deepEqual((timeoutWarning!.details as { packetIds?: string[] }).packetIds, ['packet-never-reconciles']);
   } finally {
     resetManagedRunRegistryForTests();
-    resetManagedRunAcceptanceForTests();
     resetManagedRunShutdownSignalForTests();
   }
 });
@@ -1085,7 +1075,6 @@ test('runManagedRunShutdownSequence closes the Fastify instance in parallel with
   const { runManagedRunShutdownSequence } = await import('./index');
   const { buildApp } = await import('./index');
   const {
-    resetManagedRunAcceptanceForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
 
@@ -1102,7 +1091,6 @@ test('runManagedRunShutdownSequence closes the Fastify instance in parallel with
       'the Fastify instance must actually be closed, not merely have had process.exit reached over it',
     );
   } finally {
-    resetManagedRunAcceptanceForTests();
     resetManagedRunShutdownSignalForTests();
   }
 });
@@ -1110,7 +1098,6 @@ test('runManagedRunShutdownSequence closes the Fastify instance in parallel with
 test('runManagedRunShutdownSequence is bounded by its deadline even when app.close() never resolves', async () => {
   const { runManagedRunShutdownSequence, buildApp } = await import('./index');
   const {
-    resetManagedRunAcceptanceForTests,
     resetManagedRunShutdownSignalForTests,
   } = await import('./lib/managedRunLifecycle');
 
@@ -1131,7 +1118,48 @@ test('runManagedRunShutdownSequence is bounded by its deadline even when app.clo
     const elapsedMs = Date.now() - startedAt;
     assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
   } finally {
-    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('managedRunShutdownDeadlineMsFromEnv falls back to the citable 8s default on anything not a positive number', async () => {
+  /* Item 5: MANAGED_RUN_SHUTDOWN_DEADLINE_MS moved from a bare literal to an env-configurable
+   * value, so Railway's assumed ~10s SIGTERM grace period can be corrected without a code change.
+   * A misconfigured value must fall back rather than produce a nonsensical deadline (zero, negative,
+   * NaN) against a real SIGKILL clock. */
+  const { managedRunShutdownDeadlineMsFromEnv, DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS } = await import('./index');
+  assert.equal(DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS, 8_000);
+  for (const raw of [undefined, '', 'not-a-number', '0', '-500', 'NaN']) {
+    assert.equal(
+      managedRunShutdownDeadlineMsFromEnv(raw),
+      DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS,
+      `expected the default for raw=${JSON.stringify(raw)}`,
+    );
+  }
+});
+
+test('managedRunShutdownDeadlineMsFromEnv honours a positive configured value', async () => {
+  const { managedRunShutdownDeadlineMsFromEnv } = await import('./index');
+  assert.equal(managedRunShutdownDeadlineMsFromEnv('12000'), 12000);
+  assert.equal(managedRunShutdownDeadlineMsFromEnv('500'), 500);
+});
+
+test('managedRunsAcceptingNewWork is derived from the shutdown signal, with no separate flag left to fall out of sync (item 4)', async () => {
+  const {
+    getManagedRunShutdownSignal,
+    managedRunsAcceptingNewWork,
+    resetManagedRunShutdownSignalForTests,
+    triggerManagedRunShutdown,
+  } = await import('./lib/managedRunLifecycle');
+
+  try {
+    assert.equal(managedRunsAcceptingNewWork(), true);
+    assert.equal(getManagedRunShutdownSignal().aborted, false);
+    triggerManagedRunShutdown();
+    assert.equal(getManagedRunShutdownSignal().aborted, true);
+    assert.equal(managedRunsAcceptingNewWork(), false,
+      'a single call must flip both the abort signal and the accepting-new-work answer together');
+  } finally {
     resetManagedRunShutdownSignalForTests();
   }
 });

@@ -80,11 +80,10 @@ import {
   listInFlightManagedRunBoundaryCompletions,
   listPreBoundaryManagedRuns,
   RUN_OWNER_ID,
-  stopAcceptingNewManagedRuns,
   triggerManagedRunShutdown,
 } from './lib/managedRunLifecycle';
 import { releaseOrphanedManagedRun } from './lib/managedRunRestartRelease';
-import { runManagedRunBootSweep } from './lib/managedRunBootSweep';
+import { MANAGED_RUN_BOOT_SWEEP_DELAY_MS, runManagedRunBootSweep } from './lib/managedRunBootSweep';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -609,8 +608,26 @@ export async function buildApp(options: BuildAppOptions = {}) {
  * it. Getting this wrong in the too-long direction is the worse failure: a handler SIGKILLed
  * mid-write leaves exactly the stranded row this feature exists to prevent, recoverable only by
  * managedRunBootSweep.ts on the next boot rather than by this handler at all.
+ *
+ * READ FROM MANAGED_RUN_SHUTDOWN_DEADLINE_MS, so the assumption about Railway's grace period can be
+ * corrected from the environment the day it turns out to be wrong, without a code change and a
+ * redeploy racing the very SIGTERM this constant is trying to survive. Deliberately NOT routed
+ * through lib/ingestionStallMonitor.ts's millisecondsFromEnv: that helper floors at 60_000ms, which
+ * is the right guard against a typo turning a polling interval into a hot loop but would be exactly
+ * wrong here - an 8s deadline is supposed to be short, and a misconfigured value should fall back to
+ * the citable default below rather than being silently stretched to a whole minute against a ~10s
+ * SIGKILL clock.
  */
-const MANAGED_RUN_SHUTDOWN_DEADLINE_MS = 8_000;
+export const DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS = 8_000;
+
+export function managedRunShutdownDeadlineMsFromEnv(raw: string | undefined): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS;
+}
+
+const MANAGED_RUN_SHUTDOWN_DEADLINE_MS = managedRunShutdownDeadlineMsFromEnv(
+  process.env.MANAGED_RUN_SHUTDOWN_DEADLINE_MS,
+);
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -625,12 +642,15 @@ function delay(ms: number): Promise<void> {
  * outlive Railway's own SIGKILL. Exported for its own targeted test; production reaches it only
  * through the signal handlers installed below.
  *
- * ORDER MATTERS. Accepting new work is stopped, and the shared stratus abort signal fired, BEFORE
- * anything is read from the registry - a run that started registering in the window between "we
- * decided to shut down" and "we finished releasing what we already had" would be exactly as
- * stranded as the ones this exists to rescue, and an aborted fetch lets that run's own promise
- * start unwinding concurrently with the release writes below rather than after them. Firing the
- * signal here is now safe for a boundary-reached run too: routes/submissionRunner.ts's
+ * ORDER MATTERS. The shared stratus abort signal is fired BEFORE anything is read from the
+ * registry - a run that started registering in the window between "we decided to shut down" and
+ * "we finished releasing what we already had" would be exactly as stranded as the ones this exists
+ * to rescue, and an aborted fetch lets that run's own promise start unwinding concurrently with the
+ * release writes below rather than after them. This single call also stops accepting new work:
+ * managedRunsAcceptingNewWork() (lib/managedRunLifecycle.ts) reads the same signal rather than a
+ * second flag, so firing it here is the whole of "refuse anything new" - there is no separate
+ * accept-flag to remember to flip in the same breath. Firing the signal here is now safe for a
+ * boundary-reached run too: routes/submissionRunner.ts's
  * managedProviderCallSignalFor never attaches it to a call at or past the employer boundary in the
  * first place, so triggerManagedRunShutdown() cannot abort the one fetch this function is about to
  * wait on below.
@@ -660,7 +680,6 @@ export async function releaseManagedRunsBeforeExit(
 ): Promise<void> {
   const release = options.release ?? releaseOrphanedManagedRun;
   const deadlineMs = options.deadlineMs ?? MANAGED_RUN_SHUTDOWN_DEADLINE_MS;
-  stopAcceptingNewManagedRuns();
   triggerManagedRunShutdown();
   const runs = listPreBoundaryManagedRuns();
   const boundaryWaits = listInFlightManagedRunBoundaryCompletions();
@@ -766,18 +785,22 @@ async function start() {
   installManagedRunShutdownHandlers(app);
 
   try {
-    /* THE OTHER HALF OF THIS FEATURE, and it runs BEFORE serving on purpose: a request landing the
-     * instant this instance comes up must never read a row this sweep would have fixed a moment
-     * later. Best-effort, exactly like the warm-cache and stall-monitor calls below - a database
-     * that is not yet reachable delays nothing here, and the rows it would have fixed simply fall
-     * back to the pre-existing three-hour stall bound (stalledFillRunRelease.ts). See
-     * managedRunBootSweep.ts for why a foreign run_owner found here is safe to treat as urgently as
-     * this process's own SIGTERM handler treats one of its own runs. */
-    await runManagedRunBootSweep(app.log).catch((err) => {
-      app.log.error(err, 'Boot-time managed run orphan sweep failed; continuing to start');
+    await app.listen({ port, host });
+
+    /* THE OTHER HALF OF THIS FEATURE - see managedRunBootSweep.ts's file header, "WHY AFTER
+     * listen(), NOT BEFORE IT", for why this moved off the pre-listen() position it used to run at.
+     * A hard Railway cutover has already fully replaced the old process by the time this line runs,
+     * same as before; a zero-downtime rollout's old instance gets MANAGED_RUN_BOOT_SWEEP_DELAY_MS to
+     * finish draining before this process forms an opinion about a row it does not own, and the
+     * sweep's own age floor (MANAGED_RUN_BOOT_SWEEP_AGE_FLOOR_MS) is the actual safety net behind
+     * that delay, not the delay itself. Never awaited and never fatal, exactly like the warm-cache
+     * and stall-monitor calls below - a database that is not yet reachable delays nothing here, and
+     * the rows it would have fixed simply fall back to the pre-existing three-hour stall bound
+     * (stalledFillRunRelease.ts). */
+    void delay(MANAGED_RUN_BOOT_SWEEP_DELAY_MS).then(() => runManagedRunBootSweep(app.log)).catch((err) => {
+      app.log.error(err, 'Boot-time managed run orphan sweep failed; continuing to serve');
     });
 
-    await app.listen({ port, host });
     /* Warm the alias deliverability answer once at boot so the first submission of the process
      * does not pay for the DNS and Resend lookups. Never awaited and never fatal: a warm that
      * fails simply leaves the cache empty and the first real caller measures it instead. */

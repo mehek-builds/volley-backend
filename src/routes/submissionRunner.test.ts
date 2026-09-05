@@ -3622,8 +3622,8 @@ test('a submit-path provider call carries no shutdown signal once its packet is 
     resetManagedRunRegistryForTests();
     resetManagedRunShutdownSignalForTests();
 
-    registerManagedRun({ packetId: 'packet-prepare', userId: 'user-1', phase: 'filling' });
-    registerManagedRun({ packetId: 'packet-submit', userId: 'user-1', phase: 'submitting' });
+    registerManagedRun({ packetId: 'packet-prepare', userId: 'user-1' });
+    registerManagedRun({ packetId: 'packet-submit', userId: 'user-1' });
 
     // Prepare-path: boundary not yet reached, so a SIGTERM must still be able to unstick this call -
     // this is the discovery/option-probe/fill run inside prepareManaged.

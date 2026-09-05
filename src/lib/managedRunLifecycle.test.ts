@@ -19,18 +19,14 @@ import {
   managedRunsAcceptingNewWork,
   markManagedRunBoundaryReached,
   registerManagedRun,
-  resetManagedRunAcceptanceForTests,
   resetManagedRunRegistryForTests,
   resetManagedRunShutdownSignalForTests,
-  stopAcceptingNewManagedRuns,
   triggerManagedRunShutdown,
   unregisterManagedRun,
-  updateManagedRunPhase,
 } from './managedRunLifecycle';
 
 afterEach(() => {
   resetManagedRunRegistryForTests();
-  resetManagedRunAcceptanceForTests();
   resetManagedRunShutdownSignalForTests();
 });
 
@@ -68,7 +64,7 @@ describe('the registry', () => {
   });
 
   test('register then unregister leaves no trace', () => {
-    const token = registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    const token = registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
     assert.equal(managedRunRegistrySize(), 1);
     unregisterManagedRun('packet-1', token);
     assert.equal(managedRunRegistrySize(), 0);
@@ -87,8 +83,8 @@ describe('the registry', () => {
      * (already deleted) - or worse, the second registration itself could be deleted out from under
      * a run that was still executing. Requiring the caller's own token to still match closes that:
      * a stale token can never delete a live, later registration. */
-    const staleToken = registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
-    const liveToken = registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    const staleToken = registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
+    const liveToken = registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
     assert.notEqual(staleToken, liveToken, 'two registrations for the same packet must never share a token');
     unregisterManagedRun('packet-1', staleToken);
     assert.equal(managedRunRegistrySize(), 1, 'the live registration must survive an unregister carrying a stale token');
@@ -97,21 +93,14 @@ describe('the registry', () => {
   });
 
   test('re-registering the same packet replaces the earlier entry rather than duplicating it', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'preparing' });
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', runId: 'run-a' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', runId: 'run-b' });
     assert.equal(managedRunRegistrySize(), 1);
-    assert.equal(listPreBoundaryManagedRuns()[0]!.phase, 'filling');
-  });
-
-  test('updateManagedRunPhase changes a live entry and is a no-op for an absent one', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'preparing' });
-    updateManagedRunPhase('packet-1', 'filling');
-    assert.equal(listPreBoundaryManagedRuns()[0]!.phase, 'filling');
-    assert.doesNotThrow(() => updateManagedRunPhase('never-registered', 'filling'));
+    assert.equal(listPreBoundaryManagedRuns()[0]!.runId, 'run-b', 'the later registration wins');
   });
 
   test('a run starts pre-boundary and appears in listPreBoundaryManagedRuns', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling', runId: 'run-1' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', runId: 'run-1' });
     const listed = listPreBoundaryManagedRuns();
     assert.equal(listed.length, 1);
     assert.equal(listed[0]!.packetId, 'packet-1');
@@ -121,7 +110,7 @@ describe('the registry', () => {
   });
 
   test('markManagedRunBoundaryReached excludes a run from the pre-boundary worklist without removing it from the registry', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'submitting' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
     markManagedRunBoundaryReached('packet-1');
     assert.equal(managedRunRegistrySize(), 1, 'still tracked - just not a release candidate');
     assert.deepEqual(listPreBoundaryManagedRuns(), []);
@@ -132,16 +121,16 @@ describe('the registry', () => {
   });
 
   test('listPreBoundaryManagedRuns mixes correctly: only the pre-boundary entries come back', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'preparing' });
-    registerManagedRun({ packetId: 'packet-2', userId: 'user-1', phase: 'filling' });
-    registerManagedRun({ packetId: 'packet-3', userId: 'user-2', phase: 'submitting' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
+    registerManagedRun({ packetId: 'packet-2', userId: 'user-1' });
+    registerManagedRun({ packetId: 'packet-3', userId: 'user-2' });
     markManagedRunBoundaryReached('packet-3');
     const listed = listPreBoundaryManagedRuns().map((entry) => entry.packetId).sort();
     assert.deepEqual(listed, ['packet-1', 'packet-2']);
   });
 
   test('isManagedRunBoundaryReached is false for a fresh registration, true once marked, and false for an absent packet', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'submitting' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
     assert.equal(isManagedRunBoundaryReached('packet-1'), false);
     markManagedRunBoundaryReached('packet-1');
     assert.equal(isManagedRunBoundaryReached('packet-1'), true);
@@ -150,7 +139,7 @@ describe('the registry', () => {
   });
 
   test('attachManagedRunBoundaryCompletion is a no-op before the boundary is marked reached', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
     attachManagedRunBoundaryCompletion('packet-1', Promise.resolve('never should be tracked'));
     assert.deepEqual(listInFlightManagedRunBoundaryCompletions(), [],
       'nothing before the employer boundary is ever worth blocking a shutdown for');
@@ -162,9 +151,9 @@ describe('the registry', () => {
   });
 
   test('listInFlightManagedRunBoundaryCompletions surfaces exactly the boundary-reached runs with an attached completion', async () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'preparing' });
-    registerManagedRun({ packetId: 'packet-2', userId: 'user-2', phase: 'submitting' });
-    registerManagedRun({ packetId: 'packet-3', userId: 'user-3', phase: 'submitting' });
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1' });
+    registerManagedRun({ packetId: 'packet-2', userId: 'user-2' });
+    registerManagedRun({ packetId: 'packet-3', userId: 'user-3' });
     markManagedRunBoundaryReached('packet-2');
     markManagedRunBoundaryReached('packet-3');
     // packet-2 is boundary-reached but has no attached completion yet (e.g. submit() has been
@@ -205,8 +194,11 @@ describe('accepting new work', () => {
     assert.equal(managedRunsAcceptingNewWork(), true);
   });
 
-  test('stopAcceptingNewManagedRuns flips it, permanently for the process lifetime', () => {
-    stopAcceptingNewManagedRuns();
+  test('derives from the shutdown signal: triggering shutdown flips it, permanently for the process lifetime', () => {
+    /* Item 4: there is no separate accepting-flag any more - managedRunsAcceptingNewWork() reads
+     * getManagedRunShutdownSignal().aborted directly, so the only way to flip it is the same call
+     * that aborts every in-flight stratus fetch. */
+    triggerManagedRunShutdown();
     assert.equal(managedRunsAcceptingNewWork(), false);
   });
 });
@@ -273,7 +265,7 @@ describe('createManagedRunAcceptanceGateHook', () => {
   }
 
   test('sends a typed 503 for a refused request', async () => {
-    stopAcceptingNewManagedRuns();
+    triggerManagedRunShutdown();
     const hook = createManagedRunAcceptanceGateHook();
     const { reply, result } = fakeReply();
     await hook(
@@ -291,7 +283,7 @@ describe('createManagedRunAcceptanceGateHook', () => {
   });
 
   test('does nothing at all for an unrelated request', async () => {
-    stopAcceptingNewManagedRuns();
+    triggerManagedRunShutdown();
     const hook = createManagedRunAcceptanceGateHook();
     const { reply, result } = fakeReply();
     await hook(

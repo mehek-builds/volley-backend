@@ -115,22 +115,20 @@ export function resetManagedRunShutdownSignalForTests(): void {
 // Accepting new work
 // ---------------------------------------------------------------------------------------------
 
-let acceptingNewManagedRuns = true;
-
-/** Whether a NEW managed run may start. False from the moment SIGTERM/SIGINT is received. */
+/**
+ * Whether a NEW managed run may start. False from the moment SIGTERM/SIGINT is received.
+ *
+ * DERIVED FROM THE SHUTDOWN SIGNAL, NOT ITS OWN FLAG. releaseManagedRunsBeforeExit is the only
+ * place that ever changes this, and it always calls triggerManagedRunShutdown() in the same breath
+ * it used to call a separate stopAcceptingNewManagedRuns() - the two never went out of sync in
+ * practice, so tracking them as two booleans was one piece of state a future edit could drift out
+ * of step with the other, for no reader who cares about either separately. The signal already
+ * means exactly "this process has started shutting down and will accept no more work", which is
+ * this function's whole contract, so reading it directly removes the second copy rather than
+ * keeping it in sync.
+ */
 export function managedRunsAcceptingNewWork(): boolean {
-  return acceptingNewManagedRuns;
-}
-
-/** Refuse every new managed run from this point on. One-way for the life of the process - there is
- * no un-refusing a shutdown that has already started. */
-export function stopAcceptingNewManagedRuns(): void {
-  acceptingNewManagedRuns = false;
-}
-
-/** Test seam only. */
-export function resetManagedRunAcceptanceForTests(): void {
-  acceptingNewManagedRuns = true;
+  return !getManagedRunShutdownSignal().aborted;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -151,18 +149,17 @@ export interface ManagedRunRegistration {
   /** The row's own submission_run_id, when the caller already knows it. Carried for logging only -
    * nothing here compares it against anything. */
   runId?: string;
-  phase: ManagedRunPhase;
   /**
    * Whether this run has reached the employer boundary - a final-send lease/claim exists, or a
    * press was observed. See markManagedRunBoundaryReached. Starts false on every registration;
    * once true it never goes back to false for this registration's lifetime, which matters only in
    * that nothing in this file ever needs to unset it.
    *
-   * REDUNDANT WITH PHASE FOR 'preparing'/'filling' BY CONSTRUCTION, AND THAT IS FINE. A row cannot
-   * reach the employer boundary before status 'submitting' - claimSubmission,
+   * REDUNDANT WITH THE ROW'S OWN STATUS FOR 'preparing'/'filling' BY CONSTRUCTION, AND THAT IS
+   * FINE. A row cannot reach the employer boundary before status 'submitting' - claimSubmission,
    * authorizeFinalSubmissionBoundary and every press all happen only once a row is there - so this
-   * is only ever meaningfully false while true for a 'submitting'-phase entry. It is still tracked
-   * for every phase, uniformly, so a caller never has to special-case "which phases even have a
+   * is only ever meaningfully false while a 'submitting' row awaits it. It is still tracked for
+   * every registration, uniformly, so a caller never has to special-case "which stage even has a
    * boundary" - it asks this one field.
    *
    * ALSO WHAT DECIDES WHETHER THE SHUTDOWN SIGNAL MAY TOUCH A GIVEN PROVIDER CALL - see
@@ -211,14 +208,12 @@ export function registerManagedRun(input: {
   packetId: string;
   userId: string;
   runId?: string;
-  phase: ManagedRunPhase;
 }): ManagedRunRegistrationToken {
   const token = randomUUID();
   registry.set(input.packetId, {
     packetId: input.packetId,
     userId: input.userId,
     runId: input.runId,
-    phase: input.phase,
     boundaryReached: false,
     registeredAt: Date.now(),
     token,
@@ -226,19 +221,12 @@ export function registerManagedRun(input: {
   return token;
 }
 
-/** Best-effort. A packet id the registry has no entry for (never registered, or already
- * unregistered) is silently a no-op - every call site in routes/submissionRunner.ts calls this
- * unconditionally rather than tracking for itself whether registration happened. */
-export function updateManagedRunPhase(packetId: string, phase: ManagedRunPhase): void {
-  const entry = registry.get(packetId);
-  if (entry) entry.phase = phase;
-}
-
 /** Mark a run as having reached (or being about to reach) the employer boundary, so a shutdown or
  * a boot sweep leaves it strictly alone - see the file header on abandonedAttemptClosure.ts's own
  * SUBMISSION_BOUNDARY_STATUSES for why 'submitting' is never released by this feature: the existing
- * #912 stalled-submitting arm owns that shape, under its own claim-based proof. Same no-op-if-absent
- * discipline as updateManagedRunPhase. */
+ * #912 stalled-submitting arm owns that shape, under its own claim-based proof. Best-effort,
+ * silently a no-op for a packet id the registry has no entry for - never registered, or already
+ * unregistered - the same discipline every registry mutator here follows. */
 export function markManagedRunBoundaryReached(packetId: string): void {
   const entry = registry.get(packetId);
   if (entry) entry.boundaryReached = true;

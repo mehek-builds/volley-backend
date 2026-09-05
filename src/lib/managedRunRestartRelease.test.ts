@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ApplicationReviewState } from './applicationReview';
+import { releaseStalledFillRun } from './stalledFillRunRelease';
 import type { SubmissionAttemptRetrySafety } from './submissionAttemptLedger';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
 import {
@@ -195,5 +196,56 @@ describe('releaseManagedRunForRestart', () => {
     const released = releaseManagedRunForRestart(withWork);
     assert.deepEqual(released.filled_fields, ['email', 'first_name']);
     assert.equal(released.questions.length, 1);
+  });
+
+  test('item 2: an unresolved stall on the row survives the release untouched - settleStall was a provable no-op here', () => {
+    /* releaseManagedRunForRestart used to wrap its result in settleStall(...), but
+     * releaseStalledFillRun/releaseManagedRunForRestart both always set status to
+     * 'needs_attention', and settleStall's own second guard
+     * (`review.status === 'needs_attention' ... return review`) returns the review UNCHANGED for
+     * that status - so the wrapper never did anything. Proven here rather than merely asserted: a
+     * row carrying an unresolved stall keeps it, byte for byte, after the release. */
+    const withStall = celerantRow({
+      stall: {
+        kind: 'human_verification',
+        stalled_at: CELERANT_FROZEN_AT,
+        surface: 'server_run',
+        provider: 'recaptcha_v2',
+        stage: 'before_fill',
+        source: 'observed',
+      },
+    });
+    const released = releaseManagedRunForRestart(withStall);
+    assert.deepEqual(released.stall, withStall.stall, 'the stall must be neither resolved nor dropped');
+  });
+
+  test('item 3: is byte-for-byte releaseStalledFillRun\'s own output, run_owner/attention overridden and nothing else', () => {
+    /* The second-reviewer finding: releaseManagedRunForRestart used to re-list
+     * releaseStalledFillRun's ~12-field clear-list a second time, which is exactly the shape where
+     * one file's list quietly drifts from the other's. Now it composes on top of that function -
+     * proven here by comparing the two outputs field for field rather than trusting the doc comment
+     * alone. */
+    const nowIso = '2026-09-04T22:30:00.000Z';
+    const row = celerantRow({
+      filled_fields: ['email'],
+      questions: [{ id: 'q1', question: 'Why us?', answer: 'Because', kind: 'essay', required: true }],
+    });
+    const restarted = releaseManagedRunForRestart(row, nowIso);
+    const stalled = releaseStalledFillRun(row, nowIso);
+    const overridden = new Set(['run_owner', 'attention_reason', 'attention_categories']);
+    for (const key of new Set([...Object.keys(restarted), ...Object.keys(stalled)]) as Set<keyof ApplicationReviewState>) {
+      if (overridden.has(key)) continue;
+      assert.deepEqual(
+        restarted[key],
+        stalled[key],
+        `field "${key}" must be identical to releaseStalledFillRun's own output`,
+      );
+    }
+    // And the three overridden fields are actually different from the shared-stall sentence -
+    // otherwise the override would itself be a no-op and this test would prove nothing.
+    assert.equal(restarted.run_owner, undefined);
+    assert.notEqual(restarted.attention_reason, stalled.attention_reason);
+    assert.equal(restarted.attention_reason, MANAGED_RUN_RESTART_ATTENTION_REASON);
+    assert.deepEqual(restarted.attention_categories, attentionCategoriesForReasons([MANAGED_RUN_RESTART_ATTENTION_REASON]));
   });
 });

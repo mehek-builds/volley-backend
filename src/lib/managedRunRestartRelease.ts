@@ -29,9 +29,8 @@ import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { generated_resumes } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
-import { settleStall } from './applicationStall';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
-import { stalledFillRunReleaseIsAdmissible } from './stalledFillRunRelease';
+import { releaseStalledFillRun, stalledFillRunReleaseIsAdmissible } from './stalledFillRunRelease';
 import {
   submissionAttemptEventsForPacket,
   submissionAttemptRetrySafetyForPacketEvents,
@@ -80,31 +79,34 @@ export function restartReleaseIsAdmissible(
 }
 
 /**
- * The released review. Byte-for-byte releaseStalledFillRun's own field list (stalledFillRunRelease.ts)
- * plus one addition: run_owner is cleared alongside submission_run_id, for the same reason that
- * field is cleared - a run that is over must not go on describing itself as belonging to anyone,
- * least of all to a process identity a later boot would otherwise read as still live. See
- * run_owner's own doc in lib/applicationReview.ts.
+ * The released review. COMPOSED on releaseStalledFillRun (stalledFillRunRelease.ts) rather than
+ * re-listing its ~12-field clear-list a second time - the two used to be an independent byte-for-
+ * byte copy of each other, which is exactly the shape where one file's list quietly drifts from the
+ * other's after an edit to just one of them. Three fields are overridden on top of that shared base:
+ *
+ *   - `run_owner: undefined` - cleared alongside submission_run_id, for the same reason that field
+ *     is cleared - a run that is over must not go on describing itself as belonging to anyone,
+ *     least of all to a process identity a later boot would otherwise read as still live. See
+ *     run_owner's own doc in lib/applicationReview.ts. releaseStalledFillRun has no opinion on this
+ *     field at all - its own caller (the three-hour stall bound) has no run_owner story to tell.
+ *   - `attention_reason` / `attention_categories` - this file's own sentence
+ *     (MANAGED_RUN_RESTART_ATTENTION_REASON), not releaseStalledFillRun's, because the two describe
+ *     different fact patterns even though both land in the same `run_failed` bucket - see that
+ *     constant's own doc for why "restarted" and "went silent" have to stay two different sentences.
+ *
+ * Every other field - status, submission_run_id, submission_error, progress_stage,
+ * progress_screenshot_url, progress_updated_at, handoff_expires_at, browser_context_id,
+ * submission_authorization, updated_at - is exactly releaseStalledFillRun's own, unmodified.
  */
 export function releaseManagedRunForRestart(
   review: ApplicationReviewState,
   nowIso: string = new Date().toISOString(),
 ): ApplicationReviewState {
   return {
-    ...review,
-    status: 'needs_attention',
-    submission_run_id: undefined,
+    ...releaseStalledFillRun(review, nowIso),
     run_owner: undefined,
-    submission_error: undefined,
-    progress_stage: undefined,
-    progress_screenshot_url: undefined,
-    progress_updated_at: undefined,
-    handoff_expires_at: undefined,
-    browser_context_id: undefined,
-    submission_authorization: undefined,
     attention_reason: MANAGED_RUN_RESTART_ATTENTION_REASON,
     attention_categories: attentionCategoriesForReasons([MANAGED_RUN_RESTART_ATTENTION_REASON]),
-    updated_at: nowIso,
   };
 }
 
@@ -180,7 +182,12 @@ export async function releaseOrphanedManagedRun(input: {
     if (!restartReleaseIsAdmissible(current, retrySafety, nowMs)) {
       return { outcome: 'left_in_place', reason: 'not_admissible' } as const;
     }
-    const released = settleStall(releaseManagedRunForRestart(current, new Date(nowMs).toISOString()));
+    /* NOT settleStall(...)'d - releaseManagedRunForRestart always lands the row at 'needs_attention',
+     * and settleStall's own first check (`review.status === 'needs_attention' ... return review`)
+     * refuses to touch a row already in that status, so wrapping it here was a provable no-op. A
+     * stall this row happened to be carrying survives untouched either way, which is correct: this
+     * release says nothing about whether an unrelated human-verification stall is still live. */
+    const released = releaseManagedRunForRestart(current, new Date(nowMs).toISOString());
     const [updated] = await tx.update(generated_resumes)
       .set({ spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(released)}::jsonb, true)` })
       .where(and(

@@ -346,7 +346,6 @@ import {
   registerManagedRun,
   RUN_OWNER_ID,
   unregisterManagedRun,
-  updateManagedRunPhase,
   type ManagedRunPhase,
   type ManagedRunRegistrationToken,
 } from '../lib/managedRunLifecycle';
@@ -7779,7 +7778,6 @@ async function prepareManaged(
     progress_stage: 'Opening the company form',
     progress_updated_at: new Date().toISOString(),
   }));
-  updateManagedRunPhase(row.id, 'filling');
   // Neither document goes on the discovery pass. It runs before anything is known about the form,
   // and its whole job is to read the page; carrying a file there would spend an upload action on a
   // control this run has not yet established exists.
@@ -13023,7 +13021,6 @@ export async function processSubmissionApplication(
       packetId: row.id,
       userId: row.user_id,
       runId: initialReview?.submission_run_id,
-      phase: initialPhase,
     });
     /* Already claimed (or mid security-code continuation) the moment this function was called -
      * the employer boundary was reached in some EARLIER call, not this one, so this run must never
