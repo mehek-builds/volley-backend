@@ -75,6 +75,15 @@ import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
 import { submissionAuthorityRevisionReadiness } from './lib/submissionAuthorityRevision';
 import { encryptionRekeyRoutes } from './routes/encryptionRekey';
 import { isAuthorityRevisionConflictError } from './db/authorityRevisionRetry';
+import {
+  createManagedRunAcceptanceGateHook,
+  listInFlightManagedRunBoundaryCompletions,
+  listPreBoundaryManagedRuns,
+  RUN_OWNER_ID,
+  triggerManagedRunShutdown,
+} from './lib/managedRunLifecycle';
+import { releaseOrphanedManagedRun } from './lib/managedRunRestartRelease';
+import { MANAGED_RUN_BOOT_SWEEP_DELAY_MS, runManagedRunBootSweep } from './lib/managedRunBootSweep';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -226,6 +235,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
   if (submissionCutover.mode !== 'off') {
     fastify.addHook('onRequest', createSubmissionCutoverHook(submissionCutover));
   }
+
+  /* THE OTHER HALF OF GRACEFUL SHUTDOWN, and it belongs beside submission cutover for the identical
+   * reason: a browser client has to be able to read a typed 503 here, so this also runs before
+   * multipart parsing, rate limiting, authentication and every route. Unlike cutover this is
+   * unconditional - the check itself is a boolean read and two string comparisons, cheap enough
+   * that skipping the registration when nothing is shutting down would save nothing worth the extra
+   * branch - and it only ever refuses the two routes that START a brand-new managed run
+   * (POST /applications/managed-prepare and POST /applications/:id/submit-request); see
+   * lib/managedRunLifecycle.ts for why those two and not the rest of the submission surface.
+   * start(), below, is what flips the flag this hook reads, on SIGTERM/SIGINT. */
+  fastify.addHook('onRequest', createManagedRunAcceptanceGateHook());
 
   // Multipart support for resume uploads
   await fastify.register(multipart, {
@@ -577,14 +597,236 @@ export async function buildApp(options: BuildAppOptions = {}) {
   return fastify;
 }
 
+/**
+ * How long the SIGTERM/SIGINT handler spends writing honest terminal states for this process's own
+ * in-flight managed runs before calling process.exit() regardless of whether every write finished.
+ *
+ * NEITHER railway.json NOR the Dockerfile configures an explicit termination grace period, so this
+ * assumes Railway's own documented default of roughly ten seconds between SIGTERM and the SIGKILL
+ * that follows it. Eight leaves a margin for this function's own teardown - the race resolving, the
+ * log line, process.exit itself - to still land inside that window rather than racing SIGKILL for
+ * it. Getting this wrong in the too-long direction is the worse failure: a handler SIGKILLed
+ * mid-write leaves exactly the stranded row this feature exists to prevent, recoverable only by
+ * managedRunBootSweep.ts on the next boot rather than by this handler at all.
+ *
+ * READ FROM MANAGED_RUN_SHUTDOWN_DEADLINE_MS, so the assumption about Railway's grace period can be
+ * corrected from the environment the day it turns out to be wrong, without a code change and a
+ * redeploy racing the very SIGTERM this constant is trying to survive. Deliberately NOT routed
+ * through lib/ingestionStallMonitor.ts's millisecondsFromEnv: that helper floors at 60_000ms, which
+ * is the right guard against a typo turning a polling interval into a hot loop but would be exactly
+ * wrong here - an 8s deadline is supposed to be short, and a misconfigured value should fall back to
+ * the citable default below rather than being silently stretched to a whole minute against a ~10s
+ * SIGKILL clock.
+ */
+export const DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS = 8_000;
+
+export function managedRunShutdownDeadlineMsFromEnv(raw: string | undefined): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS;
+}
+
+const MANAGED_RUN_SHUTDOWN_DEADLINE_MS = managedRunShutdownDeadlineMsFromEnv(
+  process.env.MANAGED_RUN_SHUTDOWN_DEADLINE_MS,
+);
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+/**
+ * Same as delay(), deliberately WITHOUT unref(). Used only for the shutdown-deadline race in
+ * releaseManagedRunsBeforeExit/runManagedRunShutdownSequence below, where this timer firing is the
+ * one thing guaranteeing the race returns at all.
+ *
+ * An unref'd timer does not count toward keeping the event loop open - if it is the only handle
+ * left when everything else the process was doing (an app.close() that hung, a release that never
+ * settles) has gone quiet, Node is free to decide the loop has nothing left to do and let it drain
+ * WITHOUT the timer ever firing, exactly as if it had been cancelled. That is invisible in normal
+ * production operation, where the HTTP server and other timers keep the loop alive regardless - but
+ * it is exactly the shape of runManagedRunShutdownSequence's own bounded-deadline tests: the deadline
+ * delay ends up the only outstanding handle in the process, so an unref'd one can starve and the
+ * `await` on the race never resolves. Left uncaught, the same starvation is a live production risk
+ * too: it defeats the one guarantee this deadline exists to provide - that
+ * runManagedRunShutdownSequence returns and process.exit(0) runs before Railway's SIGKILL - in
+ * precisely the case where release() or app.close() has already wedged and nothing else is pending.
+ * A ref'd timer costs nothing here: the whole point of this race is for the process to stay alive
+ * for up to deadlineMs while it decides whether to keep waiting, so there being a live handle for
+ * that exact span is the intended behaviour, not a leak.
+ */
+function boundedDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Release every pre-boundary managed run this process still owns, AND wait (within the same
+ * deadline) for any boundary-reached run's own reconciliation to finish - bounded so neither can
+ * outlive Railway's own SIGKILL. Exported for its own targeted test; production reaches it only
+ * through the signal handlers installed below.
+ *
+ * ORDER MATTERS. The shared stratus abort signal is fired BEFORE anything is read from the
+ * registry - a run that started registering in the window between "we decided to shut down" and
+ * "we finished releasing what we already had" would be exactly as stranded as the ones this exists
+ * to rescue, and an aborted fetch lets that run's own promise start unwinding concurrently with the
+ * release writes below rather than after them. This single call also stops accepting new work:
+ * managedRunsAcceptingNewWork() (lib/managedRunLifecycle.ts) reads the same signal rather than a
+ * second flag, so firing it here is the whole of "refuse anything new" - there is no separate
+ * accept-flag to remember to flip in the same breath. Firing the signal here is now safe for a
+ * boundary-reached run too: routes/submissionRunner.ts's
+ * managedProviderCallSignalFor never attaches it to a call at or past the employer boundary in the
+ * first place, so triggerManagedRunShutdown() cannot abort the one fetch this function is about to
+ * wait on below.
+ *
+ * TWO WORKLISTS, ONE RACE. listPreBoundaryManagedRuns() names the runs this function may safely
+ * finish for - release() writes an honest terminal state for each. listInFlightManagedRunBoundaryCompletions()
+ * names runs this function must NEVER write to - the #912 stalled-submitting arm, and this row's own
+ * still-running promise, own that decision - so the only thing done for those is AWAIT the promise
+ * routes/submissionRunner.ts already attached, so the reconciliation gets a chance to finish inside
+ * the grace window instead of being truncated by process.exit(). Both lists are raced together
+ * against the single deadline below (Promise.allSettled, not a loop awaiting one at a time), so a
+ * slow or contended entry in either list can never crowd out the others' chance to finish. Anything
+ * the race leaves unsettled when the deadline wins is left exactly as this handler found it: a
+ * pre-boundary run stays 'preparing'/'filling' with a stale run_owner, now the boot sweep's problem;
+ * a boundary-reached run stays whatever the #912 stalled-submitting arm already owns, and this
+ * function says so in a log line rather than guessing at it.
+ */
+export async function releaseManagedRunsBeforeExit(
+  log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>,
+  options: {
+    /** Injected for the same reason BuildAppOptions.modelPing is: so the targeted test in
+     * index.test.ts can prove the deadline race actually bounds a release that never resolves,
+     * without opening a real database transaction. Production never passes this. */
+    release?: typeof releaseOrphanedManagedRun;
+    deadlineMs?: number;
+  } = {},
+): Promise<void> {
+  const release = options.release ?? releaseOrphanedManagedRun;
+  const deadlineMs = options.deadlineMs ?? MANAGED_RUN_SHUTDOWN_DEADLINE_MS;
+  triggerManagedRunShutdown();
+  const runs = listPreBoundaryManagedRuns();
+  const boundaryWaits = listInFlightManagedRunBoundaryCompletions();
+  if (runs.length === 0 && boundaryWaits.length === 0) return;
+  if (runs.length > 0) {
+    log.info({ count: runs.length }, 'Releasing in-flight managed runs before shutdown');
+  }
+  if (boundaryWaits.length > 0) {
+    log.info(
+      { count: boundaryWaits.length, packetIds: boundaryWaits.map((wait) => wait.packetId) },
+      'Waiting for an in-flight employer-boundary run to reconcile before shutdown',
+    );
+  }
+  const releases = runs.map((run) => release({
+    packetId: run.packetId,
+    userId: run.userId,
+    expectedRunOwner: RUN_OWNER_ID,
+    log,
+  }).catch((err) => {
+    log.error({ err, applicationId: run.packetId }, 'Failed to release a managed run during shutdown');
+  }));
+  const boundaryCompletions = boundaryWaits.map((wait) => wait.promise.catch((err) => {
+    log.warn(
+      { err, applicationId: wait.packetId },
+      'An in-flight employer-boundary run did not settle cleanly before shutdown',
+    );
+  }));
+  const settled = Promise.allSettled([...releases, ...boundaryCompletions]);
+  const timedOut = await Promise.race([
+    settled.then(() => false),
+    boundedDelay(deadlineMs).then(() => true),
+  ]);
+  if (timedOut && boundaryWaits.length > 0) {
+    log.warn(
+      { count: boundaryWaits.length, packetIds: boundaryWaits.map((wait) => wait.packetId) },
+      'Shutdown deadline reached with an employer-boundary run still in flight; leaving its row '
+      + 'for the stalled-submitting arm to resolve rather than exiting over the reconciliation',
+    );
+  }
+}
+
+let shuttingDown = false;
+
+/**
+ * The full shutdown sequence, minus the final process.exit() - split out from
+ * installManagedRunShutdownHandlers so it can be exercised by its own targeted test without forking
+ * a process. Runs the managed-run release/wait above IN PARALLEL with closing the Fastify instance,
+ * both bounded by the same deadline, and returns once both have settled or the deadline wins -
+ * whichever comes first.
+ *
+ * WHY CLOSE THE SERVER HERE AT ALL. Before this, a bare process.exit(0) cut every other in-flight
+ * HTTP request mid-response the instant the managed-run release finished, however unrelated that
+ * request was to a managed run. app.close() asks Fastify to stop accepting new connections and wait
+ * for requests already being served to finish, so an ordinary in-flight request gets to complete
+ * instead of being severed. It runs concurrently with (not after) the managed-run work above, so
+ * neither one's own bounded wait pads the other's.
+ */
+export async function runManagedRunShutdownSequence(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>,
+  options: {
+    release?: typeof releaseOrphanedManagedRun;
+    deadlineMs?: number;
+  } = {},
+): Promise<void> {
+  const deadlineMs = options.deadlineMs ?? MANAGED_RUN_SHUTDOWN_DEADLINE_MS;
+  const releasePromise = releaseManagedRunsBeforeExit(log, options);
+  const closePromise = app.close().catch((err) => {
+    log.error({ err }, 'Error closing the HTTP server during shutdown');
+  });
+  await Promise.race([
+    Promise.all([releasePromise, closePromise]),
+    boundedDelay(deadlineMs),
+  ]);
+}
+
+/**
+ * Installed only here, in start() - the Railway long-lived-process path - and never in buildApp(),
+ * for the same reason the ingestion stall monitor a few lines below is started only here: the
+ * serverless entrypoint (api/index.ts) and the test suite both call buildApp() directly and must
+ * never register a process-level signal handler as a side effect of building an app. A second
+ * SIGTERM (or a SIGINT arriving mid-shutdown) is a no-op, not a second race against the same
+ * deadline.
+ */
+function installManagedRunShutdownHandlers(app: Awaited<ReturnType<typeof buildApp>>): void {
+  const handle = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log.info({ signal }, 'Received shutdown signal; releasing in-flight managed runs before exit');
+    void runManagedRunShutdownSequence(app, app.log)
+      .catch((err) => app.log.error(err, 'Error during managed run shutdown sequence'))
+      .finally(() => process.exit(0));
+  };
+  process.on('SIGTERM', () => handle('SIGTERM'));
+  process.on('SIGINT', () => handle('SIGINT'));
+}
+
 async function start() {
   const port = parseInt(process.env.PORT || '3001', 10);
   const host = process.env.HOST || '0.0.0.0';
 
   const app = await buildApp();
+  installManagedRunShutdownHandlers(app);
 
   try {
     await app.listen({ port, host });
+
+    /* THE OTHER HALF OF THIS FEATURE - see managedRunBootSweep.ts's file header, "WHY AFTER
+     * listen(), NOT BEFORE IT", for why this moved off the pre-listen() position it used to run at.
+     * A hard Railway cutover has already fully replaced the old process by the time this line runs,
+     * same as before; a zero-downtime rollout's old instance gets MANAGED_RUN_BOOT_SWEEP_DELAY_MS to
+     * finish draining before this process forms an opinion about a row it does not own, and the
+     * sweep's own age floor (MANAGED_RUN_BOOT_SWEEP_AGE_FLOOR_MS) is the actual safety net behind
+     * that delay, not the delay itself. Never awaited and never fatal, exactly like the warm-cache
+     * and stall-monitor calls below - a database that is not yet reachable delays nothing here, and
+     * the rows it would have fixed simply fall back to the pre-existing three-hour stall bound
+     * (stalledFillRunRelease.ts). */
+    void delay(MANAGED_RUN_BOOT_SWEEP_DELAY_MS).then(() => runManagedRunBootSweep(app.log)).catch((err) => {
+      app.log.error(err, 'Boot-time managed run orphan sweep failed; continuing to serve');
+    });
+
     /* Warm the alias deliverability answer once at boot so the first submission of the process
      * does not pay for the DNS and Resend lookups. Never awaited and never fatal: a warm that
      * fails simply leaves the cache empty and the first real caller measures it instead. */

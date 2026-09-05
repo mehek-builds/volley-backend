@@ -871,3 +871,305 @@ test('/health probes the model through an injectable call, once per burst', asyn
     await app.close();
   }
 });
+
+test('the managed-run acceptance gate refuses only the two routes that start a new run, before auth', async () => {
+  /* Modelled on "submission cutover runs before auth" directly above: the property under test is
+   * identical in shape - a 503 has to win over the route's own 401, proving this hook runs at
+   * onRequest, ahead of requireAuth - but the trigger and the scope are this feature's own
+   * (managedRunsAcceptingNewWork, not SUBMISSION_CUTOVER_MODE), and it is far narrower: everything
+   * except the two doors a brand-new managed run walks in through stays open, including every
+   * OTHER submission and application route. */
+  const {
+    buildApp,
+    releaseManagedRunsBeforeExit,
+  } = await import('./index');
+  const {
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+  const applicationId = '11111111-2222-4333-8444-555555555555';
+  const app = await buildApp(HEALTH_TEST_OPTIONS);
+  await app.ready();
+  try {
+    const beforeShutdown = await app.inject({
+      method: 'POST',
+      url: '/applications/managed-prepare',
+    });
+    assert.equal(beforeShutdown.statusCode, 401, 'unaffected before any shutdown signal');
+
+    // Flip the flag the same way the SIGTERM handler does, without touching a real registry entry
+    // or a real database - the release loop below finds nothing registered and returns at once.
+    await releaseManagedRunsBeforeExit({ info() {}, warn() {}, error() {} });
+
+    const prepare = await app.inject({ method: 'POST', url: '/applications/managed-prepare' });
+    assert.equal(prepare.statusCode, 503);
+    assert.equal(prepare.json().code, 'MANAGED_RUN_SHUTDOWN');
+    assert.equal(prepare.headers['cache-control'], 'no-store');
+    assert.equal(prepare.headers['retry-after'], '5');
+
+    const submitRequest = await app.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/submit-request`,
+    });
+    assert.equal(submitRequest.statusCode, 503);
+    assert.equal(submitRequest.json().code, 'MANAGED_RUN_SHUTDOWN');
+
+    // Everything else keeps its ordinary auth boundary - the gate named exactly two routes and
+    // must not have fenced anything wider.
+    for (const request of [
+      { method: 'GET' as const, url: '/applications/board' },
+      { method: 'GET' as const, url: `/applications/${applicationId}/submission` },
+      { method: 'POST' as const, url: `/applications/${applicationId}/submission/approve` },
+      { method: 'PUT' as const, url: `/applications/${applicationId}/review/answers` },
+    ]) {
+      const response = await app.inject(request);
+      assert.equal(response.statusCode, 401, `${request.method} ${request.url} must stay open`);
+    }
+
+    // Not asserting 200: this suite's DATABASE_URL is unreachable, so /health legitimately answers
+    // 503 of its OWN accord (see "/health identifies the deployable service and revision contract"
+    // above) regardless of this gate. What this gate must not do is add ITS OWN opinion to a route
+    // it was never supposed to touch - so assert the absence of this feature's code, not a status
+    // code /health already has its own independent contract for.
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    assert.notEqual(health.json().code, 'MANAGED_RUN_SHUTDOWN', 'a public, unauthenticated route is unaffected');
+  } finally {
+    resetManagedRunShutdownSignalForTests();
+    await app.close();
+  }
+});
+
+test('releaseManagedRunsBeforeExit is bounded by its deadline, not by how long a release takes', async () => {
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    registerManagedRun,
+    resetManagedRunRegistryForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  registerManagedRun({ packetId: 'packet-never-resolves', userId: 'user-1' });
+  let releaseWasCalled = false;
+  const neverResolvingRelease = (() => {
+    releaseWasCalled = true;
+    return new Promise(() => {
+      /* deliberately never settles - the whole point is proving the caller does not wait for it */
+    });
+  }) as unknown as typeof import('./lib/managedRunRestartRelease')['releaseOrphanedManagedRun'];
+
+  try {
+    const startedAt = Date.now();
+    await releaseManagedRunsBeforeExit(
+      { info() {}, warn() {}, error() {} },
+      { release: neverResolvingRelease, deadlineMs: 50 },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(releaseWasCalled, true, 'the release attempt must actually have been made');
+    assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('releaseManagedRunsBeforeExit stops accepting new work and aborts the shutdown signal even with nothing registered', async () => {
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    getManagedRunShutdownSignal,
+    managedRunsAcceptingNewWork,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  try {
+    assert.equal(managedRunsAcceptingNewWork(), true);
+    await releaseManagedRunsBeforeExit({ info() {}, warn() {}, error() {} });
+    assert.equal(managedRunsAcceptingNewWork(), false);
+    assert.equal(getManagedRunShutdownSignal().aborted, true);
+  } finally {
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('releaseManagedRunsBeforeExit waits for an in-flight employer-boundary run to reconcile before returning', async () => {
+  /* Item 1's other half: a run that has already reached the employer boundary must never be
+   * released outright (the #912 stalled-submitting arm owns it), but its own in-flight
+   * reconciliation - the promise routes/submissionRunner.ts attaches via
+   * attachManagedRunBoundaryCompletion - must be AWAITED rather than abandoned the instant
+   * process.exit() would otherwise fire. Proven here by registering a run, marking it
+   * boundary-reached, attaching a promise that resolves after a short delay, and checking this
+   * function does not return before that promise settles. */
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    attachManagedRunBoundaryCompletion,
+    markManagedRunBoundaryReached,
+    registerManagedRun,
+    resetManagedRunRegistryForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  registerManagedRun({ packetId: 'packet-at-boundary', userId: 'user-1' });
+  markManagedRunBoundaryReached('packet-at-boundary');
+  let reconciled = false;
+  const reconciliation = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      reconciled = true;
+      resolve();
+    }, 30);
+  });
+  attachManagedRunBoundaryCompletion('packet-at-boundary', reconciliation);
+
+  try {
+    await releaseManagedRunsBeforeExit(
+      { info() {}, warn() {}, error() {} },
+      { deadlineMs: 5000 },
+    );
+    assert.equal(reconciled, true, 'the function must not return before the boundary-reached promise settled');
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('releaseManagedRunsBeforeExit leaves a still-in-flight boundary run alone and logs it, once the deadline wins', async () => {
+  /* The other side of the same requirement: if the deadline expires before the boundary-reached
+   * run's own reconciliation settles, this function must NOT write anything for that row (nothing
+   * here ever does - it only awaits) and must say so in a warning log line, rather than silently
+   * exiting over an answer nobody got to record. */
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    attachManagedRunBoundaryCompletion,
+    markManagedRunBoundaryReached,
+    registerManagedRun,
+    resetManagedRunRegistryForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  registerManagedRun({ packetId: 'packet-never-reconciles', userId: 'user-1' });
+  markManagedRunBoundaryReached('packet-never-reconciles');
+  attachManagedRunBoundaryCompletion('packet-never-reconciles', new Promise(() => {
+    /* deliberately never settles */
+  }));
+
+  const warnings: Array<{ details: Record<string, unknown>; message: string }> = [];
+  try {
+    const startedAt = Date.now();
+    await releaseManagedRunsBeforeExit(
+      { info() {}, error() {}, warn: (details: Record<string, unknown>, message?: string) => { warnings.push({ details, message: message ?? '' }); } },
+      { deadlineMs: 50 },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
+    const timeoutWarning = warnings.find((warning) => /still in flight/i.test(warning.message));
+    assert.ok(timeoutWarning, 'a timed-out boundary-reached run must be named in its own warning log line');
+    assert.deepEqual((timeoutWarning!.details as { packetIds?: string[] }).packetIds, ['packet-never-reconciles']);
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('runManagedRunShutdownSequence closes the Fastify instance in parallel with releasing managed runs', async () => {
+  /* Item 2: a bare process.exit(0) used to cut every other in-flight HTTP request mid-response the
+   * instant the managed-run release finished, because nothing ever called app.close(). Proven here
+   * by building a real app, calling the sequence with a release that resolves immediately, and
+   * checking app.close() actually ran - inject() rejects/throws once Fastify is closed, which is
+   * this test's proof rather than reaching into Fastify's own internals. */
+  const { runManagedRunShutdownSequence } = await import('./index');
+  const { buildApp } = await import('./index');
+  const {
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  const app = await buildApp(HEALTH_TEST_OPTIONS);
+  await app.ready();
+  try {
+    await runManagedRunShutdownSequence(
+      app,
+      { info() {}, warn() {}, error() {} },
+      { deadlineMs: 5000 },
+    );
+    await assert.rejects(
+      () => app.inject({ method: 'GET', url: '/health' }),
+      'the Fastify instance must actually be closed, not merely have had process.exit reached over it',
+    );
+  } finally {
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('runManagedRunShutdownSequence is bounded by its deadline even when app.close() never resolves', async () => {
+  const { runManagedRunShutdownSequence, buildApp } = await import('./index');
+  const {
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  const app = await buildApp(HEALTH_TEST_OPTIONS);
+  await app.ready();
+  // A close() that never settles - e.g. a request stuck open past its own timeout - must never make
+  // the whole sequence outlive Railway's SIGKILL. Overloaded to match FastifyInstance['close'], whose
+  // two signatures (no-arg returning a Promise<undefined>, or a closeListener returning undefined)
+  // both need honouring so the test double type-checks like the real thing.
+  function neverSettlingClose(): Promise<undefined>;
+  function neverSettlingClose(closeListener: () => void): undefined;
+  function neverSettlingClose(closeListener?: () => void): Promise<undefined> | undefined {
+    if (closeListener) {
+      return undefined;
+    }
+    return new Promise<undefined>(() => {
+      /* deliberately never settles */
+    });
+  }
+  app.close = neverSettlingClose;
+  try {
+    const startedAt = Date.now();
+    await runManagedRunShutdownSequence(
+      app,
+      { info() {}, warn() {}, error() {} },
+      { deadlineMs: 50 },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
+  } finally {
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('managedRunShutdownDeadlineMsFromEnv falls back to the citable 8s default on anything not a positive number', async () => {
+  /* Item 5: MANAGED_RUN_SHUTDOWN_DEADLINE_MS moved from a bare literal to an env-configurable
+   * value, so Railway's assumed ~10s SIGTERM grace period can be corrected without a code change.
+   * A misconfigured value must fall back rather than produce a nonsensical deadline (zero, negative,
+   * NaN) against a real SIGKILL clock. */
+  const { managedRunShutdownDeadlineMsFromEnv, DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS } = await import('./index');
+  assert.equal(DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS, 8_000);
+  for (const raw of [undefined, '', 'not-a-number', '0', '-500', 'NaN']) {
+    assert.equal(
+      managedRunShutdownDeadlineMsFromEnv(raw),
+      DEFAULT_MANAGED_RUN_SHUTDOWN_DEADLINE_MS,
+      `expected the default for raw=${JSON.stringify(raw)}`,
+    );
+  }
+});
+
+test('managedRunShutdownDeadlineMsFromEnv honours a positive configured value', async () => {
+  const { managedRunShutdownDeadlineMsFromEnv } = await import('./index');
+  assert.equal(managedRunShutdownDeadlineMsFromEnv('12000'), 12000);
+  assert.equal(managedRunShutdownDeadlineMsFromEnv('500'), 500);
+});
+
+test('managedRunsAcceptingNewWork is derived from the shutdown signal, with no separate flag left to fall out of sync (item 4)', async () => {
+  const {
+    getManagedRunShutdownSignal,
+    managedRunsAcceptingNewWork,
+    resetManagedRunShutdownSignalForTests,
+    triggerManagedRunShutdown,
+  } = await import('./lib/managedRunLifecycle');
+
+  try {
+    assert.equal(managedRunsAcceptingNewWork(), true);
+    assert.equal(getManagedRunShutdownSignal().aborted, false);
+    triggerManagedRunShutdown();
+    assert.equal(getManagedRunShutdownSignal().aborted, true);
+    assert.equal(managedRunsAcceptingNewWork(), false,
+      'a single call must flip both the abort signal and the accepting-new-work answer together');
+  } finally {
+    resetManagedRunShutdownSignalForTests();
+  }
+});

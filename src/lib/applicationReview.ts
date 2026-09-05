@@ -1185,6 +1185,29 @@ export type ApplicationReviewState = {
   submitted_at?: string;
   submission_error?: string;
   submission_run_id?: string;
+  /* WHICH PROCESS IS RUNNING THIS, so a later boot can tell "the process that owned this died
+   * without cleaning up" from "a run that is still going". Written once, at the same moment as
+   * submission_run_id (claimPreparation's move off submit_requested, and prepareManaged's own
+   * first write - see RUN_OWNER_ID in lib/managedRunLifecycle.ts), by whichever process is running
+   * the fill right now.
+   *
+   * THE DEFECT THIS ANSWERS. Every merge to main redeploys the single Railway process with no
+   * SIGTERM handler, so an in-flight prepareManaged fill died with the process while its row sat at
+   * `filling` (or `preparing`/`submitting`) with a stale progress_stage - measured twice, 2026-09-04
+   * (Celerant run d471dcf1, TWG run 985f76ac) - and nothing moved it again until the unrelated
+   * three-hour stall bound in stalledFillRunRelease.ts. A graceful SIGTERM handler now releases its
+   * own registered runs before exiting, but that handler cannot run across a SIGKILL or a hard
+   * crash. This field is what lets the NEXT boot tell the difference between a row genuinely still
+   * being worked (this process's own value, or no run at all) and one whose owner is provably gone
+   * (a foreign value, from a process that either already released it on the way out or was killed
+   * outright and cannot still be running it) - see managedRunBootSweep.ts.
+   *
+   * ABSENT MEANS UNKNOWN, NEVER "no owner". Every row written before this shipped has none, and the
+   * boot sweep deliberately leaves those to the existing three-hour bound rather than guessing.
+   * Cleared by releaseManagedRunForRestart (managedRunRestartRelease.ts) when a run ends there, for
+   * the same reason submission_run_id is cleared beside it: the field would otherwise name a run
+   * that is over. */
+  run_owner?: string;
   browser_context_id?: string;
   browser_session_id?: string;
   /* The exact application-form URL observed by the managed runner when a network-reputation page
