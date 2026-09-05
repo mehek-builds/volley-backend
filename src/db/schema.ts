@@ -835,12 +835,19 @@ export const application_submission_attempt_events = pgTable('application_submis
     ))
     or (${t.event_kind} <> 'not_sent_proven' and ${t.proof_kind} is null)
   `),
+  /* EIGHT MINUTES, raised from five on 2026-09-05. The lease this bounds is the budget of the send
+   * run that re-fills the form before it presses, and a Workable form measured at more than 300 s
+   * of filling (TWG Global) cannot be sent under a five-minute lease. Eight is the ceiling stratus
+   * itself admits on a provider deadline (MAX_PROVIDER_DEADLINE_MS); the code's own lease
+   * (SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS) stays a minute or more inside it. The live table only
+   * learns this by running scripts/apply-submission-attempt-ledger-schema.mjs, which drops and
+   * re-adds the constraint - the code must not lengthen the lease before that has run. */
   boundaryAuthorizationCheck: check('submission_attempt_events_boundary_auth_check', sql`
     (${t.event_kind} = 'boundary_authorized'
       and ${t.boundary_activation_id} is not null
       and ${t.boundary_expires_at} is not null
       and ${t.boundary_expires_at} > ${t.observed_at}
-      and ${t.boundary_expires_at} <= ${t.observed_at} + interval '5 minutes')
+      and ${t.boundary_expires_at} <= ${t.observed_at} + interval '8 minutes')
     or (${t.event_kind} <> 'boundary_authorized'
       and ${t.boundary_activation_id} is null
       and ${t.boundary_expires_at} is null)
