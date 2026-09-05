@@ -1,3 +1,4 @@
+import { outcomeRecoveryDue, claimOutcomeRecovery, finishOutcomeRecovery, retainOutcomeEvidence } from '../lib/submissionOutcomeRecovery';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { decide, isBlocked } from '../engine/eligibility';
@@ -2661,6 +2662,7 @@ async function acknowledgeManagedTerminalFold(
     eq(generated_resumes.id, row.id),
     eq(generated_resumes.user_id, row.user_id),
   )).limit(1);
+  if (latest && retainOutcomeEvidence(readApplicationReview(latest.spec))) return;
   const queued = latest ? managedTerminalCleanupOutboxFromSpec(latest.spec) : null;
   const queuedMarker = queued?.entries[managedTerminalCleanupEntryKey(marker)];
   if (!queuedMarker || !isDeepStrictEqual(queuedMarker, marker)) {
@@ -2732,6 +2734,11 @@ export async function retryManagedTerminalCleanupOutbox(
   let completed = 0;
   let pending = 0;
   for (const row of rows) {
+    // Account-deletion cleanup must never wait for an application recovery window.
+    if (!options.userId && retainOutcomeEvidence(readApplicationReview(row.spec))) {
+      pending += 1;
+      continue;
+    }
     const outbox = managedTerminalCleanupOutboxFromSpec(row.spec);
     if (!outbox) {
       fastify.log.error({ applicationId: row.id }, 'Managed terminal cleanup outbox is malformed');
@@ -3643,6 +3650,9 @@ export async function recoverManagedSubmissionTerminalResult(
     resultId?: string,
     outcome?: ManagedSubmitOutcome | null,
   ) => {
+    // The unresolved record already owns its evidence and original timestamp. A failed
+    // recovery must not restamp it or replace its diagnostics with a weaker later observation.
+    if (review.status === 'needs_attention' && review.unverified_submission) return 'folded' as const;
     const cleanupMarker = resultId
       ? exactManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt, resultId })
       : pendingManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt });
@@ -3726,7 +3736,7 @@ export async function recoverManagedSubmissionTerminalResult(
     return persistUnverified('The retained managed result could not be classified', []);
   }
 
-  const result = terminal.run;
+  let result = terminal.run;
   if (!attemptBinding.postingIdentity.portalUrl) {
     return persistUnverified(
       'The retained managed result has no immutable employer URL binding',
@@ -3783,6 +3793,38 @@ export async function recoverManagedSubmissionTerminalResult(
       options,
     );
   }
+  // Recovery must inspect the observation execution too. Its response can be lost after
+  // Stratus consumed the single-use token, independently of the initial submission response.
+  const observationAttempt = managedContinuationSubmissionAttempt(attemptBinding, 'receipt_observation');
+  let observationResultId: string | undefined;
+  if (outcome?.pressed === true && outcome.state === 'unknown') {
+    const retainedObservation = await getManagedBrowserTerminalResult(observationAttempt);
+    if (retainedObservation.state === 'pending') return 'pending';
+    if (retainedObservation.state === 'completed') {
+      if (exactManagedSubmitVerdict(retainedObservation.run, expectedApplicationUrl).kind === 'confirmed') {
+        result = retainedObservation.run;
+        observationResultId = retainedObservation.resultId;
+      }
+    } else if (retainedObservation.state === 'not_found') {
+      const observation = await observeManagedReceiptOnce({
+        initial: result,
+        expectedApplicationUrl,
+        observe: async (token) => {
+          const observed = await continueManagedBrowserWithAccountFence(row.user_id, row.id, token, [], {
+            screenshot: true,
+            submissionAttempt: observationAttempt,
+            timeoutMs: MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,
+            minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
+          });
+          observationResultId = managedBrowserTerminalResultId(observed);
+          return observed;
+        },
+      });
+      result = observation.receiptResult;
+      // A lost observation response must be retrievable on the next pass before initial cleanup.
+      if (observation.error) return 'pending';
+    }
+  }
   const verdict = exactManagedSubmitVerdict(result, expectedApplicationUrl);
   if (verdict.kind !== 'confirmed') {
     return persistUnverified(
@@ -3809,7 +3851,9 @@ export async function recoverManagedSubmissionTerminalResult(
     verification: { status: 'not_needed' },
     receipt: baseReceipt,
     receiptEvidence: { result, expectedApplicationUrl },
-    cleanupMarkers: [cleanupMarker],
+    cleanupMarkers: [cleanupMarker, ...(observationResultId ? [exactManagedTerminalCleanupMarker({
+      attemptBinding, submissionAttempt: observationAttempt, resultId: observationResultId,
+    })] : [])],
   });
   if (!confirmed) {
     return persistUnverified(
@@ -3845,6 +3889,9 @@ export async function recoverManagedSubmissionTerminalResult(
     terminal.resultId,
     fastify,
   );
+  if (observationResultId) {
+    await acknowledgeManagedTerminalFold(row, attemptBinding, observationAttempt, observationResultId, fastify);
+  }
   return 'folded';
 }
 
@@ -13489,6 +13536,56 @@ export function managedRunPhaseForStatus(
       return 'submitting';
     default:
       return null;
+  }
+}
+
+/** Recover a held attempt without ever entering prepare or submit. The lease spans replicas. */
+export async function recoverUnverifiedSubmission(
+  applicationId: string,
+  fastify: FastifyInstance,
+  deps: { recoverTerminal: typeof recoverManagedSubmissionTerminalResult } = { recoverTerminal: recoverManagedSubmissionTerminalResult },
+): Promise<void> {
+  const claimed = await db.transaction(async (tx) => {
+    const [candidate] = await tx.select().from(generated_resumes)
+      .where(eq(generated_resumes.id, applicationId)).limit(1);
+    if (!candidate) return null;
+    await lockSubmissionAttemptUser(tx, candidate.user_id);
+    const [row] = await tx.select().from(generated_resumes)
+      .where(eq(generated_resumes.id, applicationId)).limit(1);
+    const review = row ? readApplicationReview(row.spec) : null;
+    if (!row || !review || !outcomeRecoveryDue(review)) return null;
+    const events = await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx });
+    const opening = events.find((event) => event.attempt_id === review.submission_claim_id
+      && event.event_kind === 'attempt_opened' && event.source === 'managed_browser');
+    if (!opening || !events.some((event) => event.attempt_id === opening.attempt_id
+      && event.event_kind === 'boundary_authorized')) return null;
+    if (events.some((event) => event.attempt_id === opening.attempt_id
+      && (event.event_kind === 'submission_confirmed' || event.event_kind === 'not_sent_proven'))) return null;
+    const claim = claimOutcomeRecovery(review);
+    const next = nextReview(review, { outcome_recovery: claim });
+    await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(${generated_resumes.spec}, '{_review}', ${JSON.stringify(next)}::jsonb, true)`,
+    }).where(eq(generated_resumes.id, row.id));
+    return { row, review: next, claim, binding: submissionAttemptBindingFromEvent(opening) };
+  });
+  if (!claimed) return;
+  try {
+    await deps.recoverTerminal(claimed.row, claimed.review, claimed.binding, fastify);
+  } finally {
+    await db.transaction(async (tx) => {
+      await lockSubmissionAttemptUser(tx, claimed.row.user_id);
+      const [row] = await tx.select().from(generated_resumes)
+        .where(eq(generated_resumes.id, applicationId)).limit(1);
+      const review = row ? readApplicationReview(row.spec) : null;
+      // A concurrent receipt or a replaced attempt always wins over a recovery status update.
+      if (!row || !review || review.status !== 'needs_attention'
+        || review.submission_claim_id !== claimed.claim.attempt_id
+        || !isDeepStrictEqual(review.outcome_recovery, claimed.claim)) return;
+      const next = nextReview(review, { outcome_recovery: finishOutcomeRecovery(claimed.claim) });
+      await tx.update(generated_resumes).set({
+        spec: sql`jsonb_set(${generated_resumes.spec}, '{_review}', ${JSON.stringify(next)}::jsonb, true)`,
+      }).where(eq(generated_resumes.id, row.id));
+    });
   }
 }
 

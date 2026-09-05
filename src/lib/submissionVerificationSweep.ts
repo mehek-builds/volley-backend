@@ -193,8 +193,8 @@ export function litosVerificationSentence(input: {
       : '';
   return `Litos pressed Send and is verifying this application on its own. ${provider}${looked}${next}`
     + 'the moment either proves it, this application is recorded as sent. Nothing is needed from you. '
-    + 'Do not submit it by hand in the meantime, because two applications to the same posting count '
-    + 'against you and cannot be taken back. If you already know the answer, the two buttons below record it.';
+    + 'Do not submit it by hand in the meantime, because another submission '
+    + 'could create a duplicate. Litos will update this status when it has confirmation.';
 }
 
 type SweepRow = { id: string; user_id: string; spec: unknown };
@@ -205,6 +205,8 @@ export type SubmissionVerificationSweepDeps = {
   storeScreenshot: (objectKey: string, body: Buffer) => Promise<{ url: string }>;
   reconcileInbox: (userId: string) => Promise<unknown>;
   now: () => number;
+  recoverRetainedAttempt?: (packetId: string) => Promise<void>;
+  reloadPacket: (packetId: string) => Promise<SweepRow | null>;
 };
 
 async function listUnresolvedUnverifiedPackets(limit: number): Promise<SweepRow[]> {
@@ -230,6 +232,11 @@ const productionDeps: SubmissionVerificationSweepDeps = {
   storeScreenshot: (objectKey, body) => storeReceiptScreenshot(objectKey, body),
   reconcileInbox: (userId) => reconcileSubmissionConfirmations({ userId, limit: 50 }),
   now: () => Date.now(),
+  reloadPacket: async (packetId) => {
+    const [row] = await db.select({ id: generated_resumes.id, user_id: generated_resumes.user_id, spec: generated_resumes.spec })
+      .from(generated_resumes).where(eq(generated_resumes.id, packetId)).limit(1);
+    return row ?? null;
+  },
 };
 
 export type SweepOutcome =
@@ -254,6 +261,7 @@ async function applyStoredEvidence(row: SweepRow, decision: UnverifiedAutoDecisi
     const current = locked ? readApplicationReview(locked.spec) : null;
     const pending = current?.unverified_submission;
     if (!locked || !current || !pending || pending.resolution || current.status !== 'needs_attention') return 'skipped';
+    if (current.submission_claim_id !== readApplicationReview(row.spec)?.submission_claim_id) return 'skipped';
     const claimId = current.submission_claim_id;
     if (!claimId) return 'skipped';
     const events = (await submissionAttemptEventsForPacket(row.user_id, locked.id, { executor: tx }))
@@ -264,6 +272,8 @@ async function applyStoredEvidence(row: SweepRow, decision: UnverifiedAutoDecisi
     const binding = submissionAttemptBindingFromEvent(opening);
     const observedAt = new Date(nowIso);
 
+    // Re-evaluate the locked record instead of closing on the scheduler's earlier snapshot.
+    decision = unverifiedAutoDecision(pending, pending.portal_url ?? current.portal_url);
     if (decision.kind === 'confirm') {
       const finalUrl = pending.final_url ?? pending.portal_url ?? current.portal_url;
       if (!finalUrl) return 'skipped';
@@ -339,6 +349,7 @@ async function recordEmployerPageCheck(
     const current = locked ? readApplicationReview(locked.spec) : null;
     const pending = current?.unverified_submission;
     if (!locked || !current || !pending || pending.resolution || current.status !== 'needs_attention') return 'skipped';
+    if (current.submission_claim_id !== readApplicationReview(row.spec)?.submission_claim_id) return 'skipped';
     const checks = [...(pending.employer_page_checks ?? []), check].slice(-EMPLOYER_PAGE_CHECK_LIMIT);
     const next = applyReviewPatch(current, {
       unverified_submission: { ...pending, employer_page_checks: checks },
@@ -366,10 +377,21 @@ export async function runSubmissionVerificationSweep(
     confirmed_from_response: 0, page_checked: 0, page_check_failed: 0, not_due: 0, skipped: 0, error: 0,
   };
   const touchedUsers = new Set<string>();
-  for (const row of rows) {
+  for (const candidate of rows) {
+    let row = candidate;
+    // The same scheduled pass owns retained-session recovery and the later public-page checks.
+    // Reload after recovery so its durable confirmation always wins over this pass's snapshot.
+    if (deps.recoverRetainedAttempt) {
+      try {
+        await deps.recoverRetainedAttempt(row.id);
+        const fresh = await deps.reloadPacket(row.id);
+        if (!fresh) { outcomes.skipped += 1; continue; }
+        row = fresh;
+      } catch { outcomes.error += 1; continue; }
+    }
     const review = readApplicationReview(row.spec);
     const record = review?.unverified_submission;
-    if (!review || !record || record.resolution) { outcomes.skipped += 1; continue; }
+    if (!review || review.status !== 'needs_attention' || !record || record.resolution) { outcomes.skipped += 1; continue; }
     touchedUsers.add(row.user_id);
     const nowMs = deps.now();
     const nowIso = new Date(nowMs).toISOString();

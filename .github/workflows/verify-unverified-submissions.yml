@@ -2,12 +2,9 @@
 #
 # A press whose page never showed a receipt parks the packet at unverified_submission. Every half
 # hour this calls /internal/verify-unverified-submissions, which for each such packet: re-reads the
-# stored submit response (a bound 2xx on the posting's own endpoint is the employer accepting and
-# files the packet as sent); releases what the runner's own record proves never left the browser
-# (no bound request issued, or challenge-vendor traffic only) once the send lease has expired; opens
-# the employer's page read-only and records what it saw as evidence on the card; and runs the inbox
-# reconciler for the accounts it touched. Nothing is asked of the applicant. Idempotent by
-# construction: every write is guarded by the ledger's own safety recomputation.
+# retained original browser result and stored submit response; opens the employer page read-only
+# when due; and runs the inbox reconciler. Missing requests never release a held attempt.
+# Confirmation requires evidence bound to the original application, with no applicant action.
 name: verify-unverified-submissions
 
 on:

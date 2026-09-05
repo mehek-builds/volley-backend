@@ -2628,3 +2628,38 @@ describe('the submit request itself proves an employer acceptance', () => {
     assert.equal((verdict as { evidence: string }).evidence, 'page_text+employer_submit_response:workable:200');
   });
 });
+
+test('a held Lever attempt observes its delayed receipt without accepting another job or a partial application', async () => {
+  const url = 'https://jobs.lever.co/example/job-id/apply';
+  const initial: ManagedReceiptFixture = { url, continuationOffered: true, continuationToken: 'x'.repeat(48),
+    continuationExpiresAt: '2026-09-05T10:01:00.000Z',
+    submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, formStillPresent: true } };
+  for (const [landedUrl, text, accepted] of [
+    ['https://jobs.lever.co/example/job-id/thanks', 'Thanks for applying', true],
+    ['https://jobs.lever.co/example/other-job/thanks', 'Thanks for applying', false],
+    ['https://jobs.lever.co/example/job-id/thanks', 'Thanks for applying. Verify your email to finish.', false],
+  ] as const) {
+    let calls = 0;
+    const observed: ManagedReceiptFixture = { url: landedUrl, submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text',
+      evidence: 'body', message: text, formStillPresent: false } };
+    const outcome = await observeManagedReceiptOnceWithBinding({ initial, expectedApplicationUrl: url,
+      nowMs: Date.parse('2026-09-05T10:00:00.000Z'), observe: async (token) => {
+        assert.equal(token, initial.continuationToken); calls++; return observed;
+      } });
+    assert.equal(calls, 1);
+    assert.equal(outcome.receiptResult === observed, accepted);
+  }
+});
+
+test('the shared page receipt validator rejects negated completion even when the form is gone', () => {
+  for (const message of [
+    'Your application has not been successfully submitted.',
+    "Your application hasn't been received.",
+    'Thank you for applying. Your application was never actually filed.',
+  ]) {
+    assert.equal(exactManagedSubmitVerdict({
+      url: 'https://jobs.lever.co/example/job-id/thanks',
+      submitOutcome: { pressed: true, state: 'confirmed', source: 'page_text', evidence: 'body', message, formStillPresent: false },
+    }, 'https://jobs.lever.co/example/job-id/apply').kind, 'unverified', message);
+  }
+});

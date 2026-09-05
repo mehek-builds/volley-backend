@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply, FastifyPluginOptions } from 'fastify';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
+import { recoverUnverifiedSubmission } from './submissionRunner';
 import { runSubmissionVerificationSweep } from '../lib/submissionVerificationSweep';
 
 /* The scheduler surface for lib/submissionVerificationSweep.ts, on the same guard and the same
@@ -37,7 +38,13 @@ async function handle(request: FastifyRequest, reply: FastifyReply, deps: Verify
 }
 
 export async function verifyUnverifiedSubmissionsRoutes(fastify: FastifyInstance, options: RouteOptions = {}) {
-  const deps = { ...productionDependencies, ...options.dependencies };
+  const deps = {
+    ...productionDependencies,
+    sweep: (input: Parameters<typeof runSubmissionVerificationSweep>[0]) => runSubmissionVerificationSweep(input, {
+      recoverRetainedAttempt: (packetId) => recoverUnverifiedSubmission(packetId, fastify),
+    }),
+    ...options.dependencies,
+  };
   fastify.get('/internal/verify-unverified-submissions', (request, reply) => handle(request, reply, deps));
   fastify.post('/internal/verify-unverified-submissions', (request, reply) => handle(request, reply, deps));
 }
