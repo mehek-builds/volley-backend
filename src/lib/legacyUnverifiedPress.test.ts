@@ -209,7 +209,8 @@ describe('her answer over the pre-ledger press', () => {
 
 describe('the routes read the same record', () => {
   test('GET /submission publishes the card and POST /submission/unverified accepts the answer', async () => {
-    const source = await readFile(new URL('../routes/applications.ts', import.meta.url), 'utf8');
+    // cwd-relative like every other source-reading test: tsconfig.api.json compiles this tree as CommonJS.
+    const source = await readFile('src/routes/applications.ts', 'utf8');
     assert.match(
       source,
       /const pending = current\.unverified_submission \?\? legacyUnverifiedSubmissionRecord\(current\);/,
