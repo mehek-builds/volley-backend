@@ -9,6 +9,7 @@ import {
   type DiscoveredQuestion,
 } from './questionDiscovery';
 import {
+  durablePortalSelector,
   managedOptionProbeControlId,
   managedOptionProbeExpectsClosedControl,
   type SupportedPortal,
@@ -329,6 +330,92 @@ export function storedAnswerMatchesNoExactOption(
   if (!answer) return false;
   if (isConsentRefusingWording(question.answer)) return false;
   return !offered.some((option) => option.trim().toLowerCase() === answer.toLowerCase());
+}
+
+/**
+ * THE MENU THE LAST READ MEASURED, KEPT WHEN THIS READ MEASURED NOTHING.
+ *
+ * `options` on a stored question is written from the CURRENT run's read. A read that produced
+ * nothing is not evidence the employer's menu is gone - the probe is opened by an option probe that
+ * can be skipped, batched away, or time out - so writing its emptiness over a list an earlier run
+ * really measured is a DELETION, not a refresh. The runner already refuses that trade one level up:
+ * managedFormSnapshotWithStableCapabilities keeps `prior.field_options` when discovery failed. This
+ * is the same rule for the per-question copy.
+ *
+ * MEASURED on origin/main at the deployed revision (107e1ae7), by driving discoverAndResolveQuestions
+ * through two runs over one Greenhouse gender combobox `[id="245"]`:
+ *   run 1, menu read : options ["Woman","Man","Non-binary","I don't wish to answer"], answer "Woman"
+ *   run 2, menu unread: options null, answer "Female"
+ * The list is the smaller half of that. The answer moved because reviewedAnswerStillFits (see
+ * routes/submissionRunner.ts) is gated on `unreadClosedControl?.kind !== 'missing_exact_options'`,
+ * so an empty read DISARMS the keep gate, and her reviewed pick of an employer option is replaced by
+ * a profile value that matches nothing the control offers. That is the "ANSWERED with nothing
+ * selected" loop reviewedComboboxOptionKept.test.ts was written for, reached by a different door.
+ *
+ * WHY THIS IS NARROWER THAN "any closed control", and the narrowing is the safety argument:
+ *
+ *   - SAME CONTROL ONLY. A list is evidence about the control it was read from, so it is kept only
+ *     when this field carries the selector the stored question was bound to. The quarantine branch
+ *     in the runner already proves a stored record this same way (`existing.portal_selector ===
+ *     selector`) before letting it survive an unread menu.
+ *   - NEVER A TYPE storedAnswerMatchesNoExactOption CAN JUDGE. That gate blanks a stored answer
+ *     matching none of the recorded options, and it runs on SINGLE_CHOICE_EXACT_OPTION_TYPE. Handing
+ *     a retained list to a select, radio or listbox would let a menu measured on an earlier render
+ *     RE-OPEN a correct answer - destroying data to fix a display gap, which is a strictly worse
+ *     trade than the one being fixed. Excluding that set is what makes retention unable to blank
+ *     anything: on the types that remain, the re-open gate returns false before it looks at options.
+ *     Written as the set difference rather than a combobox literal so the two stay coupled - widen
+ *     the re-open gate later and retention narrows itself automatically.
+ *
+ *     That exclusion is belt and braces rather than the only guard, which is what makes the rule
+ *     safe to reason about at the call sites. A zero-option read on a type that needs exact options
+ *     before resolution raises `missing_exact_options` at the TOP of the discovery loop, and that
+ *     branch ends in `continue` - the record is preserved wholesale under its own current-round
+ *     same-selector proof, or invalidated. Control never reaches the writes this function serves.
+ *     EXACT_OPTIONS_BEFORE_RESOLUTION_TYPE is a superset of SINGLE_CHOICE_EXACT_OPTION_TYPE, so
+ *     every blankable type is intercepted there; combobox is the exempt one, and is therefore the
+ *     only type that reaches here with an unread menu. choiceOptionsNeverCaptured.test.ts pins both
+ *     halves of that.
+ *   - STILL A CHOICE CONTROL. A menu is kept only for something that is still a menu; a control this
+ *     run read as free text has no use for one.
+ *
+ * On the types that survive those tests the retained list can only help: the keep gate
+ * (REVIEWED_PICK_EXACT_OPTION_TYPE, which DOES admit combobox) can see that her reviewed answer is
+ * an offered option and hold it, and the dashboard can render the employer's choices instead of a
+ * bare text box.
+ */
+export function optionsSurvivingAnUnreadMenu(input: {
+  freshOptions: readonly string[] | null | undefined;
+  controlType: string;
+  selector: string | null | undefined;
+  existing: { options?: readonly string[] | null; portal_selector?: string | null } | undefined;
+}): string[] | null {
+  const fresh = usableOptions(input.freshOptions);
+  if (fresh.length > 0) return fresh;
+  const kept = usableOptions(input.existing?.options);
+  if (kept.length === 0) return null;
+  const controlType = input.controlType?.trim().toLowerCase() ?? '';
+  // A menu is kept only for a control that still offers one...
+  if (!CLOSED_CONTROL_TYPE.test(controlType)) return null;
+  // ...and never for one whose stored answer the re-open gate is allowed to blank.
+  if (SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType)) return null;
+  /* THE SAME-CONTROL PROOF HAS TO BE A DURABLE ONE.
+   *
+   * portalSelectorForField hands back `field.selector` - the `[data-litos-discovered-N]` marker
+   * stamped by the DISCOVERY page load - for a Greenhouse combobox with no id, which is precisely
+   * the population this function serves. durablePortalSelector refuses that marker, and it is right
+   * to: N is assigned by discovery ORDER, so the same marker can name a different control on a later
+   * run (a conditional field appeared, a section expanded) and the same control can change markers.
+   * Comparing raw selectors therefore reads as a proof of identity while proving nothing, and the
+   * consequence is not merely cosmetic - reviewedAnswerStillFits consults this menu, so a marker
+   * collision would keep an answer against another control's options AND skip the
+   * missing_exact_options blocker that would otherwise hold the send.
+   *
+   * Where identity cannot be proven, nothing is kept, which is exactly today's behaviour. */
+  const selector = durablePortalSelector(input.selector ?? undefined);
+  if (!selector) return null;
+  if (durablePortalSelector(input.existing?.portal_selector ?? undefined) !== selector) return null;
+  return kept;
 }
 
 /**

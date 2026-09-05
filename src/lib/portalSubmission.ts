@@ -1375,6 +1375,29 @@ export function ripplingListboxSelector(inputId: string): string {
  * aria-expanded while its one listbox is open, so the selector keeps the control id in the proof
  * and refuses to read a listbox unless that exact control says it owns an open popup. */
 export function paylocityListboxSelector(inputId: string): string {
+  return openControlListboxSelector(inputId);
+}
+
+/* THE POPUP THIS EXACT CONTROL SAYS IT HAS OPEN, ON A BOARD WHOSE POPUP ID NOBODY HAS MEASURED.
+ *
+ * The three selectors above are conventions: react-select names the popup after the input,
+ * Rippling appends '-list', and those hold on every board of their family. Every OTHER family has
+ * no measured convention, and that is why managedOptionProbeTargets refused to probe them at all
+ * (see the family list there, and the count this cost). A convention is not the only way to name a
+ * popup: aria-expanded is the ARIA contract every combobox implements, and a control that reports
+ * aria-expanded="true" is stating that the visible listbox on the page is its own.
+ *
+ * This is Paylocity's selector, unchanged and now shared, which is the point: it is the one shape
+ * in this file that names the popup WITHOUT knowing its id, it has been in production since
+ * 2026-08-xx on that family, and optionProbeIdForSelector already parses the control id back out
+ * of it. Widening the probe to the other families needed a selector, not a new mechanism.
+ *
+ * The proof is deliberately in two halves. `body:has([id=X][aria-expanded="true"])` refuses to read
+ * anything at all unless THIS control declares an open popup, so a page-level menu, a cookie
+ * banner's listbox or a neighbouring question's menu can never donate while the control is closed.
+ * `:visible` then keeps the read to the popup a person can see, because a widget that keeps every
+ * menu mounted behind display:none would otherwise offer several. */
+export function openControlListboxSelector(inputId: string): string {
   return `body:has([id="${quoteAttr(inputId)}"][aria-expanded="true"]) [role="listbox"]:visible`;
 }
 
@@ -1392,11 +1415,18 @@ function optionProbeIdForSelector(selector: string | undefined): string | undefi
  * TWO ROUNDS, and the second one is the one that reads.
  *
  * School and End date month hold their options in the page and come back on the first open.
- * Degree and Discipline load theirs over the network when the menu opens, and the runner has no
- * wait primitive: every action is instantaneous, an optional `waitForSelector` is skipped by the
- * runner's own "missing selector" pre-check before it can wait for anything, and `click`'s
- * networkidle wait returns immediately because the fetch has not started yet. Measured: the first
- * open reads back the literal text "Loading...".
+ * Degree and Discipline load theirs over the network when the menu opens, and the first open cannot
+ * see them however long it waits: `click`'s networkidle wait returns immediately because the fetch
+ * has not started yet. Measured: the first open reads back the literal text "Loading...".
+ *
+ * THE SECOND HALF OF THIS PARAGRAPH USED TO SAY the runner has no wait primitive at all - "an
+ * optional `waitForSelector` is skipped by the runner's own missing-selector pre-check before it can
+ * wait for anything". That was true when it was written and is not true now: the runner exempts
+ * waitForSelector from that pre-check by name and honours its own clamped timeout. The correction is
+ * load-bearing rather than cosmetic, because the false belief is why no pass in this file ever asked
+ * the runner to wait for a menu, and a menu that is painted a frame after the click reads as a menu
+ * with nothing in it. pushDiscoveredOptionProbe now emits that wait; see the note there. Round one
+ * still exists for the reason below, which a wait cannot replace - it is what STARTS the fetch.
  *
  * The second open reads the real list, because the first one warmed the fetch. Measured on the same
  * posting: round one "Loading...", round two 100 discipline options. So round one exists to make
@@ -1579,8 +1609,23 @@ export function attachManagedFieldOptions<T extends {
  * it safe to run against an employer's form on an application the applicant has not yet approved.
  */
 
-/** A custom control needs one identity read plus two bounded open/read/close rounds. */
-export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 7;
+/** A custom control needs one identity read plus two bounded open/wait/read/close rounds. */
+export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 9;
+
+/**
+ * How long one round waits for the popup the open-click asked for.
+ *
+ * Sized off the runner's own measurement of the same wait one layer down: fillCustomChoice polls
+ * for a bare opener's menu on a 1200ms deadline, and the comment there records Greenhouse's async
+ * menus arriving at 555-563ms - "the choosers below never re-read, so a menu that rendered at 500ms
+ * was simply lost". The probe faces the same widgets, so it gets the same window rather than a
+ * number invented here.
+ *
+ * Spent at most twice per control and only where a menu can appear, and the runner clamps
+ * waitForSelector to 100-20000ms in any case. A control that opens instantly does not pay it: the
+ * wait returns the moment the selector matches.
+ */
+export const MANAGED_OPTION_PROBE_MENU_WAIT_MS = 1200;
 export const MANAGED_OPTION_PROBE_MAX_CONTROLS = 80;
 
 /**
@@ -1860,12 +1905,35 @@ export function managedOptionProbeTargets(
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): string[] {
-  /* Greenhouse, and now Rippling. Rippling's bare div comboboxes ship no options in the DOM
-   * until opened, so every one of them reached resolution blind and the fill sent vocabulary the
-   * employer does not offer ('No' into a list reading 'I am not a protected veteran' - measured
-   * on Easy Dynamics, 2026-08-20). The probe machinery is family-agnostic; only the popup's id
-   * shape differs, and ripplingListboxSelector carries it. */
-  if (!['greenhouse', 'rippling', 'paylocity'].includes(portalFamily(portal))) return [];
+  /* EVERY FAMILY, AND THE THREE-NAME LIST THAT USED TO STAND HERE WAS THE LARGEST SINGLE CAUSE OF
+   * AN UNANSWERABLE QUESTION ON THIS ACCOUNT.
+   *
+   * The note this replaces said the probe machinery is family-agnostic and only the popup's id
+   * shape differs - which was true, and was then used to justify a three-name allow list against a
+   * PortalFamily union of twenty-six. So on Lever, Ashby, Workable, Workday, Breezy, Recruitee,
+   * Teamtailor, iCIMS and eighteen others, no closed control's menu was EVER opened. Their options
+   * could only come from the DOM walk, and a custom combobox does not render its menu until it is
+   * opened, so the walk returned nothing and the question was stored with an empty option list.
+   *
+   * Measured live on mehekmandal05@gmail.com, 2026-09-03: of 179 unanswered REQUIRED choice
+   * questions across the packet queue, 160 carry a completely EMPTY option list, and 19 packets are
+   * blocked on nothing else. A choice question with no captured options is unanswerable by
+   * construction - the product must send one of the employer control's own exact option strings and
+   * it has none to send - so those 160 could never be resolved and could never be asked either.
+   *
+   * What made the list defensible was the selector, not the machinery: greenhouse, rippling and
+   * paylocity are the three families whose popup shape somebody had measured. openControlListboxSelector
+   * removes that constraint - it names the popup by the control's own aria-expanded rather than by a
+   * convention - so there is no longer anything a family has to be on this list to get.
+   *
+   * IT STAYS READ-ONLY, which is what makes widening it safe to do at all: open the control, read
+   * the listbox, press Escape, on every family exactly as on the three. Nothing is filled, nothing
+   * is uploaded and nothing is submitted, and the run carries scan correlation for containment
+   * (see scanPostingQuestions and the stratus note at normalizeManagedRun). The cost of being wrong
+   * about a family is spent actions, never an employer action.
+   *
+   * managedOptionProbeTarget is still the gate on WHICH controls are read, and it is unchanged: a
+   * field that does not expect a closed control returns undefined there and is never probed. */
   // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
   // empty and windowed reads are absent from alreadyRead and must enter this fail-closed stage.
   const seen = new Set<string>();
@@ -1907,6 +1975,21 @@ function nativeSelectSelector(controlId: string): string {
   return `[id="${quoteAttr(controlId)}"]:is(select)`;
 }
 
+/**
+ * The popup selector this control's family is known to use, or the aria-expanded proof otherwise.
+ *
+ * Two measured conventions and one general rule. The conventions stay because they name the exact
+ * popup node and so cannot pick up a neighbour even on a page with several menus open at once; the
+ * general rule is what every other family gets, and it is the reason the family allow list in
+ * managedOptionProbeTargets could be removed.
+ */
+function probeListboxSelector(controlId: string, portal?: SupportedPortal): string {
+  const family = portal ? portalFamily(portal) : undefined;
+  if (family === 'rippling') return ripplingListboxSelector(controlId);
+  if (family === 'greenhouse') return reactSelectListboxSelector(controlId);
+  return openControlListboxSelector(controlId);
+}
+
 function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget, portal?: SupportedPortal) {
   if (target.kind === 'native') {
     actions.push({
@@ -1927,15 +2010,41 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
+  const listboxSelector = probeListboxSelector(target.controlId, portal);
   for (const round of [1, 2] as const) {
     actions.push({ type: 'click', selector, label: `option_probe_open:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    /* WAIT FOR THE MENU THIS CLICK OPENED, because nothing else in the run does.
+     *
+     * The two-round shape below exists because the runner "has no wait primitive" - the belief
+     * recorded above pushManagedReactSelectOptionProbeActions, which is now stale in the one way
+     * that matters here. The runner's optional-action pre-check exempts waitForSelector BY NAME
+     * (stratus src/managed-browser.js: `action.optional && action.type !== 'waitForSelector'`, with
+     * its own comment saying "a pre-check that can answer 'not there' before that timeout starts is
+     * the bug itself"), and normalizeManagedActions clamps the timeout to 100-20000ms. So an
+     * optional waitForSelector DOES wait now, and it is the only thing in this action list that can.
+     *
+     * Without it the extract runs in the very next action after the click. `click`'s only settle is
+     * waitForLoadState('networkidle'), which returns immediately for a menu rendered from client
+     * state with no network request, so the read lands before the popup has been painted and the
+     * control is recorded as having returned no readable choices - indistinguishable, downstream,
+     * from a control whose menu is genuinely empty.
+     *
+     * OPTIONAL AND SHORT. A control that never opens (a text field the planner misjudged, a menu
+     * behind a network fetch that has not landed) costs this window once per round and then reads
+     * exactly what it read before; it can never fail the run, because an optional waitForSelector
+     * that times out lands in the runner's catch and is reported in `skipped`. The round-two shape
+     * is kept as it was: it is what makes Greenhouse's over-the-network taxonomies readable, and a
+     * wait does not replace a warm - the first open is what STARTS the fetch. */
+    actions.push({
+      type: 'waitForSelector',
+      selector: listboxSelector,
+      label: `option_probe_menu:${target.controlId}:${round}`,
+      optional: true,
+      timeout: MANAGED_OPTION_PROBE_MENU_WAIT_MS,
+    });
     actions.push({
       type: 'extract',
-      selector: portal && portalFamily(portal) === 'rippling'
-        ? ripplingListboxSelector(target.controlId)
-        : portal && portalFamily(portal) === 'paylocity'
-          ? paylocityListboxSelector(target.controlId)
-          : reactSelectListboxSelector(target.controlId),
+      selector: listboxSelector,
       label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`,
       optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,

@@ -7778,21 +7778,82 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var labels = document.querySelectorAll('label[for="' + CSS.escape(el.id) + '"]');
     return labels.length === 1 ? labels[0] : null;
   }
-  /* One popup explicitly names this exact opener, inside the opener's own immediate question block.
+  /* ONE POPUP EXPLICITLY NAMES THIS EXACT OPENER, WHEREVER THE WIDGET MOUNTED IT.
    *
-   * CBS Recruitee keeps its closed menu in the DOM as a sibling of the button and binds it through
+   * CBS Recruitee keeps its closed menu in the DOM and binds it through
    * aria-labelledby="input-candidate.salutation-2". The relation is token-based because ARIA permits
-   * more than one id. Requiring one same-parent listbox prevents a page-level menu or a neighbour's
-   * popup from donating its choices. Ambiguity returns null and no options are inferred. */
-  function exactBoundSiblingListbox(el) {
-    if (!el.id || !el.parentElement || !el.parentElement.querySelectorAll) return null;
-    var candidates = el.parentElement.querySelectorAll('[role="listbox"][aria-labelledby]');
-    var matches = Array.prototype.filter.call(candidates, function (listbox) {
-      if (listbox.parentElement !== el.parentElement) return false;
-      var ids = clean(listbox.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
-      return ids.indexOf(el.id) !== -1;
-    });
-    return matches.length === 1 ? matches[0] : null;
+   * more than one id. Exactly one bound popup is required; ambiguity returns null and no options are
+   * inferred, so a page-level menu or a neighbour's popup can never donate its choices.
+   *
+   * THE SAME-PARENT TEST THIS REPLACES WAS THE DEFECT, and the fill path had already proved it. This
+   * used to require listbox.parentElement === el.parentElement, so only a SIBLING popup counted. A
+   * widget that portals its menu - React Select with menuPortalTarget, downshift behind a popper,
+   * Radix, MUI, Headless UI - appends it near <body>, where it is never anyone's sibling, so the
+   * reverse aria-labelledby binding the widget author wrote on purpose was read and then thrown
+   * away. Measured on cbsconsulting.recruitee.com 2026-08-28 one layer down: the chooser hit exactly
+   * this and was fixed there (readOpenerPortalListbox in the stratus runner, and the three
+   * assertions in test/recruitee-listbox-portal-scope-dom.test.js). The reader in front of it was
+   * left believing a menu is a sibling, so the two layers disagreed about which listbox is a
+   * control's own - the chooser could commit an option the reader could not report.
+   *
+   * Deliberately the SAME two directions the chooser resolves, so they cannot drift again:
+   *   - FORWARD: the opener's own aria-controls, falling back to aria-owns (the ARIA 1.0 spelling
+   *     Select2 and jQuery UI still write). Reading only aria-controls dropped every widget that
+   *     spells the same statement the older way.
+   *   - REVERSE: a listbox anywhere in the document whose aria-labelledby names THIS opener.
+   * A reference that resolves to a wrapper AROUND the listbox counts as naming the listbox, because
+   * that is what a popup container is; pointing at the container rather than the list itself is the
+   * common spelling and refusing it read zero options off a menu that was fully present.
+   *
+   * A candidate must hold at least one option row, which is what keeps this from widening: a popup
+   * shell with nothing in it is not evidence of a vocabulary, and requiring rows is also how two
+   * mounted-but-empty menus fail to become an ambiguity. */
+  function boundOptionListbox(el) {
+    if (!el || !el.getAttribute) return null;
+    var candidates = [];
+    function optionRoot(node) {
+      if (!node || !node.querySelector) return null;
+      var listbox = node.getAttribute && node.getAttribute('role') === 'listbox'
+        ? node
+        : node.querySelector('[role="listbox"]');
+      var root = listbox || node;
+      return optionRowsIn(root).length > 0 ? root : null;
+    }
+    function addCandidate(node) {
+      var root = optionRoot(node);
+      if (root && candidates.indexOf(root) === -1) candidates.push(root);
+    }
+    var referenced = clean(
+      el.getAttribute('aria-controls') || el.getAttribute('aria-owns') || '',
+    ).split(/\s+/).filter(Boolean);
+    for (var f = 0; f < referenced.length; f += 1) {
+      addCandidate(document.getElementById(referenced[f]));
+    }
+    if (el.id) {
+      var named = document.querySelectorAll('[role="listbox"][aria-labelledby]');
+      for (var r = 0; r < named.length; r += 1) {
+        var ids = clean(named[r].getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        if (ids.indexOf(el.id) !== -1) addCandidate(named[r]);
+      }
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+  /* THE ROWS A MENU OFFERS, in the two spellings that are evidence rather than guesswork.
+   *
+   * role="option" is the standard and is tried first. A <ul role="listbox"> whose rows are plain
+   * <li> is the other real shape - Select2's results list and every hand-rolled downshift menu write
+   * it - and reading only role=option returned ZERO options off a menu whose rows were all present,
+   * which downstream is indistinguishable from "this employer offers nothing".
+   *
+   * The li arm is deliberately narrow: it fires only when the root is itself a declared listbox and
+   * only when no role=option row exists, so a menu that spells its rows properly is never read
+   * twice, and a random <ul> somewhere in the block can never contribute. */
+  function optionRowsIn(root) {
+    if (!root || !root.querySelectorAll) return [];
+    var rows = root.querySelectorAll('[role="option"]');
+    if (rows.length > 0) return Array.prototype.slice.call(rows);
+    var isListbox = root.getAttribute && root.getAttribute('role') === 'listbox';
+    return isListbox ? Array.prototype.slice.call(root.querySelectorAll('li')) : [];
   }
   /* THE QUESTION A CHOICE CONTROL BELONGS TO, when the DOM never said so in a standard way.
    *
@@ -8047,9 +8108,9 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       }
       return out;
     }
-    var boundListbox = exactBoundSiblingListbox(el);
+    var boundListbox = boundOptionListbox(el);
     if (boundListbox) {
-      var boundOptions = boundListbox.querySelectorAll('[role="option"]');
+      var boundOptions = optionRowsIn(boundListbox);
       for (i = 0; i < boundOptions.length; i += 1) {
         var boundText = clean(
           boundOptions[i].getAttribute('aria-label')
