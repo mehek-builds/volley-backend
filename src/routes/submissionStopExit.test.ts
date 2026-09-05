@@ -38,7 +38,10 @@ import {
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
 import { ManagedBrowserAssertionFailureError, ManagedBrowserPreSubmitCrashError } from '../lib/browserbase';
 import { submitRequestDisposition } from '../lib/submissionSafety';
-import { SubmissionAccountDeletionDrainError } from '../lib/submissionAttemptLedger';
+import {
+  SubmissionAccountDeletionDrainError,
+  SubmissionProviderCallLockTimeoutError,
+} from '../lib/submissionAttemptLedger';
 
 const CLAIMED_AT = '2026-08-11T12:00:00.000Z';
 
@@ -91,6 +94,22 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.equal(persisted.submission_claim_id, undefined);
     assert.equal(persisted.unverified_submission, undefined);
     assert.match(persisted.attention_reason ?? '', /Account deletion paused/);
+  });
+
+  test('a provider-call lock timeout releases a pre-boundary claim without remote uncertainty', () => {
+    /* withProviderCallFence's lock acquire can only time out before the callback it guards ever
+       runs (see lockSubmissionProviderCallUser and PROVIDER_CALL_LOCK_TIMEOUT_MS), so this is the
+       same family as the account-deletion drain above: nothing reached the employer either way. */
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new SubmissionProviderCallLockTimeoutError(240_000),
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_claimed_at, undefined);
+    assert.equal(persisted.submission_claim_id, undefined);
+    assert.equal(persisted.unverified_submission, undefined);
+    assert.match(persisted.attention_reason ?? '', /did not finish in time/);
+    assert.match(persisted.attention_reason ?? '', /Nothing has been sent/);
   });
 
   test('an action-budget stop exits by ordinary re-run, because the builder threw before the click', () => {

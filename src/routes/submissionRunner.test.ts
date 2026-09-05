@@ -3492,10 +3492,12 @@ test('every managed provider start, continuation POST, and direct session creati
   const bodyStart = fenceSource.indexOf('export async function withProviderCallFence');
   assert.ok(bodyStart > 0, 'the provider call fence must be one named, testable function');
   const fenceBody = fenceSource.slice(bodyStart);
-  assert.ok(fenceBody.includes('lockSubmissionProviderCallUser(tx, userId)'));
+  // Bounded since 2026-09-05 (PROVIDER_CALL_LOCK_TIMEOUT_MS): the fence's own acquire must always
+  // pass a lock timeout, never the unbounded two-argument form account.ts's deletion drain uses.
+  assert.ok(fenceBody.includes('lockSubmissionProviderCallUser(tx, userId, {'));
   assert.ok(!fenceBody.includes('lockSubmissionAttemptUser('),
     'the provider fence must not hold the ledger key across a provider call');
-  assert.ok(fenceBody.indexOf('lockSubmissionProviderCallUser(tx, userId)')
+  assert.ok(fenceBody.indexOf('lockSubmissionProviderCallUser(tx, userId, {')
     < fenceBody.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
   assert.ok(fenceBody.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
     < fenceBody.indexOf('return call({'));

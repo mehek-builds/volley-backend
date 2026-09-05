@@ -501,6 +501,40 @@ export class SubmissionAccountDeletionDrainError extends Error {
   }
 }
 
+/* Thrown by lockSubmissionProviderCallUser's bounded form when SET LOCAL lock_timeout expires before
+ * pg_advisory_xact_lock acquires `submission-provider-call:<userId>`. Structurally this can only fire
+ * BEFORE the caller's own provider call starts - see lockSubmissionProviderCallUser - so, exactly like
+ * SubmissionAccountDeletionDrainError, submissionFailureReview treats it as a stop that provably
+ * precedes any employer contact. See PROVIDER_CALL_LOCK_TIMEOUT_MS in submissionAccountFence.ts for
+ * why 55P03 here is a class of stop this codebase has to name, not swallow as a bare Error: an
+ * untyped throw here would classify 'unclassified' the same way the 2026-09-02 drift refusal and
+ * destination-probe refusal did before they were typed, and read the row as an uncertain send it
+ * plainly is not. */
+export class SubmissionProviderCallLockTimeoutError extends Error {
+  readonly code = 'SUBMISSION_PROVIDER_CALL_LOCK_TIMEOUT';
+
+  constructor(lockTimeoutMs: number) {
+    super(`Timed out after ${lockTimeoutMs}ms waiting for an earlier submission provider call for this account to finish`);
+    this.name = 'SubmissionProviderCallLockTimeoutError';
+  }
+}
+
+/* Postgres `lock_not_available`, the SQLSTATE SET LOCAL lock_timeout raises when it expires.
+ *
+ * READ THE CAUSE CHAIN, NOT JUST THE ERROR, for the exact reason applicationFacts.ts's
+ * isUndefinedColumnError does: a failed statement surfaces here as a DrizzleQueryError whose own
+ * `code` is undefined and whose `cause` is the pg error actually carrying 55P03. Testing `error.code`
+ * alone would silently never match on this repo's Drizzle version, exactly as it silently never
+ * matched 42703 there. Bounded depth for the same reason: a cause that points at itself must not spin. */
+function isLockNotAvailableError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if ((current as { code?: string }).code === '55P03') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** Refuse any new employer capability after account deletion has fenced the user. */
 export async function assertSubmissionAccountNotDraining(
   executor: Pick<SubmissionAttemptLedgerExecutor, 'select'>,
@@ -590,12 +624,55 @@ export async function lockSubmissionAttemptUser(
  *
  * Keep this key PER USER, never per posting: "one provider call at a time for one account" is what
  * stops two managed runs racing the same employer session.
+ *
+ * BOUNDED FOR A PROVIDER CALL, UNBOUNDED FOR EVERYTHING ELSE, as of 2026-09-05. This acquire has no
+ * timeout of its own: a holder that never releases - a stratus hang that somehow outlives
+ * MANAGED_PREPARE_FILL_DEADLINE_MS, a connection left half-dead so its transaction's
+ * rollback-on-error never runs - queues out every later call for that account forever, with no error
+ * and no way to distinguish "busy" from "wedged". `options.lockTimeoutMs`, when given, sets a
+ * transaction-scoped `lock_timeout` before the acquire and turns that wedge into a catchable
+ * SubmissionProviderCallLockTimeoutError instead. Account deletion (account.ts) calls this with NO
+ * options, on purpose: it must keep waiting out a real in-flight call no matter how long that call
+ * legitimately takes, because giving up early is the one thing that would let deletion and a live
+ * provider call overlap. Only withProviderCallFence, which exists to bound exactly one provider call
+ * rather than to guarantee deletion ordering, opts into a timeout. See PROVIDER_CALL_LOCK_TIMEOUT_MS
+ * in submissionAccountFence.ts for the value and the reasoning behind it.
  */
 export async function lockSubmissionProviderCallUser(
   executor: Pick<typeof db, 'execute'>,
   userId: string,
+  options: { lockTimeoutMs?: number } = {},
 ): Promise<void> {
-  await executor.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`submission-provider-call:${userId}`}, 0::bigint))`);
+  const acquire = () => executor.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`submission-provider-call:${userId}`}, 0::bigint))`,
+  );
+  if (options.lockTimeoutMs === undefined) {
+    await acquire();
+    return;
+  }
+  const { lockTimeoutMs } = options;
+  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
+    throw new Error('lockSubmissionProviderCallUser lock timeout must be a positive integer of milliseconds');
+  }
+  /* set_config, not `SET LOCAL ... = ${...}`: SET's own grammar takes a literal, never a bind
+   * parameter, so a dynamic value can only reach it through string interpolation. set_config is an
+   * ordinary function and takes one; passing `true` for its is_local argument is the functional
+   * equivalent of SET LOCAL, reverting on its own at this transaction's COMMIT or ROLLBACK even if the
+   * explicit reset below never runs. */
+  await executor.execute(sql`select set_config('lock_timeout', ${`${lockTimeoutMs}ms`}, true)`);
+  try {
+    await acquire();
+  } catch (error) {
+    if (isLockNotAvailableError(error)) throw new SubmissionProviderCallLockTimeoutError(lockTimeoutMs);
+    throw error;
+  }
+  /* Reached only when the lock was actually acquired: a timed-out acquire above throws INSIDE this
+   * transaction, which Postgres aborts on any error, so nothing further can run on it until the
+   * caller's own rollback regardless. Reset promptly on the success path because withProviderCallFence
+   * holds this exact transaction open for the whole provider call that follows the return from here -
+   * leaving a short lock_timeout live for that entire duration would let it silently catch some
+   * unrelated lock a future change acquires on the same executor while the fence is still held. */
+  await executor.execute(sql`reset lock_timeout`);
 }
 
 /* The same serialization asked without waiting, for a best-effort reader that must never queue

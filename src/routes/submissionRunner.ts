@@ -368,6 +368,7 @@ import {
   submissionAttemptRetrySafety,
   submissionAttemptsOpenedToday,
   SubmissionAccountDeletionDrainError,
+  SubmissionProviderCallLockTimeoutError,
   type SubmissionBoundaryAuthorization,
   type SubmissionAttemptBinding,
   type SubmissionAttemptEventKind,
@@ -12631,6 +12632,18 @@ export function submissionFailureReview(
       ...preClickNoSubmitReleasePatch(),
       submission_error: error.message,
       attention_reason: 'Account deletion paused this submission before Litos contacted the employer.',
+      attention_categories: ['evidence_gap'],
+    });
+  }
+  /* Thrown by withProviderCallFence's lock acquire, strictly before the fenced provider call it
+   * guards can start - see SubmissionProviderCallLockTimeoutError and PROVIDER_CALL_LOCK_TIMEOUT_MS.
+   * Same family as the drain above: nothing reached the employer, so this releases exactly like it. */
+  if (error instanceof SubmissionProviderCallLockTimeoutError) {
+    return nextReview(current, {
+      status: 'needs_attention',
+      ...preClickNoSubmitReleasePatch(),
+      submission_error: error.message,
+      attention_reason: 'An earlier attempt on this account was still running and did not finish in time, so Litos stopped before contacting the employer. Nothing has been sent. Try this one again in a few minutes.',
       attention_categories: ['evidence_gap'],
     });
   }
