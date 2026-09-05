@@ -1599,6 +1599,9 @@ export type ApplicationReviewState = {
      * published so the applicant can answer a press that was only ever written as a sentence. It
      * is never stored in this shape; the writer that resolves it persists the resolution. */
     legacy_prose?: true;
+    /* This record is a READING of the packet's own ledger (lib/legacyUnverifiedPress.ts): a press
+     * without an outcome whose claim the row no longer carries. Never stored in this shape either. */
+    ledger_attempt?: string;
   };
 };
 
