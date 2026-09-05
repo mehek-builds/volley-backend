@@ -579,9 +579,13 @@ function managedActionPlanPositionProvesPreClick(
   label: string | null,
 ): boolean {
   if (!label) return false;
-  const failingIndex = actions.findIndex((action) => action.label === label);
   const confirmIndex = actions.findIndex((action) => action.type === 'confirmAndSubmit');
-  return failingIndex >= 0 && confirmIndex >= 0 && failingIndex < confirmIndex;
+  if (confirmIndex < 0) return false;
+  const positions = actions.flatMap((action, index) => (action.label === label ? [index] : []));
+  // Every occurrence of the label must sit ahead of the click. A label that also appears at or after
+  // `confirmAndSubmit` cannot say which occurrence died, so it proves nothing - the applicant is never
+  // told "nothing was sent" on a position that might have been a post-press read.
+  return positions.length > 0 && positions.every((index) => index < confirmIndex);
 }
 
 /** Correlated provider progress that crossed or resolved an employer boundary before its response. */

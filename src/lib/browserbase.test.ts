@@ -1730,6 +1730,43 @@ test('a refusal at or after confirmAndSubmit is not proven pre-click by plan pos
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
+test('a label that also appears at or after confirmAndSubmit is not proven pre-click by plan position', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const refusal = 'filled_field:phone: expected exactly one match for input[name="phone"], found 0';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: refusal },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  const actions: ManagedBrowserAction[] = [
+    { type: 'extract', selector: 'input[name="phone"]', label: 'filled_field:phone', optional: false },
+    { type: 'confirmAndSubmit', contractVersion: 2, submitKind: 'application', maxRetries: 1, chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY },
+    { type: 'extract', selector: 'input[name="phone"]', label: 'filled_field:phone', optional: false },
+  ];
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', actions, {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof ManagedBrowserAssertionFailureError)
+      && !(error instanceof ManagedBrowserPreSubmitCrashError),
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
 test('the crash retry helper never spends a second sandbox run on a deterministic refusal', async () => {
   const progress = {
     version: 1,
