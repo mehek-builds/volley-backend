@@ -384,6 +384,7 @@ const reviewBodySchema = z.object({
  * that screen to post them back would make a round trip of the portal identity every time somebody
  * fixes a typo in an essay. Narrower body, narrower route, nothing to re-derive. */
 const reviewAnswersBodySchema = z.object({
+  discard_prepared_form: z.boolean().optional(),
   /* Plus the one field only this screen can honestly send. `confirmed` is the applicant's explicit
    * word that she read this exact answer and let it stand, which the merge turns into the
    * applicant-claim an unedited confirmation can never earn through a diff - see
@@ -3234,7 +3235,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       // The row, not its status. needs_attention is also what a run that may have pressed submit
       // leaves behind, and only the evidence fields on the row tell those two apart.
-      if (reviewAnswerSaveDisposition(current) !== 'save') {
+      const discardPrepared = parsed.data.discard_prepared_form === true
+        && current.status === 'ready_for_final_approval'
+        && !current.submission_claim_id && !current.submission_claimed_at
+        && !employerMayHoldApplication(current);
+      if (reviewAnswerSaveDisposition(current) !== 'save' && !discardPrepared) {
         /* THE REFUSAL THAT WAS RIGHT AND NAMED NO WAY OUT, WHICH THIS ROUTE'S NEIGHBOUR ALREADY
          * CALLS A BUG IN ITSELF.
          *
@@ -3362,12 +3367,23 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         resolverAnswerFor,
         machineAnswerFor,
       );
-      const next: ApplicationReviewState = {
-        ...current,
-        questions: merged,
-        questions_reviewed_at: reviewedAt,
-        updated_at: new Date().toISOString(),
-      };
+      const next: ApplicationReviewState = discardPrepared
+        ? {
+          // Use the same invalidation as a refill, but do not queue or authorize a browser run.
+          ...freshSubmitRequestReview(current, merged, reviewedAt),
+          status: 'questions_ready',
+          submission_run_id: undefined,
+          packet_audit: undefined,
+          progress_screenshot_url: undefined,
+          progress_stage: undefined,
+          progress_updated_at: undefined,
+        }
+        : {
+          ...current,
+          questions: merged,
+          questions_reviewed_at: reviewedAt,
+          updated_at: new Date().toISOString(),
+        };
       /* THE OTHER WAY THIS SAVE LOSES THE RACE, and until now it was the only one that reached the
        * applicant as a crash.
        *
