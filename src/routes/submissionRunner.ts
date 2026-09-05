@@ -108,6 +108,7 @@ import {
   managedOptionProbeTargets,
   managedUnexplainedAnswers,
   managedUnexplainedAnswerReasons,
+  type ManagedUnexplainedAnswer,
   managedResultFieldOptions,
   mergeManagedFieldOptions,
   managedResultSupportsDiscoveryRole,
@@ -5844,6 +5845,184 @@ export function questionMetadataMeasurementIsComplete(input: {
   return applicationFormWasReached(input);
 }
 
+/* A FORM THAT VANISHED PARTWAY THROUGH IS NOT A FORM THAT WAS REACHED.
+ *
+ * applicationFormWasReached (above) answers "was this control ever present in this run", and it has
+ * to: a fill that filled nothing is not evidence of a missing form on its own. But it short-circuits
+ * on the FIRST filled field, which is exactly what let two measured runs through. Pony.ai packet
+ * fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, run 5648ed71 (2026-09-05): the fixed fields (name, email,
+ * location, resume, phone, question:city) all landed, so applicationFormWasReached returned true on
+ * its very first line - and THEN Workable's resume upload closed its S3 window early, the page
+ * behind it turned into Workable's own "Sorry, an unknown error occurred" view, and the run's three
+ * remaining planned fills - question:country, question:postcode, question:summary - all came back
+ * "nothing matched <selector>" or a locator timeout. Every one of those controls had a value the
+ * packet was actively answering, and none of the earlier fills' evidence covers what happened to the
+ * page after them. TWG Global packet 8b26619f, run 9c7b21eb, the same day: no comparable list of
+ * named fields, but the fill pass's own page text ran to 205 characters against roughly 1188 for the
+ * same posting's discovery pass - a form that lost 83% of its text between two passes of the same
+ * run is not the form discovery just measured, whatever blockers and filled_fields say.
+ *
+ * Both are read the same way applicationFormWasReached already is: as MISMATCH evidence, not
+ * absolute floors. A short discovery pass proves the real form is short, and neither check below
+ * fires on that - see managedFormTextCollapsed's minimum, and managedVanishedControlFields' discovery
+ * membership check just below it.
+ */
+// Not anchored to the start of the string: a raw mention is the provider's full skipped line, kept
+// verbatim from `label: detail` (see ManagedUnexplainedAnswer.rawMentions and
+// MANAGED_ANSWER_LOSS_SUFFIX in portalSubmission.ts for the identical shape), so "nothing matched"
+// or the timeout wording sits after the label and colon, never at index 0.
+const CONTROL_VANISHED_RAW_MENTION_RE = /nothing matched\b|Timeout\s+\d+\s*ms\s+exceeded/i;
+
+/**
+ * A CONTROL DISCOVERY ITSELF JUST FOUND, GONE BY THE NEXT PASS.
+ *
+ * Scoped to `discoveredQuestions` - THIS run's own discovery pass, not the packet's full merged
+ * question set - on purpose. A stored question carried over from an earlier round whose control this
+ * run's discovery never re-found may honestly describe a form that has fewer fields than it used to;
+ * failing to fill that one is the ordinary R-076/R-122 drift this codebase already accepts as
+ * informational (see managedUnexplainedAnswerReasons) and must stay that way. What the same-run
+ * discovery pass just enumerated and the same-run fill pass could not find a moment later is not
+ * drift, it is the two passes disagreeing about one page.
+ */
+export type VanishedControlField = {
+  question: string;
+  required: boolean;
+};
+
+export function managedVanishedControlFields(
+  unexplained: readonly ManagedUnexplainedAnswer[],
+  discoveredQuestions: ReadonlyArray<{ question: string; required?: boolean }>,
+): VanishedControlField[] {
+  // Exact equality on the SAME normalization discovery already uses for a label key elsewhere in
+  // this file (normalizeReviewQuestionLabel(...).toLowerCase() - see the map keys at line 6258,
+  // 8459/8475, etc). This used to be a bidirectional prefix match (`a.startsWith(b) ||
+  // b.startsWith(a)`), which let "Country of Residence" - carried over from an earlier round and
+  // never re-found by this run's own discovery - match this run's unrelated "Country" control and
+  // read as "discovered this run". Two different questions that merely share a prefix are not the
+  // same control, and the whole point of scoping to discoveredQuestions (see the doc comment above)
+  // is to compare THIS run's discovery against THIS run's fill, not to approximately compare labels.
+  const discoveredRequiredByKey = new Map<string, boolean>();
+  for (const question of discoveredQuestions) {
+    const key = normalizeReviewQuestionLabel(question.question).toLowerCase();
+    if (!key) continue;
+    discoveredRequiredByKey.set(key, (discoveredRequiredByKey.get(key) ?? false) || Boolean(question.required));
+  }
+  const fields: VanishedControlField[] = [];
+  const seen = new Set<string>();
+  for (const entry of unexplained) {
+    if (!entry.rawMentions.some((mention) => CONTROL_VANISHED_RAW_MENTION_RE.test(mention))) continue;
+    const key = normalizeReviewQuestionLabel(entry.question).toLowerCase();
+    if (!key || seen.has(key) || !discoveredRequiredByKey.has(key)) continue;
+    seen.add(key);
+    fields.push({ question: entry.question, required: discoveredRequiredByKey.get(key) ?? false });
+  }
+  return fields;
+}
+
+/* Workable's own generic failure view, matched verbatim off the Pony.ai preview screenshot,
+ * 2026-09-05: "Sorry, an unknown error occurred. The page you are looking for might have been
+ * removed, had its name changed, or is temporarily unavailable." Specific enough that no real job
+ * description or application form says this by accident. */
+const KNOWN_ERROR_PAGE_TEXT_RE =
+  /sorry,?\s+an unknown error occurred|the page you (?:are|were) looking for might have been removed/i;
+
+// Below this fraction of the discovery pass's own text length, on a discovery pass that measured a
+// real form (not a stub or a redirect stub), the fill pass is reading a different page. Measured
+// generously against the TWG collapse (205 / 1188 ≈ 17%) so an ordinary reflow or a lazy-loaded
+// section trims text without tripping it.
+const FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH = 300;
+const FORM_TEXT_COLLAPSE_RATIO = 0.3;
+
+// A SECOND, GENERIC SIGNAL FOR THE DISCOVERY PASSES TOO SHORT FOR THE RATIO CHECK ABOVE. That check
+// stays silent below FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH on purpose - a discovery pass that only
+// ever saw a little text proves nothing about a collapse, because a real short form (a two-field
+// "apply with LinkedIn" stub, say) is honestly this short both times. But "honestly short both
+// times" and "discovery saw something, the fill pass saw almost nothing" are different shapes, and
+// the second is provable without knowing this board's own error page: below this absolute floor a
+// real employer application form does not exist, so a fill pass this short - on a discovery pass
+// that itself cleared the same floor - is reading a different page, exactly like the ratio check
+// above but for the range the ratio check cannot reach. Left deliberately narrow: this catches only
+// "discovery measured a real page and the fill pass came back with next to nothing", not any other
+// board's specific error signature - those are their own fix when one is measured.
+const FORM_TEXT_COLLAPSE_ABSOLUTE_FLOOR = 120;
+
+export function managedFormTextCollapsed(discoveryText: string | undefined, fillText: string | undefined): boolean {
+  const fill = (fillText ?? '').trim();
+  if (KNOWN_ERROR_PAGE_TEXT_RE.test(fill)) return true;
+  const discoveryLength = (discoveryText ?? '').trim().length;
+  // No discovery text (it failed, or this call site has none to offer) or a discovery pass that was
+  // already this short proves nothing about a collapse - see the module comment above - except for
+  // the one case the absolute floor below can still prove: a discovery pass that itself cleared that
+  // floor (so it did see a real form) paired with a fill pass that fell under it.
+  if (discoveryLength < FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH) {
+    return discoveryLength >= FORM_TEXT_COLLAPSE_ABSOLUTE_FLOOR && fill.length < FORM_TEXT_COLLAPSE_ABSOLUTE_FLOOR;
+  }
+  return fill.length < discoveryLength * FORM_TEXT_COLLAPSE_RATIO;
+}
+
+/**
+ * The one sentence for a run that had the form and lost it, named so it can never be confused with
+ * FORM_NOT_REACHED_REASON above: that sentence is for a run with NO evidence it ever reached the
+ * form; this one is for a run that reached it, filled part of it, and then the page stopped being
+ * it. Written to classify as 'form_not_reached' in submissionTerminalCause.ts (it matches "never
+ * reached the application form"), because from here forward - the part of the form after the page
+ * changed - that is exactly true, and because a category that already tells the applicant "nothing
+ * was filled in and nothing was sent, open it and finish it off" is the correct next step for a run
+ * that filled the FIRST half and never touched the rest.
+ *
+ * THE WORDING IS PROPORTIONAL TO THE EVIDENCE, not maximal on every call. `formTextCollapsed` is
+ * page-death evidence - the fill pass's OWN page measurably stopped being the page discovery
+ * measured, or matched a board's known error view outright - so only that shape earns the "the page
+ * it was on stopped being the employer's application form" sentence. A run with vanished fields but
+ * no collapse has weaker evidence: it knows discovery found these controls and the fill pass could
+ * not place them moments later, and nothing here proves the page itself died rather than, say, one
+ * lazy-loaded section failing to re-render. Claiming a page death it cannot show would be exactly
+ * the dishonesty this file exists to remove, so that shape gets its own sentence that names what was
+ * actually seen and stops there.
+ *
+ * ONE OPTIONAL FIELD WITH NO COLLAPSE IS NOT PARKED. A single non-required control a form quietly
+ * dropped is not distinguishable from the ordinary R-076/R-122 drift this codebase already accepts
+ * as informational (see managedUnexplainedAnswerReasons) - one field is exactly the shape a lazy-
+ * loaded widget or a single flaky selector produces on a form that is otherwise intact. Two or more
+ * vanished fields, or any single REQUIRED one, is no longer distinguishable from drift: a form does
+ * not usually lose a REQUIRED control and stay itself, and losing two or more independent controls in
+ * the same run is the same disagreement-within-one-run the collapse signal reports, just without the
+ * text measurement. Either of those, or the collapse signal, earns the park; a lone optional field
+ * with the text intact does not, and falls through to `null` so the run is judged on the rest of its
+ * evidence instead.
+ */
+export function vanishedFormEvidenceReason(input: {
+  vanishedFields: readonly VanishedControlField[];
+  formTextCollapsed: boolean;
+}): string | null {
+  if (input.vanishedFields.length === 0 && !input.formTextCollapsed) return null;
+  const meetsParkBar = input.formTextCollapsed
+    || input.vanishedFields.length >= 2
+    || input.vanishedFields.some((field) => field.required);
+  if (!meetsParkBar) return null;
+
+  if (input.formTextCollapsed) {
+    const named = input.vanishedFields.length > 0
+      ? ` Litos had just found ${input.vanishedFields.length === 1 ? 'this question' : 'these questions'} on `
+        + `this same form and could not fill ${input.vanishedFields.length === 1 ? 'it' : 'them'} moments `
+        + `later: ${input.vanishedFields.map((field) => `"${field.question.slice(0, 60)}"`).join(', ')}.`
+      : '';
+    return 'Litos was filling in this application and the page it was on stopped being the employer’s '
+      + `application form partway through, so it never reached the application form for the rest of it.${named} `
+      + 'Nothing has been sent. Open it when you have a minute and finish it off.';
+  }
+
+  // No page-death evidence here, only vanished fields - do not claim the page died. Say exactly what
+  // was seen: discovery found these controls on this same form, and the fill pass could not place
+  // them moments later.
+  const isSingle = input.vanishedFields.length === 1;
+  const namedFields = input.vanishedFields.map((field) => `"${field.question.slice(0, 60)}"`).join(', ');
+  return 'Litos was filling in this application and had just found '
+    + `${isSingle ? 'this question' : 'these questions'} on this same form, and could not fill `
+    + `${isSingle ? 'it' : 'them'} moments later: ${namedFields}. Litos never reached the application `
+    + 'form for the rest of it. Nothing has been sent. Open it when you have a minute and finish it off.';
+}
+
 export function preparationEvidenceBlockers(
   result: {
     text?: string;
@@ -8813,16 +8992,28 @@ async function prepareManaged(
     text: result.text,
     email: packet.email,
   });
+  /* THE HALF OF THE RUN applicationFormWasReached CANNOT SEE: it is satisfied by the FIRST filled
+   * field, so a form that was there at the start of this run and gone by the end reads as safely
+   * "reached" on that check alone. See managedVanishedControlFields and managedFormTextCollapsed
+   * above for the two measured shapes (Pony.ai's three named controls, TWG Global's text collapse)
+   * and why each is a MISMATCH check against this run's own discovery pass, not an absolute one. */
+  const vanishedFormReason = vanishedFormEvidenceReason({
+    vanishedFields: managedVanishedControlFields(unexplainedAnswers, discoveredQuestions),
+    formTextCollapsed: managedFormTextCollapsed(discoveryResult?.text, result.text),
+  });
   // Both passes count as evidence the form was reached. The discovery pass enumerates the live
   // inputs and probes the core fields, so a run whose fill pass came back empty can still have
   // proven the form was there - and a run where NEITHER pass saw anything has proven the opposite.
-  const evidenceBlockers = preparationEvidenceBlockers({
-    ...result,
-    filledFields,
-    blockers: [...(result.blockers ?? []), ...(discoveryResult?.blockers ?? [])],
-    discovered: discoveredFields,
-    extracted: [...(result.extracted ?? []), ...(discoveryResult?.extracted ?? [])],
-  }, packet);
+  const evidenceBlockers = [
+    ...preparationEvidenceBlockers({
+      ...result,
+      filledFields,
+      blockers: [...(result.blockers ?? []), ...(discoveryResult?.blockers ?? [])],
+      discovered: discoveredFields,
+      extracted: [...(result.extracted ?? []), ...(discoveryResult?.extracted ?? [])],
+    }, packet),
+    ...(vanishedFormReason ? [vanishedFormReason] : []),
+  ];
   // The gap between what the employer demands and what Litos can offer her a place to type. See
   // unansweredRequiredBlockerLabels: this is the measurement the DRW run should have carried and did
   // not, and it is logged as an error because a non-zero count is a product defect first and the
