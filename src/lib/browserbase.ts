@@ -1177,9 +1177,14 @@ export type ManagedBrowserRequestBudget = Readonly<{
   startedAtMs: number;
 }>;
 
+/* Eight minutes, raised from five with MANAGED_PREPARE_FILL_DEADLINE_MS: the request that waits on a
+ * 420-second employer-action window must itself be allowed to wait that long. This is the outer
+ * bound on one Stratus request; the deadline the run is granted is decided above it. */
+const MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS = 8 * 60 * 1000;
+
 function assertManagedBrowserTimeout(timeoutMs: number, label: string): void {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 5 * 60 * 1000) {
-    throw new Error(`${label} timeout must be between 1 ms and 5 minutes`);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS) {
+    throw new Error(`${label} timeout must be between 1 ms and 8 minutes`);
   }
 }
 
@@ -1286,28 +1291,25 @@ async function managedStratusAuthorization(signal?: AbortSignal): Promise<{
 const MANAGED_READ_SCAN_DEADLINE_MS = 240_000;
 
 /**
- * The employer-action window for a prepare-path fill or discovery run, and 280s is the LARGEST
- * VALUE STRATUS CAN ACTUALLY SERVICE, not a round number with headroom.
+ * The employer-action window for a prepare-path fill or discovery run.
  *
- * These runs are bigger than a discover-plus-probe read: up to 120 actions including document
- * uploads, and stratus caps its own run execution at 270s (MANAGED_RUN_TIMEOUT_MS), so the 240s
- * read-scan window would abort a run stratus was still legitimately finishing. Widening it has an
- * upper bound that is easy to overshoot, because stratus derives TWO different clocks from the one
- * deadline we send:
+ * 420s, raised from 280 on a measurement. TWG Global (apply.workable.com, six employer questions, a
+ * resume upload and a phone dial-code picker) ran 2026-09-05 04:18:50 to 04:23:55 under the 280s
+ * deadline and died in a page.waitForTimeout with five of six questions answered - the same shape as
+ * Mercari run 09814b03 a week earlier, which filled all 23 Workable questions and expired with only
+ * the submit left. Stratus stops acting ten seconds before this deadline, so 420 buys a 410-second
+ * action window.
  *
- *   sandbox action window = deadline - PROVIDER_RESPONSE_MARGIN_MS (10s)
- *   host wait for the result = min(MANAGED_RUN_TIMEOUT_MS 270s, deadline - PROVIDER_RETURN_MARGIN_MS)
- *
- * The host must outlast the sandbox, or a run that finishes inside its own window has its result
- * thrown away. That constraint is deadline - 10s <= 270s, i.e. 280s. At 290s the sandbox keeps
- * acting until the 280s mark while the host abandons the wait at 270s and returns 504
- * RUN_TIMED_OUT: a fill finishing in that band has already mutated the employer form, stratus
- * writes a valid result, and the packet fails on a generic timeout with the fill lost.
- *
- * 280s makes the sandbox window exactly stratus's own 270s budget, and leaves 20s against the 300s
- * provider maximum for latency and clock skew between this host and stratus.
+ * WHAT BOUNDS IT NOW. The production runner is stratus's Railway-hosted local runner
+ * (local-managed-runner.js): it waits for the run until this deadline plus a 5-second return margin,
+ * capped by its MAX_RUN_TIMEOUT_MS of 480s, and validates the deadline against
+ * MAX_PROVIDER_DEADLINE_MS of 8 minutes. The constraint is therefore deadline + 5s <= 480s, and 420
+ * leaves a full minute against that ceiling. The Vercel-hosted sandbox path documented the old 280
+ * (its host waits at most MANAGED_RUN_TIMEOUT_MS 270s under a 300s maxDuration, so a longer sandbox
+ * window there has its result thrown away); that path is not where production fills run, and a
+ * deployment that moved back to it would have to lower this constant with it.
  */
-export const MANAGED_PREPARE_FILL_DEADLINE_MS = 280_000;
+export const MANAGED_PREPARE_FILL_DEADLINE_MS = 420_000;
 
 /**
  * The action types stratus classifies as read-only (its READ_ONLY_ACTIONS set). Every other action
@@ -1434,11 +1436,12 @@ export async function runManagedBrowser(
      * deadline and throws a TimeoutError, which the discovery call site's .catch then files as a
      * provider failure - a configuration bug wearing a network bug's clothes. The bounds are
      * stratus's own: strictly more than PROVIDER_RESPONSE_MARGIN_MS + PROVIDER_MINIMUM_SUBMIT_WINDOW_MS
-     * (12s) and at most MAX_PROVIDER_DEADLINE_MS (5min). */
+     * (12s) and at most MAX_PROVIDER_DEADLINE_MS (8min since the TWG measurement, see
+     * MANAGED_PREPARE_FILL_DEADLINE_MS). */
     if (!Number.isSafeInteger(options.scanDeadlineMs)
       || options.scanDeadlineMs <= 12_000
-      || options.scanDeadlineMs > 5 * 60 * 1000) {
-      throw new Error('A managed scan deadline must be more than 12 seconds and at most 5 minutes');
+      || options.scanDeadlineMs > 8 * 60 * 1000) {
+      throw new Error('A managed scan deadline must be more than 12 seconds and at most 8 minutes');
     }
   }
   // A read scan mints its own ephemeral correlation unless the caller pinned an exact pair (tests do).

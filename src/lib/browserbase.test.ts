@@ -470,17 +470,19 @@ test('a prepare-path fill widens its scan deadline to cover the provider run bud
      * the value actually sent on the wire is the one derived from it. */
     const deadlineAtMs = Date.parse(body.providerDeadlineAt!);
     assert.ok(
-      deadlineAtMs - after <= 280_000,
-      `deadline above the 280s ceiling: ${deadlineAtMs - after}ms past the post-call clock`,
+      deadlineAtMs - after <= 420_000,
+      `deadline above the 420s ceiling: ${deadlineAtMs - after}ms past the post-call clock`,
     );
     assert.ok(
-      deadlineAtMs - before >= 280_000,
-      `deadline short of the 280s budget: ${deadlineAtMs - before}ms past the pre-call clock`,
+      deadlineAtMs - before >= 420_000,
+      `deadline short of the 420s budget: ${deadlineAtMs - before}ms past the pre-call clock`,
     );
-    assert.equal(MANAGED_PREPARE_FILL_DEADLINE_MS, 280_000);
+    assert.equal(MANAGED_PREPARE_FILL_DEADLINE_MS, 420_000);
+    /* The Railway local runner waits deadline + 5s, capped at its MAX_RUN_TIMEOUT_MS of 480s: the
+       host must outlast the runner's own stop, or a run finishing inside its window is thrown away. */
     assert.ok(
-      MANAGED_PREPARE_FILL_DEADLINE_MS - 10_000 <= 270_000,
-      'the sandbox action window must not outlast the provider host wait',
+      MANAGED_PREPARE_FILL_DEADLINE_MS + 5_000 <= 480_000,
+      'the action window must not outlast the local runner host wait',
     );
     // A widened deadline without the scan correlation is a usage error, not a silent no-op.
     await assert.rejects(
@@ -489,14 +491,14 @@ test('a prepare-path fill widens its scan deadline to cover the provider run bud
     );
     // A window computed down to zero (or past the provider maximum) is a configuration bug and must
     // say so, rather than minting an expired deadline that reads as a provider timeout downstream.
-    for (const scanDeadlineMs of [0, -1, 12_000, 300_001, 1.5]) {
+    for (const scanDeadlineMs of [0, -1, 12_000, 480_001, 1.5]) {
       await assert.rejects(
         runManagedBrowser(
           'https://portal.example/apply',
           [{ type: 'fill', selector: '#first_name', text: 'Mehek' }],
           { scanCorrelation: true, scanDeadlineMs },
         ),
-        /more than 12 seconds and at most 5 minutes/i,
+        /more than 12 seconds and at most 8 minutes/i,
         `scanDeadlineMs ${scanDeadlineMs} must be refused`,
       );
     }
