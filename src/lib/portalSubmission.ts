@@ -1233,7 +1233,14 @@ const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 4_000;
  * measurably failed: they prove the exact same fact against the exact same live widget (see
  * pushWorkableCookieBoundaryActions - "both barriers keep proving the SAME fact with the SAME
  * bound"), and giving the terminal wait the old, smaller budget while the preflight wait gets the
- * new one would make an intentional parity look like drift to the next person reading the diff. */
+ * new one would make an intentional parity look like drift to the next person reading the diff.
+ *
+ * UPDATE: `workable_cookie_preflight_cleared` was the exactly-one `optional: false` waitForSelector
+ * described above at the time of this measurement. It no longer is - see
+ * pushWorkableManagedPreflightActions - because a wider timeout raises the odds of catching a slow
+ * widget but cannot save a run from one that is still loading past even 20s, and by that point the
+ * fact this paragraph already establishes (preflight and terminal prove the identical fact against
+ * the identical widget) argues for matching optionality too, not just the timeout. */
 const WORKABLE_COOKIE_CLEARED_TIMEOUT_MS = 20_000;
 
 function managedFill(
@@ -5791,15 +5798,34 @@ export function managedApplicationUsesAtomicSubmitV4(
  * fields.
  *
  * So: wait for the form first (the proof the app has mounted, and the consent dialog mounts in the
- * shell around it), THEN decline, THEN require the overlay gone before anything that clicks. The
- * cleared wait is REQUIRED, exactly like workable_cookie_final_cleared: a dialog that stays up
- * would otherwise cost 30 seconds at the opener and an opaque sentence about a click, while this
- * costs at most MANAGED_FILL_TIMEOUT_MS and fails with the overlay's own name. The barrier names
- * the FORM as well as the two overlay nodes (see WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR), so a
- * page whose app has not booted cannot satisfy it by being empty, and a page that never shows the
- * dialog still passes the moment the form is there.
- * NOTHING IS WEAKENED: the decline stays optional and the form-ready wait stays optional, exactly
- * as before; only their order changed and a barrier was added. */
+ * shell around it), THEN decline, THEN wait for the overlay gone before anything that clicks. The
+ * barrier names the FORM as well as the two overlay nodes (see
+ * WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR), so a page whose app has not booted cannot satisfy it by
+ * being empty, and a page that never shows the dialog still passes the moment the form is there.
+ *
+ * THE CLEARED WAIT IS OPTIONAL, not required as originally shipped here. It was required for a
+ * while on the reasoning that failing this early "costs nothing" (see the near-identical argument
+ * that once justified keeping workable_cookie_final_cleared required too, in
+ * pushWorkableManagedPhoneTerminalActions's block comment) - but MEASURED 2026-09-04/05 production
+ * (packet fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, see WORKABLE_COOKIE_CLEARED_TIMEOUT_MS) shows this
+ * exact barrier killing runs outright on nothing but a slow GTM widget, before a single field is
+ * touched. Widening the timeout (WORKABLE_COOKIE_CLEARED_TIMEOUT_MS) helps against ordinary
+ * slowness but cannot help a widget that is still loading past even that ceiling, and the
+ * terminal barrier already proved what to do in that case: this and workable_cookie_final_cleared
+ * prove the exact same fact about the exact same live widget, and treating one as fatal while the
+ * other is not is an asymmetry the file's own decline-boundary consolidation exists to prevent.
+ *
+ * A timeout here is not silent: every fill and click that follows still carries Playwright's own
+ * actionability wait, which refuses to act on an element a live backdrop is intercepting. If the
+ * dialog is genuinely still up, the very first field the overlay blocks fails there instead, under
+ * its own name - a later, honest failure rather than a run killed by a re-verification with nothing
+ * filled yet. If the dialog was in fact gone (a stale selector, a widget that finished a moment
+ * after the timeout, one that never blocks this particular field), the run simply proceeds, which a
+ * required barrier could never allow. Nothing about a still-open decline dialog corrupts a
+ * subsequent fill - it has no side effect on form fields, only on the pointer - so there is no
+ * concrete reason to keep failing the whole run over it this early.
+ * NOTHING ELSE IS WEAKENED: the decline stays optional and the form-ready wait stays optional,
+ * exactly as before; only the cleared wait's optionality and the timeouts changed. */
 function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   actions.push({
     type: 'waitForSelector',
@@ -5811,6 +5837,7 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   pushWorkableCookieBoundaryActions(actions, {
     decline: 'workable_cookie_preflight',
     cleared: 'workable_cookie_preflight_cleared',
+    clearedOptional: true,
   });
 }
 
@@ -5835,16 +5862,30 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
  * Today's bundle ships exactly one decline so neither path fires; this is the guard for the day it
  * ships two.
  *
- * The cleared barrier is REQUIRED by default wherever it is asked for, and omitted entirely
- * (never made optional) on the evidence run, which must always come home. `clearedOptional` is
- * the one deliberate exception to "required by default" - see the terminal call site in
- * pushWorkableManagedPhoneTerminalActions for why the barrier that runs there can no longer be
- * allowed to end the run under its own name the way the preflight barrier still may.
+ * The cleared barrier defaults to REQUIRED wherever it is asked for (an unlabelled `cleared` still
+ * means "prove it or fail"), and is omitted entirely on the evidence run, which must always come
+ * home. Both real callers - the preflight (pushWorkableManagedPreflightActions) and the terminal
+ * boundary (pushWorkableManagedPhoneTerminalActions) - now pass `clearedOptional: true`, and for
+ * the same underlying reason: each barrier proves the same fact about the same live widget as its
+ * sibling, so a run either lets a slow widget degrade into a later, honest failure at the first
+ * field it actually blocks, or it does not - one of the two staying fatal while the other is not
+ * would just be new drift of the kind this helper exists to prevent. See either call site's own
+ * comment for the specific measurement that moved it.
  *
  * The cleared wait's own timeout is WORKABLE_COOKIE_CLEARED_TIMEOUT_MS, not the generic
  * MANAGED_FILL_TIMEOUT_MS every other bounded wait in this file uses - see that constant for why a
  * live third-party consent widget that has not finished loading needs a wider budget than "this
- * selector may not exist", and for why both call sites (preflight and terminal) share it. */
+ * selector may not exist", and for why both call sites (preflight and terminal) share it.
+ *
+ * THE DECLINE CLICK SHARES THE SAME BUDGET, for the same reason. The wait can only ever succeed
+ * after a decline: if the GTM widget is the slow, cold-cache thing WORKABLE_COOKIE_CLEARED_TIMEOUT_MS
+ * exists to tolerate, it can just as easily still be mounting the "Decline all" button at
+ * MANAGED_FILL_TIMEOUT_MS (10s) as it can still be showing the dialog at that mark - a decline
+ * click that gives up at 10s while the wait behind it is willing to hold out for 20 just moves the
+ * failure one action earlier without buying anything: the widget the decline needed never rendered,
+ * so the wait was always going to time out too, just slower. Keeping the pair on one constant is the
+ * invariant: the click and the wait it gates either both still have budget left to catch a live
+ * widget, or neither does. */
 function pushWorkableCookieBoundaryActions(
   actions: ManagedBrowserAction[],
   labels: { decline: string; cleared?: string; clearedOptional?: boolean },
@@ -5854,7 +5895,7 @@ function pushWorkableCookieBoundaryActions(
     selector: WORKABLE_COOKIE_DECLINE_SELECTOR,
     label: labels.decline,
     optional: true,
-    timeout: MANAGED_FILL_TIMEOUT_MS,
+    timeout: WORKABLE_COOKIE_CLEARED_TIMEOUT_MS,
     requireUnique: true,
   });
   if (!labels.cleared) return;
@@ -6124,10 +6165,14 @@ const WORKABLE_PHONE_COUNTRY_TERMINAL_READBACK_LABEL = 'workable_phone_terminal:
  *    stops the zero-wait pre-check from cancelling the wait before it starts, it does not bypass
  *    this catch), and the run proceeds to the terminal re-reads and the final submit click, whose
  *    own actionability wait becomes the real enforcement if a dialog is genuinely still
- *    intercepting the pointer. THE PREFLIGHT barrier (workable_cookie_preflight_cleared) is
- *    UNCHANGED and stays required: failing there costs nothing (no field has been filled yet), and
- *    #847's specific fix for that race - the decline reordered to run after the form mounts - has
- *    not been contradicted by any later measurement.
+ *    intercepting the pointer. THE PREFLIGHT barrier (workable_cookie_preflight_cleared) is now
+ *    optional too, for the same reason as this one: #847's reordering fix (the decline runs after
+ *    the form mounts) still holds, but a later measurement (see
+ *    pushWorkableManagedPreflightActions and WORKABLE_COOKIE_CLEARED_TIMEOUT_MS, packet
+ *    fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb) showed the same live-widget slowness this barrier reasons
+ *    about can also strand the preflight wait, and "failing there costs nothing" stopped being true
+ *    the moment failing there means the whole run dies before a field is touched instead of
+ *    degrading to a later, honest failure the way this barrier now does.
  *
  * 2. The TOLERANT re-reads. The strict proofs ran before the parse remount could land, so they can
  *    no longer see a parse that rewrites the committed value afterwards. These re-reads can - and
@@ -9944,7 +9989,10 @@ const SMARTRECRUITERS_APPLY_LINK_SELECTOR =
 /* The Playwright twin of pushWorkableCookieBoundaryActions, so the direct (non-managed) path cannot
  * hold a different opinion about what the consent dialog is or when it is gone. Same dialog
  * selector, same one decline, same cleared barrier that names the form as well as the two overlay
- * nodes.
+ * nodes - and, per that helper's own invariant, the same WORKABLE_COOKIE_CLEARED_TIMEOUT_MS budget
+ * on this wait, because it is proving the exact same fact against the exact same live widget. A
+ * twin that cannot hold a different opinion cannot run its own wait on the generic
+ * MANAGED_FILL_TIMEOUT_MS while the managed plans it mirrors run theirs on the wider one.
  *
  * Returns TRUE when the page is provably free of the overlay, FALSE when a dialog was up and could
  * not be cleared. The caller decides what that is worth: navigateToApplicationForm ignores it (it
@@ -9960,7 +10008,7 @@ async function clearWorkableCookieOverlay(page: Page): Promise<boolean> {
   }
   // Safe when no dialog ever appeared, and fail-closed when a lone backdrop or a stuck dialog stays.
   return page.locator(WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR).first()
-    .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+    .waitFor({ state: 'attached', timeout: WORKABLE_COOKIE_CLEARED_TIMEOUT_MS })
     .then(() => true)
     .catch(() => false);
 }

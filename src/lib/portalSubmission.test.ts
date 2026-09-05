@@ -4970,28 +4970,35 @@ test('managed Workable phone selects exact UAE and proves the value before the r
     timeout: 10_000,
     requireUnique: true,
   });
+  /* The decline click shares WORKABLE_COOKIE_CLEARED_TIMEOUT_MS (20s) with the wait behind it, not
+   * the generic 10s every other bounded click in this file uses: the wait can only ever succeed
+   * after a decline, so a decline that gives up at 10s while a slow GTM widget is still mounting
+   * its "Decline all" button just moves the same failure one action earlier - see
+   * pushWorkableCookieBoundaryActions's block comment for the invariant. */
   assert.deepEqual(actions[lateCookieDeclineIndex], {
     type: 'click',
     selector: WORKABLE_COOKIE_DECLINE,
     label: 'workable_cookie_final_decline',
     optional: true,
-    timeout: 10_000,
+    timeout: 20_000,
     requireUnique: true,
   });
-  /* Unlike the preflight barrier, this one is now OPTIONAL: measured 2026-09-04/05 production,
-   * Pony.ai fdcf4ccb fill run f3aab6c5 died here with `page.waitForSelector: Timeout 10000ms
-   * exceeded.` after "Employer questions 3 items completed" - three answered questions, the resume
-   * upload and every fixed field already captured, discarded by one re-verification of an overlay
-   * that #847's own review (finding 6) already flagged as a risk and bet the preflight reorder
-   * would prevent. See the block comment on pushWorkableManagedPhoneTerminalActions.
+  /* Both cleared barriers - this one and its sibling workable_cookie_preflight_cleared - are now
+   * OPTIONAL: measured 2026-09-04/05 production, Pony.ai fdcf4ccb fill run f3aab6c5 died HERE with
+   * `page.waitForSelector: Timeout 10000ms exceeded.` after "Employer questions 3 items completed"
+   * - three answered questions, the resume upload and every fixed field already captured, discarded
+   * by one re-verification of an overlay that #847's own review (finding 6) already flagged as a
+   * risk and bet the preflight reorder would prevent. See the block comment on
+   * pushWorkableManagedPhoneTerminalActions.
    *
    * timeout is WORKABLE_COOKIE_CLEARED_TIMEOUT_MS (20s), not the generic 10s every other bounded
    * wait in this file uses: a SECOND production packet fdcf4ccb SEND death, at 2026-09-05 11:08Z,
    * post-dates this optionality fix and carries the identical error text, which rules this barrier
-   * back out and points at its sibling, workable_cookie_preflight_cleared - the only OTHER required
-   * 10s waitForSelector in a Workable plan. Both cleared waits share the widened budget because
-   * they prove the identical fact against the identical live GTM widget; see
-   * WORKABLE_COOKIE_CLEARED_TIMEOUT_MS for the full account. */
+   * back out and points at its sibling, workable_cookie_preflight_cleared. Both cleared waits share
+   * the widened budget AND the optional flag, because they prove the identical fact against the
+   * identical live GTM widget; see WORKABLE_COOKIE_CLEARED_TIMEOUT_MS and
+   * pushWorkableManagedPreflightActions for the full account of why the preflight barrier was made
+   * optional too. */
   assert.deepEqual(actions[lateCookieClearedIndex], {
     type: 'waitForSelector',
     selector: WORKABLE_COOKIE_CLEARED,
@@ -5260,8 +5267,15 @@ test('managed Workable final cookie boundary handles both a late modal and no mo
  * PREFLIGHT decline to run after the app mounts would stop a second dialog from ever needing to be
  * caught here. This production run is the measurement that bet did not fully cover. The fix keeps
  * the barrier's diagnostic value (a timeout still lands in `skipped` under its own name) while
- * refusing to let it discard an application that already reached employer questions. */
-test('the terminal cookie barrier is optional so it cannot discard already-answered employer questions', () => {
+ * refusing to let it discard an application that already reached employer questions.
+ *
+ * A LATER round (see the test below) went further and made the PREFLIGHT barrier optional too, once
+ * the same live-widget slowness was measured stranding it as well - "failing there costs nothing"
+ * stopped being true once "there" could mean the whole run dying before a field is touched. Both
+ * barriers are pinned optional here on purpose: keeping one fatal while its sibling proves the
+ * identical fact about the identical widget is exactly the asymmetry this file's cookie-boundary
+ * consolidation exists to prevent. */
+test('both cookie barriers are optional so neither can discard a run over one re-verification', () => {
   const fillActions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+1 213 574 6270',
@@ -5275,11 +5289,11 @@ test('the terminal cookie barrier is optional so it cannot discard already-answe
     const finalCleared = actions.find((action) => action.label === 'workable_cookie_final_cleared');
     assert.equal(preflightCleared?.type, 'waitForSelector', name);
     assert.equal(finalCleared?.type, 'waitForSelector', name);
-    // Nothing has been filled yet at the preflight position, so a stuck dialog still fails the
-    // whole run there under its own name - that race is #847's, and it stays fixed.
-    assert.equal(preflightCleared?.optional, false, `${name}: the preflight barrier still fails closed`);
-    // Everything has already been filled by the terminal position, so the same overlay check must
-    // not be allowed to discard it - this is the fix this test pins.
+    // A stuck dialog no longer ends the run at either position: a field it actually blocks still
+    // fails there, under its own name, via that field's own actionability wait - a later, honest
+    // failure instead of the whole run dying on a re-verification with work already done (or, at
+    // the preflight position, with nothing done yet but the widget merely slow).
+    assert.equal(preflightCleared?.optional, true, `${name}: the preflight barrier must not end the run either`);
     assert.equal(finalCleared?.optional, true, `${name}: the terminal barrier must not end a completed fill`);
     // Both barriers keep proving the SAME fact with the SAME bound; only the consequence of a
     // timeout changed, never the selector or the budget.
@@ -5304,9 +5318,13 @@ test('the terminal cookie barrier is optional so it cannot discard already-answe
  * only two front-loaded requireCapability checks (no page interaction) and a trailing
  * confirmAndSubmit. The one structural fact that explains a death this early, with the one error
  * text Playwright only emits for an actual `page.waitForSelector()` call: workable_cookie_
- * preflight_cleared is the single `optional: false` waitForSelector in a Workable plan, sitting
- * before a single field is touched, at what was the generic MANAGED_FILL_TIMEOUT_MS. Fixed by
- * giving both cleared barriers WORKABLE_COOKIE_CLEARED_TIMEOUT_MS instead - see that constant. */
+ * preflight_cleared was the single `optional: false` waitForSelector in a Workable plan, sitting
+ * before a single field is touched, at what was the generic MANAGED_FILL_TIMEOUT_MS. Fixed first by
+ * giving both cleared barriers WORKABLE_COOKIE_CLEARED_TIMEOUT_MS instead - see that constant - and
+ * then, once even that ceiling was not enough for every widget, by making the preflight barrier
+ * optional too, matching its terminal sibling (see the test above): a Workable plan now has NO
+ * required waitForSelector at all, and a stuck dialog degrades to a later, honest failure at
+ * whichever field it actually blocks. */
 test('the prepare and send plans agree on the phone block, so a SEND-only death there is not the phone', () => {
   const packet = {
     ...capturePacket,
@@ -5325,20 +5343,22 @@ test('the prepare and send plans agree on the phone block, so a SEND-only death 
     .map((action) => ({ type: action.type, label: action.label, optional: action.optional, timeout: action.timeout }));
   assert.deepEqual(phoneShape(sendActions), phoneShape(prepareActions),
     'the send plan must not run the phone block any differently than the proven prepare plan');
-  // The only REQUIRED waitForSelector in either plan is the preflight cookie-cleared barrier, and
-  // it is not phone-scoped - it is the actual production failure this test package pins.
+  // Neither plan has a REQUIRED waitForSelector any more: both cookie-cleared barriers are
+  // optional, so nothing this late (or this early) can end the run under a re-verification's name.
   const requiredWaits = (actions: ManagedBrowserAction[]) => actions
     .filter((action) => action.type === 'waitForSelector' && action.optional === false)
     .map((action) => action.label);
-  assert.deepEqual(requiredWaits(prepareActions), ['workable_cookie_preflight_cleared']);
-  assert.deepEqual(requiredWaits(sendActions), ['workable_cookie_preflight_cleared']);
+  assert.deepEqual(requiredWaits(prepareActions), []);
+  assert.deepEqual(requiredWaits(sendActions), []);
   for (const actions of [prepareActions, sendActions]) {
     const preflightCleared = actions.find((action) => action.label === 'workable_cookie_preflight_cleared');
+    assert.equal(preflightCleared?.optional, true,
+      'the preflight barrier a phone-shaped Workable send can stall on must not end the run');
     // 20_000 is WORKABLE_COOKIE_CLEARED_TIMEOUT_MS, kept as a literal here the same way every other
     // timeout assertion in this file pins the plan's actual numbers rather than importing the
     // module-private constant that produced them.
     assert.equal(preflightCleared?.timeout, 20_000,
-      'the one required barrier a phone-shaped Workable send can die on needs the widened live-widget budget');
+      'the barrier a phone-shaped Workable send can stall on still needs the widened live-widget budget');
   }
 });
 
@@ -5487,17 +5507,26 @@ test('Workable opens the exact application route and clears optional-cookie over
     'the decline must carry no tenant-language text');
   assert.equal(actions[declineIndex]?.requireUnique, true);
   assert.equal(actions[declineIndex]?.optional, true);
+  // The decline shares the cleared wait's WORKABLE_COOKIE_CLEARED_TIMEOUT_MS budget, not the
+  // generic one: the wait behind it can only ever succeed after a decline, so giving the click a
+  // smaller budget than the wait just moves the same live-widget failure one action earlier.
+  assert.equal(actions[declineIndex]?.timeout, 20_000, 'the decline click must share the cleared wait\'s widened budget');
   /* MEASURED 2026-09-02, EQL Tech application 9bbf3ba1, two runs: the decline used to sit at index
    * 0, before the form-ready wait, on a client-rendered shell reached with domcontentloaded. Its
    * optional pre-check matched nothing because the app had not mounted, the consent dialog then
    * mounted with the form, and its backdrop took the first pointer action (phone_country_open,
    * `locator.click: Timeout 30000ms exceeded.`). The form is the proof the app has mounted, so it
-   * comes first, the decline second, and a required cleared barrier third. */
+   * comes first, the decline second, and the cleared barrier third. */
   assert.ok(readyIndex >= 0 && readyIndex < declineIndex,
     'Workable must wait for the candidate form BEFORE the cookie preflight, or the decline matches nothing');
   assert.ok(clearedIndex > declineIndex, 'the cleared barrier follows the decline');
   assert.equal(actions[clearedIndex]?.type, 'waitForSelector');
-  assert.equal(actions[clearedIndex]?.optional, false, 'a consent dialog that stays up must fail closed under its own name');
+  /* Optional, not fail-closed: MEASURED 2026-09-04/05 production (see below) showed this exact
+   * barrier killing a run outright on nothing but a slow GTM widget, before a single field was
+   * touched. A stuck dialog is not silently ignored - the first field it actually blocks still
+   * fails there, under Playwright's own actionability wait, which is a later and more honest
+   * failure than losing the whole run to a re-verification. */
+  assert.equal(actions[clearedIndex]?.optional, true, 'a consent dialog that stays up must not end the run before a field is touched');
   /* Bounded by WORKABLE_COOKIE_CLEARED_TIMEOUT_MS (the runner's own waitForSelector ceiling - see
    * normalizeManagedActions' 100..20000ms clamp), not the generic MANAGED_FILL_TIMEOUT_MS every
    * other bounded wait in this file uses. MEASURED 2026-09-04/09-05, Pony.ai packet fdcf4ccb-eca9-
@@ -5599,7 +5628,7 @@ test('Workable clears the consent overlay before its first pointer action on the
     const openerIndex = actions.findIndex((action) => action.label === 'phone_country_open');
     const firstPointerIndex = actions.findIndex((action) => action.type === 'click' && action.label !== 'workable_cookie_preflight');
     assert.ok(readyIndex >= 0 && declineIndex > readyIndex && clearedIndex > declineIndex, `${name}: ready, decline, cleared, in that order`);
-    assert.equal(actions[clearedIndex]?.optional, false, `${name}: the barrier fails closed`);
+    assert.equal(actions[clearedIndex]?.optional, true, `${name}: the barrier must not end the run over one re-verification`);
     assert.ok(openerIndex > clearedIndex, `${name}: the phone country opener runs behind the cleared barrier`);
     assert.equal(firstPointerIndex, openerIndex, `${name}: the opener is the first pointer action, and nothing clicks before the barrier`);
     /* "Mutation" is stratus's own classification, read from the exported mirror of its
@@ -5657,7 +5686,7 @@ test('the Workable preflight barrier survives every budget trim', () => {
     assert.ok(readyIndex >= 0, `${name} lost the form-ready wait to the trim`);
     assert.ok(declineIndex > readyIndex, `${name} lost or moved the cookie decline`);
     assert.ok(clearedIndex > declineIndex, `${name} lost or moved the cleared barrier`);
-    assert.equal(actions[clearedIndex]?.optional, false, `${name}: the barrier must still fail closed after the trim`);
+    assert.equal(actions[clearedIndex]?.optional, true, `${name}: the barrier must still be optional after the trim`);
     assert.equal(actions[clearedIndex]?.selector, WORKABLE_COOKIE_CLEARED, `${name}: and it is still the same barrier`);
   }
 
