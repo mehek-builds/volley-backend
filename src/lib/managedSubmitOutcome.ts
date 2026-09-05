@@ -217,6 +217,22 @@ export type ManagedSubmitOutcome = {
   /** The sentence the employer showed. Evidence for a person, never the thing the verdict rests on. */
   message: string | null;
   formStillPresent: boolean | null;
+  /* THE EMPLOYER'S SERVER MAY STILL BE ANSWERING. True only when Stratus's own reader recognised a
+   * disabled, in-flight submit control (Workable's own "Submitting…" button, read from its public
+   * candidate bundle) still standing when the observation window closed - never inferred here from
+   * state alone, because 'unknown' also covers a page no arm recognises at all and a page that
+   * genuinely said nothing. Absent (rather than false) on every runner and every arm that predates
+   * this field, which readManagedSubmitOutcome normalises to false: an older runner not saying
+   * "still pending" is not evidence that nothing was pending, but the honest default has to be the
+   * one this system can safely act on, and "no stronger claim available" is that default here the
+   * same way it is everywhere else in this file.
+   *
+   * Measured need: Pony.ai application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, 2026-09-05, ledger
+   * attempt 4496a103. Litos pressed Send, the button was still visibly disabled and reading
+   * "Submitting…" when the 30s observation window closed, and the applicant was told "no
+   * confirmation state" - the same sentence a page that showed nothing at all would get - about a
+   * request the employer's own server had not finished answering yet. */
+  pending: boolean;
   /* What the submit request itself came back with, recorded by the runner from the moment before
    * the final press: method, origin plus path, and a status, or a failure text when the request
    * never returned. Measured need on the live Easy Dynamics Rippling form (2026-08-20, twice): Send
@@ -224,6 +240,24 @@ export type ManagedSubmitOutcome = {
    * way forever with nobody able to learn why. Evidence for a person resolving an unverified
    * press; never the thing a verdict rests on, because analytics POSTs are write-shaped too. */
   network: SubmitNetworkEntry[] | null;
+  /* WHETHER STRATUS'S OWN NETWORK WATCH (armSubmitNetworkWatch, stratus-browser-cloud) SAW A SUBMIT
+   * REQUEST LEAVE THE BROWSER AT ALL, distinct from whether one is present in `network` above:
+   * `network` can be null or empty simply because this runner predates network capture, or because
+   * the capture window missed it, and neither of those is evidence the request was never sent. This
+   * field is the positive-or-negative claim armSubmitNetworkWatch itself makes after watching the
+   * click: true once it observed a matching request (whether or not `network` above also carries the
+   * entry), false when it watched the click and specifically saw NO request reach the bound submit
+   * endpoint before its window closed (the click fired, nothing left the browser - a disabled
+   * button, a client-side validation trap, or a JS error in the click handler), and null (the
+   * default, same reasoning as `pending` above) when no runner has reported this yet.
+   *
+   * unverifiedSubmissionReason uses this to choose among the three things that can be true about a
+   * pending Workable submit: the request was never issued (this field false), it was issued and is
+   * unanswered (this field true or null, together with `pending`/a status-less network entry), or it
+   * was issued and answered with a non-success status (a `network` entry with a numeric `status`).
+   * ASSUMED SHAPE for the stratus-browser-cloud counterpart: a boolean `submit_request_seen` field
+   * alongside `network` on the same `submitOutcome` object read here. */
+  submitRequestSeen: boolean | null;
 };
 
 export type SubmitNetworkEntry = {
@@ -308,6 +342,8 @@ export function readManagedSubmitOutcome(result: MaybeOutcome | null | undefined
     evidence: typeof value.evidence === 'string' ? value.evidence.slice(0, 200) : null,
     message: typeof value.message === 'string' ? value.message.slice(0, 1000) : null,
     formStillPresent: typeof value.formStillPresent === 'boolean' ? value.formStillPresent : null,
+    pending: value.pending === true,
+    submitRequestSeen: typeof value.submit_request_seen === 'boolean' ? value.submit_request_seen : null,
     network: readSubmitNetwork(value.network),
   };
 }
@@ -644,6 +680,28 @@ function greenhouseEmbedSubmitBinding(url: URL): { tenant: string; jobToken: str
     : null;
 }
 
+/* WORKABLE'S OWN SUBMIT ENDPOINT, read from its public candidate bundle rather than measured live -
+ * no live Workable send has yet carried a network array with a body_excerpt captured on it, the same
+ * gap PR #949's Greenhouse arm closed with two live 428s. Read this way instead, from the shell,
+ * 2026-09-05, out of dcvxs6ggqztsa.cloudfront.net/candidate/releases/careers.16db0938022ceab4.js
+ * (never by opening the employer portal): the candidate apply call is
+ *
+ *   POST https://apply.workable.com/api/v1/jobs/<jobId>/apply
+ *
+ * where <jobId> is the same 10-character hex shortcode that appears in the public application URL
+ * (/<tenant>/j/<jobId>/apply or /j/<jobId>/apply) - so this is bound to the SAME jobToken
+ * managedAtsBinding already computed from the packet's own expected application URL, exactly the way
+ * greenhouseEmbedSubmitBinding is bound to its tenant and jobToken, never to the host alone. No
+ * tenant segment travels in this path, unlike the Greenhouse embed submit or the page URL itself, so
+ * only jobToken is compared. Case-insensitive: the API path has not been observed to preserve the
+ * uppercase managedAtsBinding normalises to, and Workable's own page-URL handling (see
+ * heldAtsBinding above) already treats the token as case-insensitive. */
+function workableApiSubmitBinding(url: URL): { jobToken: string } | null {
+  if (url.hostname.toLowerCase() !== 'apply.workable.com') return null;
+  const match = url.pathname.match(/^\/api\/v1\/jobs\/([A-Za-z0-9]+)\/apply\/?$/);
+  return match ? { jobToken: match[1].toUpperCase() } : null;
+}
+
 /**
  * The LAST network entry that is a submit-class request to the bound posting's OWN submit
  * endpoint, or null when none matches - including when the network list is absent, every entry is
@@ -656,16 +714,16 @@ function greenhouseEmbedSubmitBinding(url: URL): { tenant: string; jobToken: str
  * retried press (press, 428, re-press, 2xx) from ever being read backwards as a refusal - see the
  * loop body for why that specific ordering is not just theoretical.
  *
- * Greenhouse only for now: the ashby and workable submit-request shapes have not been measured on a
- * live run, and guessing one wrong would be worse than leaving those two families on the existing
+ * Greenhouse and Workable only: the ashby submit-request shape has not been measured or read off a
+ * public bundle, and guessing one wrong would be worse than leaving that family on the existing
  * 'unverified' path. Widen this the same way CONFIRMATION_LOOKS_LIKE below was widened - one family
- * at a time, once its shape is actually seen.
+ * at a time, once its shape is actually seen or published.
  */
 function boundEmployerSubmitNetworkEntry(
   network: readonly SubmitNetworkEntry[] | null,
   expected: ManagedAtsBinding,
 ): SubmitNetworkEntry | null {
-  if (!network || expected.family !== 'greenhouse') return null;
+  if (!network || (expected.family !== 'greenhouse' && expected.family !== 'workable')) return null;
   let chosen: SubmitNetworkEntry | null = null;
   for (const entry of network) {
     if (!/^(?:POST|PUT|PATCH)$/i.test(entry.method)) continue;
@@ -675,8 +733,12 @@ function boundEmployerSubmitNetworkEntry(
     } catch {
       continue;
     }
-    const binding = greenhouseEmbedSubmitBinding(url);
-    if (!binding || binding.tenant !== expected.tenant || binding.jobToken !== expected.jobToken) continue;
+    const binding = expected.family === 'greenhouse'
+      ? greenhouseEmbedSubmitBinding(url)
+      : workableApiSubmitBinding(url);
+    if (!binding || binding.jobToken !== expected.jobToken) continue;
+    if (expected.family === 'greenhouse'
+      && (binding as { tenant: string; jobToken: string }).tenant !== expected.tenant) continue;
     /* A 2xx/3xx, an unknown outcome (no status at all - the transport never returned one), OR a
      * status under 100 (0 is what a browser reports for a network error, a CORS block, or a request
      * the runner aborted - never a real HTTP response), on ANY of this posting's own bound submit
@@ -721,8 +783,19 @@ function isEmployerSubmitRefusalStatus(status: number | null): status is number 
  * Greenhouse's embed form renders this sentence IN PLACE of the form while the form itself stays
  * mounted and resubmittable underneath it - measured verbatim, observed page text beginning exactly
  * this way, on both live sends named above. */
+/* WORKABLE'S OWN THREE POST-PRESS FAILURE SENTENCES, read from the same public candidate bundle as
+ * workableApiSubmitBinding above (dcvxs6ggqztsa.cloudfront.net/candidate/releases/
+ * careers.16db0938022ceab4.js, fetched 2026-09-05): submit.error ("Something went wrong. We are
+ * working on this, please try again later." - the server's own answer came back and was not ok),
+ * submit.validationError ("There are some issues with your application. Please revisit your data
+ * and try again." - client-side, before any request, kept here too because a retried press can
+ * still show it beside a genuine 4xx from an earlier attempt) and submit.turnstileError ("We
+ * couldn't process your request. Please access the application from a different browser and try
+ * again." - Workable's own CAPTCHA/anti-bot refusal). All three are the ATS's own copy, not guessed
+ * prose, the same discipline Greenhouse's banner above is held to. */
 const SUBMIT_REFUSAL_BANNER_TEXT: Partial<Record<ManagedAtsFamily, RegExp>> = {
   greenhouse: /There was an error processing your application\.\s*Please try again\./i,
+  workable: /something went wrong\.\s*we are working on this,?\s*please try again later|there are some issues with your application\.\s*please revisit your data and try again|we (?:could ?n[o']?t|couldn.t) process your request\.?\s*please access the application from a different browser/i,
 };
 
 /* GREENHOUSE'S OWN PRE-FILING REFUSAL CODES, read from the submit response body rather than from
@@ -829,23 +902,33 @@ function employerSubmitRefusalProof(
  * before anything was filed. Unlike unverifiedSubmissionReason below, this is not a question:
  * nothing here asks her to go look or to say which she found, because the network status and the
  * employer's own page or response already answered it - see employerSubmitRefusalProof above for
- * how each of the two proofs is read. Greenhouse-only today, matching the proof it describes.
+ * how each of the two proofs is read.
+ *
+ * `atsName` names the ATS whose own answer this is, and defaults to 'Greenhouse' - the family this
+ * proof was built for and the one every existing caller and test still exercises with no name
+ * supplied. Workable's own refusal (SUBMIT_REFUSAL_BANNER_TEXT.workable) never carries a `code`,
+ * because GREENHOUSE_PRE_FILING_REFUSAL_CODES is Greenhouse's own body-code vocabulary and
+ * employerSubmitRefusalProof only ever sets `code` from it - so a Workable proof always takes the
+ * bannerText-only branch below, and only the employer name in that sentence needed to stop being a
+ * literal.
  */
 export function employerSubmitRefusalReason(input: {
   code?: string;
   bannerText?: string;
   securityCodeRecipient?: string;
+  atsName?: string;
 }): string {
+  const name = input.atsName?.trim() || 'Greenhouse';
   const base = input.code && GREENHOUSE_CAPTCHA_REFUSAL_CODES.has(input.code)
-    ? 'Greenhouse’s automated check refused this attempt before anything was filed. Nothing has '
+    ? `${name}’s automated check refused this attempt before anything was filed. Nothing has `
       + 'gone to the employer.'
     : input.code
-      ? `Greenhouse refused this submit request before filing it (code “${input.code}”). Nothing `
+      ? `${name} refused this submit request before filing it (code “${input.code}”). Nothing `
         + 'has gone to the employer.'
-      : 'Greenhouse refused this submit request before filing it'
+      : `${name} refused this submit request before filing it`
         + `${input.bannerText ? `, saying: “${input.bannerText}”` : ''}. Nothing has gone to the employer.`;
   const codeHint = input.securityCodeRecipient
-    ? ` Greenhouse said it emailed a verification code to ${input.securityCodeRecipient}.`
+    ? ` ${name} said it emailed a verification code to ${input.securityCodeRecipient}.`
     : '';
   return `${base}${codeHint} Litos released this attempt: send it again from Review and send `
     + 'whenever you are ready.';
@@ -1392,6 +1475,26 @@ export function pressReachedOnlyChallengePlatform(
   return challenged;
 }
 
+/* CASE (c) OF THE THREE-WAY PENDING SENTENCE (see unverifiedSubmissionReason below): the LAST
+ * network entry that came back with a real numeric status at all, regardless of which host it went
+ * to - deliberately looser than pressReachedOnlyChallengePlatform and boundEmployerSubmitNetworkEntry
+ * above, both of which only ever narrow toward a VERDICT (a machine decision this system acts on).
+ * This is evidence inside a sentence a person still has to read and answer, never a verdict, so it
+ * is allowed to name "some request came back with some status" even when that request cannot be
+ * proven to be the posting's own bound submit call. readSubmitNetwork already normalises a status
+ * under 100 (0, a network error/CORS block/abort) to null, so a non-null return here is always a
+ * real HTTP response. */
+function lastDefiniteNetworkStatus(network: readonly SubmitNetworkEntry[] | null | undefined): number | null {
+  if (!network) return null;
+  for (let i = network.length - 1; i >= 0; i -= 1) {
+    const status = network[i]!.status;
+    // A 2xx/3xx is the success shape this whole sentence is contrasting against - naming "status
+    // 204" as "not the success answer" would be a false claim about the one status that IS one.
+    if (typeof status === 'number' && (status < 200 || status >= 400)) return status;
+  }
+  return null;
+}
+
 /* THE TWO SENTENCES FOR AN ATTEMPT THAT NEVER PRESSED ANYTHING.
  *
  * Every arm of unverifiedSubmissionReason asserts a press, and its cause vocabulary has no "never
@@ -1456,6 +1559,18 @@ export function unverifiedSubmissionReason(input: {
   challengeOnScreen?: boolean;
   /** What the runner saw on the page after the press, when it saw anything. Shown, never judged. */
   observedPageText?: string | null;
+  /* Stratus's own reader saw a disabled, in-flight submit control (Workable's "Submitting…" button)
+   * still standing when the observation window closed - see ManagedSubmitOutcome.pending. Asked
+   * ahead of the generic 'no_confirmation_state' prose below because "the page said nothing" and
+   * "the page was still waiting on the employer's server" are different facts, and the first one is
+   * simply false when this is true. Never asked ahead of the challenge check above: a rendered
+   * human-verification widget is stronger, more specific evidence than a disabled button, and the
+   * two are not expected to coexist on the same page anyway. */
+  pending?: boolean;
+  /* See ManagedSubmitOutcome.submitRequestSeen. Asked ahead of `pending` and the network-status read
+   * below: a network watch that positively saw NO request leave the browser is stronger, more
+   * specific evidence than either "no status came back" or "no network array was captured at all". */
+  submitRequestSeen?: boolean | null;
 }): string {
   /* ASKED FIRST, ahead of every cause arm, because no cause can outrank it. The causes below are
    * all descriptions of how a press ended; if the ledger says no press was made, none of them
@@ -1480,14 +1595,53 @@ export function unverifiedSubmissionReason(input: {
       + 'release this saved application. The filled-form proof and every next action stay in this '
       + 'dashboard.';
   }
-  const what = input.cause === 'run_timed_out'
-    ? 'Litos pressed Send and the secure browser was cut off before the employer’s answer came back, '
-      + 'so it does not know whether this application went through.'
-    : input.cause === 'provider_error'
-      ? 'Litos pressed Send and the secure browser failed before it could read the employer’s answer, '
-        + 'so it does not know whether this application went through.'
-      : 'Litos pressed Send and the page never showed a confirmation it could read, so it does not '
-        + 'know whether this application went through.';
+  /* CASE (a) OF THREE: THE SUBMIT REQUEST WAS NEVER ISSUED. Stronger, more specific evidence than
+   * `pending` or a missing/status-less network entry: armSubmitNetworkWatch positively watched the
+   * click and saw nothing leave the browser toward the employer, rather than simply not having
+   * captured anything. Ended with the same "It is not there" call the challenge branch above uses,
+   * not the two-way ask below, because a click that never produced a request is as strong a claim
+   * that nothing went through as a human-verification wall is. */
+  if (input.cause === 'no_confirmation_state' && input.submitRequestSeen === false) {
+    return 'Litos pressed Send, but no request ever left the browser toward the employer’s server: '
+      + 'the click registered, and nothing was sent, so this application very likely did not go '
+      + 'through. Litos cannot claim a receipt for a request that was never made. Choose “It is not '
+      + 'there” below to record that nothing was sent and release this saved application. The '
+      + 'filled-form proof and every next action stay in this dashboard.';
+  }
+  /* THE HONEST VERSION OF "NO CONFIRMATION STATE": the page had not finished answering, not that
+   * the press produced nothing to wait for. Same next step as the generic sentence below - she still
+   * has to look and say what she found - because a still-pending request can resolve either way
+   * after Litos stops watching; only the FIRST sentence changes, and it changes to a true statement
+   * instead of a misleading one. */
+  if (input.cause === 'no_confirmation_state' && input.pending === true) {
+    return 'Litos pressed Send, and the page was still showing "Submitting…" when Litos stopped '
+      + `watching, so it does not know whether the employer’s server finished accepting it. ${where} `
+      + `${looksLike} Then tell Litos which you found: if it is there, Litos will record it as sent `
+      + 'and will not apply again; if it is not, Litos will send this one for you. Do not submit it '
+      + 'by hand in the meantime, because two applications to the same posting count against you and '
+      + 'cannot be taken back.';
+  }
+  /* CASE (c) OF THREE: THE REQUEST WAS ISSUED AND ANSWERED, WITH A STATUS THE PAGE ITSELF NEVER
+   * SURFACED. A definite non-success status is real, specific evidence that something other than a
+   * quiet success happened - but it is not proof of a refusal (a proven refusal takes the separate
+   * 'employer_refused' verdict and never reaches this function at all), so the ending stays the
+   * two-way ask rather than the "It is not there" call the two branches above use. */
+  const answeredStatus = input.cause === 'no_confirmation_state'
+    ? lastDefiniteNetworkStatus(input.network)
+    : null;
+  const what = answeredStatus !== null
+    ? `Litos pressed Send, and the request came back from the employer’s server with status `
+      + `${answeredStatus} - not the success answer a confirmation depends on - but the page itself `
+      + 'never showed anything Litos could read, so it does not know whether this application went '
+      + 'through.'
+    : input.cause === 'run_timed_out'
+      ? 'Litos pressed Send and the secure browser was cut off before the employer’s answer came '
+        + 'back, so it does not know whether this application went through.'
+      : input.cause === 'provider_error'
+        ? 'Litos pressed Send and the secure browser failed before it could read the employer’s '
+          + 'answer, so it does not know whether this application went through.'
+        : 'Litos pressed Send and the page never showed a confirmation it could read, so it does '
+          + 'not know whether this application went through.';
   /* What the page said travels on the record (unverified_submission.observed_page_text), never
    * inside this sentence: the dashboard passes attention_reason through its technical-error
    * filter, and an observed "Internal Server Error" or "HTTP 502" replaced the whole warning with

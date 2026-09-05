@@ -366,6 +366,28 @@ describe('the run reads the outcome off the page, and the caller keys off that',
     assert.equal(outcome?.pressed, false);
   });
 
+  test('pending defaults to false for a runner that predates the field', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: 'unmatched_page_text', evidence: 'x', message: 'y', formStillPresent: true },
+    });
+    assert.equal(outcome?.pending, false);
+  });
+
+  test('pending is read through when the runner reported the Workable submitting button', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true,
+        state: 'unknown',
+        source: 'ats_state_unconfirmed',
+        evidence: 'workable_submitting_button',
+        message: 'Submitting…',
+        formStillPresent: true,
+        pending: true,
+      },
+    });
+    assert.equal(outcome?.pending, true);
+  });
+
   test('the timeouts that mean "the run never said what it did" are recognised', () => {
     assert.equal(isManagedRunTimeout('Managed browser run timed out before it produced a result'), true);
     // The sentence the Skydio packet actually carried. Still recognised, because an older runner or
@@ -1207,6 +1229,145 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
     assert.doesNotMatch(generic, /green panel/);
     assert.match(generic, /usually replaces the form with a short confirmation/);
   });
+
+  /* THE PONY.AI INCIDENT (2026-09-05, application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger
+   * attempt 4496a103): the button on screen still read "Submitting…" when Litos stopped watching,
+   * and the generic 'no_confirmation_state' sentence below - "the page never showed a confirmation
+   * it could read" - is simply false about that page: it had shown something, and was still
+   * showing it. `pending: true` is the one fact that must change which sentence this returns. */
+  test('a still-pending press gets the honest "still waiting" sentence, not "no confirmation state"', () => {
+    const reason = unverifiedSubmissionReason({
+      atsName: 'workable',
+      portalUrl: 'https://apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply/',
+      cause: 'no_confirmation_state',
+      pending: true,
+    });
+    assert.match(reason, /still showing .Submitting…./);
+    assert.doesNotMatch(reason, /never showed a confirmation it could read/);
+    // Still tells her where to look and what a sent application looks like - the next step is
+    // unchanged, only the diagnosis is corrected.
+    assert.match(reason, /apply\.workable\.com\/pony-dot-ai\/j\/BA5FFDBC71\/apply/);
+    assert.match(reason, /tell Litos which you found/i);
+  });
+
+  test('pending is ignored for every cause other than no_confirmation_state', () => {
+    const reason = unverifiedSubmissionReason({ atsName: 'workable', cause: 'run_timed_out', pending: true });
+    assert.doesNotMatch(reason, /still showing/);
+    assert.match(reason, /secure browser was cut off/);
+  });
+
+  test('a rendered human-verification challenge still outranks a pending read', () => {
+    const reason = unverifiedSubmissionReason({
+      atsName: 'workable',
+      cause: 'no_confirmation_state',
+      pending: true,
+      challengeOnScreen: true,
+    });
+    assert.match(reason, /human-verification challenge/);
+    assert.doesNotMatch(reason, /still showing/);
+  });
+
+  /* THE THREE-WAY SENTENCE: whether Stratus's own network watch says a Workable submit request (a)
+   * never left the browser, (b) is still pending an answer, or (c) came back with a definite,
+   * non-success status the page itself never surfaced. Coordinates with the stratus-browser-cloud
+   * counterpart's armSubmitNetworkWatch, which is expected to report a boolean `submit_request_seen`
+   * on the same submitOutcome object `network` already travels on. */
+  describe('the three-way sentence for a pending submit tells her which of three things is true', () => {
+    test('(a) submitRequestSeen: false says the request never left the browser, and asks for a definite answer', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        submitRequestSeen: false,
+      });
+      assert.match(reason, /no request ever left the browser/);
+      assert.match(reason, /It is not there/);
+      assert.doesNotMatch(reason, /still showing/);
+      assert.doesNotMatch(reason, /tell Litos which you found/i);
+    });
+
+    test('(a) outranks a status read off the network array, because it is stronger evidence', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        submitRequestSeen: false,
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 422 }],
+      });
+      assert.match(reason, /no request ever left the browser/);
+      assert.doesNotMatch(reason, /status 422/);
+    });
+
+    test('(b) pending outranks a network status - "still waiting" is the more specific, more recent fact', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        pending: true,
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 500 }],
+      });
+      assert.match(reason, /still showing/);
+      assert.doesNotMatch(reason, /status 500/);
+    });
+
+    test('(c) a definite non-success status is named when nothing stronger applies', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        portalUrl: 'https://apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply/',
+        cause: 'no_confirmation_state',
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/BA5FFDBC71/apply', status: 500 }],
+      });
+      assert.match(reason, /status 500/);
+      assert.match(reason, /not the success answer a confirmation depends on/);
+      // Still a two-way ask, unlike (a): a definite status is real evidence but not proof of a
+      // refusal (a proven one takes the separate 'employer_refused' verdict, never this function).
+      assert.match(reason, /tell Litos which you found/i);
+    });
+
+    test('(c) a 2xx/3xx status is never named as "not the success answer" - it is one', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        network: [{ method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 204 }],
+      });
+      assert.doesNotMatch(reason, /status 204/);
+      assert.match(reason, /never showed a confirmation it could read/);
+    });
+
+    test('(c) reads the LAST status with a real answer, skipping a later transport failure (null status)', () => {
+      const reason = unverifiedSubmissionReason({
+        atsName: 'workable',
+        cause: 'no_confirmation_state',
+        network: [
+          { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/ABC/apply', status: 503 },
+          { method: 'GET', url: 'https://apply.workable.com/analytics', status: null, failure: 'aborted' },
+        ],
+      });
+      assert.match(reason, /status 503/);
+    });
+
+    test('with no evidence at all, the generic sentence is unchanged', () => {
+      const reason = unverifiedSubmissionReason({ atsName: 'workable', cause: 'no_confirmation_state' });
+      assert.match(reason, /never showed a confirmation it could read/);
+    });
+  });
+});
+
+describe('readManagedSubmitOutcome parses submitRequestSeen defensively', () => {
+  test('true and false are read through', () => {
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null, submit_request_seen: true },
+    })?.submitRequestSeen, true);
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null, submit_request_seen: false },
+    })?.submitRequestSeen, false);
+  });
+
+  test('absent, or a non-boolean value, normalises to null - not evidence either way', () => {
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null },
+    })?.submitRequestSeen, null);
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { pressed: true, state: 'unknown', source: null, evidence: null, message: null, formStillPresent: null, submit_request_seen: 'yes' },
+    })?.submitRequestSeen, null);
+  });
 });
 
 describe('the state has a way out of it', () => {
@@ -2018,6 +2179,100 @@ describe('a success or an unknown outcome anywhere on the bound endpoint blocks 
   });
 });
 
+/* WORKABLE'S OWN SUBMIT ENDPOINT AND FAILURE VOCABULARY, read from its public candidate bundle
+ * (dcvxs6ggqztsa.cloudfront.net/candidate/releases/careers.16db0938022ceab4.js, fetched 2026-09-05)
+ * rather than measured on a live send - the same shape the Greenhouse describe block above pins,
+ * widened for the ATS that pressed Send and had no network evidence at all in the Pony.ai incident
+ * (application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt 4496a103, 2026-09-05). */
+describe('the submit request itself proves a Workable employer refusal', () => {
+  const APPLY_URL = 'https://apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply/';
+  const VALIDATION_BANNER = 'There are some issues with your application. Please revisit your data and try again.';
+
+  function workableUnknownResult(over: {
+    status?: number | null;
+    url?: string;
+    message?: string | null;
+    formStillPresent?: boolean | null;
+  } = {}) {
+    return {
+      url: APPLY_URL,
+      submitOutcome: {
+        pressed: true,
+        state: 'unknown',
+        source: null,
+        evidence: null,
+        message: over.message === undefined ? VALIDATION_BANNER : over.message,
+        formStillPresent: over.formStillPresent === undefined ? true : over.formStillPresent,
+        network: [{
+          method: 'POST',
+          url: over.url ?? 'https://apply.workable.com/api/v1/jobs/BA5FFDBC71/apply',
+          status: over.status === undefined ? 422 : over.status,
+        }],
+      },
+    };
+  }
+
+  test('a 4xx on Workable\'s own /apply endpoint with its validation banner still on screen is proven', () => {
+    const verdict = exactManagedSubmitVerdict(workableUnknownResult(), APPLY_URL);
+    assert.deepEqual(verdict, {
+      kind: 'employer_refused',
+      cause: 'employer_refused_submit',
+      httpStatus: 422,
+      bannerText: VALIDATION_BANNER,
+    });
+  });
+
+  test('Workable\'s server-error sentence proves the refusal too', () => {
+    const verdict = exactManagedSubmitVerdict(workableUnknownResult({
+      message: 'Something went wrong. We are working on this, please try again later.',
+    }), APPLY_URL);
+    assert.equal(verdict.kind, 'employer_refused');
+  });
+
+  test('the job token match is case-insensitive, the same as the page-URL binding', () => {
+    const verdict = exactManagedSubmitVerdict(workableUnknownResult({
+      url: 'https://apply.workable.com/api/v1/jobs/ba5ffdbc71/apply',
+    }), APPLY_URL);
+    assert.equal(verdict.kind, 'employer_refused');
+  });
+
+  test('a 4xx on a DIFFERENT job\'s apply endpoint is never read as this posting\'s own answer', () => {
+    const verdict = exactManagedSubmitVerdict(workableUnknownResult({
+      url: 'https://apply.workable.com/api/v1/jobs/FFFFFFFFFF/apply',
+    }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a 2xx on the bound endpoint blocks the refusal, same as Greenhouse', () => {
+    const verdict = exactManagedSubmitVerdict(workableUnknownResult({ status: 201 }), APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a 401/403 login wall is never read as the employer\'s own refusal', () => {
+    for (const status of [401, 403]) {
+      const verdict = exactManagedSubmitVerdict(workableUnknownResult({ status }), APPLY_URL);
+      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+    }
+  });
+
+  test('no network array at all (the actual Pony.ai shape) stays unverified, never a false refusal', () => {
+    const result = {
+      url: APPLY_URL,
+      submitOutcome: {
+        pressed: true,
+        state: 'unknown',
+        source: 'ats_state_unconfirmed',
+        evidence: 'workable_submitting_button',
+        message: 'Submitting…',
+        formStillPresent: true,
+        pending: true,
+      },
+    };
+    const verdict = exactManagedSubmitVerdict(result, APPLY_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+});
+
 describe('the plain-words sentence for a proven employer refusal', () => {
   test('a CAPTCHA-shaped code uses the exact required sentence', () => {
     for (const code of ['captcha-failed', 'captcha-retry']) {
@@ -2025,6 +2280,21 @@ describe('the plain-words sentence for a proven employer refusal', () => {
       assert.match(reason,
         /Greenhouse’s automated check refused this attempt before anything was filed\. Nothing has gone to the employer\./);
     }
+  });
+
+  test('an explicit atsName replaces the Greenhouse default everywhere it appears', () => {
+    assert.match(
+      employerSubmitRefusalReason({ code: 'captcha-failed', atsName: 'Workable' }),
+      /Workable’s automated check refused this attempt/,
+    );
+    assert.match(
+      employerSubmitRefusalReason({ bannerText: 'There are some issues with your application.', atsName: 'Workable' }),
+      /^Workable refused this submit request before filing it, saying: /,
+    );
+    assert.doesNotMatch(
+      employerSubmitRefusalReason({ bannerText: 'x', atsName: 'Workable' }),
+      /Greenhouse/,
+    );
   });
 
   test('a non-captcha code is named, not hidden behind the generic sentence', () => {

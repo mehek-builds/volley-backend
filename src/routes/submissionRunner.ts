@@ -187,6 +187,7 @@ import {
   attemptNeverPressedReason,
   unverifiedSubmissionReason,
   type ManagedReceiptResult,
+  type ManagedSubmitOutcome,
 } from '../lib/managedSubmitOutcome';
 import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord, type SubmissionStopReason } from '../lib/submissionStop';
 import {
@@ -3619,18 +3620,43 @@ export async function recoverManagedSubmissionTerminalResult(
   );
   if (!authorization) return 'not_recoverable';
   const submissionAttempt = managedInitialSubmissionAttempt(attemptBinding, authorization);
+  /* THE ASYNC RECOVERY PATH'S OWN SENTENCE, mirroring the synchronous path's pattern
+   * (unverifiedSubmissionPatch, and the plain-'unverified' call site around line 12028): call
+   * unverifiedSubmissionReason with whatever outcome this fold actually read, rather than a sentence
+   * that cannot say anything the recovered run did not report. Most of persistUnverified's callers
+   * below never reach a point where a ManagedSubmitOutcome exists at all (the terminal result could
+   * not be retrieved, was never retained, or ended in a state readManagedSubmitOutcome cannot parse) -
+   * for those the previous generic sentence is kept, because there is genuinely nothing more specific
+   * to say. Once `outcome` exists (from readManagedSubmitOutcome(result) below), it is passed through
+   * so a still-pending Workable "Submitting…" button - or a network record proving the request was
+   * never issued or came back with a definite status - gets the same honest sentence on this path
+   * that the synchronous path's call sites already give it, instead of the flatly wrong generic
+   * fallback. `network` also travels onto the record itself (unverified_submission.network), the
+   * same evidence the synchronous path already carries there. */
   const persistUnverified = async (
     message: string,
     categories: ApplicationAttentionCategory[],
     resultId?: string,
+    outcome?: ManagedSubmitOutcome | null,
   ) => {
     const cleanupMarker = resultId
       ? exactManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt, resultId })
       : pendingManagedTerminalCleanupMarker({ attemptBinding, submissionAttempt });
+    const attentionReason = outcome
+      ? unverifiedSubmissionReason({
+        atsName: review.ats_name,
+        portalUrl: attemptBinding.postingIdentity.portalUrl ?? undefined,
+        cause: 'no_confirmation_state',
+        network: outcome.network,
+        pending: outcome.pending === true,
+        submitRequestSeen: outcome.submitRequestSeen,
+      })
+      : 'Litos could not prove the final employer result for this exact application. Check the employer portal and record whether it was received.';
     await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
       message,
-      attentionReason: 'Litos could not prove the final employer result for this exact application. Check the employer portal and record whether it was received.',
+      attentionReason,
       attentionCategories: [...new Set([...categories, 'unverified_submission' as const])],
+      ...(outcome?.network ? { network: outcome.network } : {}),
       cleanupMarkers: [cleanupMarker],
     });
     if (resultId) {
@@ -3736,6 +3762,7 @@ export async function recoverManagedSubmissionTerminalResult(
       error instanceof Error ? error.message.slice(0, 500) : 'Recovered managed proof was incomplete',
       ['required_field'],
       terminal.resultId,
+      outcome,
     );
   }
   if (challenge) {
@@ -3758,6 +3785,7 @@ export async function recoverManagedSubmissionTerminalResult(
       `The recovered managed result was ${verdict.kind}`,
       [],
       terminal.resultId,
+      outcome,
     );
   }
   const capturedAt = terminal.completedAt;
@@ -11907,6 +11935,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // The press-window network record, for the unverified arms below. Read once, next to the
     // verdict it annotates, so the two cannot come from different readings of the result.
     const pressNetwork = readManagedSubmitOutcome(receiptResult)?.network ?? undefined;
+    // Same read as pressNetwork above, for the same reason: every unverified arm below should agree
+    // on whether Stratus's own reader saw a still-pending submit control, not each recompute it (or
+    // some of them forget to).
+    const pressPending = readManagedSubmitOutcome(receiptResult)?.pending === true;
+    // Same read again, for the three-way "never issued / unanswered / answered with a status"
+    // sentence (see unverifiedSubmissionReason).
+    const pressSubmitRequestSeen = readManagedSubmitOutcome(receiptResult)?.submitRequestSeen ?? null;
     /* The runner's own post-run CAPTCHA verdict, read from the same result as the verdict above.
      * Measured on the live Mytos Lever form (run 6757f19a, 2026-08-20): the press fetched an
      * hCaptcha drag puzzle, the receipt shows it standing over the fully filled form, and the
@@ -11937,6 +11972,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           code: verdict.code,
           bannerText: verdict.bannerText,
           securityCodeRecipient: verdict.securityCodeRecipient,
+          atsName: claimedReview.ats_name,
         }),
         previewUrl: blob.url,
         cleanupMarkers: managedCleanupMarkers(),
@@ -12031,6 +12067,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           network: pressNetwork ?? null,
           challengeOnScreen: pressChallengeOnScreen,
           observedPageText: observedPageText ?? null,
+          pending: pressPending,
+          submitRequestSeen: pressSubmitRequestSeen,
         }),
         attentionCategories: ['unverified_submission'],
         ...(unverifiedSecurityCode ? { securityCode: unverifiedSecurityCode } : {}),
@@ -12078,6 +12116,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             cause: 'no_confirmation_state',
             network: pressNetwork ?? null,
             challengeOnScreen: pressChallengeOnScreen,
+            pending: pressPending,
+            submitRequestSeen: pressSubmitRequestSeen,
           }),
           attentionCategories: ['security_code', 'unverified_submission'],
           ...(uncertainSecurityCode ? { securityCode: uncertainSecurityCode } : {}),
@@ -12099,6 +12139,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           cause: 'no_confirmation_state',
           network: pressNetwork ?? null,
           challengeOnScreen: pressChallengeOnScreen,
+          pending: pressPending,
+          submitRequestSeen: pressSubmitRequestSeen,
         }),
         attentionCategories: ['unverified_submission'],
         previewUrl: blob.url,
