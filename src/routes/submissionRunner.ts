@@ -188,7 +188,7 @@ import {
   unverifiedSubmissionReason,
   type ManagedReceiptResult,
 } from '../lib/managedSubmitOutcome';
-import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
+import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord, type SubmissionStopReason } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
   advanceCanonicalApplicationPreparedSend,
@@ -12205,6 +12205,27 @@ export type SubmissionFailureOutcome =
      before it can ever be written, with withTerminalCause catching whatever gets past it. */
   | { status: TerminalRunStatus; attentionReason: string; attentionCategories: ApplicationAttentionCategory[] };
 
+/** Turn a runner assertion label into a phrase an applicant can read, without naming any one field
+ * by hand. `filled_field:<name>` becomes "the &lt;name&gt; field" (underscores/colons in the name
+ * turned to spaces); any of the Workable phone-widget labels (`phone_country_open`,
+ * `phone_country_close`, `phone_country_option`, or anything starting `workable_phone_` - see
+ * portalSubmission.ts's WORKABLE_PHONE_* label constants) collapse to the one plain phrase an
+ * applicant recognises, "the phone field", instead of surfacing the widget's own internal step name;
+ * and an unrecognised or missing label falls back to the same cause-neutral phrase the rest of this
+ * file already uses for "some answer, unspecified" - deliberately NOT the raw label with underscores
+ * swapped for spaces, which read as internal telemetry ("the workable phone value visible field")
+ * rather than a field an applicant filled in. */
+export function assertionAppliesField(label: string | null | undefined): string {
+  if (!label) return 'one of the answers it typed';
+  const fieldMatch = /^filled_field:(.+)$/.exec(label);
+  if (fieldMatch) {
+    const name = fieldMatch[1]!.replace(/[_:]+/g, ' ').trim();
+    return name ? `the ${name} field` : 'one of the answers it typed';
+  }
+  if (/^(?:workable_)?phone(?:_|:|$)/.test(label)) return 'the phone field';
+  return 'one of the answers it typed';
+}
+
 export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
@@ -12221,6 +12242,12 @@ export function submissionFailureOutcome(input: {
      NOT one in fact. See the arm below for what that inheritance was costing the applicant. */
   requiredFieldConfirmation?: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
+  /* The failing action's own label, as the runner spelled it (e.g. `filled_field:phone`), when
+   * fieldProofFailedBeforeSubmit came from a ManagedBrowserAssertionFailureError. Used to name WHICH
+   * field the sentence below is about instead of speaking only in the abstract - derived generically
+   * from the label rather than hardcoded to any one field, so a future assertion on a different
+   * field gets the same treatment for free. */
+  fieldProofFailedLabel?: string | null;
   /* The exact issue strings from a EmployerBoundPacketDriftError, or undefined. Strings rather than
      a boolean for the same reason actionBudgetStop is a string: packetDriftAttentionReason composes
      the sentence from them and names the binding that moved, and re-deriving that here would be a
@@ -12239,7 +12266,7 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
+  const { captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, fieldProofFailedLabel, packetDriftIssues, destinationUnverifiedBeforeSend, uncertainAfterClaim, preClickProvenByLedger, externalGate, providerSessionFailure } = input;
   const packetDrift = packetDriftIssues !== undefined && packetDriftIssues.length > 0;
   /* preClickProvenByLedger joins the needs_attention list rather than falling to 'failed', and that
      is load-bearing rather than cosmetic. submitRequestDisposition treats an unclaimed
@@ -12324,7 +12351,21 @@ export function submissionFailureOutcome(input: {
            submission_error, and the blockers the run produced are surfaced on their own. */
         ? 'Litos filled this application in and found the button that sends it, but could not confirm one of the required answers had been accepted, so it did not press it. Nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
       : fieldProofFailedBeforeSubmit
-        ? 'Litos filled this application in, but could not prove one of the answers it typed was still on the form, so it stopped before pressing the button that sends it. Nothing has been sent and there is no confirmation to look for. Retrying will very likely stop at the same place, so open it when you have a minute and finish it off.'
+        /* NAMES THE STEP GENERICALLY, derived from the runner's own label rather than hardcoded to
+           any one field, because assertionAppliesField below strips a `filled_field:` prefix off
+           whatever label the assertion carries. Measured on Pony.ai fdcf4ccb, ledger attempt
+           b624e034: the label was `filled_field:phone` and the applicant was told instead that
+           "Litos pressed Send" and sent to check the employer's portal, for a run that died
+           re-filling the phone widget before confirmAndSubmit was ever reached. */
+        /* DETERMINISTIC, NOT TEMPORARY. browserbase.ts's ManagedBrowserAssertionFailureError
+           documents exactly this refusal as reproducing on every attempt - it is the required
+           extract assertion doing its fail-closed job on a page whose DOM no longer matches the
+           proof selector, not a sandbox crash. Telling her to retry because "the page will settle"
+           promised a fix that never arrives; the honest promise is that this needs the field's read
+           fixed, not another attempt. ManagedBrowserPreSubmitCrashError is the transient sibling and
+           does not reach this arm - it is typed separately (providerSessionFailureBeforeSubmit) and
+           takes the "temporary secure-browser error ... try again in a few minutes" sentence below. */
+        ? `Litos could not finish this application: it stopped while re-filling ${assertionAppliesField(fieldProofFailedLabel)}, before the button that sends it was ever pressed, so nothing has gone to the employer. Retrying will very likely stop at the same place until this field's read is fixed, so open it when you have a minute and finish it off.`
       : destinationUnverifiedBeforeSend
         /* RANKED WITH THE PRE-CLICK FAMILY, mirroring classifySubmissionStop exactly. The probe is
            a separate read-only run made before the fill-and-submit list is assembled, so nothing
@@ -12651,6 +12692,51 @@ export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
 
+/* THE STOP REASONS BACKED BY STRATUS'S OWN RUN-PROGRESS RECORD, and the ONLY ones
+ * releasedClaimProofKind below may credit with `run_progress_proven_not_pressed`. Each is set only
+ * by submissionFailureReview's fieldProofFailedBeforeSubmit or providerSessionFailureBeforeSubmit,
+ * which browserbase.ts's managedBrowserRequestError constructs (ManagedBrowserAssertionFailureError,
+ * ManagedBrowserPreSubmitCrashError) ONLY when managedBrowserProgressAllowsPreSubmitRetry held for
+ * Stratus's own reported progress - see the proof kind's own definition in
+ * SUBMISSION_NOT_SENT_PROOF_KINDS for the full story. */
+const RUN_PROGRESS_BACKED_STOP_REASONS = new Set<SubmissionStopReason>([
+  'field_proof_failed_before_submit',
+  'provider_session_failure_before_submit',
+]);
+
+/**
+ * Which not-sent proof kind actually backs a released claim, derived from the run's OWN typed stop
+ * rather than assumed from whether the attempt happens to carry a boundary_authorized event.
+ *
+ * THE BUG THIS REPLACES. recordSubmissionRunnerFailure used to reason "an authorization already
+ * exists on this attempt, so any release found here must be the run-progress proof" and minted
+ * `run_progress_proven_not_pressed` on that inference alone. But `failed.submission_claim_id` is
+ * also cleared, unconditionally, by preClickNoSubmitReview - the NoSubmitControlError /
+ * ManagedRequiredFieldConfirmationError arm submissionFailureReview delegates to for
+ * assertManagedRequiredFieldsConfirmed's pressClaimed guard - and that release has nothing to do
+ * with Stratus's run-progress record. Crediting it with `run_progress_proven_not_pressed` would
+ * write a proof kind that was never actually observed, letting a stop that is NOT provably
+ * run-progress-backed slip past the ledger's own admissibility rule
+ * (submissionAttemptLedger.ts's AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS), which exists precisely to
+ * refuse an unproven machine claim once an authorization is on record.
+ *
+ * The fix asks the run's own typed stop (`submission_stop.reason`, written by submissionFailureReview
+ * on every arm including the ones that release outright) rather than re-deriving "was this
+ * run-progress-backed" from the error type a second time here. Everything that is not one of the two
+ * run-progress-backed reasons writes the general `typed_pre_click_stop` kind instead - including the
+ * no-submit-control release - and if that arrives after an authorization already exists, the
+ * ledger's own admissibility rule is what decides its fate (folding it to 'invalid_sequence'), not a
+ * proof kind manufactured here to dodge that rule.
+ */
+export function releasedClaimProofKind(
+  stopReason: SubmissionStopReason | undefined,
+  authorizedAlready: boolean,
+): SubmissionNotSentProofKind {
+  return authorizedAlready && stopReason !== undefined && RUN_PROGRESS_BACKED_STOP_REASONS.has(stopReason)
+    ? 'run_progress_proven_not_pressed'
+    : 'typed_pre_click_stop';
+}
+
 /**
  * Linearize a runner failure against authorization, terminal evidence, and the packet projection.
  * A stale caller either updates the exact still-current attempt or writes nothing.
@@ -12710,7 +12796,45 @@ export async function recordSubmissionRunnerFailure(
     const boundary = attemptId
       ? await submissionBoundaryAuthorization(row.user_id, attemptId, { executor: tx })
       : null;
-    if (boundary) {
+    /* CHECKED FIRST, ahead of `boundary`, and that order is the fix. Before this, `if (boundary)`
+     * ran unconditionally whenever an authorization existed on the attempt and overwrote whatever
+     * `failed` had already correctly worked out - including a run submissionFailureReview had just
+     * PROVEN pre-click from its own progress record (runProgressProvenNeverPressed) and released the
+     * claim for. An authorization existing is a fact about the ATTEMPT; `failed.submission_claim_id`
+     * being cleared is a fact about what THIS run's own evidence just proved, and the second must
+     * outrank the first or every one of those releases is undone one line later.
+     *
+     * Measured 2026-09-05, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt b624e034:
+     * boundary_authorized was on record, submissionFailureReview correctly proved the run died
+     * re-filling the Workable phone widget before confirmAndSubmit and released the claim, and this
+     * block used to run anyway and reinstate the unverified_submission record it had just cleared -
+     * telling the applicant Litos had pressed Send. */
+    if (attemptId && !failed.submission_claim_id) {
+      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+      if (!opening) throw new Error('Submission attempt reservation was not durably recorded');
+      const binding = submissionAttemptBindingFromEvent(opening);
+      /* releasedClaimProofKind reads the run's OWN typed stop (submission_stop.reason) rather than
+       * inferring the proof kind from `authorizedAlready` alone - see its doc comment for the
+       * defect that inference caused. Only the two run-progress-backed reasons may be credited with
+       * `run_progress_proven_not_pressed` once an authorization exists; every other pre-click
+       * release, including the no-submit-control one, writes `typed_pre_click_stop` and lets the
+       * ledger's own admissibility rule (submissionAttemptLedger.ts,
+       * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS) decide whether that is admissible after
+       * authorization. */
+      const authorizedAlready = exactEvents.some((event) => event.event_kind === 'boundary_authorized');
+      const proofKind = releasedClaimProofKind(failed.submission_stop?.reason, authorizedAlready);
+      await appendSubmissionAttemptEvent({
+        ...binding,
+        eventId: submissionAttemptEventId(attemptId, 'not_sent_proven', proofKind),
+        eventKind: 'not_sent_proven',
+        proofKind,
+        evidenceCode: failed.submission_stop?.reason ?? proofKind,
+      }, { executor: tx });
+    } else if (boundary) {
+      /* THE AMBIGUOUS CASES ONLY, now that a provable pre-click stop is handled above: a press was
+       * observed with no confirmation, or the run died during or after confirmAndSubmit with no
+       * network witness either way. Neither is provable, so the claim stays held and the row gets
+       * the resolvable unverified_submission record exactly as before. */
       const securityCode = mergeManagedSecurityCodeEvidence(
         latestReview.security_code,
         failed.security_code,
@@ -12734,17 +12858,6 @@ export async function recordSubmissionRunnerFailure(
           ? [...new Set([...failed.attention_categories, 'unverified_submission' as const])]
           : ['unverified_submission'],
       });
-    } else if (attemptId && !failed.submission_claim_id) {
-      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
-      if (!opening) throw new Error('Submission attempt reservation was not durably recorded');
-      const binding = submissionAttemptBindingFromEvent(opening);
-      await appendSubmissionAttemptEvent({
-        ...binding,
-        eventId: submissionAttemptEventId(attemptId, 'not_sent_proven', 'typed-runner-stop'),
-        eventKind: 'not_sent_proven',
-        proofKind: 'typed_pre_click_stop',
-        evidenceCode: failed.submission_stop?.reason ?? 'typed_pre_click_stop',
-      }, { executor: tx });
     }
 
     const updated = await tx.update(generated_resumes).set({
@@ -12887,6 +13000,30 @@ export function submissionFailureReview(
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailureBeforeSubmit = error instanceof ManagedBrowserPreSubmitCrashError;
   const fieldProofFailedBeforeSubmit = error instanceof ManagedBrowserAssertionFailureError;
+  const fieldProofFailedLabel = error instanceof ManagedBrowserAssertionFailureError
+    ? error.assertionLabel
+    : null;
+  /* THE RUN'S OWN WITNESS THAT THE CLICK NEVER HAPPENED, DISTINCT FROM THE LEDGER'S.
+   *
+   * preClickProvenByLedger (below) answers "did this attempt ever get boundary_authorized or
+   * press_observed" - and once authorization exists, that answer is permanently true, which is
+   * exactly right for the ledger's own admissibility rule (see submissionAttemptLedger.ts's
+   * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS) but says nothing about what THIS run, which was
+   * granted that authorization, actually did with it.
+   *
+   * Both ManagedBrowserAssertionFailureError and ManagedBrowserPreSubmitCrashError are constructed
+   * in browserbase.ts's managedBrowserRequestError ONLY when managedBrowserProgressAllowsPreSubmitRetry
+   * held for Stratus's own reported run-progress: submitPressed, applicationSubmitPressed and
+   * verificationSubmitPressed all false, and employerOutcome (if present) exactly 'not_attempted'.
+   * That is the same proof this codebase already trusts to let runWithManagedPreSubmitCrashRetry
+   * retry an authorized attempt automatically, so treating it as proof for closing the ledger and
+   * releasing the claim is not a new risk, it is reusing an existing one.
+   *
+   * Measured 2026-09-05, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt b624e034:
+   * boundary_authorized was on record, so preClickProvenByLedger read true-crossed (false) and this
+   * run's own contained-transport proof was the only thing left that could say what actually
+   * happened - and until this existed, nothing here asked it. */
+  const runProgressProvenNeverPressed = fieldProofFailedBeforeSubmit || providerSessionFailureBeforeSubmit;
   const providerSessionFailure = providerSessionFailureBeforeSubmit || isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
   /* THE PROOF THIS FUNCTION NEVER HAD, and the reason 69 employers on one account were blocked by
@@ -13011,22 +13148,31 @@ export function submissionFailureReview(
    * answer is proof about THIS run only, which is exactly the scope of the claim being released -
    * the claim was taken by this run. Anything an earlier attempt left on the row is untouched by
    * the release and keeps blocking through employerMayHoldApplication, so widening the release here
-   * cannot let a second application out behind an unresolved first one. */
-  const releasesClaim = uncertainAfterClaim && (provablyNotSent || preClickProvenByLedger);
+   * cannot let a second application out behind an unresolved first one.
+   *
+   * runProgressProvenNeverPressed joins the same disjunction for the same reason, on the narrower
+   * evidence described above it: it is proof about THIS run's OWN progress record, so widening the
+   * release to include it cannot let a second application out behind an unresolved first one
+   * either - it only ever says this run, specifically, never pressed anything. */
+  const releasesClaim = uncertainAfterClaim
+    && (provablyNotSent || preClickProvenByLedger || runProgressProvenNeverPressed);
   /* A claim held with no proof behind it. Every such row must leave here with a door, and the only
      door that fits a state nobody can classify is the applicant's own look at the employer page. */
   const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, routeCheckUnavailable, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, fieldProofFailedLabel, externalGate, providerSessionFailure,
     packetDriftIssues: packetDrift?.issues,
     destinationUnverifiedBeforeSend: destinationUnverified,
     /* SUPPRESSED BY THE PROOF, and this is where defect 2 is actually fixed. uncertainAfterClaim's
        sentence is "The final submission was attempted, but Litos could not verify the employer
        confirmation. Check the portal or your email before trying again." Every word of it is false
        of a run that never reached the boundary, and it is the sentence that sent the applicant to
-       inspect an employer portal for an attempt that did not happen. */
-    uncertainAfterClaim: uncertainAfterClaim && !preClickProvenByLedger,
+       inspect an employer portal for an attempt that did not happen.
+       Also suppressed by runProgressProvenNeverPressed, for the same reason: fieldProofFailedBeforeSubmit
+       and providerSessionFailure already outrank this sentence below in the ranking, so in practice
+       this only guards against a future reordering silently reviving the false claim. */
+    uncertainAfterClaim: uncertainAfterClaim && !preClickProvenByLedger && !runProgressProvenNeverPressed,
     preClickProvenByLedger,
     currentAttentionReason: current.attention_reason,
   });

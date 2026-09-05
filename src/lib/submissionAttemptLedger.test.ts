@@ -91,6 +91,19 @@ function notSent(proofKind: SubmissionNotSentProofKind, evidenceCode: string): S
   return event('not_sent_proven', { proof_kind: proofKind, evidence_code: evidenceCode });
 }
 
+/** attempt_opened -> boundary_authorized, no press_observed - the exact shape measured 2026-09-05 on
+ * Pony.ai application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt b624e034: the send was
+ * authorized and then died re-filling Workable's phone widget before confirmAndSubmit was reached. */
+function authorizedNotPressed(): SubmissionAttemptEventRecord[] {
+  const opened = event('attempt_opened');
+  const authorized = event('boundary_authorized', {
+    boundary_activation_id: ACTIVATION,
+    boundary_expires_at: new Date(FIXTURE_BASE_MS + 999_000),
+    evidence_code: 'managed_browser_employer_boundary_authorized',
+  });
+  return [opened, authorized];
+}
+
 describe('employer_rejected_not_filed closes an authorized, pressed attempt', () => {
   test('a proven employer refusal folds to safe_not_sent, exactly like her own look does', () => {
     const events = [
@@ -119,6 +132,42 @@ describe('employer_rejected_not_filed closes an authorized, pressed attempt', ()
     ];
     const safety = submissionAttemptRetrySafety(events);
     assert.equal(safety.kind, 'safe_not_sent');
+  });
+});
+
+describe('run_progress_proven_not_pressed closes an authorized attempt this run never pressed', () => {
+  test('an authorized-but-unpressed attempt folds to safe_not_sent, like the other two machine witnesses', () => {
+    const events = [
+      ...authorizedNotPressed(),
+      notSent('run_progress_proven_not_pressed', 'run_progress_proven_not_pressed'),
+    ];
+    const safety = submissionAttemptRetrySafety(events);
+    assert.equal(safety.kind, 'safe_not_sent',
+      'Stratus\'s own contained-transport proof for this run must not need her look too');
+    if (safety.kind !== 'safe_not_sent') return;
+    assert.equal(safety.proofKind, 'run_progress_proven_not_pressed');
+    assert.equal(safety.attemptId, ATTEMPT);
+  });
+
+  test('it closes the attempt even with no authorization at all (proof about a run beats proof about the ledger)', () => {
+    const opened = event('attempt_opened');
+    const events = [opened, notSent('run_progress_proven_not_pressed', 'run_progress_proven_not_pressed')];
+    const safety = submissionAttemptRetrySafety(events);
+    assert.equal(safety.kind, 'safe_not_sent');
+  });
+
+  test('it cannot close an attempt a press actually happened on - the contradiction folds to invalid_sequence', () => {
+    // This proof kind asserts the click never happened, exactly like typed_pre_click_stop and
+    // extension_cancelled_before_press. A press event standing beside it on the same attempt is a
+    // logical contradiction, not a race to resolve in the machine's favour.
+    const events = [
+      ...pressedAndAuthorized(),
+      notSent('run_progress_proven_not_pressed', 'run_progress_proven_not_pressed'),
+    ];
+    const safety = submissionAttemptRetrySafety(events);
+    assert.equal(safety.kind, 'blocked_unverified');
+    if (safety.kind !== 'blocked_unverified') return;
+    assert.equal(safety.reason, 'invalid_sequence');
   });
 });
 
