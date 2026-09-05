@@ -115,12 +115,128 @@ export async function linkGeneratedPacketToCanonicalApplication(
 }
 
 /**
- * Complete the one absent value the document tuple can be missing on a row this module's own
- * earlier writes left behind: the selected resume link's attached_at, copied from the application's
- * resume_attached_at. Nothing that already carries a value is touched, and a link that carries a
- * DIFFERENT clock than the application is left as it is - that disagreement is real and the
- * projection is right to refuse it. Returns whether a link was stamped.
+ * THE LINKAGE A SELECTED ARTIFACT IMPLIES, completed where it is absent.
+ *
+ * Two shapes this module's own earlier writes left behind, both fatal to a managed receipt's
+ * document tuple (lib/authoritativeSubmissionProjection.ts, generatedDocumentChecks):
+ *
+ *   - the selected resume link's attached_at is NULL beside an application that knows when its
+ *     resume was attached (Bear Robotics b822b998, 2026-09-05: `link.attached_at=null`);
+ *   - the application points at a selected artifact and still says (resume_attached false,
+ *     resume_source 'none', resume_attached_at null) - the pre-2026-09-03 tailor shape the
+ *     2026-09-04 migration completed for the rows that existed then, and which this account's
+ *     Deepgram row 8c6485c4 still wore at 04:48Z today: `application.resume_attached=false`,
+ *     `application.resume_source=none`, `application.resume_attached_at=null`, `link.attached_at=null`.
+ *
+ * The plan is pure (resumeLinkageCompletionPlan) so it can be tested against those exact rows; this
+ * applies it. It completes ONLY absent values, on ONE clock: the application's resume_attached_at
+ * where it exists, else the link's, else now. Nothing that already carries a value is overwritten,
+ * an artifact that is not this packet's own is never linked, and an application that names some
+ * OTHER source (base_resume) beside a selected artifact is left disagreeing for the projection to
+ * refuse. Returns whether anything was written.
  */
+export type ResumeLinkageCompletionPlan = {
+  applicationPatch: { resume_attached: true; resume_source: 'artifact'; resume_attached_at: Date } | null;
+  link: 'insert' | 'stamp' | null;
+  clock: Date;
+};
+
+export function resumeLinkageCompletionPlan(input: {
+  application: {
+    selected_resume_artifact_id: string | null;
+    resume_attached: boolean;
+    resume_source: string;
+    resume_attached_at: Date | null;
+  };
+  /** The selected artifact, when it exists, is not deleted, and belongs to the packet being repaired. */
+  artifactBelongsToPacket: boolean;
+  link: { attached_at: Date | null } | null;
+  now: Date;
+}): ResumeLinkageCompletionPlan | null {
+  const { application, link } = input;
+  if (!application.selected_resume_artifact_id || !input.artifactBelongsToPacket) return null;
+  if (application.resume_source !== 'artifact' && application.resume_source !== 'none') return null;
+  if (application.resume_source === 'none' && application.resume_attached) return null;
+  const clock = application.resume_attached_at ?? link?.attached_at ?? input.now;
+  const applicationComplete = application.resume_attached
+    && application.resume_source === 'artifact'
+    && application.resume_attached_at !== null;
+  const applicationPatch = applicationComplete
+    ? null
+    : { resume_attached: true as const, resume_source: 'artifact' as const, resume_attached_at: clock };
+  const linkAction: 'insert' | 'stamp' | null = link === null
+    ? 'insert'
+    : link.attached_at === null ? 'stamp' : null;
+  if (!applicationPatch && !linkAction) return null;
+  return { applicationPatch, link: linkAction, clock };
+}
+
+export async function completeSelectedResumeLinkage(
+  tx: ArtifactVersionTransaction,
+  input: { userId: string; applicationId: string; packetId: string; now?: Date },
+): Promise<boolean> {
+  const [application] = await tx.select({
+    selected_resume_artifact_id: applications.selected_resume_artifact_id,
+    resume_attached: applications.resume_attached,
+    resume_attached_at: applications.resume_attached_at,
+    resume_source: applications.resume_source,
+  }).from(applications).where(and(
+    eq(applications.id, input.applicationId),
+    eq(applications.user_id, input.userId),
+  )).limit(1);
+  if (!application?.selected_resume_artifact_id) return false;
+  const [artifact] = await tx.select({ id: artifacts.id }).from(artifacts).where(and(
+    eq(artifacts.id, application.selected_resume_artifact_id),
+    eq(artifacts.user_id, input.userId),
+    eq(artifacts.legacy_generated_resume_id, input.packetId),
+    sql`${artifacts.deleted_at} is null`,
+  )).limit(1);
+  const [link] = await tx.select({ attached_at: application_artifacts.attached_at }).from(application_artifacts).where(and(
+    eq(application_artifacts.application_id, input.applicationId),
+    eq(application_artifacts.artifact_id, application.selected_resume_artifact_id),
+    eq(application_artifacts.purpose, 'resume'),
+  )).limit(1);
+  const plan = resumeLinkageCompletionPlan({
+    application: {
+      selected_resume_artifact_id: application.selected_resume_artifact_id,
+      resume_attached: application.resume_attached,
+      resume_source: application.resume_source,
+      resume_attached_at: application.resume_attached_at,
+    },
+    artifactBelongsToPacket: Boolean(artifact),
+    link: link ? { attached_at: link.attached_at } : null,
+    now: input.now ?? new Date(),
+  });
+  if (!plan) return false;
+  if (plan.applicationPatch) {
+    await tx.update(applications).set({
+      ...plan.applicationPatch,
+      updated_at: new Date(),
+    }).where(and(
+      eq(applications.id, input.applicationId),
+      eq(applications.user_id, input.userId),
+    ));
+  }
+  if (plan.link === 'insert') {
+    await tx.insert(application_artifacts).values({
+      application_id: input.applicationId,
+      artifact_id: application.selected_resume_artifact_id,
+      purpose: 'resume',
+      selected: true,
+      attached_at: plan.clock,
+    }).onConflictDoNothing();
+  } else if (plan.link === 'stamp') {
+    await tx.update(application_artifacts).set({ attached_at: plan.clock }).where(and(
+      eq(application_artifacts.application_id, input.applicationId),
+      eq(application_artifacts.artifact_id, application.selected_resume_artifact_id),
+      eq(application_artifacts.purpose, 'resume'),
+      sql`${application_artifacts.attached_at} is null`,
+    ));
+  }
+  return true;
+}
+
+/** The narrow predecessor of completeSelectedResumeLinkage, kept for its callers: stamp only. */
 export async function stampSelectedResumeLinkAttachedAt(
   tx: ArtifactVersionTransaction,
   input: { userId: string; applicationId: string },

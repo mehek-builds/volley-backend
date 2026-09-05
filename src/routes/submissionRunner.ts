@@ -214,7 +214,7 @@ import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
 import { objectStorageUsesRailway } from '../lib/objectStorage';
-import { stampSelectedResumeLinkAttachedAt, storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
+import { completeSelectedResumeLinkage, storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON, relearnedFormReadingAcknowledgement } from '../lib/packetResumeRestore';
 import {
@@ -1908,9 +1908,13 @@ export async function repairParkedConfirmedProjection(
     eq(applications.legacy_generated_resume_id, row.id),
   )).limit(1);
   if (canonicalForPacket) {
-    const stamped = await stampSelectedResumeLinkAttachedAt(db, { userId: row.user_id, applicationId: canonicalForPacket.id });
-    if (stamped) {
-      log.info({ applicationId: row.id, canonicalApplicationId: canonicalForPacket.id }, 'selected resume link stamped from the application clock');
+    const completed = await completeSelectedResumeLinkage(db, {
+      userId: row.user_id,
+      applicationId: canonicalForPacket.id,
+      packetId: row.id,
+    });
+    if (completed) {
+      log.info({ applicationId: row.id, canonicalApplicationId: canonicalForPacket.id }, 'selected resume linkage completed before re-projection');
     }
   }
   const committed = await commitVerifiedSubmissionConfirmed(row, attemptBinding, {
