@@ -82,6 +82,7 @@ import {
   type ManagedDiscoveredQuestion,
 } from './browserbase';
 import type { ReferralSourceEvidence } from './referralSource';
+import type { ManagedBrowserAction } from './browserbase';
 
 const JOB_BOARD_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
   kind: 'litos_job_board',
@@ -4982,13 +4983,21 @@ test('managed Workable phone selects exact UAE and proves the value before the r
    * exceeded.` after "Employer questions 3 items completed" - three answered questions, the resume
    * upload and every fixed field already captured, discarded by one re-verification of an overlay
    * that #847's own review (finding 6) already flagged as a risk and bet the preflight reorder
-   * would prevent. See the block comment on pushWorkableManagedPhoneTerminalActions. */
+   * would prevent. See the block comment on pushWorkableManagedPhoneTerminalActions.
+   *
+   * timeout is WORKABLE_COOKIE_CLEARED_TIMEOUT_MS (20s), not the generic 10s every other bounded
+   * wait in this file uses: a SECOND production packet fdcf4ccb SEND death, at 2026-09-05 11:08Z,
+   * post-dates this optionality fix and carries the identical error text, which rules this barrier
+   * back out and points at its sibling, workable_cookie_preflight_cleared - the only OTHER required
+   * 10s waitForSelector in a Workable plan. Both cleared waits share the widened budget because
+   * they prove the identical fact against the identical live GTM widget; see
+   * WORKABLE_COOKIE_CLEARED_TIMEOUT_MS for the full account. */
   assert.deepEqual(actions[lateCookieClearedIndex], {
     type: 'waitForSelector',
     selector: WORKABLE_COOKIE_CLEARED,
     label: 'workable_cookie_final_cleared',
     optional: true,
-    timeout: 10_000,
+    timeout: 20_000,
   });
   assert.deepEqual(actions[capabilityIndex], {
     type: 'requireCapability',
@@ -5279,6 +5288,60 @@ test('the terminal cookie barrier is optional so it cannot discard already-answe
   }
 });
 
+/* THE SECOND fdcf4ccb REGRESSION PIN, and a re-diagnosis. Packet fdcf4ccb-eca9-44dc-b0cb-
+ * d400805ebdeb's SEND died again on 2026-09-05 11:08:17Z-11:08:43Z (26s), byte-identical error text
+ * to the run the test above pins: `page.waitForSelector: Timeout 10000ms exceeded.`, nothing else.
+ * That earlier fix already made workable_cookie_final_cleared optional, so this second death
+ * cannot be it - and the PREPARE run for the same packet (85e360cf, 11:03Z) succeeded with `phone`
+ * in filled_fields moments earlier, which looked like a prepare/send divergence in the phone block.
+ *
+ * It is not. Building both plans for the identical packet shape and diffing them (below) shows the
+ * phone block - fill, wait, extract, country wait, country extract - is byte-for-byte identical in
+ * both, same order, same optional flags, same timeouts; both of the phone-readback waitForSelector
+ * actions are optional at WORKABLE_PHONE_REMOUNT_TIMEOUT_MS (4s), and extract never calls
+ * page.waitForSelector (it reads via locator.evaluate, or polls with page.waitForTimeout when
+ * zero-match - see managed-browser.js), so neither can produce this exact error text. Send adds
+ * only two front-loaded requireCapability checks (no page interaction) and a trailing
+ * confirmAndSubmit. The one structural fact that explains a death this early, with the one error
+ * text Playwright only emits for an actual `page.waitForSelector()` call: workable_cookie_
+ * preflight_cleared is the single `optional: false` waitForSelector in a Workable plan, sitting
+ * before a single field is touched, at what was the generic MANAGED_FILL_TIMEOUT_MS. Fixed by
+ * giving both cleared barriers WORKABLE_COOKIE_CLEARED_TIMEOUT_MS instead - see that constant. */
+test('the prepare and send plans agree on the phone block, so a SEND-only death there is not the phone', () => {
+  const packet = {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  };
+  const url = 'https://apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply/';
+  const prepareActions = buildManagedPortalActions('workable', packet, false, url);
+  const sendActions = buildManagedPortalActions('workable', packet, true, url);
+  const phoneLabels = [
+    'workable_phone_assertion_capability', 'phone_country_open', 'phone_country_option',
+    'phone_country_close', 'phone', 'workable_phone_value_visible', 'filled_field:phone',
+    'workable_phone_country_visible', 'filled_field:phone_country',
+  ];
+  const phoneShape = (actions: ManagedBrowserAction[]) => actions
+    .filter((action) => phoneLabels.includes(action.label ?? ''))
+    .map((action) => ({ type: action.type, label: action.label, optional: action.optional, timeout: action.timeout }));
+  assert.deepEqual(phoneShape(sendActions), phoneShape(prepareActions),
+    'the send plan must not run the phone block any differently than the proven prepare plan');
+  // The only REQUIRED waitForSelector in either plan is the preflight cookie-cleared barrier, and
+  // it is not phone-scoped - it is the actual production failure this test package pins.
+  const requiredWaits = (actions: ManagedBrowserAction[]) => actions
+    .filter((action) => action.type === 'waitForSelector' && action.optional === false)
+    .map((action) => action.label);
+  assert.deepEqual(requiredWaits(prepareActions), ['workable_cookie_preflight_cleared']);
+  assert.deepEqual(requiredWaits(sendActions), ['workable_cookie_preflight_cleared']);
+  for (const actions of [prepareActions, sendActions]) {
+    const preflightCleared = actions.find((action) => action.label === 'workable_cookie_preflight_cleared');
+    // 20_000 is WORKABLE_COOKIE_CLEARED_TIMEOUT_MS, kept as a literal here the same way every other
+    // timeout assertion in this file pins the plan's actual numbers rather than importing the
+    // module-private constant that produced them.
+    assert.equal(preflightCleared?.timeout, 20_000,
+      'the one required barrier a phone-shaped Workable send can die on needs the widened live-widget budget');
+  }
+});
+
 /* THE PRODUCTION-SHAPED REPLAY of the five live refutations, and of the fix. The resume upload
  * triggers Workable's asynchronous parse remount, which destroys the intl-tel-input widget for the
  * rest of the run's readable window (measured: Pony.ai fdcf4ccb on 2026-08-28 with the value
@@ -5435,12 +5498,17 @@ test('Workable opens the exact application route and clears optional-cookie over
   assert.ok(clearedIndex > declineIndex, 'the cleared barrier follows the decline');
   assert.equal(actions[clearedIndex]?.type, 'waitForSelector');
   assert.equal(actions[clearedIndex]?.optional, false, 'a consent dialog that stays up must fail closed under its own name');
-  /* Bounded by MANAGED_FILL_TIMEOUT_MS, which is the whole cost argument for making it required:
-   * ten seconds under the overlay's own name instead of the thirty silent seconds Playwright's
-   * default click timeout spends on an intercepted pointer. The runner clamps a waitForSelector
-   * timeout to 100..20000ms, so an unset one would not even be the same bound. */
-  assert.equal(actions[clearedIndex]?.timeout, 10_000);
-  assert.equal(actions[clearedIndex]?.timeout, actions[readyIndex]?.timeout);
+  /* Bounded by WORKABLE_COOKIE_CLEARED_TIMEOUT_MS (the runner's own waitForSelector ceiling - see
+   * normalizeManagedActions' 100..20000ms clamp), not the generic MANAGED_FILL_TIMEOUT_MS every
+   * other bounded wait in this file uses. MEASURED 2026-09-04/09-05, Pony.ai packet fdcf4ccb-eca9-
+   * 44dc-b0cb-d400805ebdeb: two SEND runs died here under the plain 10s budget with
+   * `page.waitForSelector: Timeout 10000ms exceeded.` and nothing filled yet, while PREPARE runs
+   * against the same packet cleared the identical barrier. The widget behind this selector is a
+   * live third-party GTM consent component that has to fetch its own config before it renders, not
+   * an unknown selector - the failure mode MANAGED_FILL_TIMEOUT_MS was sized for - so it gets the
+   * wider budget instead of the generic one the form-ready wait still uses under its own name. */
+  assert.equal(actions[clearedIndex]?.timeout, 20_000);
+  assert.equal(actions[readyIndex]?.timeout, 10_000, 'the form-ready wait keeps the generic budget');
   /* The barrier names the FORM as well as the two overlay nodes. Without the `body:has(form)` arm
    * it is TRUE of the un-booted loader-cube shell - no dialog and no backdrop, because nothing has
    * rendered yet - so it would pass in milliseconds and hand the same intercepted click back. */

@@ -1189,6 +1189,53 @@ const MANAGED_FILL_TIMEOUT_MS = 10_000;
  * expectedValueDigits, so a phone that genuinely did not land still fails, four seconds sooner. */
 const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 4_000;
 
+/* MEASURED root cause of the SEND death this constant fixes, packet fdcf4ccb-eca9-44dc-b0cb-
+ * d400805ebdeb (Pony.ai), two occurrences with byte-identical error text: 2026-09-04 21:35Z and
+ * 2026-09-05 11:08:17Z-11:08:43Z (26s runtime), both `page.waitForSelector: Timeout 10000ms
+ * exceeded.` with no selector or label attached (stratus reports only the bare Playwright message
+ * for this action type - see managed-browser.js's `if (action.type === 'waitForSelector') await
+ * page.waitForSelector(...)`).
+ *
+ * THIS IS NOT A PHONE FAILURE, even though the same run's action_audit lists the phone readback's
+ * selectors among its longest. Both phone waits (workable_phone_value_visible,
+ * workable_phone_country_visible) are `optional: true` at WORKABLE_PHONE_REMOUNT_TIMEOUT_MS (4s),
+ * and a timeout on an optional action never throws - it lands in `skipped` (managed-browser.js's
+ * `catch (actionError)` only rethrows when `!action.optional`). The phone extracts right after them
+ * are required, but extract never calls page.waitForSelector (it reads via `locator.evaluate` and,
+ * for a zero-match requireUnique extract, polls with `page.waitForTimeout` in a hand-rolled loop -
+ * see the `action.type === 'extract' && action.requireUnique && matchCount === 0` branch); either
+ * failure mode produces a distinct "expected exactly one match" or "extracted value is empty"
+ * message, never bare "page.waitForSelector: Timeout Nms exceeded.".
+ *
+ * Building both the prepare and send plans for this exact packet shape (buildManagedPortalActions
+ * with submit false and true) and diffing them confirms the phone block is byte-for-byte identical
+ * in both, in the same position, with the same optional flags and timeouts - send adds only two
+ * front-loaded requireCapability checks (no page interaction; `requireCapability` is a `continue`
+ * in the runner, see line ~16174) and the trailing confirmAndSubmit. There is exactly one
+ * `optional: false` waitForSelector anywhere in a Workable plan, at MANAGED_FILL_TIMEOUT_MS (10s):
+ * `workable_cookie_preflight_cleared`, pushed by pushWorkableManagedPreflightActions before a
+ * single field is touched. That is the one action whose error text and timeout value are both an
+ * exact match, and it explains a death this early with nothing filled yet.
+ *
+ * The barrier is real and earns its 10s bound against an unknown selector (see
+ * MANAGED_FILL_TIMEOUT_MS above), but what it is waiting for here is not an unknown selector - it
+ * is a live third-party GTM-driven consent widget that has to fetch its config and locale before it
+ * even decides whether to render, on a cold sandbox context with no cache. A generic budget sized
+ * for "this selector may not exist" is the wrong budget for "this selector's owner has not finished
+ * loading yet", and giving it only that generic budget means the SAME transient network slowness
+ * that a phone readback would tolerate (four extra seconds, optionally) kills the entire run before
+ * one field is written. Raised to the runner's own ceiling (normalizeManagedActions clamps every
+ * waitForSelector timeout to 100-20,000ms) rather than an arbitrary number in between, because
+ * anything smaller is still a coin flip against the same live widget and anything larger is not
+ * something the runner will honor anyway.
+ *
+ * Applied to BOTH cookie-cleared waits (preflight and terminal), not only the required one that
+ * measurably failed: they prove the exact same fact against the exact same live widget (see
+ * pushWorkableCookieBoundaryActions - "both barriers keep proving the SAME fact with the SAME
+ * bound"), and giving the terminal wait the old, smaller budget while the preflight wait gets the
+ * new one would make an intentional parity look like drift to the next person reading the diff. */
+const WORKABLE_COOKIE_CLEARED_TIMEOUT_MS = 20_000;
+
 function managedFill(
   actions: ManagedBrowserAction[],
   selector: string,
@@ -5792,7 +5839,12 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
  * (never made optional) on the evidence run, which must always come home. `clearedOptional` is
  * the one deliberate exception to "required by default" - see the terminal call site in
  * pushWorkableManagedPhoneTerminalActions for why the barrier that runs there can no longer be
- * allowed to end the run under its own name the way the preflight barrier still may. */
+ * allowed to end the run under its own name the way the preflight barrier still may.
+ *
+ * The cleared wait's own timeout is WORKABLE_COOKIE_CLEARED_TIMEOUT_MS, not the generic
+ * MANAGED_FILL_TIMEOUT_MS every other bounded wait in this file uses - see that constant for why a
+ * live third-party consent widget that has not finished loading needs a wider budget than "this
+ * selector may not exist", and for why both call sites (preflight and terminal) share it. */
 function pushWorkableCookieBoundaryActions(
   actions: ManagedBrowserAction[],
   labels: { decline: string; cleared?: string; clearedOptional?: boolean },
@@ -5811,7 +5863,7 @@ function pushWorkableCookieBoundaryActions(
     selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
     label: labels.cleared,
     optional: labels.clearedOptional === true,
-    timeout: MANAGED_FILL_TIMEOUT_MS,
+    timeout: WORKABLE_COOKIE_CLEARED_TIMEOUT_MS,
   });
 }
 
