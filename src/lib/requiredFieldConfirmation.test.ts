@@ -33,6 +33,7 @@ import {
   UNATTRIBUTED_REQUIRED_BLOCKER,
   type SubmissionPacket,
   type SupportedPortal,
+  WORKABLE_ATOMIC_SUBMIT_V4_ENABLED,
 } from './portalSubmission';
 
 const FINAL_CHOOSER_URL = 'https://apply.workable.com/example/j/ABC123/';
@@ -187,22 +188,31 @@ test('only one exact native Workable application route emits the cross-repo v4 c
     MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
     'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"])',
   );
-  assert.deepEqual(atomicCapabilities, [{
-    type: 'requireCapability',
-    value: MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
-    optional: false,
-    applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
-  }]);
+  if (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED) {
+    assert.deepEqual(atomicCapabilities, [{
+      type: 'requireCapability',
+      value: MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+      optional: false,
+      applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+    }]);
+    assert.equal(actions.at(-1)?.chooserPolicy, MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY);
+  } else {
+    /* v4 off for Workable (see managedApplicationUsesAtomicSubmitV4): no atomic capability is
+       emitted and the press takes the v3 chooser every other family takes. */
+    assert.deepEqual(atomicCapabilities, []);
+    assert.equal(actions.at(-1)?.chooserPolicy, MANAGED_SUBMIT_CHOOSER_POLICY);
+  }
   assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
-  assert.equal(actions.at(-1)?.chooserPolicy, MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY);
   assert.equal(actions.at(-1)?.expectedPageUrl, applicationUrl);
   assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
-  assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'
-    && action.chooserPolicy?.version === 3), false,
-  'a v4 refusal has no v3 submit action to fall through to in the same run');
+  if (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED) {
+    assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'
+      && action.chooserPolicy?.version === 3), false,
+    'a v4 refusal has no v3 submit action to fall through to in the same run');
+  }
 });
 
-test('a production Workable v4 invalid phone stops cleanly before any Stratus request', async () => {
+test('a production Workable v4 invalid phone stops cleanly before any Stratus request', { skip: !WORKABLE_ATOMIC_SUBMIT_V4_ENABLED && 'v4 is switched off for Workable; the v3 path confirms the phone on the page' }, async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
   const previousFetch = globalThis.fetch;
@@ -246,8 +256,15 @@ test('host, family, and application route all have to match before managed v4 is
     'https://apply.workable.com/example/j/ABC123/apply?source=litos',
   ];
   for (const url of v4Urls) {
-    assert.equal(managedApplicationUsesAtomicSubmitV4('workable', url), true, url);
-    assert.equal(buildManagedPortalActions('workable', packet, true, url).at(-1)?.chooserPolicy?.version, 4, url);
+    /* The native route is the shape v4 selects on - but v4 is switched off for Workable until it can
+       carry a resume (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED, see managedApplicationUsesAtomicSubmitV4),
+       so today these take v3 like every other family. */
+    assert.equal(managedApplicationUsesAtomicSubmitV4('workable', url), WORKABLE_ATOMIC_SUBMIT_V4_ENABLED, url);
+    assert.equal(
+      buildManagedPortalActions('workable', packet, true, url).at(-1)?.chooserPolicy?.version,
+      WORKABLE_ATOMIC_SUBMIT_V4_ENABLED ? 4 : MANAGED_SUBMIT_CHOOSER_POLICY.version,
+      url,
+    );
   }
 
   const v3Cases: Array<[SupportedPortal, string]> = [
@@ -271,7 +288,7 @@ test('host, family, and application route all have to match before managed v4 is
   }
 });
 
-test('Workable v4 budget pressure keeps both required boundaries or blocks before submit', () => {
+test('Workable v4 budget pressure keeps both required boundaries or blocks before submit', { skip: !WORKABLE_ATOMIC_SUBMIT_V4_ENABLED && 'v4 is switched off for Workable; the v4 budget contract is pinned again when it returns' }, () => {
   const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
   let completed = 0;
   let blocked = 0;

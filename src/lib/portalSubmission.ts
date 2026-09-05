@@ -5750,11 +5750,28 @@ const WORKABLE_CHOICE_UNCONFIRMED_ATTR = 'data-litos-choice-unconfirmed-v1';
 /**
  * Chooser v4 is enabled only on the measured native Workable application route.
  * Every other managed application submit retains chooser v3.
+ *
+ * SWITCHED OFF FOR WORKABLE, 2026-09-05, PENDING A DESIGN DECISION. Stratus's v4 pre-submit
+ * containment refuses every request from the moment navigation settles - reads included, and by its
+ * own pinned invariants any transport a fill handler triggers ("v4 no-click blocks pre-chooser fill
+ * change upload and select transports", formless-submit-scope.test.js). Workable's apply page is a
+ * client-rendered shell whose form arrives only after its own GET reads, and it attaches a resume by
+ * a change-event POST to its S3 bucket. Under v4 neither can happen: measured on TWG Global
+ * (apply.workable.com/twgai/j/772CD136FF/apply/), the send's pre-press probe read a 283-character
+ * shell and the run died at its cookie preflight, while the same packet's fill under the standard
+ * containment completed in 7 s with the resume uploaded and answered (stratus #190, #191). So a
+ * Workable send takes the v3 path that every verified managed send has taken, with the fill
+ * containment's upload window and the ordinary exact-final-authority press, until v4 is given a
+ * named-bucket upload window of its own (stratus #192, parked). The route test below still pins
+ * the shape v4 WOULD select on, so switching it back is one line.
  */
+export const WORKABLE_ATOMIC_SUBMIT_V4_ENABLED = false;
+
 export function managedApplicationUsesAtomicSubmitV4(
   portal: SupportedPortal,
   expectedPageUrl: string | undefined,
 ): boolean {
+  if (!WORKABLE_ATOMIC_SUBMIT_V4_ENABLED) return false;
   if (portalFamily(portal) !== 'workable' || !expectedPageUrl) return false;
   try {
     const url = new URL(expectedPageUrl);

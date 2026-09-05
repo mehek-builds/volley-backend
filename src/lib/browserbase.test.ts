@@ -39,6 +39,7 @@ import {
   buildManagedPortalActions,
   buildManagedPrescriptActions,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+  WORKABLE_ATOMIC_SUBMIT_V4_ENABLED,
 } from './portalSubmission';
 
 const MANAGED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -1743,7 +1744,7 @@ test('managed Stratus selector errors include a sanitized outbound action audit'
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
-test('managed Stratus selector audits include the v4 form boundary without applicant values', async () => {
+test('managed Stratus selector audits include the v4 form boundary without applicant values', { skip: !WORKABLE_ATOMIC_SUBMIT_V4_ENABLED && 'v4 is switched off for Workable (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED); this v4 contract is pinned again when it returns' }, async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
   const previousFetch = globalThis.fetch;
@@ -1911,7 +1912,7 @@ test('managed Stratus serializes the required extract assertion capability and e
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
-test('managed Stratus proves the exact employer URL before actions and before a physical submit', async () => {
+test('managed Stratus proves the exact employer URL before actions and before a physical submit', { skip: !WORKABLE_ATOMIC_SUBMIT_V4_ENABLED && 'v4 is switched off for Workable (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED); this v4 contract is pinned again when it returns' }, async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
   const previousFetch = globalThis.fetch;
@@ -2019,7 +2020,7 @@ test('managed Stratus proves the exact employer URL before actions and before a 
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
-test('managed chooser v4 refuses to leave the process without both exact boundaries', async () => {
+test('managed chooser v4 refuses to leave the process without both exact boundaries', { skip: !WORKABLE_ATOMIC_SUBMIT_V4_ENABLED && 'v4 is switched off for Workable (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED); this v4 contract is pinned again when it returns' }, async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
   const previousFetch = globalThis.fetch;
