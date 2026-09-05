@@ -430,7 +430,7 @@ export const PACKET_VISIBLE_QUESTION_FIELDS = [
  */
 export function packetVisibleQuestions(questions: unknown): unknown {
   if (!Array.isArray(questions)) return questions;
-  return questions.map((question) => {
+  const projected = questions.map((question) => {
     if (!question || typeof question !== 'object' || Array.isArray(question)) return question;
     const source = question as Record<string, unknown>;
     const visible: Record<string, unknown> = {};
@@ -438,6 +438,36 @@ export function packetVisibleQuestions(questions: unknown): unknown {
       if (source[field] !== undefined) visible[field] = source[field];
     }
     return visible;
+  });
+  /* THE BINDING IS A SET OF ROWS, NOT AN ARRANGEMENT OF THEM.
+   *
+   * Measured on Belvedere Trading c4413bff (Lever), 2026-09-05 01:02Z. She approved the packet;
+   * the fill run's discovery merge wrote the same 25 questions back in the FORM's order
+   * (mergeDiscoveredPortalQuestions lists what the page showed first, then what it did not); the
+   * run's own drift check passed, because packetQuestionAcknowledgement compares rows as a set;
+   * and then POST /submission/approve refused the send as packet_stale: verifyCurrentPacketAudit
+   * re-hashed the reordered array and got a different questionsSha256. Re-sorting the served rows
+   * into the pre-run order reproduced the bound hash byte for byte - 2a0498d2 both times - so no
+   * byte the employer receives had moved. Only the arrangement had, and the arrangement is a
+   * live-page fact discovery is entitled to rewrite on every run. Every first approve of a packet
+   * therefore ended at Send with "This application changed after you approved the exact packet",
+   * and the second approve worked only because the order had stopped moving.
+   *
+   * So the rows are hashed in a canonical order. Each row's own bytes stay bound exactly as
+   * before: a changed answer, label, selector or control type still moves the hash, and a row
+   * added or removed still moves it. Sorted by the projected content itself rather than by id
+   * alone, so two rows that differ only in arrangement cannot be told apart and two rows that
+   * differ in anything else always can. Both the constructor and the verifier come through here
+   * (see packetBindings), so they cannot disagree about what a packet is.
+   *
+   * ONE-TIME COST, stated because it is real: an acknowledgement minted under the arranged hash
+   * mismatches once after this deploys and must be approved again. Those packets refuse to send
+   * today at exactly this gate, so this strictly improves them. */
+  if (!projected.every((row) => row && typeof row === 'object' && !Array.isArray(row))) return projected;
+  return [...projected].sort((a, b) => {
+    const left = canonicalPacketJson(a);
+    const right = canonicalPacketJson(b);
+    return left < right ? -1 : left > right ? 1 : 0;
   });
 }
 
