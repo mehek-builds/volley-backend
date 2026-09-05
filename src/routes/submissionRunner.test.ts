@@ -3669,8 +3669,8 @@ test('every managed provider start, continuation POST, and direct session creati
   );
   assert.equal(
     [...runnerSource.matchAll(/\bcontinueManagedBrowserWithAccountFence\(/g)].length,
-    4,
-    'all three managed continuation call sites must use the account fence',
+    5,
+    'all four managed continuation call sites, including retained recovery, must use the account fence',
   );
 
   /* THE HELPER ITSELF: gated on the registry's own boundary mark, and nothing else. */
