@@ -1,4 +1,5 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
+import { Agent, type Dispatcher } from 'undici';
 import { getVercelOidcToken } from '@vercel/oidc';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -1182,6 +1183,32 @@ export type ManagedBrowserRequestBudget = Readonly<{
  * bound on one Stratus request; the deadline the run is granted is decided above it. */
 const MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS = 8 * 60 * 1000;
 
+/**
+ * THE RUN REQUEST WAITS LONGER THAN NODE'S FETCH IS WILLING TO WAIT FOR A RESPONSE HEADER.
+ *
+ * Stratus answers POST /api/run only when the run is over, so a 420 s fill is a request whose
+ * response headers arrive after 420 s. Node's global fetch is undici with a headersTimeout of
+ * 300 s, independent of the AbortSignal this file passes: at five minutes undici aborts the request
+ * with "fetch failed" (cause HeadersTimeoutError) and the run keeps going with nobody listening.
+ * Measured 2026-09-05 on TWG Global (Workable), the first run under the 420 s deadline: started
+ * 06:08:43Z, "fetch failed" at 06:13:44.997Z - 301 seconds, while stratus was still filling.
+ *
+ * So the two run requests carry their own dispatcher whose header and body timeouts sit a minute
+ * above the request ceiling. One minute, not more: the ceiling is what a caller may ask for, and
+ * a response that has not begun a minute after the caller's own signal fired is not coming.
+ * Every other request in this file (authorization, run-results, acknowledge) is short and keeps
+ * the default dispatcher.
+ */
+export const MANAGED_RUN_HEADERS_TIMEOUT_MS = MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS + 60_000;
+let managedRunDispatcher: Dispatcher | null = null;
+export function managedRunRequestInit(init: RequestInit): RequestInit {
+  managedRunDispatcher ??= new Agent({
+    headersTimeout: MANAGED_RUN_HEADERS_TIMEOUT_MS,
+    bodyTimeout: MANAGED_RUN_HEADERS_TIMEOUT_MS,
+  });
+  return { ...init, dispatcher: managedRunDispatcher } as RequestInit;
+}
+
 function assertManagedBrowserTimeout(timeoutMs: number, label: string): void {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS) {
     throw new Error(`${label} timeout must be between 1 ms and 8 minutes`);
@@ -1479,7 +1506,7 @@ export async function runManagedBrowser(
     options.submissionAttempt ?? scanPair?.submissionAttempt,
     submitCorrelated || scanCorrelated,
   );
-  const response = await fetch(`${baseUrl}/api/run`, {
+  const response = await fetch(`${baseUrl}/api/run`, managedRunRequestInit({
     method: 'POST',
     headers,
     ...(signal ? { signal } : {}),
@@ -1499,7 +1526,7 @@ export async function runManagedBrowser(
         continuationTtlSeconds: Math.min(Math.max(options.continuationTtlSeconds ?? 120, 15), 180),
       } : {}),
     }),
-  });
+  }));
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
     throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
@@ -1558,7 +1585,7 @@ export async function continueManagedBrowser(
       options.minimumDispatchBudgetMs!,
     );
   }
-  const response = await fetch(`${baseUrl}/api/run`, {
+  const response = await fetch(`${baseUrl}/api/run`, managedRunRequestInit({
     method: 'POST',
     headers,
     ...(signal ? { signal } : {}),
@@ -1570,7 +1597,7 @@ export async function continueManagedBrowser(
       screenshot: options.screenshot ?? true,
       fullPage: true,
     }),
-  });
+  }));
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
     throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
