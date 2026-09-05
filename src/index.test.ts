@@ -1052,7 +1052,7 @@ test('releaseManagedRunsBeforeExit leaves a still-in-flight boundary run alone a
   try {
     const startedAt = Date.now();
     await releaseManagedRunsBeforeExit(
-      { info() {}, error() {}, warn: (details: Record<string, unknown>, message: string) => { warnings.push({ details, message }); } },
+      { info() {}, error() {}, warn: (details: Record<string, unknown>, message?: string) => { warnings.push({ details, message: message ?? '' }); } },
       { deadlineMs: 50 },
     );
     const elapsedMs = Date.now() - startedAt;
@@ -1104,10 +1104,20 @@ test('runManagedRunShutdownSequence is bounded by its deadline even when app.clo
   const app = await buildApp(HEALTH_TEST_OPTIONS);
   await app.ready();
   // A close() that never settles - e.g. a request stuck open past its own timeout - must never make
-  // the whole sequence outlive Railway's SIGKILL.
-  app.close = () => new Promise(() => {
-    /* deliberately never settles */
-  });
+  // the whole sequence outlive Railway's SIGKILL. Overloaded to match FastifyInstance['close'], whose
+  // two signatures (no-arg returning a Promise<undefined>, or a closeListener returning undefined)
+  // both need honouring so the test double type-checks like the real thing.
+  function neverSettlingClose(): Promise<undefined>;
+  function neverSettlingClose(closeListener: () => void): undefined;
+  function neverSettlingClose(closeListener?: () => void): Promise<undefined> | undefined {
+    if (closeListener) {
+      return undefined;
+    }
+    return new Promise<undefined>(() => {
+      /* deliberately never settles */
+    });
+  }
+  app.close = neverSettlingClose;
   try {
     const startedAt = Date.now();
     await runManagedRunShutdownSequence(
