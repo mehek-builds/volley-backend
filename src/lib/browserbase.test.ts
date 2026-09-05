@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { Agent } from 'undici';
 import test from 'node:test';
 import {
   acknowledgeManagedBrowserTerminalResult,
@@ -29,6 +30,8 @@ import {
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
   startManagedBrowserRequestBudget,
+  MANAGED_RUN_HEADERS_TIMEOUT_MS,
+  managedRunRequestInit,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import {
@@ -1101,6 +1104,51 @@ test('managed Stratus accepts a short-lived OIDC token without production enviro
   else process.env.VERCEL_ENV = previousVercelEnv;
   if (previousOidcToken === undefined) delete process.env.VERCEL_OIDC_TOKEN;
   else process.env.VERCEL_OIDC_TOKEN = previousOidcToken;
+});
+
+test('the run request carries a dispatcher that outwaits the 420 s fill it is asked to wait for', async () => {
+  // Node's fetch aborts at undici's 300 s headersTimeout regardless of the AbortSignal; the first
+  // 420 s run (TWG Global, 2026-09-05 06:08:43Z) died with "fetch failed" at 301 s. The run
+  // request has to say how long it will wait for the first response byte.
+  assert.ok(MANAGED_RUN_HEADERS_TIMEOUT_MS > 300_000);
+  assert.equal(MANAGED_RUN_HEADERS_TIMEOUT_MS, 8 * 60 * 1000 + 60_000);
+  const init = managedRunRequestInit({ method: 'POST' }) as RequestInit & { dispatcher?: unknown };
+  assert.ok(init.dispatcher instanceof Agent);
+  assert.equal(init.method, 'POST');
+  // One dispatcher, reused: a new Agent per request would leak a connection pool per run.
+  const again = managedRunRequestInit({ method: 'POST' }) as RequestInit & { dispatcher?: unknown };
+  assert.equal(again.dispatcher, init.dispatcher);
+
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let capturedDispatcher: unknown = null;
+  globalThis.fetch = (async (_input, init) => {
+    capturedDispatcher = (init as { dispatcher?: unknown } | undefined)?.dispatcher ?? null;
+    const body = JSON.parse(String(init?.body)) as { submissionAttempt?: unknown };
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: 'https://portal.example/complete',
+      text: 'Thank you',
+      submissionAttempt: body.submissionAttempt,
+    } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    await runManagedBrowser(
+      'https://portal.example/apply',
+      [{ type: 'fill', selector: '#email', value: 'person@example.com' }],
+      { scanCorrelation: true },
+    );
+    assert.equal(capturedDispatcher, init.dispatcher);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
 });
 
 test('managed Stratus posts bounded actions to the private production run endpoint', async () => {
