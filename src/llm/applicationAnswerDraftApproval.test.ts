@@ -242,7 +242,9 @@ describe('the drafting call sites carry the draft provenance', () => {
   });
 
   test("a draft sorts as machine-authored, so she is never told the packet was tampered with", () => {
-    assert.match(runner, /const machineAuthored = \(source: unknown\): boolean => source === undefined \|\| source === 'litos_draft';/);
+    /* Multi-line since the consent-grant record joined the machine-authored set (2026-09-05): the
+       pin is that 'litos_draft' sorts as machine-authored, whatever else does. */
+    assert.match(runner, /const machineAuthored = \(source: unknown\): boolean => source === undefined\s*\|\|\s*source === 'litos_draft'/);
     assert.match(runner, /unacknowledged: extras\.filter\(\(q\) => machineAuthored\(q\.answerSource\)\)/);
     assert.match(runner, /forged: extras\.filter\(\(q\) => !machineAuthored\(q\.answerSource\)\)/);
   });
