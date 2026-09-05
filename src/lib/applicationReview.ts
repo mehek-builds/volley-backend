@@ -1595,6 +1595,10 @@ export type ApplicationReviewState = {
     final_url?: string;
     resolution?: 'sent' | 'not_sent';
     resolved_at?: string;
+    /* This record is a READING of the pre-ledger runner's prose (lib/legacyUnverifiedPress.ts),
+     * published so the applicant can answer a press that was only ever written as a sentence. It
+     * is never stored in this shape; the writer that resolves it persists the resolution. */
+    legacy_prose?: true;
   };
 };
 
