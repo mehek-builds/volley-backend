@@ -227,6 +227,7 @@ import {
   packetForEmployerDelivery,
   type EmployerDeliveryEnvelope,
   type EmployerPacketDeliveryMode,
+  employerDeliveryDriftFields,
 } from '../lib/employerDeliveryIdentity';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import {
@@ -4332,12 +4333,23 @@ export function verifiedBuiltPacketIssues(
  * pinned by existing tests; only the TYPE and the classification derived from it are new. */
 export class EmployerBoundPacketDriftError extends Error {
   readonly issues: readonly string[];
-
-  constructor(issues: readonly string[]) {
-    super(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
+  /** The projected parts whose digests moved, when the binding carries per-part digests. */
+  readonly movedParts: readonly string[] | null;
+  constructor(issues: readonly string[], movedParts: readonly string[] | null = null) {
+    super(`The employer-bound packet changed after approval: ${issues.join('; ')}`
+      + (movedParts && movedParts.length > 0 ? ` (moved: ${movedParts.join(', ')})` : ''));
     this.name = 'EmployerBoundPacketDriftError';
     this.issues = [...issues];
+    this.movedParts = movedParts ? [...movedParts] : null;
   }
+}
+
+/* The sentence a drift stop appends so the part that moved is on the row and not only in a log
+ * nobody on this account can read. Diagnostics beside the refusal, never the refusal itself. */
+export function packetDriftMovedPartsSentence(movedParts: readonly string[] | null): string {
+  return movedParts && movedParts.length > 0
+    ? ` Litos' own record of this packet moved in: ${movedParts.join(', ')}.`
+    : '';
 }
 
 /* THE DESTINATION PROBE COULD NOT ANSWER, AND THAT IS A TYPED PRE-CLICK STOP.
@@ -4372,7 +4384,10 @@ function assertVerifiedBuiltPacket(
 ): void {
   const issues = verifiedBuiltPacketIssues(packet, audit, verifiedQuestions, mode, envelope);
   if (issues.length > 0) {
-    throw new EmployerBoundPacketDriftError(issues);
+    throw new EmployerBoundPacketDriftError(
+      issues,
+      employerDeliveryDriftFields(packet, audit.bindings.employerDelivery, envelope),
+    );
   }
 }
 
@@ -4878,11 +4893,13 @@ async function holdPreparationForPacketDrift(input: {
   /* The issue strings are static English naming a binding, never applicant values, so they are
    * safe for hosted logs - and without this line the drift class is invisible: the run parks, the
    * applicant re-approves, and no record anywhere says which binding kept moving. */
+  const movedParts = employerDeliveryDriftFields(input.packet, input.audit.bindings.employerDelivery, input.envelope);
   input.log.warn(
     {
       applicationId: input.row.id,
       runId: input.patch.submission_run_id,
       packetDriftIssues: issues,
+      packetDriftMovedParts: movedParts,
       ...(issues.includes('application questions changed after packet approval')
         ? {
           questionsDrift: packetQuestionsDriftDiagnostic(
@@ -4897,7 +4914,8 @@ async function holdPreparationForPacketDrift(input: {
   await writeReview(input.row, nextReview(input.current, {
     ...input.patch,
     status: 'needs_attention',
-    attention_reason: packetDriftAttentionReason(issues, askOnly),
+    attention_reason: packetDriftAttentionReason(issues, askOnly)
+      + (askOnly ? '' : packetDriftMovedPartsSentence(movedParts)),
     /* A question waiting to be asked is something she can finish, not a gap in her evidence. */
     attention_categories: askOnly ? ['required_field'] : ['evidence_gap'],
     packet_audit_acknowledgement: undefined,

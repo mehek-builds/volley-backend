@@ -12,6 +12,19 @@ export type EmployerDeliveryBindings = {
   version: typeof EMPLOYER_DELIVERY_BINDING_VERSION;
   mode: EmployerDeliveryMode;
   sha256: string;
+  /**
+   * ONE DIGEST PER PROJECTED PART, beside the whole-payload hash, so a mismatch can be NAMED.
+   *
+   * The whole-payload sha256 above is the authority and is unchanged. It answers yes or no; it
+   * cannot say which of the ~40 projected fields moved, and for two days every first approve on
+   * this account ended in "how Litos reaches this employer" - Belvedere c4413bff twice (22:27Z,
+   * 22:32Z, 2026-09-04), Covenant House c24e48a2 at 01:56Z (2026-09-05) - with nothing anywhere
+   * naming the part. Keys are the projection's own keys ('questions', 'fieldOptions', ...) plus
+   * 'envelope'; values are packetAuditSha256 of that part alone. Digests only: no applicant byte
+   * is stored here, the same rule the whole-payload hash already follows. Optional, because audits
+   * minted before this field existed carry none and stay exactly as valid as they were.
+   */
+  fields?: Record<string, string>;
 };
 
 export type EmployerDeliveryChannel =
@@ -205,6 +218,39 @@ export function employerDeliverySha256(
   });
 }
 
+/** The per-part digests described on EmployerDeliveryBindings.fields, over the same projection. */
+export function employerDeliveryFieldDigests(
+  packet: SubmissionPacket,
+  envelope: EmployerDeliveryEnvelope,
+): Record<string, string> {
+  const projection = employerDeliveryProjection(packet);
+  const digests: Record<string, string> = {};
+  for (const key of Object.keys(projection).sort()) {
+    digests[key] = packetAuditSha256(projection[key]);
+  }
+  digests.envelope = packetAuditSha256(envelope);
+  return digests;
+}
+
+/**
+ * WHICH PROJECTED PARTS MOVED since the binding was minted, by name, or null when the binding
+ * predates per-part digests (nothing can be named, and nothing is guessed). A part present on one
+ * side and absent on the other is named too. Diagnostics only: the refusal itself is still the
+ * whole-payload comparison in employerDeliveryBindingIssue, and this reads the stored digests
+ * beside it rather than deciding anything.
+ */
+export function employerDeliveryDriftFields(
+  packet: SubmissionPacket,
+  bindings: Pick<EmployerDeliveryBindings, 'fields'> | undefined,
+  envelope: EmployerDeliveryEnvelope,
+): string[] | null {
+  const stored = bindings?.fields;
+  if (!stored || typeof stored !== 'object') return null;
+  const current = employerDeliveryFieldDigests(packet, envelope);
+  const keys = new Set([...Object.keys(stored), ...Object.keys(current)]);
+  return [...keys].filter((key) => stored[key] !== current[key]).sort();
+}
+
 export function packetForEmployerDelivery(
   packet: SubmissionPacket,
   review: Pick<ApplicationReviewState, 'cover_letter_supported' | 'transcript_supported'>,
@@ -237,20 +283,23 @@ export function createEmployerDeliveryBindings(
     extensionProjection: Record<string, unknown>;
   },
 ): EmployerDeliveryBindings {
-  const sha256 = selection.mode === 'extension'
-    ? packetAuditSha256({
+  if (selection.mode === 'extension') {
+    return {
       version: EMPLOYER_DELIVERY_BINDING_VERSION,
-      extension: selection.extensionProjection,
-      envelope: selection.envelope,
-    })
-    : employerDeliverySha256(
-      packetForEmployerDelivery(packet, review, selection.mode),
-      selection.envelope,
-    );
+      mode: selection.mode,
+      sha256: packetAuditSha256({
+        version: EMPLOYER_DELIVERY_BINDING_VERSION,
+        extension: selection.extensionProjection,
+        envelope: selection.envelope,
+      }),
+    };
+  }
+  const delivered = packetForEmployerDelivery(packet, review, selection.mode);
   return {
     version: EMPLOYER_DELIVERY_BINDING_VERSION,
     mode: selection.mode,
-    sha256,
+    sha256: employerDeliverySha256(delivered, selection.envelope),
+    fields: employerDeliveryFieldDigests(delivered, selection.envelope),
   };
 }
 
