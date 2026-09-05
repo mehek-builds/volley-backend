@@ -21,6 +21,7 @@ import {
   profileFieldIntent,
   usableOptions,
 } from './profileFieldResolution';
+import { isReferralSourceQuestionLabel, jobBoardClosedListOption } from './referralSource';
 
 export type QuestionMetadataBlocker = {
   kind: 'missing_question_text' | 'missing_exact_options';
@@ -523,12 +524,16 @@ export function snapStoredAnswersToProfileFieldOptions<T extends StoredClosedCho
     const answerLower = answer.toLowerCase();
     if (offered.some((option) => option.trim().toLowerCase() === answerLower)) return question;
     const label = normalizeReviewQuestionLabel(question.question);
-    if (!label || !isProfileBackedKey(profileFieldIntent(label))) return question;
-    for (const alias of profileAnswerAliases(label, answer)) {
-      const key = comparableOption(alias);
-      if (!key) continue;
-      const matches = offered.filter((option) => comparableOption(option) === key);
-      if (matches.length !== 1) continue;
+    if (!label) return question;
+    /* Shared by the alias loop below and the referral fallback beneath it: both snap an
+     * unprovenanced value onto the control's own spelling and record what it was snapped FROM in
+     * answer_option_source, which is the shape truthfulResolvedReferralAnswer and
+     * isTruthfulJobBoardOtherReferral (routes/submissionRunner.ts) already read to tell a resolver
+     * pick apart from her own. answer_source is left absent rather than stamped with a new value of
+     * its own: submissionRunner.ts's machineAuthored predicate (packet-drift/forgery detection)
+     * recognises only `undefined` and `'litos_draft'` as machine-authored, so any other string here
+     * would read as a claim she never made and misfire that check. */
+    const snapTo = (matched: string): T => {
       const withProvenance = question as T & {
         answer_source?: unknown;
         answer_reviewed_at?: unknown;
@@ -550,7 +555,41 @@ export function snapStoredAnswersToProfileFieldOptions<T extends StoredClosedCho
         answer_state: _answerState,
         ...rest
       } = withProvenance;
-      return { ...rest, answer: matches[0], answer_option_source: answer } as unknown as T;
+      return { ...rest, answer: matched, answer_option_source: answer } as unknown as T;
+    };
+    if (isProfileBackedKey(profileFieldIntent(label))) {
+      for (const alias of profileAnswerAliases(label, answer)) {
+        const key = comparableOption(alias);
+        if (!key) continue;
+        const matches = offered.filter((option) => comparableOption(option) === key);
+        if (matches.length !== 1) continue;
+        return snapTo(matches[0]);
+      }
+    }
+    /* THE ONE CASE profileFieldIntent CANNOT SEE WITHOUT A JOB DESCRIPTION IT IS NOT HANDED HERE.
+     *
+     * classifyField only recognises an EMPLOYER-NAMED referral label ("how did you first hear
+     * about Five Rings?") by validating that name against the frozen job context - see
+     * questionDiscovery.ts's parseReferralQuestion and its own note on why. This function judges
+     * one stored row at a time with no packet context to validate against (StoredClosedChoiceQuestion
+     * carries no jdText), so profileFieldIntent(label) comes back null for exactly the labels this
+     * measured gap is about and the alias loop above never runs - isProfileBackedKey(null) is false.
+     *
+     * MEASURED 2026-09-05, account mehekmandal05@gmail.com, Five Rings packet 2231fc73: the profile
+     * default "Job board" survived every refresh un-snapped because of this, on a control offering
+     * Coffee Chat / Conference / GitHub / Handshake / LinkedIn / Student Organization Newsletter or
+     * Event / University Career Fair / Networking Event / Word of Mouth / Information Session /
+     * Other, and the fill reported `no option matched "Job board"` on a required control even
+     * though "Other" was right there.
+     *
+     * isReferralSourceQuestionLabel needs no employer name to recognise the SHAPE of the question;
+     * jobBoardClosedListOption's own claim test is what actually decides whether "Job board" is
+     * answerable against THIS control's options, so the gap closes without widening what an
+     * unrelated, unnamed label may become. Checkbox stays out of REVIEWED_PICK_EXACT_OPTION_TYPE
+     * above and is never reached here, same as every other family this function snaps. */
+    if (isReferralSourceQuestionLabel(label)) {
+      const matched = jobBoardClosedListOption(answer, offered);
+      if (matched) return snapTo(matched);
     }
     return question;
   });

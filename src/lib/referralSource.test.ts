@@ -3,6 +3,8 @@ import test from 'node:test';
 import {
   isCompanySiteReferralClaim,
   isJobBoardReferralClaim,
+  isReferralSourceQuestionLabel,
+  jobBoardClosedListOption,
   referralSourceForApplication,
   referralSourceOptionCandidates,
   genericJobBoardOption,
@@ -170,4 +172,67 @@ test('the generic entry still wins when the list has one', () => {
    * answer does, so it is only correct when nothing states the fact more plainly. */
   const withGeneric = ['Job board', 'LinkedIn Job Posting', 'Referral from Employee'];
   assert.equal(genericJobBoardOption(withGeneric), 'Job board');
+});
+
+/* MEASURED 2026-09-05, account mehekmandal05@gmail.com, Greenhouse embed forms.
+ *
+ * Five Rings packet 2231fc73's question is "how did you first hear about five rings?" - the word
+ * "first" sits between "you" and "hear", which the submissionRunner.ts and portalSubmission.ts
+ * copies of "is this a referral question" had already drifted on before this predicate became their
+ * one shared definition. isReferralSourceQuestionLabel must recognise this exact wording, or every
+ * caller built on top of it (jobBoardClosedListOption's own consumers) never gets a chance to run. */
+const FIVE_RINGS_REFERRAL_OPTIONS = [
+  'Coffee Chat',
+  'Conference',
+  'GitHub',
+  'Handshake',
+  'LinkedIn',
+  'Student Organization Newsletter or Event',
+  'University Career Fair / Networking Event',
+  'Word of Mouth',
+  'Information Session',
+  'Other',
+];
+
+test('isReferralSourceQuestionLabel recognises "first hear about" and "learned about" phrasing', () => {
+  assert.equal(isReferralSourceQuestionLabel('how did you first hear about five rings?'), true);
+  assert.equal(isReferralSourceQuestionLabel('How did you first hear about us?'), true);
+  assert.equal(isReferralSourceQuestionLabel('where have you learned about this role?'), true);
+  assert.equal(isReferralSourceQuestionLabel('how did you hear about us?'), true);
+  assert.equal(isReferralSourceQuestionLabel('referral source'), true);
+});
+
+test('jobBoardClosedListOption: Five Rings list has no job-board wording, so "Job board" resolves to Other', () => {
+  assert.equal(jobBoardClosedListOption('Job board', FIVE_RINGS_REFERRAL_OPTIONS), 'Other');
+});
+
+test('jobBoardClosedListOption: a list with neither a job-board wording nor Other leaves the claim unanswered', () => {
+  // Notion's checkbox list: LinkedIn, Glassdoor, Notion Blog, Notion Employee, Notion Website,
+  // Billboard/Outdoor Ads, Conference or Meetup. Picking LinkedIn or Glassdoor here would be a
+  // claim she never made; the honest outcome is leaving it for her.
+  const notionOptions = [
+    'LinkedIn',
+    'Glassdoor',
+    'Notion Blog',
+    'Notion Employee',
+    'Notion Website',
+    'Billboard/Outdoor Ads',
+    'Conference or Meetup',
+  ];
+  assert.equal(jobBoardClosedListOption('Job board', notionOptions), undefined);
+});
+
+test('jobBoardClosedListOption: a generic job-board entry wins over Other', () => {
+  assert.equal(jobBoardClosedListOption('Job board', ['LinkedIn', 'Referral', 'Online job board', 'Other']), 'Online job board');
+});
+
+test('jobBoardClosedListOption: Other is chosen over a same-list Referral entry, never Referral', () => {
+  const result = jobBoardClosedListOption('Job board', ['Referral', 'Other', 'LinkedIn']);
+  assert.equal(result, 'Other');
+  assert.notEqual(result, 'Referral');
+});
+
+test('jobBoardClosedListOption refuses a non-job-board claim, whatever the list offers', () => {
+  assert.equal(jobBoardClosedListOption('LinkedIn', ['Other', 'LinkedIn']), undefined);
+  assert.equal(jobBoardClosedListOption(undefined, ['Other']), undefined);
 });

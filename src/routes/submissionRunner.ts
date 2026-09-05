@@ -289,6 +289,8 @@ import {
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from '../lib/selfDeclaration';
 import {
   isJobBoardReferralClaim,
+  isReferralSourceQuestionLabel,
+  jobBoardClosedListOption,
   otherReferralOption,
   REFERRAL_OTHER_DETAIL,
   referralSourceForApplication,
@@ -7024,8 +7026,9 @@ function applicationProfileForPacket(
 
 const RECENT_EXPERIENCE_EMPLOYER_QUESTION =
   /\bwhere\s+did\s+you\s+complete\s+your\s+most\s+recent\b[^?]{0,80}\b(?:internship|research\s+experience)\b/i;
-const REFERRAL_SOURCE_CHOICE_QUESTION =
-  /\b(?:how\s+did\s+you\s+hear|how\s+did\s+you\s+find|where\s+did\s+you\s+hear|referral\s+source|source\s+of\s+(?:your\s+|the\s+)?application)\b/i;
+/* Was its own hand-maintained regex here, missing the `hear\s+about` alternative
+ * isReferralSourceQuestionLabel already carries - see that function's own header for the measured
+ * Five Rings gap the drift caused. Sharing one definition is the fix as much as widening it is. */
 const GENERIC_OTHER_DETAIL_QUESTION =
   /^if\s+other\b[^?]{0,80}\b(?:explain|specify|describe|provide|tell)\b/i;
 const EMPLOYEE_REFERRAL_DETAIL_QUESTION =
@@ -7039,7 +7042,7 @@ function isTruthfulJobBoardOtherReferral(
   return Boolean(
     original
     && isJobBoardReferralClaim(original)
-    && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalizeReviewQuestionLabel(question.question))
+    && isReferralSourceQuestionLabel(normalizeReviewQuestionLabel(question.question))
     && other
     && question.answer.trim().toLowerCase() === other.toLowerCase(),
   );
@@ -7108,16 +7111,20 @@ export function managedSearchFillableWindowedFailureIds(
 }
 
 /**
- * The literal "Other" option that truthfully carries an answer the employer omitted from a closed
- * taxonomy. This is deliberately not a general fuzzy fallback. It covers only two facts the
- * applicant already supplied:
+ * The one closed-list option that truthfully carries an answer the employer's own control omits.
+ * This is deliberately not a general fuzzy fallback. It covers only two facts the applicant already
+ * supplied:
  *
- * - a job-board referral when the source list has no generic job-board entry;
+ * - a job-board referral, resolved through jobBoardClosedListOption's own ladder: a generic
+ *   job-board entry when the list has one, "Other" when it does not, a named public board as the
+ *   last resort when it has neither - see that function's header for why the order matters and why
+ *   this stays scoped to the job-board claim alone;
  * - the named employer of the applicant's most recent internship or research experience when that
- *   employer is absent from the employer's company list.
+ *   employer is absent from the employer's company list, which is always the literal "Other".
  *
- * In both cases selecting a neighbouring named option would change the fact, while "Other" is the
- * exact branch the control reserves for it. Every other option mismatch remains applicant work.
+ * In both cases selecting a neighbouring named option would change the fact, while the option this
+ * returns is the exact branch the control reserves for it. Every other option mismatch remains
+ * applicant work.
  */
 export function truthfulOtherChoice(
   question: string,
@@ -7128,10 +7135,8 @@ export function truthfulOtherChoice(
   const value = answer.trim();
   if (!value || offered.length === 0) return undefined;
   if (offered.some((option) => option.trim().toLowerCase() === value.toLowerCase())) return undefined;
-  const other = otherReferralOption(offered);
-  if (!other) return undefined;
-  if (REFERRAL_SOURCE_CHOICE_QUESTION.test(question) && isJobBoardReferralClaim(value)) return other;
-  if (RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(question)) return other;
+  if (isReferralSourceQuestionLabel(question)) return jobBoardClosedListOption(value, offered);
+  if (RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(question)) return otherReferralOption(offered);
   return undefined;
 }
 
@@ -7158,7 +7163,7 @@ export function resolveApplicantClosedChoiceFallbacks(
         && !question.answer_option_source?.trim()
         && (isJobBoardReferralClaim(currentReferralSource)
           || legacyLitosDetailPresent)
-        && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalized)
+        && isReferralSourceQuestionLabel(normalized)
         && Boolean(other)
         && question.answer.trim().toLowerCase() === other?.toLowerCase();
       const recoverRecentEmployerProvenance = !question.answer_option_source?.trim()
@@ -7194,7 +7199,7 @@ export function resolveApplicantClosedChoiceFallbacks(
       const detailLabel = normalizeReviewQuestionLabel(items[index + 1]?.label ?? '');
       const source = resolvedByLabel.get(sourceLabel.toLowerCase());
       if (!source
-        || !REFERRAL_SOURCE_CHOICE_QUESTION.test(sourceLabel)
+        || !isReferralSourceQuestionLabel(sourceLabel)
         || !GENERIC_OTHER_DETAIL_QUESTION.test(detailLabel)) continue;
       const expectedOther = truthfulOtherChoice(
         sourceLabel,
@@ -8413,7 +8418,7 @@ async function prepareManaged(
   ));
   const referralResolutionDiagnostics = mergedQuestions.flatMap((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
-    const family = REFERRAL_SOURCE_CHOICE_QUESTION.test(label)
+    const family = isReferralSourceQuestionLabel(label)
       ? 'source'
       : GENERIC_OTHER_DETAIL_QUESTION.test(label)
         ? 'other_detail'

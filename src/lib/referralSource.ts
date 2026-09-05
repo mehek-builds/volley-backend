@@ -205,6 +205,64 @@ export function otherReferralOption(options: readonly string[]): string | undefi
 }
 
 /**
+ * The label shape this whole family answers to - "how did you hear about X", "how did you FIRST
+ * hear about X", "where have you learned about X", "referral source", a bare "source" beside an
+ * employer question - with no need to validate an employer's name against a job description.
+ *
+ * CANONICAL AND SHARED ON PURPOSE. Before this, portalSubmission.ts's own isReferralSourceQuestion
+ * and submissionRunner.ts's REFERRAL_SOURCE_CHOICE_QUESTION were two hand-maintained copies of the
+ * same idea, and they had already drifted: the submissionRunner copy had no `hear\s+about`
+ * alternative, so "How did you FIRST hear about Five Rings?" - the exact prefix
+ * GREENHOUSE_REFERRAL_LABEL_PREFIXES already treats as a referral field at fill time - matched the
+ * fill-time alias pass and missed the closed-choice "Other" fallback that is supposed to run before
+ * it. Measured 2026-09-05, account mehekmandal05@gmail.com, Five Rings packet 2231fc73: her standing
+ * "Job board" default sat unmatched forever on a control offering Coffee Chat / Conference / GitHub /
+ * Handshake / LinkedIn / Student Organization Newsletter or Event / University Career Fair /
+ * Networking Event / Word of Mouth / Information Session / Other, and the fill reported
+ * `no option matched "Job board"` on a required control even though "Other" was right there.
+ *
+ * Deliberately NOT the employer-name-validated test questionDiscovery.ts's parseReferralQuestion
+ * performs (via classifyField / profileFieldIntent). That check exists to stop an unrelated label
+ * from being answered as a referral question at all, and it needs a job description to validate
+ * against - a resource a caller judging one already-classified, already-stored row rarely has. This
+ * predicate answers a narrower, safer question that needs no such resource: "does this label have
+ * the SHAPE of a referral-source question", which is exactly what a caller holding a stored answer
+ * and a real option list - and nothing else - can honestly ask.
+ */
+export function isReferralSourceQuestionLabel(label: string): boolean {
+  return /\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|where\s+have\s+you\s+learned\s+about|source)\b/i.test(label);
+}
+
+/**
+ * The one closed-list option that answers a job-board referral claim, once the ordinary alias
+ * wordings have already missed against the control's REAL options.
+ *
+ * Order is deliberate and shared verbatim by every caller that owns a real option list -
+ * resolveProfileField (profileFieldResolution.ts) at discovery and refresh, truthfulOtherChoice
+ * (submissionRunner.ts) in the fill-time fallback, and snapStoredAnswersToProfileFieldOptions
+ * (questionMetadata.ts) on every later audit read - so the three pipelines cannot silently diverge
+ * on what "Job board" resolves to once the plain wordings run out. A generic board entry says the
+ * most (genericJobBoardOption) and wins when the list actually offers one; "Other" is the truthful
+ * fallback (otherReferralOption) once it does not; a named public board is the last resort on a list
+ * that offers neither (namedJobBoardOption). Undefined when the claim itself is not job-board-shaped,
+ * or when none of the three rungs finds anything - which leaves the question exactly where it was,
+ * for her.
+ *
+ * Scoped to the job-board claim only, never the company-site one: employerOwnSiteOption is only
+ * safe to reach once real per-application EVIDENCE has been checked (see referralSourceForApplication
+ * and resolveProfileField's own guard), which a caller holding just a label, an answer and an option
+ * list cannot verify. Every caller of this function judges exactly that narrower shape, so widening
+ * it to the company-site rung here would apply that ladder without the evidence check it depends on.
+ */
+export function jobBoardClosedListOption(
+  claim: string | undefined,
+  options: readonly string[],
+): string | undefined {
+  if (!isJobBoardReferralClaim(claim)) return undefined;
+  return genericJobBoardOption(options) ?? otherReferralOption(options) ?? namedJobBoardOption(options);
+}
+
+/**
  * What goes in the free-text box that an "Other" choice reveals, when the form has one.
  *
  * Her declaration, in her words: choose Other, then say Litos. It is also simply true - Litos is

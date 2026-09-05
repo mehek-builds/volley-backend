@@ -69,10 +69,7 @@ import {
   referralSourceOptionCandidates,
   employerOwnSiteOption,
   isCompanySiteReferralClaim,
-  isJobBoardReferralClaim,
-  genericJobBoardOption,
-  namedJobBoardOption,
-  otherReferralOption,
+  jobBoardClosedListOption,
 } from './referralSource';
 import {
   comparableOption,
@@ -1464,26 +1461,16 @@ export function resolveProfileField(
     }
     /* HER STANDING ANSWER, UNDER THE BOARD'S OWN WORDING, AND THEN "OTHER".
      *
-     * Order is the whole design. The alias ladder above has already tried her answer spelled the
-     * ordinary ways. genericJobBoardOption then reads the employer's list for an entry that states
-     * "a job board" and names nobody in particular, which is the same fact in the board's words.
-     * Only when the list genuinely does not offer it does "Other" apply.
-     *
-     * "Other" last, and never ahead of a job-board entry, because it says strictly less. Measured
-     * on Jane Street 2026-08-16: 128 options, no generic job-board entry, and the nearest match
-     * "University job board" is a claim she cannot make. Before this the question came back blank
-     * and held a complete application; now it is answered the way she asked for it to be. */
-    if (matched === null && isJobBoardReferralClaim(evidenced)) {
-      const options = usableOptions(bindingOptions);
-      /* namedJobBoardOption is last because it says the MOST: it names one particular board, where
-       * her standing answer is the generic fact. It is only correct once the two entries that state
-       * that fact more exactly - the generic wording, then "Other" - are both absent from the list,
-       * which is the Databricks shape. See namedJobBoardOption for the exclusions that keep a
-       * referral, a recruiter or a career fair from ever landing here. */
-      matched = genericJobBoardOption(options)
-        ?? otherReferralOption(options)
-        ?? namedJobBoardOption(options)
-        ?? null;
+     * Order is the whole design, and it now lives once in jobBoardClosedListOption rather than
+     * here and in every other caller that owns a real option list (truthfulOtherChoice in
+     * submissionRunner.ts, snapStoredAnswersToProfileFieldOptions in questionMetadata.ts) - see
+     * that function's own header for the generic-then-Other-then-named ordering and why "Other"
+     * never leads a job-board entry. Measured on Jane Street 2026-08-16: 128 options, no generic
+     * job-board entry, and the nearest match "University job board" is a claim she cannot make.
+     * Before this the question came back blank and held a complete application; now it is
+     * answered the way she asked for it to be. */
+    if (matched === null) {
+      matched = jobBoardClosedListOption(evidenced, usableOptions(bindingOptions)) ?? null;
     }
   }
   if (key === 'referral_source_default' && usableOptions(bindingOptions).length > 0 && matched === null) {
