@@ -4373,6 +4373,43 @@ const SNAP_EXEMPT_FIELDS = new Set(['answer', 'answerOptionSource', 'answerSourc
  * compared - on the ATS API channel it is the DESTINATION KEY, not aiming. */
 const LIVE_FORM_READING_FIELDS = new Set(['portalSelector', 'portalInputType', 'required']);
 
+/* THE GRANT RECORD IS LITOS'S OWN, NOT HER CLAIM, and the minted-claim rule below must not read it
+ * as one.
+ *
+ * MEASURED 2026-09-05, Jump Trading packet 1d9f92ea, four consecutive prepares (14:21Z, 14:27Z,
+ * 14:31Z, 14:36Z), each parked as "how Litos reaches this employer changed" with questionsDrift
+ * naming exactly one moved field on exactly one question: `answerSource` on "Review our Notice at
+ * Collection...", the consent control the Automation grant ticks. The audit-side reading comes out
+ * of refreshKnownQuestionAnswers, which carries consent_permission_version and
+ * consent_permission_granted_at (ANSWER_CLAIM_FIELDS, keyed on the answer) but NOT answer_source
+ * (APPLICANT_CLAIM_FIELDS, keyed on record identity) - so the acknowledged copy holds the grant's
+ * version and time with no `answer_source` beside them. The build then runs the resolution loop,
+ * which writes the whole consentTrail again: answer_source 'consent_permission' plus the same two
+ * grant fields. Byte-identical answer, byte-identical grant, and one extra field that the rule below
+ * read as "a packet that MINTS a claim the acknowledged reading never held" - because that rule was
+ * written for 'applicant_review', the one answer_source that asserts SHE reviewed something.
+ *
+ * 'consent_permission' asserts the opposite: that Litos ticked this control under a standing
+ * machine permission, not that she looked at it. The refresh itself says so - it DELETES the grant
+ * fields the moment she confirms the answer herself, because her claim and a machine grant cannot
+ * stand on one answer. Minting it therefore cannot forge a review. What still protects the boundary
+ * is the answer: this exemption applies only when the packet's answer is byte-equal to the
+ * acknowledged one, so a consent control whose VALUE moved ("I do not agree" over an acknowledged
+ * acceptance, or the reverse) refuses exactly as before. Without this, every packet carrying a
+ * grant-licensed consent question - every Greenhouse form with a Notice at Collection tick, i.e.
+ * Jump Trading, Cloudflare, most of the 43 Greenhouse rows on this account - could never pass the
+ * drift gate however many times she re-approved it. */
+function consentGrantRecordMinted(
+  packetQ: SubmissionPacket['questions'][number],
+  verifiedQ: SubmissionPacket['questions'][number],
+): boolean {
+  return packetQ.answerSource === 'consent_permission'
+    && verifiedQ.answerSource === undefined
+    && typeof packetQ.answer === 'string'
+    && packetQ.answer.trim().length > 0
+    && isDeepStrictEqual(packetQ.answer, verifiedQ.answer);
+}
+
 function packetQuestionEqualsAcknowledged(
   packetQ: SubmissionPacket['questions'][number],
   verifiedQ: SubmissionPacket['questions'][number],
@@ -4383,7 +4420,9 @@ function packetQuestionEqualsAcknowledged(
     if (SNAP_EXEMPT_FIELDS.has(field) || LIVE_FORM_READING_FIELDS.has(field)) continue;
     if (!isDeepStrictEqual(packetQ[field], verifiedQ[field])) return false;
   }
-  if (packetQ.answerSource !== undefined && !isDeepStrictEqual(packetQ.answerSource, verifiedQ.answerSource)) {
+  if (packetQ.answerSource !== undefined
+    && !isDeepStrictEqual(packetQ.answerSource, verifiedQ.answerSource)
+    && !consentGrantRecordMinted(packetQ, verifiedQ)) {
     return false;
   }
   /* The acknowledged answer, unchanged, with only the live form's aiming moved beneath it. There is
@@ -4445,7 +4484,11 @@ export function packetQuestionAcknowledgement(
    * name; a draft marker is Litos naming itself as the author and asserting nothing about her. It is
    * an extra question the audit never showed her, which is the definition of `unacknowledged`: not
    * drift, not sendable, ask her next round. */
-  const machineAuthored = (source: unknown): boolean => source === undefined || source === 'litos_draft';
+  // 'consent_permission' is the Automation grant's own record (see consentGrantRecordMinted), not an
+  // applicant claim: an extra carrying it is unacknowledged work, never a forged review.
+  const machineAuthored = (source: unknown): boolean => source === undefined
+    || source === 'litos_draft'
+    || source === 'consent_permission';
   return {
     missing: unmatched.map((verifiedQ) => verifiedQ.question),
     unacknowledged: extras.filter((q) => machineAuthored(q.answerSource)).map((q) => q.question),

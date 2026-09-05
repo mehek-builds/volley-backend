@@ -6881,6 +6881,32 @@ test('a genuinely changed answer still parks the run, snap or no snap', () => {
     { ...approvedQ, answerSource: 'applicant_review' },
     'a minted answerSource must refuse',
   );
+  /* EXCEPT THE GRANT'S OWN RECORD. The refresh carries the consent grant's version and time but not
+   * answer_source (APPLICANT_CLAIM_FIELDS vs ANSWER_CLAIM_FIELDS), and the build re-stamps the whole
+   * consentTrail, so every grant-licensed consent question arrived here with exactly one moved field.
+   * Jump Trading 1d9f92ea parked four times in a row on it, 2026-09-05. 'consent_permission' says
+   * Litos ticked the control under a machine permission, not that she reviewed it; minting it forges
+   * nothing, and the answer beneath it is still compared byte for byte. */
+  passes(
+    { ...approvedQ, answerSource: 'consent_permission' },
+    'a re-stamped consent grant record over the same answer is Litos\u2019 own record, not her claim',
+  );
+  refuses(
+    { ...approvedQ, answerSource: 'consent_permission', answer: 'I do not agree' },
+    'a consent grant record over a DIFFERENT answer still refuses',
+  );
+  refuses(
+    { ...approvedQ, answerSource: 'consent_permission', answer: '' },
+    'a consent grant record over an empty answer still refuses',
+  );
+  assert.deepEqual(
+    packetQuestionAcknowledgement(
+      [approvedQ, { ...approvedQ, question: 'Veteran status', answerSource: 'consent_permission' }],
+      acknowledged,
+    ).forged,
+    [],
+    'an added consent-grant question is unacknowledged work, never a forged review',
+  );
   // Membership, in both directions.
   assert.equal(packetQuestionsMatchAcknowledged([], acknowledged), false, 'a dropped question refuses');
   assert.equal(
