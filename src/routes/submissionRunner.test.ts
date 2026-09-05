@@ -655,6 +655,34 @@ test('a Job board source makes only an employee-referral detail non-applicable',
   );
 });
 
+/* Round-2 review, PR #979. isTruthfulJobBoardOtherReferral used to compare the resolved answer
+ * against otherReferralOption alone, i.e. only the literal "Other" branch of
+ * jobBoardClosedListOption's ladder. Once the list offers a generic job-board wording
+ * (genericJobBoardOption), the ladder picks that ahead of "Other" - truthfulOtherChoice already does
+ * this - so an answer of "Online job board" was truthfully job-board-sourced but no longer matched
+ * the old literal comparison, and the employee-referral attention reason it should have retired
+ * stayed open. */
+test('a Job board source resolved to a generic board wording still retires the employee-referral detail', () => {
+  const discovered = [
+    { label: 'How did you hear about Optiver?', selector: '#source', inputType: 'combobox', maxLength: null, options: ['LinkedIn', 'Referral', 'Online job board', 'Other'] },
+    { label: 'If referred by an Optiver employee or Optiver intern, please provide their name', selector: '#employee-detail', inputType: 'text', maxLength: 100 },
+  ];
+  const resolved = resolveApplicantClosedChoiceFallbacks(discovered, [
+    { id: 'source', question: 'How did you hear about Optiver?', answer: 'Job board', kind: 'required', required: true, options: discovered[0]!.options },
+    { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
+  ]);
+
+  assert.equal(resolved[0]?.answer, 'Online job board');
+  assert.equal(resolved[0]?.answer_option_source, 'Job board');
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
+    ], resolved),
+    [],
+    'a generic job-board wording is exactly as truthful as the literal Other and must retire the same attention reason',
+  );
+});
+
 test('managed provider blockers pass through the proven referral filter before the send gate', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const prepareStart = source.indexOf('async function prepareManaged(');

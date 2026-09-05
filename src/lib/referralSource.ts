@@ -206,13 +206,14 @@ export function otherReferralOption(options: readonly string[]): string | undefi
 
 /**
  * The label shape this whole family answers to - "how did you hear about X", "how did you FIRST
- * hear about X", "where have you learned about X", "referral source", a bare "source" beside an
- * employer question - with no need to validate an employer's name against a job description.
+ * hear about X", "how did you find this posting", "where did you hear of this opportunity", "where
+ * have you learned about X", "referral source", "source of your application" - with no need to
+ * validate an employer's name against a job description.
  *
  * CANONICAL AND SHARED ON PURPOSE. Before this, portalSubmission.ts's own isReferralSourceQuestion
  * and submissionRunner.ts's REFERRAL_SOURCE_CHOICE_QUESTION were two hand-maintained copies of the
- * same idea, and they had already drifted: the submissionRunner copy had no `hear\s+about`
- * alternative, so "How did you FIRST hear about Five Rings?" - the exact prefix
+ * same idea, and they had already drifted from each other: the submissionRunner copy had no
+ * `hear\s+about` alternative, so "How did you FIRST hear about Five Rings?" - the exact prefix
  * GREENHOUSE_REFERRAL_LABEL_PREFIXES already treats as a referral field at fill time - matched the
  * fill-time alias pass and missed the closed-choice "Other" fallback that is supposed to run before
  * it. Measured 2026-09-05, account mehekmandal05@gmail.com, Five Rings packet 2231fc73: her standing
@@ -220,6 +221,24 @@ export function otherReferralOption(options: readonly string[]): string | undefi
  * Handshake / LinkedIn / Student Organization Newsletter or Event / University Career Fair /
  * Networking Event / Word of Mouth / Information Session / Other, and the fill reported
  * `no option matched "Job board"` on a required control even though "Other" was right there.
+ *
+ * This first consolidation itself dropped coverage the submissionRunner copy had carried: bare
+ * "how did you find this job posting?" and bare "where did you hear of this opportunity?" (no
+ * "about"), both of which the old REFERRAL_SOURCE_CHOICE_QUESTION regex matched and the merged
+ * predicate did not. HEAR_FRAME below is the union of every phrasing either retired regex carried,
+ * so the three pipelines cannot silently narrow again.
+ *
+ * The bare `hear\s+about` and bare `source` alternatives that consolidation carried forward were
+ * themselves too wide: `hear\s+about` alone matches 'how did you hear about our privacy policy?',
+ * and bare `source` alone matches 'what is the source of your funding?' - neither is a referral
+ * question, and this predicate now also gates snapStoredAnswersToProfileFieldOptions
+ * (questionMetadata.ts), which runs on every dashboard poll, so a false positive here is not free.
+ * HEAR_FRAME requires a how/where/what-led/who-told frame around "hear"/"find"/"learn" instead of a
+ * bare substring, NOT_REFERRAL_HEAR_TOPIC excludes the small set of non-referral topics that still
+ * complete that frame (a privacy policy, terms, funding), and SOURCE_PHRASE narrows the bare
+ * "source" alternative to "referral source", "source of (this/the/your) application/referral/lead",
+ * and "how did you ... source" - not a standalone word that also means "the origin of your
+ * paycheck" or "your revenue".
  *
  * Deliberately NOT the employer-name-validated test questionDiscovery.ts's parseReferralQuestion
  * performs (via classifyField / profileFieldIntent). That check exists to stop an unrelated label
@@ -229,8 +248,16 @@ export function otherReferralOption(options: readonly string[]): string | undefi
  * the SHAPE of a referral-source question", which is exactly what a caller holding a stored answer
  * and a real option list - and nothing else - can honestly ask.
  */
+const HEAR_FRAME =
+  /\b(?:how\s+(?:did|do)\s+you\s+(?:first\s+)?(?:hear|find)|where\s+(?:did|have)\s+you\s+(?:first\s+)?(?:heard|hear|learn(?:ed)?)|what\s+led\s+you\s+to\s+(?:hear|learn|find)|who\s+told\s+you\s+(?:that\s+)?you)\b/i;
+const NOT_REFERRAL_HEAR_TOPIC =
+  /\babout\s+(?:our\s+|the\s+|this\s+|your\s+)?(?:privacy\s+polic(?:y|ies)|terms(?:\s+(?:of\s+service|and\s+conditions))?|cookie\s+polic(?:y|ies)|refund\s+polic(?:y|ies)|return\s+polic(?:y|ies)|funding)\b/i;
+const SOURCE_PHRASE =
+  /\breferral\s+source\b|\bsource\s+of\s+(?:this\s+|the\s+|your\s+)?(?:application|referral|lead)\b|\bhow\s+did\s+you\b[^?]{0,40}\bsource\b/i;
+
 export function isReferralSourceQuestionLabel(label: string): boolean {
-  return /\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|where\s+have\s+you\s+learned\s+about|source)\b/i.test(label);
+  if (NOT_REFERRAL_HEAR_TOPIC.test(label)) return false;
+  return HEAR_FRAME.test(label) || SOURCE_PHRASE.test(label);
 }
 
 /**

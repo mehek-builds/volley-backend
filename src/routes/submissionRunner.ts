@@ -7037,14 +7037,21 @@ const EMPLOYEE_REFERRAL_DETAIL_QUESTION =
 function isTruthfulJobBoardOtherReferral(
   question: Pick<ApplicationReviewQuestion, 'question' | 'answer' | 'answer_option_source' | 'options'>,
 ): boolean {
+  /* SHARE THE LADDER, not just the claim check. This used to compare the answer against
+   * otherReferralOption alone, i.e. it only recognised the literal "Other" branch of
+   * jobBoardClosedListOption's ladder. Once that ladder started returning a generic board wording
+   * (genericJobBoardOption, e.g. "Online job board") ahead of "Other" for lists that offer one, an
+   * employee-referral attention reason resolved by the same fact stopped being filtered: the answer
+   * was truthfully job-board-sourced, but no longer literally "Other", so `other` came back
+   * mismatched. Resolving through jobBoardClosedListOption itself keeps this in lockstep with
+   * whatever the ladder actually chooses, on the original claim recorded in answer_option_source. */
   const original = question.answer_option_source?.trim();
-  const other = otherReferralOption(usableOptions(question.options));
+  const resolved = jobBoardClosedListOption(original, usableOptions(question.options));
   return Boolean(
     original
-    && isJobBoardReferralClaim(original)
     && isReferralSourceQuestionLabel(normalizeReviewQuestionLabel(question.question))
-    && other
-    && question.answer.trim().toLowerCase() === other.toLowerCase(),
+    && resolved
+    && question.answer.trim().toLowerCase() === resolved.toLowerCase(),
   );
 }
 

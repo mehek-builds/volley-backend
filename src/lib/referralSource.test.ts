@@ -236,3 +236,24 @@ test('jobBoardClosedListOption refuses a non-job-board claim, whatever the list 
   assert.equal(jobBoardClosedListOption('LinkedIn', ['Other', 'LinkedIn']), undefined);
   assert.equal(jobBoardClosedListOption(undefined, ['Other']), undefined);
 });
+
+/* Round-2 review, PR #979. The consolidation that introduced isReferralSourceQuestionLabel dropped
+ * two phrasings the old submissionRunner.ts REFERRAL_SOURCE_CHOICE_QUESTION regex covered: bare
+ * "how did you find..." and bare "where did you hear..." with no "about". Both are real employer
+ * wordings and neither contains "hear about", "referral source", or "learned about". */
+test('isReferralSourceQuestionLabel recognises bare "how did you find" and "where did you hear"', () => {
+  assert.equal(isReferralSourceQuestionLabel('How did you find this job posting?'), true);
+  assert.equal(isReferralSourceQuestionLabel('Where did you hear of this opportunity?'), true);
+});
+
+/* Same review round. The bare `hear\s+about` and bare `source` alternatives the consolidation
+ * carried forward also matched labels that have the same surface shape but are not referral
+ * questions at all - and this predicate now gates a branch (questionMetadata.ts's
+ * snapStoredAnswersToProfileFieldOptions) that runs on every dashboard poll, so an over-broad match
+ * is not a one-time cost. */
+test('isReferralSourceQuestionLabel rejects non-referral labels with the same surface shape', () => {
+  assert.equal(isReferralSourceQuestionLabel('how did you hear about our privacy policy?'), false);
+  assert.equal(isReferralSourceQuestionLabel('what is the source of your funding?'), false);
+  assert.equal(isReferralSourceQuestionLabel('who referred you'), false);
+  assert.equal(isReferralSourceQuestionLabel('referral bonus'), false);
+});
