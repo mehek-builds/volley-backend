@@ -5882,23 +5882,37 @@ const CONTROL_VANISHED_RAW_MENTION_RE = /nothing matched\b|Timeout\s+\d+\s*ms\s+
  * discovery pass just enumerated and the same-run fill pass could not find a moment later is not
  * drift, it is the two passes disagreeing about one page.
  */
+export type VanishedControlField = {
+  question: string;
+  required: boolean;
+};
+
 export function managedVanishedControlFields(
   unexplained: readonly ManagedUnexplainedAnswer[],
-  discoveredQuestions: ReadonlyArray<{ question: string }>,
-): string[] {
-  const discoveredKeys = discoveredQuestions
-    .map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase())
-    .filter((key) => key.length > 0);
-  const fields: string[] = [];
+  discoveredQuestions: ReadonlyArray<{ question: string; required?: boolean }>,
+): VanishedControlField[] {
+  // Exact equality on the SAME normalization discovery already uses for a label key elsewhere in
+  // this file (normalizeReviewQuestionLabel(...).toLowerCase() - see the map keys at line 6258,
+  // 8459/8475, etc). This used to be a bidirectional prefix match (`a.startsWith(b) ||
+  // b.startsWith(a)`), which let "Country of Residence" - carried over from an earlier round and
+  // never re-found by this run's own discovery - match this run's unrelated "Country" control and
+  // read as "discovered this run". Two different questions that merely share a prefix are not the
+  // same control, and the whole point of scoping to discoveredQuestions (see the doc comment above)
+  // is to compare THIS run's discovery against THIS run's fill, not to approximately compare labels.
+  const discoveredRequiredByKey = new Map<string, boolean>();
+  for (const question of discoveredQuestions) {
+    const key = normalizeReviewQuestionLabel(question.question).toLowerCase();
+    if (!key) continue;
+    discoveredRequiredByKey.set(key, (discoveredRequiredByKey.get(key) ?? false) || Boolean(question.required));
+  }
+  const fields: VanishedControlField[] = [];
   const seen = new Set<string>();
   for (const entry of unexplained) {
     if (!entry.rawMentions.some((mention) => CONTROL_VANISHED_RAW_MENTION_RE.test(mention))) continue;
-    const key = entry.question.trim().toLowerCase();
-    if (!key || seen.has(key)) continue;
-    const discoveredThisRun = discoveredKeys.some((discovered) => discovered.startsWith(key) || key.startsWith(discovered));
-    if (!discoveredThisRun) continue;
+    const key = normalizeReviewQuestionLabel(entry.question).toLowerCase();
+    if (!key || seen.has(key) || !discoveredRequiredByKey.has(key)) continue;
     seen.add(key);
-    fields.push(entry.question);
+    fields.push({ question: entry.question, required: discoveredRequiredByKey.get(key) ?? false });
   }
   return fields;
 }
@@ -5917,13 +5931,30 @@ const KNOWN_ERROR_PAGE_TEXT_RE =
 const FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH = 300;
 const FORM_TEXT_COLLAPSE_RATIO = 0.3;
 
+// A SECOND, GENERIC SIGNAL FOR THE DISCOVERY PASSES TOO SHORT FOR THE RATIO CHECK ABOVE. That check
+// stays silent below FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH on purpose - a discovery pass that only
+// ever saw a little text proves nothing about a collapse, because a real short form (a two-field
+// "apply with LinkedIn" stub, say) is honestly this short both times. But "honestly short both
+// times" and "discovery saw something, the fill pass saw almost nothing" are different shapes, and
+// the second is provable without knowing this board's own error page: below this absolute floor a
+// real employer application form does not exist, so a fill pass this short - on a discovery pass
+// that itself cleared the same floor - is reading a different page, exactly like the ratio check
+// above but for the range the ratio check cannot reach. Left deliberately narrow: this catches only
+// "discovery measured a real page and the fill pass came back with next to nothing", not any other
+// board's specific error signature - those are their own fix when one is measured.
+const FORM_TEXT_COLLAPSE_ABSOLUTE_FLOOR = 120;
+
 export function managedFormTextCollapsed(discoveryText: string | undefined, fillText: string | undefined): boolean {
   const fill = (fillText ?? '').trim();
   if (KNOWN_ERROR_PAGE_TEXT_RE.test(fill)) return true;
   const discoveryLength = (discoveryText ?? '').trim().length;
   // No discovery text (it failed, or this call site has none to offer) or a discovery pass that was
-  // already this short proves nothing about a collapse - see the module comment above.
-  if (discoveryLength < FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH) return false;
+  // already this short proves nothing about a collapse - see the module comment above - except for
+  // the one case the absolute floor below can still prove: a discovery pass that itself cleared that
+  // floor (so it did see a real form) paired with a fill pass that fell under it.
+  if (discoveryLength < FORM_TEXT_COLLAPSE_MIN_DISCOVERY_LENGTH) {
+    return discoveryLength >= FORM_TEXT_COLLAPSE_ABSOLUTE_FLOOR && fill.length < FORM_TEXT_COLLAPSE_ABSOLUTE_FLOOR;
+  }
   return fill.length < discoveryLength * FORM_TEXT_COLLAPSE_RATIO;
 }
 
@@ -5936,20 +5967,58 @@ export function managedFormTextCollapsed(discoveryText: string | undefined, fill
  * changed - that is exactly true, and because a category that already tells the applicant "nothing
  * was filled in and nothing was sent, open it and finish it off" is the correct next step for a run
  * that filled the FIRST half and never touched the rest.
+ *
+ * THE WORDING IS PROPORTIONAL TO THE EVIDENCE, not maximal on every call. `formTextCollapsed` is
+ * page-death evidence - the fill pass's OWN page measurably stopped being the page discovery
+ * measured, or matched a board's known error view outright - so only that shape earns the "the page
+ * it was on stopped being the employer's application form" sentence. A run with vanished fields but
+ * no collapse has weaker evidence: it knows discovery found these controls and the fill pass could
+ * not place them moments later, and nothing here proves the page itself died rather than, say, one
+ * lazy-loaded section failing to re-render. Claiming a page death it cannot show would be exactly
+ * the dishonesty this file exists to remove, so that shape gets its own sentence that names what was
+ * actually seen and stops there.
+ *
+ * ONE OPTIONAL FIELD WITH NO COLLAPSE IS NOT PARKED. A single non-required control a form quietly
+ * dropped is not distinguishable from the ordinary R-076/R-122 drift this codebase already accepts
+ * as informational (see managedUnexplainedAnswerReasons) - one field is exactly the shape a lazy-
+ * loaded widget or a single flaky selector produces on a form that is otherwise intact. Two or more
+ * vanished fields, or any single REQUIRED one, is no longer distinguishable from drift: a form does
+ * not usually lose a REQUIRED control and stay itself, and losing two or more independent controls in
+ * the same run is the same disagreement-within-one-run the collapse signal reports, just without the
+ * text measurement. Either of those, or the collapse signal, earns the park; a lone optional field
+ * with the text intact does not, and falls through to `null` so the run is judged on the rest of its
+ * evidence instead.
  */
 export function vanishedFormEvidenceReason(input: {
-  vanishedFields: readonly string[];
+  vanishedFields: readonly VanishedControlField[];
   formTextCollapsed: boolean;
 }): string | null {
   if (input.vanishedFields.length === 0 && !input.formTextCollapsed) return null;
-  const named = input.vanishedFields.length > 0
-    ? ` Litos had just found ${input.vanishedFields.length === 1 ? 'this question' : 'these questions'} on `
-      + `this same form and could not fill ${input.vanishedFields.length === 1 ? 'it' : 'them'} moments `
-      + `later: ${input.vanishedFields.map((field) => `"${field.slice(0, 60)}"`).join(', ')}.`
-    : '';
-  return 'Litos was filling in this application and the page it was on stopped being the employer’s '
-    + `application form partway through, so it never reached the application form for the rest of it.${named} `
-    + 'Nothing has been sent. Open it when you have a minute and finish it off.';
+  const meetsParkBar = input.formTextCollapsed
+    || input.vanishedFields.length >= 2
+    || input.vanishedFields.some((field) => field.required);
+  if (!meetsParkBar) return null;
+
+  if (input.formTextCollapsed) {
+    const named = input.vanishedFields.length > 0
+      ? ` Litos had just found ${input.vanishedFields.length === 1 ? 'this question' : 'these questions'} on `
+        + `this same form and could not fill ${input.vanishedFields.length === 1 ? 'it' : 'them'} moments `
+        + `later: ${input.vanishedFields.map((field) => `"${field.question.slice(0, 60)}"`).join(', ')}.`
+      : '';
+    return 'Litos was filling in this application and the page it was on stopped being the employer’s '
+      + `application form partway through, so it never reached the application form for the rest of it.${named} `
+      + 'Nothing has been sent. Open it when you have a minute and finish it off.';
+  }
+
+  // No page-death evidence here, only vanished fields - do not claim the page died. Say exactly what
+  // was seen: discovery found these controls on this same form, and the fill pass could not place
+  // them moments later.
+  const isSingle = input.vanishedFields.length === 1;
+  const namedFields = input.vanishedFields.map((field) => `"${field.question.slice(0, 60)}"`).join(', ');
+  return 'Litos was filling in this application and had just found '
+    + `${isSingle ? 'this question' : 'these questions'} on this same form, and could not fill `
+    + `${isSingle ? 'it' : 'them'} moments later: ${namedFields}. Litos never reached the application `
+    + 'form for the rest of it. Nothing has been sent. Open it when you have a minute and finish it off.';
 }
 
 export function preparationEvidenceBlockers(

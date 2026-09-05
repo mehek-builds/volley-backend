@@ -6004,7 +6004,12 @@ test('the greenhouse closed banner is believed even when the page looks reached'
  * and replaced the form with an error page mid-run, and the readiness gate never asked whether the
  * page it finished on was still the one discovery started on. */
 test('managedVanishedControlFields names a planned control discovery just found and the fill lost', () => {
-  const discoveredThisRun = [{ question: 'Country' }, { question: 'Postcode' }, { question: 'Summary' }, { question: 'City' }];
+  const discoveredThisRun = [
+    { question: 'Country', required: true },
+    { question: 'Postcode', required: true },
+    { question: 'Summary', required: false },
+    { question: 'City', required: false },
+  ];
   const unexplained: ManagedUnexplainedAnswer[] = [
     {
       label: 'question:Country',
@@ -6023,14 +6028,18 @@ test('managedVanishedControlFields names a planned control discovery just found 
     },
   ];
   const fields = managedVanishedControlFields(unexplained, discoveredThisRun);
-  assert.deepEqual(fields, ['Country', 'Postcode', 'Summary']);
+  assert.deepEqual(fields, [
+    { question: 'Country', required: true },
+    { question: 'Postcode', required: true },
+    { question: 'Summary', required: false },
+  ]);
 
   // A silent unexplained answer (no raw mention at all, the DRW/Deepgram shape) is a real defect
   // too, but it is not evidence the CONTROL was absent - it could just as well mean the run moved on
   // without saying anything about a control that was there the whole time. Left alone: it stays
   // informational via managedUnexplainedAnswerReasons, exactly as it always has.
   const silent: ManagedUnexplainedAnswer[] = [{ label: 'question:Legal first name', question: 'Legal first name', rawMentions: [] }];
-  assert.deepEqual(managedVanishedControlFields(silent, [{ question: 'Legal first name' }]), []);
+  assert.deepEqual(managedVanishedControlFields(silent, [{ question: 'Legal first name', required: true }]), []);
 
   // A "value did not persist" mention is the OTHER failure managedUnexplainedAnswers already
   // discharges before either of us ever sees it (managedSkipExplainsLoss), so this is a defence in
@@ -6040,7 +6049,44 @@ test('managedVanishedControlFields names a planned control discovery just found 
     question: 'GPA',
     rawMentions: ['question:GPA: some other provider note, not an absence'],
   }];
-  assert.deepEqual(managedVanishedControlFields(persisted, [{ question: 'GPA' }]), []);
+  assert.deepEqual(managedVanishedControlFields(persisted, [{ question: 'GPA', required: false }]), []);
+});
+
+/* THE COLLISION THIS MUST NOT ADMIT: a bidirectional prefix match ("discovered.startsWith(key) ||
+ * key.startsWith(discovered)") used to let a question carried over from an earlier round - "Country
+ * of Residence" - stand in for a completely different control this run's own discovery actually
+ * found - "Country" - just because one string happens to prefix the other. Exact equality on the
+ * same normalization discovery uses for label keys elsewhere in this file
+ * (normalizeReviewQuestionLabel(...).toLowerCase()) is the fix: two questions that merely share a
+ * prefix are not the same control, and admitting them as one is exactly the false "discovered this
+ * run" this function exists to rule out. */
+test('managedVanishedControlFields does not let a prefix stand in for the same control', () => {
+  const unexplained: ManagedUnexplainedAnswer[] = [{
+    label: 'question:Country',
+    question: 'Country',
+    rawMentions: ['question:Country: nothing matched #country'],
+  }];
+  // This run's own discovery never found "Country" - only the longer, unrelated "Country of
+  // Residence" from an earlier round is present. The old prefix match treated these as the same
+  // control; exact equality correctly reports no match this run.
+  const discoveredThisRun = [{ question: 'Country of Residence', required: true }];
+  assert.deepEqual(managedVanishedControlFields(unexplained, discoveredThisRun), []);
+
+  // The reverse direction is refused too: this run's discovery found the SHORT label, and the
+  // unexplained answer names the LONGER one.
+  const reversedUnexplained: ManagedUnexplainedAnswer[] = [{
+    label: 'question:Country of Residence',
+    question: 'Country of Residence',
+    rawMentions: ['question:Country of Residence: nothing matched #country'],
+  }];
+  const reversedDiscovered = [{ question: 'Country', required: true }];
+  assert.deepEqual(managedVanishedControlFields(reversedUnexplained, reversedDiscovered), []);
+
+  // An honest match - same label, same normalization - still fires.
+  assert.deepEqual(
+    managedVanishedControlFields(unexplained, [{ question: 'Country', required: true }]),
+    [{ question: 'Country', required: true }],
+  );
 });
 
 /* THE ACCEPTED DRIFT THIS MUST NOT TOUCH: a question the packet carries from an earlier round whose
@@ -6057,7 +6103,7 @@ test('an unexplained optional question discovery never saw this run is left alon
   }];
   // Discovery this run found other controls, but never this one - it is a stored, optional
   // question from a prior round, and the live form no longer carries it.
-  const discoveredThisRun = [{ question: 'Email' }, { question: 'Resume' }];
+  const discoveredThisRun = [{ question: 'Email', required: true }, { question: 'Resume', required: true }];
   assert.deepEqual(managedVanishedControlFields(unexplained, discoveredThisRun), []);
   // With nothing named and no text collapse, the honesty gate has nothing new to add: the run stays
   // exactly as safe as it already was, and this stale field's loss is told only through the
@@ -6091,9 +6137,34 @@ test('managedFormTextCollapsed reads the drop against this run’s own discovery
   );
 });
 
-test('vanishedFormEvidenceReason names the fields, classifies form_not_reached, and leaves the ledger alone', () => {
+/* THE GENERIC FLOOR FOR THE RANGE THE RATIO CHECK CANNOT REACH: a discovery pass under the 300-char
+ * ratio floor still proves something when it is not itself tiny. Below FORM_TEXT_COLLAPSE_MIN_
+ * DISCOVERY_LENGTH the ratio check stays silent unconditionally today; this absolute floor gives it
+ * one provable exception without needing a board-specific error signature. */
+test('managedFormTextCollapsed also catches a near-empty fill pass below the ratio floor', () => {
+  // Discovery cleared the absolute floor (120) but stayed under the ratio floor (300); the fill pass
+  // came back with almost nothing. No board-specific error text needed - the absolute floor alone
+  // proves this is a different page.
+  assert.equal(managedFormTextCollapsed('A'.repeat(200), 'B'.repeat(40)), true);
+
+  // The real-short-form case must still read false: discovery itself never cleared the absolute
+  // floor, so a similarly short fill pass proves nothing about a collapse. This is the exact pairing
+  // from the test above ('A short careers form.' / 22 chars discovery, 30 chars fill) restated to
+  // pin the floor's lower edge.
+  assert.equal(managedFormTextCollapsed('A short careers form.', 'A short careers form, filled.'), false);
+
+  // Discovery cleared the absolute floor and so did the fill pass - not a collapse, just a shorter
+  // real page.
+  assert.equal(managedFormTextCollapsed('A'.repeat(200), 'B'.repeat(150)), false);
+});
+
+test('vanishedFormEvidenceReason claims a page death only when the collapse signal actually fired', () => {
   const named = vanishedFormEvidenceReason({
-    vanishedFields: ['Country', 'Postcode', 'Summary'],
+    vanishedFields: [
+      { question: 'Country', required: true },
+      { question: 'Postcode', required: true },
+      { question: 'Summary', required: false },
+    ],
     formTextCollapsed: true,
   });
   assert.ok(named);
@@ -6102,19 +6173,88 @@ test('vanishedFormEvidenceReason names the fields, classifies form_not_reached, 
   assert.match(named!, /"Postcode"/);
   assert.match(named!, /"Summary"/);
   assert.match(named!, /Nothing has been sent/);
+  // This is the page-died shape (formTextCollapsed fired): it may say so.
+  assert.match(named!, /stopped being the employer/);
   // No press language, no submission claim, no employer-facing verb - this is a park, not a stop.
   assert.doesNotMatch(named!, /submit|pressed|sent to the employer/i);
   assert.deepEqual(attentionCategoriesForReasons([named!]), ['form_not_reached']);
 
-  // The text-collapse-only shape (TWG): no controls to name, still an honest, classifiable sentence.
+  // The text-collapse-only shape (TWG): no controls to name, still an honest, classifiable sentence
+  // that keeps the page-died wording, since that is exactly the evidence this shape has.
   const collapsedOnly = vanishedFormEvidenceReason({ vanishedFields: [], formTextCollapsed: true });
   assert.ok(collapsedOnly);
   assert.match(collapsedOnly!, /never reached the application form/);
+  assert.match(collapsedOnly!, /stopped being the employer/);
   assert.deepEqual(attentionCategoriesForReasons([collapsedOnly!]), ['form_not_reached']);
 
   // Neither signal fired: nothing new to say, and `null` is what lets prepareManaged skip adding it
   // to evidenceBlockers - a clean fill's `safe` computation is exactly as it was before this fix.
   assert.equal(vanishedFormEvidenceReason({ vanishedFields: [], formTextCollapsed: false }), null);
+});
+
+/* THE SECOND SENTENCE, for the run that has vanished-field evidence but no page-death evidence at
+ * all: the page might just have dropped one section, and this function must not claim more than it
+ * can show. Pony.ai's own run also cleared formTextCollapsed (the resume-upload failure replaced the
+ * whole page with Workable's error view), so the case where vanished fields fire WITHOUT a collapse
+ * has never actually been measured live - but the wording still has to be honest about what a run
+ * with only that evidence would mean, because a future board could plausibly drop >=2 fields, or one
+ * required field, without collapsing its own text. */
+test('vanishedFormEvidenceReason names the fields without claiming the page died when only fields vanished', () => {
+  const twoOptionalFields = vanishedFormEvidenceReason({
+    vanishedFields: [
+      { question: 'Country', required: false },
+      { question: 'Postcode', required: false },
+    ],
+    formTextCollapsed: false,
+  });
+  assert.ok(twoOptionalFields);
+  assert.match(twoOptionalFields!, /never reached the application form/);
+  assert.match(twoOptionalFields!, /"Country"/);
+  assert.match(twoOptionalFields!, /"Postcode"/);
+  assert.match(twoOptionalFields!, /just found/);
+  // The honest half: no page-death claim when there is no collapse evidence for one.
+  assert.doesNotMatch(twoOptionalFields!, /stopped being the employer|partway through/);
+  assert.deepEqual(attentionCategoriesForReasons([twoOptionalFields!]), ['form_not_reached']);
+
+  const oneRequiredField = vanishedFormEvidenceReason({
+    vanishedFields: [{ question: 'Work authorization', required: true }],
+    formTextCollapsed: false,
+  });
+  assert.ok(oneRequiredField);
+  assert.match(oneRequiredField!, /"Work authorization"/);
+  assert.match(oneRequiredField!, /this question/); // singular wording for exactly one field
+  assert.doesNotMatch(oneRequiredField!, /stopped being the employer|partway through/);
+  assert.deepEqual(attentionCategoriesForReasons([oneRequiredField!]), ['form_not_reached']);
+});
+
+/* THE RULE THAT KEEPS ORDINARY DRIFT OUT: a single OPTIONAL vanished field, with no text collapse,
+ * is not distinguishable from a form quietly dropping one non-required control - the ordinary
+ * R-076/R-122 shape this codebase already accepts as informational drift (see
+ * managedUnexplainedAnswerReasons). Parking the run on that alone would misfile ordinary drift as a
+ * page death. Two or more vanished fields, any single REQUIRED one, or an actual text collapse are
+ * all still evidence enough - only the single-optional-no-collapse combination is exempted. */
+test('vanishedFormEvidenceReason treats one optional vanished field with no collapse as ordinary drift', () => {
+  assert.equal(
+    vanishedFormEvidenceReason({
+      vanishedFields: [{ question: 'Preferred pronouns', required: false }],
+      formTextCollapsed: false,
+    }),
+    null,
+  );
+
+  // The same single field, but REQUIRED, still parks - a form does not usually lose a required
+  // control and stay itself.
+  assert.ok(vanishedFormEvidenceReason({
+    vanishedFields: [{ question: 'Work authorization', required: true }],
+    formTextCollapsed: false,
+  }));
+
+  // The same single OPTIONAL field, but paired with an actual collapse, still parks - the collapse
+  // signal alone is sufficient evidence.
+  assert.ok(vanishedFormEvidenceReason({
+    vanishedFields: [{ question: 'Preferred pronouns', required: false }],
+    formTextCollapsed: true,
+  }));
 });
 
 /* THE DRIFT HOLD NAMES WHAT MOVED, to the applicant and to the log. Before this, a packet parked
