@@ -112,6 +112,9 @@ export type AuthoritativeSubmissionProjectionResult = {
   byApplicationId: Map<string, AuthoritativeSubmissionProjection>;
   retrySafetyByPacketId: Map<string, SubmissionAttemptRetrySafety>;
   retrySafetyByApplicationId: Map<string, SubmissionAttemptRetrySafety>;
+  /** Only when the caller asked to explain: each document-tuple check that failed, as
+   * `<attemptId>:<check>`. The reasons above stay exactly as they were. */
+  explanations?: string[];
 };
 
 export function authoritativeConfirmedProjectionMatches(
@@ -173,6 +176,9 @@ type ClassifierContext = {
   artifactVersionsByArtifactId: Map<string, ArtifactVersionRow[]>;
   linksByApplicationId: Map<string, LinkRow[]>;
   attempts: AttemptProjection[];
+  /** Present only when a caller asked the classifier to explain itself; checks that fail are
+   * appended here as `<attemptId>:<check>`. Never read by any classification. */
+  explain?: string[];
 };
 
 const TERMINAL_TRACKER_STAGES = new Set(['applied', 'interview', 'offer', 'closed']);
@@ -822,7 +828,7 @@ function applicationForOpening(
     };
 }
 
-function makeContext(snapshot: AuthoritativeSubmissionProjectionSnapshot): ClassifierContext {
+function makeContext(snapshot: AuthoritativeSubmissionProjectionSnapshot, explain?: string[]): ClassifierContext {
   const applicationsById = new Map(snapshot.applications.map((row) => [row.id, row]));
   const foreignLiveApplicationIds = new Set(snapshot.foreignLiveApplicationIds ?? []);
   const packetsById = new Map(snapshot.packets.map((row) => [row.id, row]));
@@ -853,6 +859,7 @@ function makeContext(snapshot: AuthoritativeSubmissionProjectionSnapshot): Class
     artifactsById,
     artifactVersionsByArtifactId,
     linksByApplicationId,
+    ...(explain ? { explain } : {}),
   };
   const attempts: AttemptProjection[] = [];
   for (const [attemptId, unsorted] of grouped) {
@@ -1275,6 +1282,80 @@ function frozenDocumentBindingMatches(
   return expected === binding ? { artifact, version } : null;
 }
 
+/* THE DOCUMENT TUPLE, CHECK BY CHECK.
+ *
+ * generatedDocumentReasons below reports one label, document_tuple_incomplete, for some twenty
+ * conditions over the canonical application row, its resume link, the artifact, its rendered
+ * version, the packet audit and the opening. Bear Robotics b822b998 (2026-09-05) sat parked with
+ * the employer's receipt in hand and that one label as the whole explanation, and the operator's
+ * only recourse was to guess which of the twenty it was. This names them. The reasons the
+ * classifier publishes do not change: the label is still one label, and every caller that
+ * reads it reads exactly what it read before. Only a caller that asks to explain sees the names
+ * (ClassifierContext.explain), and only for the tuple it asked about. */
+export function generatedDocumentChecks(
+  context: Pick<ClassifierContext, 'artifactsById' | 'artifactVersionsByArtifactId' | 'linksByApplicationId'>,
+  application: ApplicationRow,
+  packet: PacketRow,
+  opening: SubmissionAttemptEventRecord,
+): { linkage: string[]; audit: string[] } {
+  const linkedArtifacts = (context.linksByApplicationId.get(application.id) ?? [])
+    .filter((link) => link.purpose === 'resume')
+    .map((link) => ({ link, artifact: context.artifactsById.get(link.artifact_id) }))
+    .filter((value): value is { link: LinkRow; artifact: ArtifactRow } => Boolean(value.artifact))
+    .filter(({ artifact }) => !artifact.deleted_at && artifact.legacy_generated_resume_id === packet.id);
+  const uniqueArtifactIds = uniqueStrings(linkedArtifacts.map(({ artifact }) => artifact.id));
+  const exactArtifact = uniqueArtifactIds.length === 1
+    ? context.artifactsById.get(uniqueArtifactIds[0]!) ?? null
+    : null;
+  const allVersions = exactArtifact ? (context.artifactVersionsByArtifactId.get(exactArtifact.id) ?? []) : [];
+  const exactVersions = allVersions.filter((version) =>
+    version.rendered_object_key === packet.resume_object_key
+    && version.content_hash === immutableDocumentContentHash(version.structured_content));
+  const review = readApplicationReview(packet.spec);
+  const audit = review?.packet_audit;
+  const auditReady = packetAuditIsSubmissionReady(audit);
+  const exactVersion = exactVersions.length === 1 ? exactVersions[0]! : null;
+  const quality = exactVersion?.structured_content
+    && typeof exactVersion.structured_content === 'object'
+    && !Array.isArray(exactVersion.structured_content)
+    ? (exactVersion.structured_content as { _quality?: { pdfGenerationBinding?: unknown } })._quality
+    : undefined;
+  const exactPdf = exactVersion?.rendered_object_key
+    ? bindingPdfIdentity(quality?.pdfGenerationBinding, exactVersion.rendered_object_key)
+    : null;
+  const exactLinks = exactArtifact
+    ? linkedArtifacts.filter(({ artifact }) => artifact.id === exactArtifact.id)
+    : [];
+  const linkage: string[] = [];
+  if (uniqueArtifactIds.length !== 1) linkage.push(`linked_resume_artifacts=${uniqueArtifactIds.length}`);
+  if (exactLinks.length !== 1) linkage.push(`links_to_exact_artifact=${exactLinks.length}`);
+  if (application.legacy_generated_resume_id !== packet.id) linkage.push('application.legacy_generated_resume_id!=packet');
+  if (application.selected_resume_artifact_id !== uniqueArtifactIds[0]) linkage.push('application.selected_resume_artifact_id!=linked_artifact');
+  if (!application.resume_attached) linkage.push('application.resume_attached=false');
+  if (application.resume_source !== 'artifact') linkage.push(`application.resume_source=${application.resume_source ?? 'null'}`);
+  if (!application.resume_attached_at) linkage.push('application.resume_attached_at=null');
+  if (!exactLinks[0]?.link.attached_at) linkage.push('link.attached_at=null');
+  else if (application.resume_attached_at
+    && exactLinks[0].link.attached_at.getTime() !== application.resume_attached_at.getTime()) {
+    linkage.push(`link.attached_at!=application.resume_attached_at(${exactLinks[0].link.attached_at.toISOString()}!=${application.resume_attached_at.toISOString()})`);
+  }
+  if (exactArtifact?.rendered_object_key !== packet.resume_object_key) linkage.push('artifact.rendered_object_key!=packet.resume_object_key');
+  if (exactVersions.length !== 1) linkage.push(`exact_rendered_versions=${exactVersions.length}(of ${allVersions.length})`);
+  const auditChecks: string[] = [];
+  if (!auditReady) auditChecks.push('packet_audit:not_submission_ready');
+  if (!opening.packet_version) auditChecks.push('opening.packet_version=null');
+  else if (opening.packet_version !== audit?.packet_version) auditChecks.push('opening.packet_version!=packet_audit.packet_version');
+  if (audit && audit.bindings.ownerSha256 !== createHash('sha256').update(opening.user_id).digest('hex')) auditChecks.push('packet_audit.ownerSha256!=opening.user');
+  if (audit && audit.bindings.applicationId !== packet.id) auditChecks.push('packet_audit.applicationId!=packet');
+  if (audit && audit.bindings.pdf.objectKey !== packet.resume_object_key) auditChecks.push('packet_audit.pdf.objectKey!=packet.resume_object_key');
+  if (!exactPdf) auditChecks.push('exact_version.pdfGenerationBinding=missing');
+  else if (audit) {
+    if (exactPdf.sha256 !== audit.bindings.pdf.sha256) auditChecks.push('exact_version.pdf.sha256!=packet_audit.pdf.sha256');
+    if (exactPdf.sizeBytes !== audit.bindings.pdf.sizeBytes) auditChecks.push('exact_version.pdf.sizeBytes!=packet_audit.pdf.sizeBytes');
+  }
+  return { linkage, audit: auditChecks };
+}
+
 function generatedDocumentReasons(
   context: ClassifierContext,
   application: ApplicationRow,
@@ -1334,6 +1415,10 @@ function generatedDocumentReasons(
     || exactPdf.sha256 !== audit.bindings.pdf.sha256
     || exactPdf.sizeBytes !== audit.bindings.pdf.sizeBytes) {
     reasons.push('document_tuple_incomplete');
+  }
+  if (context.explain && reasons.includes('document_tuple_incomplete')) {
+    const checks = generatedDocumentChecks(context, application, packet, opening);
+    for (const check of [...checks.linkage, ...checks.audit]) context.explain.push(`${opening.attempt_id}:${check}`);
   }
   if (!selectedFlagsAreCoherent(context, application, uniqueArtifactIds[0] ?? null)) {
     reasons.push('selected_flags_incoherent');
@@ -1806,8 +1891,11 @@ export function authoritativeSubmissionProjectionFromSnapshot(input: {
   packetIds?: readonly string[];
   applicationIds?: readonly string[];
   snapshot: AuthoritativeSubmissionProjectionSnapshot;
+  /** Name each document-tuple check that fails, in `explanations`. Classification is unchanged. */
+  explain?: boolean;
 }): Omit<AuthoritativeSubmissionProjectionResult, 'schemaVersion' | 'revision'> {
-  const context = makeContext(input.snapshot);
+  const explanations: string[] | undefined = input.explain ? [] : undefined;
+  const context = makeContext(input.snapshot, explanations);
   const byPacketId = new Map<string, AuthoritativeSubmissionProjection>();
   const byApplicationId = new Map<string, AuthoritativeSubmissionProjection>();
   const retrySafetyByPacketId = new Map<string, SubmissionAttemptRetrySafety>();
@@ -1825,6 +1913,7 @@ export function authoritativeSubmissionProjectionFromSnapshot(input: {
     byApplicationId,
     retrySafetyByPacketId,
     retrySafetyByApplicationId,
+    ...(explanations ? { explanations: uniqueStrings(explanations) } : {}),
   };
 }
 
@@ -1892,6 +1981,8 @@ export async function authoritativeSubmissionProjection(input: {
    * the only thing that may choose one, and it chooses `snapshot` - no lock at all. A caller that
    * hands us its own executor is inside a critical section and keeps the exclusive default. */
   lockMode?: SubmissionAuthorityLockMode;
+  /** Name each document-tuple check that fails, in `explanations`. Classification is unchanged. */
+  explain?: boolean;
 }): Promise<AuthoritativeSubmissionProjectionResult> {
   if (!input.executor) {
     if (input.lockedRevision !== undefined) {
@@ -1953,6 +2044,11 @@ export async function authoritativeSubmissionProjection(input: {
   return {
     schemaVersion: SUBMISSION_AUTHORITY_SCHEMA_VERSION,
     revision,
-    ...authoritativeSubmissionProjectionFromSnapshot({ packetIds, applicationIds, snapshot }),
+    ...authoritativeSubmissionProjectionFromSnapshot({
+      packetIds,
+      applicationIds,
+      snapshot,
+      ...(input.explain ? { explain: true } : {}),
+    }),
   };
 }

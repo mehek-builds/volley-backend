@@ -1869,7 +1869,7 @@ export type ParkedConfirmedProjectionRepair =
   | { kind: 'resting' }
   | { kind: 'no_exact_attempt' }
   | { kind: 'repaired'; row: ResumeRow }
-  | { kind: 'still_parked'; reasons: string[] };
+  | { kind: 'still_parked'; reasons: string[]; details: string[] };
 
 export async function repairParkedConfirmedProjection(
   row: ResumeRow,
@@ -1918,24 +1918,29 @@ export async function repairParkedConfirmedProjection(
   /* Name what still stands in the way. The commit classified inside its own transaction and parked
    * the row again; read the classifier once more here, outside it, purely for the reasons. */
   let reasons: string[] = ['confirmed_commit_refused'];
+  let details: string[] = [];
   try {
     const canonical = await canonicalApplicationForAttemptProjection(db, attemptBinding);
     const projections = await authoritativeSubmissionProjection({
       userId: row.user_id,
       packetIds: [row.id],
       applicationIds: [canonical.id],
+      explain: true,
     });
     const projection = projections.byPacketId.get(row.id);
     if (projection?.state === 'repair_required') reasons = [...projection.reasons];
     else if (projection) reasons = [`projection_${projection.state}`];
+    details = (projections.explanations ?? [])
+      .filter((entry) => entry.startsWith(`${attemptBinding.attemptId}:`))
+      .map((entry) => entry.slice(attemptBinding.attemptId.length + 1));
   } catch (error) {
     reasons = ['canonical_application_unresolved', error instanceof Error ? error.message.slice(0, 120) : 'unknown'];
   }
   log.warn(
-    { applicationId: row.id, attemptId: attemptBinding.attemptId, reasons },
+    { applicationId: row.id, attemptId: attemptBinding.attemptId, reasons, details },
     'parked employer receipt still cannot be projected',
   );
-  return { kind: 'still_parked', reasons };
+  return { kind: 'still_parked', reasons, details };
 }
 
 /**
