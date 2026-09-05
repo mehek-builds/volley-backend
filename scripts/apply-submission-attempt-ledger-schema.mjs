@@ -376,7 +376,7 @@ async function main() {
             and boundary_activation_id is not null
             and boundary_expires_at is not null
             and boundary_expires_at > observed_at
-            and boundary_expires_at <= observed_at + interval '5 minutes')
+            and boundary_expires_at <= observed_at + interval '8 minutes')
           or (event_kind <> 'boundary_authorized'
             and boundary_activation_id is null
             and boundary_expires_at is null)
@@ -433,7 +433,7 @@ async function main() {
             and boundary_activation_id is not null
             and boundary_expires_at is not null
             and boundary_expires_at > observed_at
-            and boundary_expires_at <= observed_at + interval '5 minutes')
+            and boundary_expires_at <= observed_at + interval '8 minutes')
           or (event_kind <> 'boundary_authorized'
             and boundary_activation_id is null
             and boundary_expires_at is null)
