@@ -968,7 +968,7 @@ async function continueManagedBrowserWithAccountFence(
 export function managedInitialCallTimeoutMs(authorization: SubmissionBoundaryAuthorization): number {
   const deadlineMs = Date.parse(managedInitialProviderDeadlineAt(authorization));
   const timeoutMs = Math.floor(deadlineMs - Date.parse(authorization.serverNow));
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 5 * 60 * 1000) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 8 * 60 * 1000) {
     throw new FinalSubmissionBoundaryChangedError();
   }
   return timeoutMs;
@@ -984,7 +984,7 @@ export function managedInitialProviderDeadlineAt(
   if (!Number.isFinite(expiresAtMs)
     || !Number.isFinite(serverNowMs)
     || deadlineMs <= serverNowMs
-    || deadlineMs - serverNowMs > 5 * 60 * 1000) {
+    || deadlineMs - serverNowMs > 8 * 60 * 1000) {
     throw new FinalSubmissionBoundaryChangedError();
   }
   return new Date(deadlineMs).toISOString();
