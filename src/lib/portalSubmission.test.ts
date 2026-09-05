@@ -329,7 +329,15 @@ test('managed Workable phone evidence replaces stale fill success with country a
     text: 'Apply for this job',
     filledFields: ['phone'],
   };
-  assert.equal(managedResultFilledFields({ ...base, extracted: [] }).includes('phone'), false);
+  /* DEGRADED ACCEPT, not a stale fill success sliding through: `filledFields` says the FILL action
+   * (requireUnique, optional:false) proved exactly one control and typed the planned value, and
+   * `extracted` is empty because the readback - now optional, see pushWorkableManagedPhoneActions -
+   * found nothing at all to assert against (the measured 2026-09-05 Pony.ai fdcf4ccb SEND #2 shape).
+   * See managedResultFilledFields's phoneDegradedToFillProof. */
+  assert.equal(managedResultFilledFields({ ...base, extracted: [] }).includes('phone'), true);
+  // Without even the fill's own success on record, there is nothing to degrade to: phone is dropped
+  // exactly as before.
+  assert.equal(managedResultFilledFields({ ...base, filledFields: [], extracted: [] }).includes('phone'), false);
   assert.equal(managedResultFilledFields({
     ...base,
     extracted: [
@@ -4706,8 +4714,11 @@ test('Workable phone readback is a mutually exclusive fallback chain the runner 
   assert.ok(arms[1]!.startsWith('body:not(:has(.iti input[type="tel"]))'));
   assert.ok(arms[2]!.startsWith('body:not(:has(.iti input[type="tel"])):not(:has(div[data-ui="phone"] input[type="tel"]))'));
   assert.ok(arms[2]!.endsWith('input[name="phone"]'));
-  // The proof discipline survives the widening untouched.
-  assert.equal(proof?.optional, false);
+  // The proof discipline survives the widening untouched, except optionality: a zero-match readback
+  // now degrades to recorded evidence instead of a fatal refusal when the fill already proved the
+  // value landed - see pushWorkableManagedPhoneActions and managedResultFilledFields's
+  // phoneDegradedToFillProof. A match that DOES come back is still held to the exact planned digits.
+  assert.equal(proof?.optional, true);
   assert.equal(proof?.requireUnique, true);
   assert.equal(proof?.requireNonEmpty, true);
   assert.equal(proof?.expectedValueDigits, '2135746270');
@@ -4934,9 +4945,12 @@ test('managed Workable phone selects exact UAE and proves the value before the r
   assert.equal(countryCloseIndex, countryOptionIndex + 1);
   assert.equal(phoneIndex, countryCloseIndex + 1);
   assert.equal(phoneWaitIndex, phoneIndex + 1);
-  assert.equal(phoneProofIndex, phoneWaitIndex + 1);
+  /* Two extra bounded retry waits sit between the settling wait and the readback now (see
+   * WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS) - the same widened window, spent as more independent
+   * chances rather than one longer one. */
+  assert.equal(phoneProofIndex, phoneWaitIndex + 3);
   assert.equal(countryWaitIndex, phoneProofIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(countryProofIndex, countryWaitIndex + 3);
   /* The cookie boundary moved to the END with the tolerant terminal re-reads it now guards: a
    * fresh post-parse consent dialog intercepts the submit click, not the country combobox. */
   assert.ok(lateCookieDeclineIndex > Math.max(...uploadIndexes));
@@ -5056,12 +5070,43 @@ test('managed Workable phone selects exact UAE and proves the value before the r
     optional: true,
     timeout: 4_000,
   });
+  // The two bounded retry attempts added on top of the settling wait above (see
+  // WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS) - each a short, independent chance for the same
+  // remount to have finished by the time the readback runs.
+  assert.deepEqual(actions[phoneWaitIndex + 1], {
+    type: 'waitForSelector',
+    selector: WIDENED_WORKABLE_PHONE_READBACK,
+    label: 'workable_phone_value_visible_retry_1',
+    optional: true,
+    timeout: 1_000,
+  });
+  assert.deepEqual(actions[phoneWaitIndex + 2], {
+    type: 'waitForSelector',
+    selector: WIDENED_WORKABLE_PHONE_READBACK,
+    label: 'workable_phone_value_visible_retry_2',
+    optional: true,
+    timeout: 1_000,
+  });
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
     selector: '.iti__selected-dial-code:visible',
     label: 'workable_phone_country_visible',
     optional: true,
     timeout: 4_000,
+  });
+  assert.deepEqual(actions[countryWaitIndex + 1], {
+    type: 'waitForSelector',
+    selector: '.iti__selected-dial-code:visible',
+    label: 'workable_phone_country_visible_retry_1',
+    optional: true,
+    timeout: 1_000,
+  });
+  assert.deepEqual(actions[countryWaitIndex + 2], {
+    type: 'waitForSelector',
+    selector: '.iti__selected-dial-code:visible',
+    label: 'workable_phone_country_visible_retry_2',
+    optional: true,
+    timeout: 1_000,
   });
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
@@ -5072,6 +5117,12 @@ test('managed Workable phone selects exact UAE and proves the value before the r
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
+  /* OPTIONAL now, the second half of the fix: a zero-match readback used to kill the whole run even
+   * though the fill immediately above already proved (requireUnique, optional:false) that exactly
+   * one control existed and accepted the planned value. See managedResultFilledFields's
+   * phoneDegradedToFillProof for what happens to a run whose readback finds nothing at all. */
+  assert.equal(actions[phoneProofIndex]?.optional, true);
+  assert.equal(actions[countryProofIndex]?.optional, true);
   assert.equal(actions[phoneProofIndex]?.attribute, 'value');
   assert.equal(actions[phoneProofIndex]?.selector, WIDENED_WORKABLE_PHONE_READBACK);
   assert.equal(actions[phoneProofIndex]?.requireNonEmpty, true);
@@ -5102,15 +5153,20 @@ test('managed Workable waits through phone remounts before its final value proof
     '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
   );
   assert.equal(phoneWaitIndex, phoneIndex + 1);
-  assert.equal(phoneProofIndex, phoneWaitIndex + 1);
+  // Two bounded retry waits now sit between the settling wait and the readback - see
+  // WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS.
+  assert.equal(phoneProofIndex, phoneWaitIndex + 3);
   assert.equal(countryWaitIndex, phoneProofIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(countryProofIndex, countryWaitIndex + 3);
   assert.equal(
     countryProof?.selector,
     '.iti__selected-dial-code:visible',
   );
   assert.equal(countryProof?.attribute, undefined);
-  assert.equal(countryProof?.optional, false);
+  /* OPTIONAL now: a zero-match readback used to kill the run outright even though the fill just
+   * above already proved the control existed uniquely and accepted the planned value. See
+   * managedResultFilledFields's phoneDegradedToFillProof. */
+  assert.equal(countryProof?.optional, true);
   assert.equal(countryProof?.requireNonEmpty, true);
   assert.equal(countryProof?.requireUnique, true);
   assert.equal(countryProof?.expectedValueDigits, '1');
@@ -5161,9 +5217,11 @@ test('managed Workable US phone selects exact United States and proves national 
   });
   assert.equal(phoneIndex, countryCloseIndex + 1);
   assert.equal(phoneWaitIndex, phoneIndex + 1);
-  assert.equal(phoneProofIndex, phoneWaitIndex + 1);
+  // Two bounded retry waits now sit between the settling wait and the readback - see
+  // WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS.
+  assert.equal(phoneProofIndex, phoneWaitIndex + 3);
   assert.equal(countryWaitIndex, phoneProofIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(countryProofIndex, countryWaitIndex + 3);
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
@@ -5174,6 +5232,10 @@ test('managed Workable US phone selects exact United States and proves national 
   );
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
+  /* OPTIONAL now - the second half of the fix. See managedResultFilledFields's
+   * phoneDegradedToFillProof for a readback that finds nothing at all. */
+  assert.equal(actions[phoneProofIndex]?.optional, true);
+  assert.equal(actions[countryProofIndex]?.optional, true);
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '2135746270');
   assert.equal(actions[phoneProofIndex]?.requireUnique, true);
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
@@ -5433,9 +5495,22 @@ test('Workable phone proofs survive the resume-parse remount that refuted the te
   // A parse that lands between the fill and its readback: the fill verifies against the old node,
   // the required extract then finds nothing - the measured shape of all five refutations.
   const refusal = replay(oldOrdering, oldFillOffset + 1);
+  /* NULL NOW, not the fatal refusal this test used to pin - and that is a SECOND, independent fix
+   * layered on top of the ordering one, not a weakening of this test. `filled_field:phone` and
+   * `filled_field:phone_country` are optional now (see pushWorkableManagedPhoneActions and
+   * managedResultFilledFields's phoneDegradedToFillProof): a zero-match readback that follows a
+   * FILL which already proved the value landed - requireUnique, optional:false, unaffected here -
+   * degrades to recorded evidence instead of killing the run, at EITHER ordering. The replay's own
+   * `action.optional` check is what now short-circuits every widget-destroyed readback, ordering
+   * included. */
+  assert.equal(refusal, null);
+  // The fill itself is UNCHANGED by either fix: still optional:false, still requireUnique. A parse
+  // that destroys the widget before the fill even runs is still fatal, at any ordering - proving the
+  // degrade above is scoped to the READBACK finding nothing, never to the fill finding nothing.
+  const fillDestroyedRefusal = replay(oldOrdering, 0);
   assert.equal(
-    refusal,
-    `filled_field:phone: expected exactly one match for ${WIDENED_WORKABLE_PHONE_READBACK}, found 0`,
+    fillDestroyedRefusal,
+    'phone: expected exactly one match for input[name="phone"][type="tel"]:visible, found 0',
   );
 });
 

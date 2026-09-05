@@ -52,6 +52,15 @@ export type SubmissionStopReason =
   /** A chooser-v4 required readback assertion refused while durable progress still proved the
    * employer transport was contained. Deterministic and pre-click, but not a provider crash. */
   | 'field_proof_failed_before_submit'
+  /** The same deterministic readback refusal as its neighbour above, proved a DIFFERENT way: no
+   * admissible run-progress record came back from the provider at all, so the proof instead reads
+   * the send plan this repo built and sent - the failing action's own label sits strictly before
+   * the plan's one `confirmAndSubmit` action, which structurally means the click was never reached.
+   * Kept as its own reason, not folded into its neighbour, because the two rest on different
+   * evidence and the ledger proof kind each one is allowed to mint after authorization
+   * (run_progress_proven_not_pressed vs plan_position_proven_not_pressed) must not be confused for
+   * the other. See ManagedBrowserAssertionFailureError's `provenBy` field. */
+  | 'field_proof_failed_before_submit_plan_position'
   /** The managed run was cut off before it reported anything. Where in the run is unknown. */
   | 'run_timed_out'
   /** The exact packet no longer matched the audit that authorised it, so the run refused to hand it
@@ -110,6 +119,10 @@ const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStop
   'applicant_email_regeneration',
   'provider_session_failure_before_submit',
   'field_proof_failed_before_submit',
+  /* Same membership reasoning as its neighbour immediately above - both are backed by
+   * ManagedBrowserAssertionFailureError, just proved from different evidence (see that class's
+   * `provenBy` field and the reason's own doc comment). */
+  'field_proof_failed_before_submit_plan_position',
   /* Backed by EmployerBoundPacketDriftError, per the membership rule above. The test is where the
    * throw is, and this one is in assertVerifiedBuiltPacket: transportVerifiedBuiltPacket asserts
    * before it calls transport(), and the managed send asserts before it opens a browser session. No
@@ -146,6 +159,9 @@ export function classifySubmissionStop(input: {
   confirmationUnproven: boolean;
   providerSessionFailureBeforeSubmit: boolean;
   fieldProofFailedBeforeSubmit?: boolean;
+  /** Mutually exclusive with fieldProofFailedBeforeSubmit - see ManagedBrowserAssertionFailureError's
+   * `provenBy` field. At most one of the two is ever true for a given error. */
+  fieldProofFailedByPlanPosition?: boolean;
   providerSessionFailure: boolean;
   runTimedOut: boolean;
   providerUnconfigured: boolean;
@@ -167,6 +183,7 @@ export function classifySubmissionStop(input: {
   if (input.destinationUnverifiedBeforeSend) return 'destination_unverified_before_send';
   if (input.noSubmitControl) return 'no_submit_control';
   if (input.confirmationUnproven) return 'confirmation_unproven';
+  if (input.fieldProofFailedByPlanPosition) return 'field_proof_failed_before_submit_plan_position';
   if (input.fieldProofFailedBeforeSubmit) return 'field_proof_failed_before_submit';
   if (input.providerSessionFailureBeforeSubmit) return 'provider_session_failure_before_submit';
   if (input.providerSessionFailure) return 'provider_session_failure';

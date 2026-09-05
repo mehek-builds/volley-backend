@@ -12776,6 +12776,20 @@ const RUN_PROGRESS_BACKED_STOP_REASONS = new Set<SubmissionStopReason>([
   'provider_session_failure_before_submit',
 ]);
 
+/* THE STOP REASON BACKED BY THE SEND PLAN'S OWN ORDERING INSTEAD, and the only one
+ * releasedClaimProofKind may credit with `plan_position_proven_not_pressed`. Written only by
+ * submissionFailureReview's fieldProofFailedByPlanPosition, which is true exactly when
+ * browserbase.ts's managedBrowserRequestError constructed a ManagedBrowserAssertionFailureError with
+ * `provenBy: 'plan_position'` - no admissible Stratus run-progress record, but the failing action's
+ * own label sat strictly before `confirmAndSubmit` in the exact plan this repo sent. See that field's
+ * own doc comment and the proof kind's definition in SUBMISSION_NOT_SENT_PROOF_KINDS. Kept as its own
+ * set rather than folded into RUN_PROGRESS_BACKED_STOP_REASONS above: the two reasons must map to
+ * different proof kinds, because the two are different evidence and the ledger's admissibility rule
+ * should be able to tell them apart if the two are ever measured to need different treatment. */
+const PLAN_POSITION_BACKED_STOP_REASONS = new Set<SubmissionStopReason>([
+  'field_proof_failed_before_submit_plan_position',
+]);
+
 /**
  * Which not-sent proof kind actually backs a released claim, derived from the run's OWN typed stop
  * rather than assumed from whether the attempt happens to carry a boundary_authorized event.
@@ -12804,9 +12818,10 @@ export function releasedClaimProofKind(
   stopReason: SubmissionStopReason | undefined,
   authorizedAlready: boolean,
 ): SubmissionNotSentProofKind {
-  return authorizedAlready && stopReason !== undefined && RUN_PROGRESS_BACKED_STOP_REASONS.has(stopReason)
-    ? 'run_progress_proven_not_pressed'
-    : 'typed_pre_click_stop';
+  if (!authorizedAlready || stopReason === undefined) return 'typed_pre_click_stop';
+  if (RUN_PROGRESS_BACKED_STOP_REASONS.has(stopReason)) return 'run_progress_proven_not_pressed';
+  if (PLAN_POSITION_BACKED_STOP_REASONS.has(stopReason)) return 'plan_position_proven_not_pressed';
+  return 'typed_pre_click_stop';
 }
 
 /**
@@ -13072,6 +13087,14 @@ export function submissionFailureReview(
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailureBeforeSubmit = error instanceof ManagedBrowserPreSubmitCrashError;
   const fieldProofFailedBeforeSubmit = error instanceof ManagedBrowserAssertionFailureError;
+  /* NARROWER than fieldProofFailedBeforeSubmit above, and used ONLY to pick the typed stop reason
+   * (classifySubmissionStop) - everywhere else in this function the two provenances share one
+   * sentence and one release rule, because both structurally prove the same fact about the click.
+   * They diverge only in the ledger proof kind a release is allowed to mint once an attempt is
+   * already authorized (see releasedClaimProofKind and ManagedBrowserAssertionFailureError's
+   * `provenBy` field for why the two must not share a proof kind). */
+  const fieldProofFailedByPlanPosition = error instanceof ManagedBrowserAssertionFailureError
+    && error.provenBy === 'plan_position';
   const fieldProofFailedLabel = error instanceof ManagedBrowserAssertionFailureError
     ? error.assertionLabel
     : null;
@@ -13189,6 +13212,7 @@ export function submissionFailureReview(
       destinationUnverifiedBeforeSend: destinationUnverified,
       confirmationUnproven,
       fieldProofFailedBeforeSubmit,
+      fieldProofFailedByPlanPosition,
       providerSessionFailureBeforeSubmit,
       providerSessionFailure,
       runTimedOut,

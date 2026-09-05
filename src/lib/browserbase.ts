@@ -508,27 +508,80 @@ export function managedDeterministicAssertionRefusal(message: string): { label: 
 
 /**
  * A required extract assertion the runner refused, on a run whose durable chooser-v4 progress
- * proves the employer transport was still contained. Deliberately NOT a subclass of
+ * proves the employer transport was still contained - OR, absent that progress record, on a run
+ * whose OWN outbound plan proves the same fact structurally (see `provenBy` and
+ * managedActionPlanPositionProvesPreClick below). Deliberately NOT a subclass of
  * ManagedBrowserPreSubmitCrashError: the crash retry helper must not spend a second sandbox run
  * reproducing a deterministic refusal, and the applicant sentence must stop calling it temporary.
  */
 export class ManagedBrowserAssertionFailureError extends Error {
   readonly code = 'SANDBOX_RUN_FAILED';
-  readonly runProgress: ManagedBrowserRunProgress;
+  readonly runProgress: ManagedBrowserRunProgress | null;
   /** The failing action's label as the runner spelled it, e.g. `filled_field:phone`. */
   readonly assertionLabel: string | null;
+  /**
+   * WHICH proof this refusal rests on, because the two are not the same evidence and must not share
+   * a ledger proof kind.
+   *
+   * `'run_progress'`: Stratus's own durable run-progress record proved submitPressed (and both its
+   * typed kinds) false all the way to the stop - the ORIGINAL proof, still the strongest available
+   * when Stratus sends it.
+   *
+   * `'plan_position'`: no admissible progress record came back at all (MEASURED 2026-09-05, Pony.ai
+   * fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb SEND #2: `filled_field:phone: expected exactly one match
+   * for ..., found 0`, no `runProgress` on the error payload), so #982's classification never fired
+   * and the run was misfiled as an unverified, possibly-pressed attempt. This proof instead reads
+   * the SEND PLAN this repo built and sent: the plan is ordered, the failing action is named, and a
+   * failure at an action whose index is strictly before `confirmAndSubmit` in that exact list proves
+   * the click was structurally unreached, with no dependence on what Stratus chose to echo back.
+   * Weaker than a live progress record (it says nothing about what happened DURING the failing
+   * action itself, only that no LATER action could have run), which is why it earns its own ledger
+   * proof kind (`plan_position_proven_not_pressed`) rather than being folded into
+   * `run_progress_proven_not_pressed`.
+   */
+  readonly provenBy: 'run_progress' | 'plan_position';
 
-  constructor(message: string, runProgress: ManagedBrowserRunProgress, assertionLabel: string | null) {
+  constructor(
+    message: string,
+    runProgress: ManagedBrowserRunProgress | null,
+    assertionLabel: string | null,
+    provenBy: 'run_progress' | 'plan_position' = 'run_progress',
+  ) {
     super(message);
     this.name = 'ManagedBrowserAssertionFailureError';
     this.runProgress = runProgress;
     this.assertionLabel = assertionLabel;
+    this.provenBy = provenBy;
   }
 
   /** Appends bounded, redacted structural evidence so submission_error carries the diagnosis. */
   attachEvidence(evidence: string) {
     this.message = `${this.message}; ${evidence}`;
   }
+}
+
+/**
+ * Whether a deterministic assertion refusal's OWN action position, within the exact plan this repo
+ * sent, structurally proves the run died before any submit press - with no dependence on a progress
+ * record from the provider.
+ *
+ * Two conditions, both required: the failing action's label must actually appear in the outbound
+ * plan (a label stratus does not recognise, or a plan built differently than this repo remembers,
+ * proves nothing), and it must sit strictly before the one `confirmAndSubmit` action a submit plan
+ * ends on. `confirmAndSubmit` is the SOLE authorized physical click (see its own field docs on
+ * ManagedBrowserAction) - every action ahead of it in the list runs before that click is even
+ * attempted, by construction of buildManagedPortalActions, which appends it last. A plan with no
+ * `confirmAndSubmit` at all (a scan, a prepare fill) proves nothing about a press either way, so it
+ * refuses rather than guesses.
+ */
+function managedActionPlanPositionProvesPreClick(
+  actions: readonly ManagedBrowserAction[],
+  label: string | null,
+): boolean {
+  if (!label) return false;
+  const failingIndex = actions.findIndex((action) => action.label === label);
+  const confirmIndex = actions.findIndex((action) => action.type === 'confirmAndSubmit');
+  return failingIndex >= 0 && confirmIndex >= 0 && failingIndex < confirmIndex;
 }
 
 /** Correlated provider progress that crossed or resolved an employer boundary before its response. */
@@ -745,11 +798,30 @@ function managedBrowserRequestError(
        * dying, so it must neither be retried as a crash nor described as temporary. */
       const assertion = managedDeterministicAssertionRefusal(message);
       if (assertion) {
-        return new ManagedBrowserAssertionFailureError(message, progress, assertion.label);
+        return new ManagedBrowserAssertionFailureError(message, progress, assertion.label, 'run_progress');
       }
       return new ManagedBrowserPreSubmitCrashError(message, progress);
     }
     if (progress) return new ManagedBrowserProviderProgressError(message, error.code, progress);
+    /* NO ADMISSIBLE PROGRESS RECORD AT ALL, which is not the same fact as "the progress record says
+     * the click already happened" - `progress` is null here whether Stratus omitted `runProgress`
+     * entirely, sent a shape managedBrowserRunProgress could not validate, or sent one that failed
+     * managedBrowserProgressStateIsConsistent. #982's classification depends entirely on that record
+     * existing, so a deterministic refusal on a run that never got one used to fall straight through
+     * to a plain Error - exactly the shape measured 2026-09-05 on Pony.ai fdcf4ccb-eca9-44dc-
+     * b0cb-d400805ebdeb SEND #2, which then read as an unverified, possibly-pressed attempt.
+     *
+     * The plan this repo built and sent is a second, independent witness that does not need
+     * Stratus's cooperation: see managedActionPlanPositionProvesPreClick. Scoped to submit-correlated
+     * calls only (expectedSubmissionAttempt != null), the same scope transportStillContained already
+     * requires above - a scan or prepare fill has no confirmAndSubmit action to be strictly ahead
+     * of, and proves nothing about a press either way. */
+    if (expectedSubmissionAttempt != null) {
+      const assertion = managedDeterministicAssertionRefusal(message);
+      if (assertion && managedActionPlanPositionProvesPreClick(actions, assertion.label)) {
+        return new ManagedBrowserAssertionFailureError(message, null, assertion.label, 'plan_position');
+      }
+    }
   }
   return new Error(message);
 }

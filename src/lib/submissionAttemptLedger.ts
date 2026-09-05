@@ -80,6 +80,29 @@ export const SUBMISSION_NOT_SENT_PROOF_KINDS = [
    * Litos had pressed Send and asked to check the employer's portal for an application that was
    * never attempted. */
   'run_progress_proven_not_pressed',
+  /* THE FIFTH WITNESS, for the SAME shape of run as run_progress_proven_not_pressed but a DIFFERENT
+   * piece of evidence, and the two must not share a name.
+   *
+   * MEASURED 2026-09-05, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb SEND #2 (attempt_opened
+   * 12:33:00Z, boundary_authorized 12:33:03Z): the run died on the identical Workable phone
+   * readback refusal run_progress_proven_not_pressed was written for
+   * (`filled_field:phone: expected exactly one match for ..., found 0`), but this time Stratus's
+   * response carried no admissible `runProgress` at all - so managedBrowserRequestError could not
+   * construct the progress-backed proof, the run fell back to a plain Error, and the row was written
+   * needs_attention / unverified_submission with the "check the employer portal" sentence, exactly
+   * the outcome run_progress_proven_not_pressed exists to prevent.
+   *
+   * This proof kind is written for that gap: ManagedBrowserAssertionFailureError constructed with
+   * `provenBy: 'plan_position'` (browserbase.ts's managedActionPlanPositionProvesPreClick) instead of
+   * `'run_progress'`. It reads the SEND PLAN this repo built and sent rather than Stratus's own
+   * telemetry - the plan is ordered, the failing action is named, and a failure at an action whose
+   * index sits strictly before the plan's one `confirmAndSubmit` action structurally proves the click
+   * was never reached, independent of anything the provider chose to echo back. Weaker than the
+   * progress record in one respect (it says nothing about what happened during the failing action
+   * itself, only that nothing after it could have run), which is exactly why it earns its own kind
+   * here rather than being folded into its neighbour: an admissibility rule that ever needs to trust
+   * one of these two proofs more than the other must be able to tell them apart. */
+  'plan_position_proven_not_pressed',
 ] as const;
 
 export type SubmissionNotSentProofKind = typeof SUBMISSION_NOT_SENT_PROOF_KINDS[number];
@@ -200,6 +223,9 @@ const PRE_CLICK_ONLY_PROOFS = new Set<SubmissionNotSentProofKind>([
    * a press_observed event standing beside it on the same attempt is a logical contradiction and
    * must fold to invalid_sequence exactly like theirs does. */
   'run_progress_proven_not_pressed',
+  /* Same contradiction, same fold: plan_position_proven_not_pressed also asserts the click never
+   * happened, from the plan's own ordering rather than from Stratus's progress record. */
+  'plan_position_proven_not_pressed',
 ]);
 /* THE PROOFS STRONG ENOUGH TO CLOSE AN ATTEMPT AFTER AUTHORIZATION, ALONGSIDE HER OWN LOOK.
  *
@@ -230,6 +256,12 @@ const AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS = new Set<SubmissionNotSentProofK
    * the stop. See the proof kind's own definition in SUBMISSION_NOT_SENT_PROOF_KINDS for the full
    * story and the measured packet. */
   'run_progress_proven_not_pressed',
+  /* THE FOURTH MACHINE WITNESS, admitted for the same reason: not a guess about whether
+   * authorization implies a press, but this repo's own send-plan ordering proving the failing action
+   * ran strictly before the plan's one confirmAndSubmit action. See the proof kind's own definition
+   * in SUBMISSION_NOT_SENT_PROOF_KINDS for the full story, the measured packet, and why it is not
+   * folded into run_progress_proven_not_pressed above. */
+  'plan_position_proven_not_pressed',
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /* FIVE MINUTES, THE CAP THIS FILE ALREADY ENFORCES, NOT THREE.

@@ -24,6 +24,7 @@ import {
   managedBrowserTerminalFailureError,
   managedContinuationFingerprint,
   managedDeterministicAssertionRefusal,
+  ManagedBrowserAction,
   ManagedBrowserAssertionFailureError,
   ManagedBrowserPreSubmitCrashError,
   ManagedBrowserProviderProgressError,
@@ -1610,11 +1611,13 @@ test('a deterministic assertion refusal under containment progress is typed, not
     (error: unknown) => error instanceof ManagedBrowserAssertionFailureError
       && !(error instanceof ManagedBrowserPreSubmitCrashError)
       && error.assertionLabel === 'filled_field:phone'
-      && error.runProgress.stage === 'phase_started',
+      && error.provenBy === 'run_progress'
+      && error.runProgress?.stage === 'phase_started',
   );
 
-  /* The same refusal WITHOUT containment progress stays a plain error: the release rule downstream
-   * leans on the durable proof, so the typing must never outrun it. */
+  /* The same refusal WITHOUT containment progress AND WITHOUT a plan to check position against
+   * (outbound actions []) stays a plain error: there is no evidence of either kind, so nothing may
+   * be guessed. See the next two tests for what changes once a real plan is in play. */
   globalThis.fetch = (async () => new Response(JSON.stringify({
     error: { code: 'SANDBOX_RUN_FAILED', message: refusal },
   }), {
@@ -1623,6 +1626,94 @@ test('a deterministic assertion refusal under containment progress is typed, not
   })) as typeof fetch;
   await assert.rejects(
     runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof ManagedBrowserAssertionFailureError)
+      && !(error instanceof ManagedBrowserPreSubmitCrashError),
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+/* MEASURED 2026-09-05 12:33Z, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb SEND #2: the identical
+ * deterministic refusal as the test above, but Stratus's response carried no `runProgress` at all -
+ * so the progress-backed arm above never fired, the run fell through to a plain Error, and the row
+ * was written needs_attention / unverified_submission telling the applicant to check the employer
+ * portal for a click that never happened. This is the second, independent witness: the exact SEND
+ * plan this repo built and sent. */
+test('a deterministic assertion refusal with no progress record is typed from the plan\'s own ordering', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const refusal = 'filled_field:phone: expected exactly one match for .iti input[type="tel"], '
+    + 'body:not(:has(.iti input[type="tel"])) div[data-ui="phone"] input[type="tel"], '
+    + 'body:not(:has(.iti input[type="tel"])):not(:has(div[data-ui="phone"] input[type="tel"])) '
+    + 'input[name="phone"], found 0';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: refusal },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  const actions: ManagedBrowserAction[] = [
+    { type: 'fill', selector: 'input[name="firstname"]', value: 'A', label: 'first_name' },
+    { type: 'extract', selector: '.iti input[type="tel"]', label: 'filled_field:phone', optional: true },
+    { type: 'confirmAndSubmit', contractVersion: 2, submitKind: 'application', maxRetries: 1, chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY },
+  ];
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', actions, {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
+    (error: unknown) => error instanceof ManagedBrowserAssertionFailureError
+      && !(error instanceof ManagedBrowserPreSubmitCrashError)
+      && error.assertionLabel === 'filled_field:phone'
+      && error.provenBy === 'plan_position'
+      && error.runProgress === null,
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+/* THE AMBIGUOUS CASES STAY UNCHANGED. A refusal at or after confirmAndSubmit proves nothing about
+ * whether the click happened - the run could have failed asserting something AFTER a real press -
+ * so plan position must refuse rather than guess, exactly as the progress-backed arm already refuses
+ * when Stratus's progress says the click might have landed. */
+test('a refusal at or after confirmAndSubmit is not proven pre-click by plan position', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const refusal = 'filled_field:receipt: expected exactly one match for .receipt, found 0';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: refusal },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  const actions: ManagedBrowserAction[] = [
+    { type: 'confirmAndSubmit', contractVersion: 2, submitKind: 'application', maxRetries: 1, chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY },
+    { type: 'extract', selector: '.receipt', label: 'filled_field:receipt', optional: true },
+  ];
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', actions, {
       allowSubmit: true,
       submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
       providerDeadlineAt: managedProviderDeadlineAt(),
