@@ -20,10 +20,14 @@
  * the key - a stratus hang that somehow outlives its own deadline, a connection left half-dead so its
  * transaction's rollback-on-error never runs - queued out every later provider call for that account
  * FOREVER, with no timeout, no error, and no distinction between "another call is legitimately busy"
- * and "the account is wedged". On Vercel the waiting request itself is simply killed by the platform
- * at api/index.ts's 300s maxDuration, with no catch block ever running: zero heartbeat, zero terminal
- * result, and the next retry - or a completely unrelated posting for the same account - repeats the
- * exact same silent hang against the same wedged key. See PROVIDER_CALL_LOCK_TIMEOUT_MS.
+ * and "the account is wedged". Production runs on Railway now (DEPLOY.md), a persistent listener with
+ * no per-request platform kill, so the waiting request does not even get the mercy of being killed:
+ * it hangs until something external intervenes, with no catch block ever running - zero heartbeat,
+ * zero terminal result - and the next retry, or a completely unrelated posting for the same account,
+ * repeats the exact same silent hang against the same wedged key. (On Vercel, DEPLOY.md's documented
+ * rollback target, the platform's own 300s maxDuration would at least kill the request; that is worse
+ * for observability but was never the actual defect - the missing bound was.) See
+ * PROVIDER_CALL_LOCK_TIMEOUT_MS.
  */
 import { db } from '../db/index';
 import { databaseNow } from './browserProviderResourceCleanup';
