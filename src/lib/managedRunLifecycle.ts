@@ -164,22 +164,56 @@ export interface ManagedRunRegistration {
    * is only ever meaningfully false while true for a 'submitting'-phase entry. It is still tracked
    * for every phase, uniformly, so a caller never has to special-case "which phases even have a
    * boundary" - it asks this one field.
+   *
+   * ALSO WHAT DECIDES WHETHER THE SHUTDOWN SIGNAL MAY TOUCH A GIVEN PROVIDER CALL - see
+   * isManagedRunBoundaryReached and routes/submissionRunner.ts's managedProviderCallSignalFor. A
+   * SIGTERM's abort must never reach the fetch that presses "submit" or a security-code
+   * continuation, because an aborted fetch there makes it impossible to tell whether the employer
+   * received the press; this field is already true by the time submit() is entered (see
+   * processSubmissionApplication's own conservative mark, before it ever calls submit()), so gating
+   * on it covers every provider call submit() makes, present and future, without a second registry
+   * of "which call sites are dangerous" to keep in sync by hand.
    */
   boundaryReached: boolean;
+  /**
+   * The still-settling promise for whatever this registration's boundary-reached work is doing -
+   * submit()'s own call, or the earlier recovery call for a row that was already claimed when this
+   * function started. Set only once a boundary-reached run actually has work in flight (see
+   * attachManagedRunBoundaryCompletion); read by the shutdown handler in index.ts so a SIGTERM can
+   * wait, within its own deadline, for the ONE reconciliation that decides whether the employer
+   * received a press, instead of exiting over it and leaving the answer to whoever reads the row
+   * next. Absent for a pre-boundary registration - those are released outright, not waited on.
+   */
+  boundaryCompletion?: Promise<unknown>;
   registeredAt: number;
+  /** Opaque per-registration identity, returned by registerManagedRun and required by
+   * unregisterManagedRun - see both for why. */
+  token: string;
 }
 
 const registry = new Map<string, ManagedRunRegistration>();
 
+/** Opaque token identifying one call to registerManagedRun. Never inspected for its shape - just
+ * carried from registerManagedRun to the matching unregisterManagedRun. */
+export type ManagedRunRegistrationToken = string;
+
 /** Begin tracking a managed run this process is now executing. Overwrites any existing entry for
  * the same packet - there can only ever be one live run per packet, serialized by the same
- * per-user advisory lock every claim in this pipeline already takes. */
+ * per-user advisory lock every claim in this pipeline already takes.
+ *
+ * RETURNS A TOKEN, AND THE CALLER MUST HOLD ONTO IT. Two overlapping registrations for the same
+ * packet id used to be indistinguishable to unregisterManagedRun - it deleted by packetId alone, so
+ * whichever call finished first would unregister the SURVIVING registration out from under the
+ * still-running second one, leaving a live run the registry (and therefore a SIGTERM) no longer
+ * knows exists. The token makes each registration's own unregister call provably about ITS OWN
+ * entry: see unregisterManagedRun. */
 export function registerManagedRun(input: {
   packetId: string;
   userId: string;
   runId?: string;
   phase: ManagedRunPhase;
-}): void {
+}): ManagedRunRegistrationToken {
+  const token = randomUUID();
   registry.set(input.packetId, {
     packetId: input.packetId,
     userId: input.userId,
@@ -187,7 +221,9 @@ export function registerManagedRun(input: {
     phase: input.phase,
     boundaryReached: false,
     registeredAt: Date.now(),
+    token,
   });
+  return token;
 }
 
 /** Best-effort. A packet id the registry has no entry for (never registered, or already
@@ -209,9 +245,19 @@ export function markManagedRunBoundaryReached(packetId: string): void {
 }
 
 /** Stop tracking a run, however it ended - success, a handled failure, or an uncaught throw.
- * Every registration must be paired with exactly one of these, in a `finally`. */
-export function unregisterManagedRun(packetId: string): void {
-  registry.delete(packetId);
+ * Every registration must be paired with exactly one of these, in a `finally`.
+ *
+ * TOKEN-GATED: only removes the entry if it is still the one registerManagedRun handed this caller
+ * its token for. A caller whose token no longer matches - because a second, later registration for
+ * the same packet has already overwritten it - has nothing left to unregister and this is silently
+ * a no-op, exactly like unregistering a packet id the registry never saw: the SURVIVING later
+ * registration keeps its entry, and its own eventual unregister (with its own token) is the one that
+ * actually clears it. */
+export function unregisterManagedRun(packetId: string, token: ManagedRunRegistrationToken): void {
+  const entry = registry.get(packetId);
+  if (entry && entry.token === token) {
+    registry.delete(packetId);
+  }
 }
 
 /** Every run this process is tracking that has NOT reached the employer boundary - the shutdown
@@ -222,6 +268,46 @@ export function unregisterManagedRun(packetId: string): void {
  * updated) in ways a fresh database read cannot. */
 export function listPreBoundaryManagedRuns(): ManagedRunRegistration[] {
   return [...registry.values()].filter((entry) => !entry.boundaryReached);
+}
+
+/** Whether THIS process's registry already believes this packet has reached the employer boundary.
+ * The one thing routes/submissionRunner.ts's managedProviderCallSignalFor asks before deciding
+ * whether a provider call may carry the shutdown signal - see boundaryReached's own doc above for
+ * why gating on this single flag is enough to cover every call submit() makes, not just the ones
+ * named when this was written. False for a packet the registry has no entry for at all: an absent
+ * registration proves nothing about the boundary, and defaulting to "may still be aborted" matches
+ * this file's existing fail-open discipline for every other best-effort read here. */
+export function isManagedRunBoundaryReached(packetId: string): boolean {
+  return registry.get(packetId)?.boundaryReached === true;
+}
+
+/** Attach the still-settling promise for a boundary-reached run's own reconciliation work, so a
+ * later shutdown can wait on it - see boundaryCompletion's own doc. A no-op for a packet with no
+ * entry, or one whose boundary has not been marked reached: nothing before the employer boundary is
+ * ever worth blocking a shutdown for, since listPreBoundaryManagedRuns already releases those
+ * outright. Overwrites any earlier completion for the same packet - there is only ever one boundary-
+ * reached call in flight per packet at a time, serialized the same way registration itself is. */
+export function attachManagedRunBoundaryCompletion(packetId: string, completion: Promise<unknown>): void {
+  const entry = registry.get(packetId);
+  if (entry && entry.boundaryReached) {
+    entry.boundaryCompletion = completion;
+  }
+}
+
+/** Every boundary-reached run this process is currently tracking that also has an attached,
+ * still-relevant completion promise - the shutdown handler's second worklist, alongside
+ * listPreBoundaryManagedRuns's release candidates. Unlike that list, nothing here is ever written
+ * to: the caller only awaits, within its own deadline, and leaves the row exactly as-is if the
+ * deadline wins - see index.ts's releaseManagedRunsBeforeExit. */
+export function listInFlightManagedRunBoundaryCompletions(): Array<{
+  packetId: string;
+  userId: string;
+  promise: Promise<unknown>;
+}> {
+  return [...registry.values()]
+    .filter((entry): entry is ManagedRunRegistration & { boundaryCompletion: Promise<unknown> } =>
+      entry.boundaryReached && entry.boundaryCompletion !== undefined)
+    .map((entry) => ({ packetId: entry.packetId, userId: entry.userId, promise: entry.boundaryCompletion }));
 }
 
 /** Observability only - how many runs this process currently believes it owns. */

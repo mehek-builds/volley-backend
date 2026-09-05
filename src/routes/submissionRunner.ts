@@ -339,13 +339,16 @@ import {
 } from '../lib/submissionSafety';
 import { resolveRevision } from '../lib/buildInfo';
 import {
+  attachManagedRunBoundaryCompletion,
   getManagedRunShutdownSignal,
+  isManagedRunBoundaryReached,
   markManagedRunBoundaryReached,
   registerManagedRun,
   RUN_OWNER_ID,
   unregisterManagedRun,
   updateManagedRunPhase,
   type ManagedRunPhase,
+  type ManagedRunRegistrationToken,
 } from '../lib/managedRunLifecycle';
 import {
   autoRunShouldPrepare,
@@ -927,24 +930,53 @@ export async function assertFinalRunnerBoundaryClear(
   return result.authorization;
 }
 
+/**
+ * The one place every managed provider call in this file decides whether a SIGTERM's shutdown
+ * signal may abort it - see boundaryReached's own doc in lib/managedRunLifecycle.ts.
+ *
+ * NEVER PAST THE EMPLOYER BOUNDARY. A row is marked boundary-reached before submit() is ever
+ * entered (processSubmissionApplication's own conservative mark), so by the time any of submit()'s
+ * own provider calls run - the final application-submit press, a security-code verification press,
+ * or the read-only calls beside them - isManagedRunBoundaryReached(packetId) already answers true
+ * for this packet. Aborting the fetch that presses "submit" (or that recovers what a prior press
+ * did) makes it impossible to tell whether the employer received it; process.exit() then truncates
+ * the one reconciliation that could have answered that question. So those calls get no signal at
+ * all: a SIGTERM will not abort them, and the shutdown handler instead WAITS for them (see
+ * attachManagedRunBoundaryCompletion and index.ts's releaseManagedRunsBeforeExit) rather than racing
+ * past them.
+ *
+ * Every call still made before that mark - prepare()'s discovery, option-probe and fill runs - gets
+ * the signal exactly as before, so a SIGTERM can still unstick a prepare-path fetch that would
+ * otherwise sit out its own multi-minute deadline past the process's own shutdown window.
+ *
+ * A packet id the registry has no entry for at all defaults to "still abortable", matching this
+ * file's existing fail-open discipline elsewhere - see isManagedRunBoundaryReached's own doc.
+ */
+export function managedProviderCallSignalFor(packetId: string): AbortSignal | undefined {
+  return isManagedRunBoundaryReached(packetId) ? undefined : getManagedRunShutdownSignal();
+}
+
 /** Keep provider preparation inside the same user-fence critical section as its final drain check.
  * Also the one place every prepare-path stratus call in this file passes the process-wide shutdown
  * signal (lib/managedRunLifecycle.ts), so a SIGTERM does not leave this fetch waiting out its own
- * deadline unobserved - see runManagedBrowser's externalSignal doc in lib/browserbase.ts. */
+ * deadline unobserved - see runManagedBrowser's externalSignal doc in lib/browserbase.ts. Past the
+ * employer boundary the same call carries no signal at all - see managedProviderCallSignalFor. */
 async function runManagedBrowserWithAccountFence(
   userId: string,
+  packetId: string,
   ...args: Parameters<typeof runManagedBrowser>
 ): Promise<ManagedBrowserResult> {
   const [portalUrl, actions, options] = args;
   return withProviderCallFence(userId, () => runManagedBrowser(portalUrl, actions, {
     ...options,
-    externalSignal: getManagedRunShutdownSignal(),
+    externalSignal: managedProviderCallSignalFor(packetId),
   }));
 }
 
 /** Keep every retained-session provider POST behind the account drain until the call finishes. */
 async function continueManagedBrowserWithAccountFence(
   userId: string,
+  packetId: string,
   continuationToken: Parameters<typeof continueManagedBrowser>[0],
   actions: Parameters<typeof continueManagedBrowser>[1],
   options: Parameters<typeof continueManagedBrowser>[2],
@@ -983,7 +1015,7 @@ async function continueManagedBrowserWithAccountFence(
       requestBudget,
       providerDeadlineAt,
       minimumDispatchBudgetMs: options.minimumDispatchBudgetMs!,
-      externalSignal: getManagedRunShutdownSignal(),
+      externalSignal: managedProviderCallSignalFor(packetId),
     });
   });
 }
@@ -3475,7 +3507,7 @@ async function recoverManagedInitialSecurityCodeChallenge(
   }
 
   try {
-    const continued = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {
+    const continued = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions, {
       submissionAttempt: continuationSubmissionAttempt,
       requestBudget,
       providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
@@ -7812,6 +7844,7 @@ async function prepareManaged(
    * run budget. See MANAGED_PREPARE_SCAN_OPTIONS for why it is 280s and not more. */
   const discoveryResult = await runManagedBrowserWithAccountFence(
     row.user_id,
+    row.id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
     MANAGED_PREPARE_SCAN_OPTIONS,
@@ -8091,6 +8124,7 @@ async function prepareManaged(
     }))];
     const result = await runManagedBrowserWithAccountFence(
       row.user_id,
+      row.id,
       applicationUrl,
       actions,
       // Option-probe clicks open dropdowns to read their choices: a mutation that never submits, so
@@ -8642,6 +8676,7 @@ async function prepareManaged(
    * fatal below, so it is the one run that asks stratus to wait for the capture. */
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
+    row.id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
     MANAGED_PREPARE_FILL_OPTIONS,
@@ -9263,6 +9298,7 @@ async function prepareManagedAttendedAccountGate(
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const result = await runManagedBrowserWithAccountFence(
     row.user_id,
+    row.id,
     applicationUrl,
     buildManagedAttendedAccountProbeActions(portal),
     { screenshot: false },
@@ -10726,6 +10762,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // than the one that submits.
     const captchaProbe = await runManagedBrowserWithAccountFence(
       row.user_id,
+      row.id,
       applicationUrl,
       buildManagedCaptchaProbeActions(),
       { screenshot: false },
@@ -10847,6 +10884,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     try {
       result = await runManagedBrowserWithAccountFence(
         row.user_id,
+        row.id,
         applicationUrl,
         initialActions,
         {
@@ -10867,6 +10905,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           // ephemeral scan correlation too; its extracts alone would not.
           const evidenceRun = await runManagedBrowserWithAccountFence(
             row.user_id,
+            row.id,
             applicationUrl,
             buildWorkablePhoneEvidenceActions(),
             { screenshot: false, scanCorrelation: true },
@@ -11304,7 +11343,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           }
           try {
             // Exactly one bounded continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {
+            receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions, {
               submissionAttempt: securityCodeSubmissionAttempt,
               requestBudget: continuationRequestBudget,
               providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
@@ -11411,7 +11450,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         expectedApplicationUrl: applicationUrl,
         observe: async (continuationToken) => {
           receiptObservationStarted = true;
-          const observed = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, [], {
+          const observed = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, [], {
             screenshot: true,
             submissionAttempt: receiptObservationSubmissionAttempt,
             // This continuation is read-only, but it still must not hold the runner or a provider
@@ -12978,8 +13017,9 @@ export async function processSubmissionApplication(
    * to register for) is a phase the shutdown handler correctly never tries to release either. */
   const initialReview = readApplicationReview(activeRow.spec);
   const initialPhase = managedRunPhaseForStatus(initialReview?.status);
+  let registrationToken: ManagedRunRegistrationToken | undefined;
   if (initialPhase) {
-    registerManagedRun({
+    registrationToken = registerManagedRun({
       packetId: row.id,
       userId: row.user_id,
       runId: initialReview?.submission_run_id,
@@ -12996,12 +13036,18 @@ export async function processSubmissionApplication(
     let review = readApplicationReview(activeRow.spec);
     if (submissionClaimIsHeld(review) || managedSecurityCodeContinuationRecoveryIsHeld(review)) {
       const attemptBinding = await persistedRunnerAttemptBinding(activeRow, review!);
-      const recovery = await recoverManagedSubmissionTerminalResult(
+      /* Captured BEFORE the await, and attached to the registry right away, so a SIGTERM landing
+       * mid-recovery can find and wait on this exact promise - see attachManagedRunBoundaryCompletion
+       * and index.ts's releaseManagedRunsBeforeExit. This row was already marked boundary-reached
+       * above (or in an earlier call this process made), so the attach is never a no-op here. */
+      const recoveryPromise = recoverManagedSubmissionTerminalResult(
         activeRow,
         review!,
         attemptBinding,
         fastify,
       );
+      attachManagedRunBoundaryCompletion(row.id, recoveryPromise);
+      const recovery = await recoveryPromise;
       if (recovery !== 'not_recoverable') {
         const recovered = await db.select().from(generated_resumes)
           .where(eq(generated_resumes.id, applicationId)).limit(1);
@@ -13038,7 +13084,12 @@ export async function processSubmissionApplication(
        * submit(), which is at or before the earliest point submit() could actually claim it, never
        * after. */
       markManagedRunBoundaryReached(row.id);
-      await submit(activeRow, fastify);
+      /* Same capture-then-attach discipline as the recovery promise above: submit() is now this
+       * packet's boundary-reached work in flight, so a SIGTERM must be able to find and wait on this
+       * exact promise rather than exiting over it. */
+      const submitPromise = submit(activeRow, fastify);
+      attachManagedRunBoundaryCompletion(row.id, submitPromise);
+      await submitPromise;
     }
   } catch (error) {
     const cause = error instanceof SubmissionExecutionError ? error.submissionCause : error;
@@ -13049,7 +13100,7 @@ export async function processSubmissionApplication(
     }, 'Application runner step failed');
     await fail(activeRow, error);
   } finally {
-    if (initialPhase) unregisterManagedRun(row.id);
+    if (initialPhase && registrationToken !== undefined) unregisterManagedRun(row.id, registrationToken);
   }
   const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   return refreshed[0] ? readApplicationReview(refreshed[0].spec) : null;

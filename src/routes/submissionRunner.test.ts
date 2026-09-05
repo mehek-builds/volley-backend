@@ -59,7 +59,16 @@ import {
   managedInitialSubmissionAttempt,
   finalBoundaryAuthorizationMatches,
   undecidedOptionalQuestionLabels,
+  managedProviderCallSignalFor,
 } from './submissionRunner';
+import {
+  getManagedRunShutdownSignal,
+  markManagedRunBoundaryReached,
+  registerManagedRun,
+  resetManagedRunRegistryForTests,
+  resetManagedRunShutdownSignalForTests,
+  triggerManagedRunShutdown,
+} from '../lib/managedRunLifecycle';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels } from '../lib/submissionSafety';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
@@ -3521,8 +3530,16 @@ test('every managed provider start, continuation POST, and direct session creati
    * INSIDE withProviderCallFence, never beside or before it. */
   assert.ok(fence.indexOf('withProviderCallFence(userId,')
     < fence.indexOf('runManagedBrowser(portalUrl, actions,'));
-  assert.ok(fence.includes('externalSignal: getManagedRunShutdownSignal()'),
-    'a SIGTERM must be able to abort an in-flight prepare-path stratus call');
+  /* NOT UNCONDITIONAL ANY MORE. A SIGTERM must still be able to unstick an in-flight prepare-path
+   * stratus call, but it must NEVER reach a call at or past the employer boundary - see
+   * managedProviderCallSignalFor's own doc, just above this wrapper, for why aborting the fetch
+   * that presses "submit" makes it impossible to tell whether the employer received the press. Both
+   * fenced wrappers route through that one function rather than calling
+   * getManagedRunShutdownSignal() directly, so the decision is made in exactly one place. */
+  assert.ok(fence.includes('externalSignal: managedProviderCallSignalFor(packetId)'),
+    'the prepare-path wrapper must decide the signal through the one shared boundary-aware helper');
+  assert.ok(!fence.includes('getManagedRunShutdownSignal()'),
+    'the wrapper itself must never call getManagedRunShutdownSignal() unconditionally any more');
   assert.equal(
     [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
     1,
@@ -3543,8 +3560,11 @@ test('every managed provider start, continuation POST, and direct session creati
     < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
   assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
     < continuationFence.indexOf('return continueManagedBrowser('));
-  assert.ok(continuationFence.includes('externalSignal: getManagedRunShutdownSignal()'),
-    'a SIGTERM must be able to abort an in-flight security-code continuation call too');
+  assert.ok(continuationFence.includes('externalSignal: managedProviderCallSignalFor(packetId)'),
+    'the continuation wrapper must decide the signal through the same shared boundary-aware helper - '
+    + 'a security-code verification press must never be aborted by a SIGTERM either');
+  assert.ok(!continuationFence.includes('getManagedRunShutdownSignal()'),
+    'the continuation wrapper itself must never call getManagedRunShutdownSignal() unconditionally any more');
   assert.equal(
     [...runnerSource.matchAll(/\bcontinueManagedBrowser\(/g)].length,
     1,
@@ -3555,6 +3575,14 @@ test('every managed provider start, continuation POST, and direct session creati
     4,
     'all three managed continuation call sites must use the account fence',
   );
+
+  /* THE HELPER ITSELF: gated on the registry's own boundary mark, and nothing else. */
+  const signalHelperStart = runnerSource.indexOf('function managedProviderCallSignalFor(');
+  const signalHelperEnd = runnerSource.indexOf('\n}', signalHelperStart) + 2;
+  const signalHelper = runnerSource.slice(signalHelperStart, signalHelperEnd);
+  assert.ok(signalHelperStart > 0, 'the signal-selection logic must be one named, testable function');
+  assert.match(signalHelper, /isManagedRunBoundaryReached\(packetId\)\s*\?\s*undefined\s*:\s*getManagedRunShutdownSignal\(\)/,
+    'past the boundary the call must carry no signal at all - not a signal that merely started pre-aborted');
 
   const resourceSource = readFileSync(join(__dirname, '../lib/browserProviderResourceCleanup.ts'), 'utf8');
   const createStart = resourceSource.indexOf('export async function createFencedBrowserSession(');
@@ -3579,6 +3607,61 @@ test('every managed provider start, continuation POST, and direct session creati
     < create.indexOf('await createReservedBrowserSession('));
   assert.ok(create.indexOf('await createReservedBrowserSession(')
     < create.indexOf('provider_resource_id: session.id'));
+});
+
+test('a submit-path provider call carries no shutdown signal once its packet is boundary-reached; a prepare-path call still does', () => {
+  /* This exercises the EXACT mechanism runManagedBrowserWithAccountFence and
+   * continueManagedBrowserWithAccountFence call on every managed provider request -
+   * managedProviderCallSignalFor(packetId) - against the real registry from
+   * lib/managedRunLifecycle.ts, not a text search. It reproduces precisely what
+   * processSubmissionApplication does before calling submit(): register the run, then mark its
+   * boundary reached (conservatively, before submit() is ever entered) - and proves the wrapper's
+   * own signal decision flips from "abortable" to "never aborted" at exactly that point, for the
+   * SAME packet id every one of submit()'s own fenced calls would pass. */
+  try {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+
+    registerManagedRun({ packetId: 'packet-prepare', userId: 'user-1', phase: 'filling' });
+    registerManagedRun({ packetId: 'packet-submit', userId: 'user-1', phase: 'submitting' });
+
+    // Prepare-path: boundary not yet reached, so a SIGTERM must still be able to unstick this call -
+    // this is the discovery/option-probe/fill run inside prepareManaged.
+    assert.equal(
+      managedProviderCallSignalFor('packet-prepare'),
+      getManagedRunShutdownSignal(),
+      'a prepare-path call must still carry the shutdown signal',
+    );
+
+    // The exact write processSubmissionApplication makes before it ever calls submit() (or, for an
+    // already-claimed row, before its own recovery call) - see submissionRunner.ts's own
+    // "CONSERVATIVELY MARKED HERE" comment just above that call.
+    markManagedRunBoundaryReached('packet-submit');
+
+    // Submit-path: the final application-submit press, and both security-code verification
+    // continuations, all resolve packetId to 'packet-submit' - so all three must now get `undefined`,
+    // never the shutdown signal, however many times this is asked.
+    assert.equal(
+      managedProviderCallSignalFor('packet-submit'),
+      undefined,
+      'a call at or past the employer boundary must never carry the shutdown signal',
+    );
+    assert.equal(managedProviderCallSignalFor('packet-submit'), undefined, 'and this must hold on every call, not just the first');
+
+    // The prepare-path packet is unaffected by another packet's boundary being marked - this is a
+    // per-packet decision, not a process-wide one once any run reaches the boundary.
+    assert.equal(managedProviderCallSignalFor('packet-prepare'), getManagedRunShutdownSignal());
+
+    // Even after the process-wide shutdown signal actually fires (the real SIGTERM path), the
+    // submit-path packet still gets no signal at all - it was never wired in, so there is nothing
+    // for the abort to reach.
+    triggerManagedRunShutdown();
+    assert.equal(managedProviderCallSignalFor('packet-submit'), undefined);
+    assert.equal(getManagedRunShutdownSignal().aborted, true, 'the prepare-path signal itself did fire');
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
 });
 
 test('the dashboard poll repair reader tries the ledger key and never queues behind a provider call', async () => {

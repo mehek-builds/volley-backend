@@ -993,3 +993,145 @@ test('releaseManagedRunsBeforeExit stops accepting new work and aborts the shutd
     resetManagedRunShutdownSignalForTests();
   }
 });
+
+test('releaseManagedRunsBeforeExit waits for an in-flight employer-boundary run to reconcile before returning', async () => {
+  /* Item 1's other half: a run that has already reached the employer boundary must never be
+   * released outright (the #912 stalled-submitting arm owns it), but its own in-flight
+   * reconciliation - the promise routes/submissionRunner.ts attaches via
+   * attachManagedRunBoundaryCompletion - must be AWAITED rather than abandoned the instant
+   * process.exit() would otherwise fire. Proven here by registering a run, marking it
+   * boundary-reached, attaching a promise that resolves after a short delay, and checking this
+   * function does not return before that promise settles. */
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    attachManagedRunBoundaryCompletion,
+    markManagedRunBoundaryReached,
+    registerManagedRun,
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunRegistryForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  registerManagedRun({ packetId: 'packet-at-boundary', userId: 'user-1', phase: 'submitting' });
+  markManagedRunBoundaryReached('packet-at-boundary');
+  let reconciled = false;
+  const reconciliation = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      reconciled = true;
+      resolve();
+    }, 30);
+  });
+  attachManagedRunBoundaryCompletion('packet-at-boundary', reconciliation);
+
+  try {
+    await releaseManagedRunsBeforeExit(
+      { info() {}, warn() {}, error() {} },
+      { deadlineMs: 5000 },
+    );
+    assert.equal(reconciled, true, 'the function must not return before the boundary-reached promise settled');
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('releaseManagedRunsBeforeExit leaves a still-in-flight boundary run alone and logs it, once the deadline wins', async () => {
+  /* The other side of the same requirement: if the deadline expires before the boundary-reached
+   * run's own reconciliation settles, this function must NOT write anything for that row (nothing
+   * here ever does - it only awaits) and must say so in a warning log line, rather than silently
+   * exiting over an answer nobody got to record. */
+  const { releaseManagedRunsBeforeExit } = await import('./index');
+  const {
+    attachManagedRunBoundaryCompletion,
+    markManagedRunBoundaryReached,
+    registerManagedRun,
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunRegistryForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  registerManagedRun({ packetId: 'packet-never-reconciles', userId: 'user-1', phase: 'submitting' });
+  markManagedRunBoundaryReached('packet-never-reconciles');
+  attachManagedRunBoundaryCompletion('packet-never-reconciles', new Promise(() => {
+    /* deliberately never settles */
+  }));
+
+  const warnings: Array<{ details: Record<string, unknown>; message: string }> = [];
+  try {
+    const startedAt = Date.now();
+    await releaseManagedRunsBeforeExit(
+      { info() {}, error() {}, warn: (details: Record<string, unknown>, message: string) => { warnings.push({ details, message }); } },
+      { deadlineMs: 50 },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
+    const timeoutWarning = warnings.find((warning) => /still in flight/i.test(warning.message));
+    assert.ok(timeoutWarning, 'a timed-out boundary-reached run must be named in its own warning log line');
+    assert.deepEqual((timeoutWarning!.details as { packetIds?: string[] }).packetIds, ['packet-never-reconciles']);
+  } finally {
+    resetManagedRunRegistryForTests();
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('runManagedRunShutdownSequence closes the Fastify instance in parallel with releasing managed runs', async () => {
+  /* Item 2: a bare process.exit(0) used to cut every other in-flight HTTP request mid-response the
+   * instant the managed-run release finished, because nothing ever called app.close(). Proven here
+   * by building a real app, calling the sequence with a release that resolves immediately, and
+   * checking app.close() actually ran - inject() rejects/throws once Fastify is closed, which is
+   * this test's proof rather than reaching into Fastify's own internals. */
+  const { runManagedRunShutdownSequence } = await import('./index');
+  const { buildApp } = await import('./index');
+  const {
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  const app = await buildApp(HEALTH_TEST_OPTIONS);
+  await app.ready();
+  try {
+    await runManagedRunShutdownSequence(
+      app,
+      { info() {}, warn() {}, error() {} },
+      { deadlineMs: 5000 },
+    );
+    await assert.rejects(
+      () => app.inject({ method: 'GET', url: '/health' }),
+      'the Fastify instance must actually be closed, not merely have had process.exit reached over it',
+    );
+  } finally {
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});
+
+test('runManagedRunShutdownSequence is bounded by its deadline even when app.close() never resolves', async () => {
+  const { runManagedRunShutdownSequence, buildApp } = await import('./index');
+  const {
+    resetManagedRunAcceptanceForTests,
+    resetManagedRunShutdownSignalForTests,
+  } = await import('./lib/managedRunLifecycle');
+
+  const app = await buildApp(HEALTH_TEST_OPTIONS);
+  await app.ready();
+  // A close() that never settles - e.g. a request stuck open past its own timeout - must never make
+  // the whole sequence outlive Railway's SIGKILL.
+  app.close = () => new Promise(() => {
+    /* deliberately never settles */
+  });
+  try {
+    const startedAt = Date.now();
+    await runManagedRunShutdownSequence(
+      app,
+      { info() {}, warn() {}, error() {} },
+      { deadlineMs: 50 },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    assert.ok(elapsedMs < 1000, `expected the race to return near the 50ms deadline, took ${elapsedMs}ms`);
+  } finally {
+    resetManagedRunAcceptanceForTests();
+    resetManagedRunShutdownSignalForTests();
+  }
+});

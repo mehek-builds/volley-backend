@@ -77,7 +77,9 @@ import { encryptionRekeyRoutes } from './routes/encryptionRekey';
 import { isAuthorityRevisionConflictError } from './db/authorityRevisionRetry';
 import {
   createManagedRunAcceptanceGateHook,
+  listInFlightManagedRunBoundaryCompletions,
   listPreBoundaryManagedRuns,
+  RUN_OWNER_ID,
   stopAcceptingNewManagedRuns,
   triggerManagedRunShutdown,
 } from './lib/managedRunLifecycle';
@@ -618,22 +620,33 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Release every pre-boundary managed run this process still owns, bounded so it cannot outlive
- * Railway's own SIGKILL. Exported for its own targeted test; production reaches it only through the
- * signal handlers installed below.
+ * Release every pre-boundary managed run this process still owns, AND wait (within the same
+ * deadline) for any boundary-reached run's own reconciliation to finish - bounded so neither can
+ * outlive Railway's own SIGKILL. Exported for its own targeted test; production reaches it only
+ * through the signal handlers installed below.
  *
  * ORDER MATTERS. Accepting new work is stopped, and the shared stratus abort signal fired, BEFORE
  * anything is read from the registry - a run that started registering in the window between "we
  * decided to shut down" and "we finished releasing what we already had" would be exactly as
  * stranded as the ones this exists to rescue, and an aborted fetch lets that run's own promise
- * start unwinding concurrently with the release writes below rather than after them.
+ * start unwinding concurrently with the release writes below rather than after them. Firing the
+ * signal here is now safe for a boundary-reached run too: routes/submissionRunner.ts's
+ * managedProviderCallSignalFor never attaches it to a call at or past the employer boundary in the
+ * first place, so triggerManagedRunShutdown() cannot abort the one fetch this function is about to
+ * wait on below.
  *
- * THE WRITES RUN IN PARALLEL (Promise.allSettled over every registered run at once, not a loop
- * awaiting one at a time), raced against the deadline above rather than chained after it, so a
- * slow or contended release for one packet can never crowd out the others' chance to finish inside
- * the grace window. Anything the race leaves unsettled when the deadline wins is abandoned exactly
- * as if this handler had never run for it: still 'preparing'/'filling'/'submitting', still carrying
- * this process's own now-stale run_owner, and now the boot sweep's problem on the next start.
+ * TWO WORKLISTS, ONE RACE. listPreBoundaryManagedRuns() names the runs this function may safely
+ * finish for - release() writes an honest terminal state for each. listInFlightManagedRunBoundaryCompletions()
+ * names runs this function must NEVER write to - the #912 stalled-submitting arm, and this row's own
+ * still-running promise, own that decision - so the only thing done for those is AWAIT the promise
+ * routes/submissionRunner.ts already attached, so the reconciliation gets a chance to finish inside
+ * the grace window instead of being truncated by process.exit(). Both lists are raced together
+ * against the single deadline below (Promise.allSettled, not a loop awaiting one at a time), so a
+ * slow or contended entry in either list can never crowd out the others' chance to finish. Anything
+ * the race leaves unsettled when the deadline wins is left exactly as this handler found it: a
+ * pre-boundary run stays 'preparing'/'filling' with a stale run_owner, now the boot sweep's problem;
+ * a boundary-reached run stays whatever the #912 stalled-submitting arm already owns, and this
+ * function says so in a log line rather than guessing at it.
  */
 export async function releaseManagedRunsBeforeExit(
   log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>,
@@ -650,19 +663,79 @@ export async function releaseManagedRunsBeforeExit(
   stopAcceptingNewManagedRuns();
   triggerManagedRunShutdown();
   const runs = listPreBoundaryManagedRuns();
-  if (runs.length === 0) return;
-  log.info({ count: runs.length }, 'Releasing in-flight managed runs before shutdown');
-  const releases = Promise.allSettled(runs.map((run) => release({
+  const boundaryWaits = listInFlightManagedRunBoundaryCompletions();
+  if (runs.length === 0 && boundaryWaits.length === 0) return;
+  if (runs.length > 0) {
+    log.info({ count: runs.length }, 'Releasing in-flight managed runs before shutdown');
+  }
+  if (boundaryWaits.length > 0) {
+    log.info(
+      { count: boundaryWaits.length, packetIds: boundaryWaits.map((wait) => wait.packetId) },
+      'Waiting for an in-flight employer-boundary run to reconcile before shutdown',
+    );
+  }
+  const releases = runs.map((run) => release({
     packetId: run.packetId,
     userId: run.userId,
+    expectedRunOwner: RUN_OWNER_ID,
     log,
   }).catch((err) => {
     log.error({ err, applicationId: run.packetId }, 'Failed to release a managed run during shutdown');
-  })));
-  await Promise.race([releases, delay(deadlineMs)]);
+  }));
+  const boundaryCompletions = boundaryWaits.map((wait) => wait.promise.catch((err) => {
+    log.warn(
+      { err, applicationId: wait.packetId },
+      'An in-flight employer-boundary run did not settle cleanly before shutdown',
+    );
+  }));
+  const settled = Promise.allSettled([...releases, ...boundaryCompletions]);
+  const timedOut = await Promise.race([
+    settled.then(() => false),
+    delay(deadlineMs).then(() => true),
+  ]);
+  if (timedOut && boundaryWaits.length > 0) {
+    log.warn(
+      { count: boundaryWaits.length, packetIds: boundaryWaits.map((wait) => wait.packetId) },
+      'Shutdown deadline reached with an employer-boundary run still in flight; leaving its row '
+      + 'for the stalled-submitting arm to resolve rather than exiting over the reconciliation',
+    );
+  }
 }
 
 let shuttingDown = false;
+
+/**
+ * The full shutdown sequence, minus the final process.exit() - split out from
+ * installManagedRunShutdownHandlers so it can be exercised by its own targeted test without forking
+ * a process. Runs the managed-run release/wait above IN PARALLEL with closing the Fastify instance,
+ * both bounded by the same deadline, and returns once both have settled or the deadline wins -
+ * whichever comes first.
+ *
+ * WHY CLOSE THE SERVER HERE AT ALL. Before this, a bare process.exit(0) cut every other in-flight
+ * HTTP request mid-response the instant the managed-run release finished, however unrelated that
+ * request was to a managed run. app.close() asks Fastify to stop accepting new connections and wait
+ * for requests already being served to finish, so an ordinary in-flight request gets to complete
+ * instead of being severed. It runs concurrently with (not after) the managed-run work above, so
+ * neither one's own bounded wait pads the other's.
+ */
+export async function runManagedRunShutdownSequence(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>,
+  options: {
+    release?: typeof releaseOrphanedManagedRun;
+    deadlineMs?: number;
+  } = {},
+): Promise<void> {
+  const deadlineMs = options.deadlineMs ?? MANAGED_RUN_SHUTDOWN_DEADLINE_MS;
+  const releasePromise = releaseManagedRunsBeforeExit(log, options);
+  const closePromise = app.close().catch((err) => {
+    log.error({ err }, 'Error closing the HTTP server during shutdown');
+  });
+  await Promise.race([
+    Promise.all([releasePromise, closePromise]),
+    delay(deadlineMs),
+  ]);
+}
 
 /**
  * Installed only here, in start() - the Railway long-lived-process path - and never in buildApp(),
@@ -677,8 +750,8 @@ function installManagedRunShutdownHandlers(app: Awaited<ReturnType<typeof buildA
     if (shuttingDown) return;
     shuttingDown = true;
     app.log.info({ signal }, 'Received shutdown signal; releasing in-flight managed runs before exit');
-    void releaseManagedRunsBeforeExit(app.log)
-      .catch((err) => app.log.error(err, 'Error releasing managed runs during shutdown'))
+    void runManagedRunShutdownSequence(app, app.log)
+      .catch((err) => app.log.error(err, 'Error during managed run shutdown sequence'))
       .finally(() => process.exit(0));
   };
   process.on('SIGTERM', () => handle('SIGTERM'));

@@ -116,7 +116,7 @@ export type ManagedRunRestartReleaseOutcome =
   | { outcome: 'released' }
   | {
     outcome: 'left_in_place';
-    reason: 'row_missing' | 'lock_contended' | 'not_admissible' | 'cas_lost';
+    reason: 'row_missing' | 'lock_contended' | 'not_admissible' | 'cas_lost' | 'owner_mismatch';
   };
 
 /**
@@ -134,14 +134,28 @@ export type ManagedRunRestartReleaseOutcome =
  * the run's own still-executing promise, most plausibly - always wins if it gets there first.
  *
  * BEST EFFORT AND SAFE TO SKIP. Every failure branch below leaves the row exactly as it was: a
- * contended lock, a row that moved out of preparing/filling since it was registered, or a lost CAS
- * all mean some other actor already has an opinion about this row, and the existing gates (the
- * three-hour stall bound, chief among them) still apply to it afterwards exactly as if this
- * function had never been called.
+ * contended lock, a row that moved out of preparing/filling since it was registered, an owner that
+ * no longer matches what the caller last saw, or a lost CAS all mean some other actor already has
+ * an opinion about this row, and the existing gates (the three-hour stall bound, chief among them)
+ * still apply to it afterwards exactly as if this function had never been called.
  */
 export async function releaseOrphanedManagedRun(input: {
   packetId: string;
   userId: string;
+  /**
+   * Re-confirmed against the row's stored `run_owner` INSIDE the FOR UPDATE read below, not merely
+   * trusted from whatever the caller observed before taking the lock. Both callers can otherwise be
+   * racing a second write to the same row between their own read and this transaction's lock: the
+   * SIGTERM handler's registry can (see managedRunLifecycle.ts's own doc on registerManagedRun/
+   * unregisterManagedRun) briefly disagree with the database if two invocations for the same packet
+   * overlapped, and the boot sweep's own candidate list is a plain SELECT taken before this
+   * transaction even starts. Passing the value each caller actually saw and re-checking it here
+   * under the lock closes that window: a row whose owner already changed - claimed anew, or already
+   * released by someone else - is left alone rather than released out from under whoever holds it
+   * now. Omitted entirely by a caller with no owner to compare (there are none left in this file),
+   * which is why it stays optional rather than required.
+   */
+  expectedRunOwner?: string;
   log: ManagedRunRestartReleaseLog;
 }): Promise<ManagedRunRestartReleaseOutcome> {
   const result = await db.transaction(async (tx) => {
@@ -154,6 +168,9 @@ export async function releaseOrphanedManagedRun(input: {
     )).limit(1).for('update');
     const current = locked ? readApplicationReview(locked.spec) : null;
     if (!locked || !current) return { outcome: 'left_in_place', reason: 'row_missing' } as const;
+    if (input.expectedRunOwner !== undefined && current.run_owner !== input.expectedRunOwner) {
+      return { outcome: 'left_in_place', reason: 'owner_mismatch' } as const;
+    }
     const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
     const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
     const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);

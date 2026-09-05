@@ -7,9 +7,12 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
 import {
+  attachManagedRunBoundaryCompletion,
   computeRunOwnerId,
   createManagedRunAcceptanceGateHook,
   getManagedRunShutdownSignal,
+  isManagedRunBoundaryReached,
+  listInFlightManagedRunBoundaryCompletions,
   listPreBoundaryManagedRuns,
   managedRunAcceptanceDecision,
   managedRunRegistrySize,
@@ -65,16 +68,32 @@ describe('the registry', () => {
   });
 
   test('register then unregister leaves no trace', () => {
-    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    const token = registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
     assert.equal(managedRunRegistrySize(), 1);
-    unregisterManagedRun('packet-1');
+    unregisterManagedRun('packet-1', token);
     assert.equal(managedRunRegistrySize(), 0);
     assert.deepEqual(listPreBoundaryManagedRuns(), []);
   });
 
   test('unregistering a packet that was never registered is a harmless no-op', () => {
-    assert.doesNotThrow(() => unregisterManagedRun('never-registered'));
+    assert.doesNotThrow(() => unregisterManagedRun('never-registered', 'some-token'));
     assert.equal(managedRunRegistrySize(), 0);
+  });
+
+  test('unregistering with a stale token - a second registration for the same packet already overwrote it - is a harmless no-op', () => {
+    /* THE RACE ITEM 3 CLOSES. Two concurrent invocations for one packet used to clobber each other:
+     * whichever unregistered FIRST deleted by packetId alone, regardless of which registration it
+     * actually belonged to, so the SURVIVING run's own later unregister found nothing to do to
+     * (already deleted) - or worse, the second registration itself could be deleted out from under
+     * a run that was still executing. Requiring the caller's own token to still match closes that:
+     * a stale token can never delete a live, later registration. */
+    const staleToken = registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    const liveToken = registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    assert.notEqual(staleToken, liveToken, 'two registrations for the same packet must never share a token');
+    unregisterManagedRun('packet-1', staleToken);
+    assert.equal(managedRunRegistrySize(), 1, 'the live registration must survive an unregister carrying a stale token');
+    unregisterManagedRun('packet-1', liveToken);
+    assert.equal(managedRunRegistrySize(), 0, 'the live registration is removable by its own token');
   });
 
   test('re-registering the same packet replaces the earlier entry rather than duplicating it', () => {
@@ -119,6 +138,44 @@ describe('the registry', () => {
     markManagedRunBoundaryReached('packet-3');
     const listed = listPreBoundaryManagedRuns().map((entry) => entry.packetId).sort();
     assert.deepEqual(listed, ['packet-1', 'packet-2']);
+  });
+
+  test('isManagedRunBoundaryReached is false for a fresh registration, true once marked, and false for an absent packet', () => {
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'submitting' });
+    assert.equal(isManagedRunBoundaryReached('packet-1'), false);
+    markManagedRunBoundaryReached('packet-1');
+    assert.equal(isManagedRunBoundaryReached('packet-1'), true);
+    assert.equal(isManagedRunBoundaryReached('never-registered'), false,
+      'an absent registration defaults to "not yet at the boundary", never the reverse');
+  });
+
+  test('attachManagedRunBoundaryCompletion is a no-op before the boundary is marked reached', () => {
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'filling' });
+    attachManagedRunBoundaryCompletion('packet-1', Promise.resolve('never should be tracked'));
+    assert.deepEqual(listInFlightManagedRunBoundaryCompletions(), [],
+      'nothing before the employer boundary is ever worth blocking a shutdown for');
+  });
+
+  test('attachManagedRunBoundaryCompletion is a no-op for a packet the registry has no entry for', () => {
+    assert.doesNotThrow(() => attachManagedRunBoundaryCompletion('never-registered', Promise.resolve()));
+    assert.deepEqual(listInFlightManagedRunBoundaryCompletions(), []);
+  });
+
+  test('listInFlightManagedRunBoundaryCompletions surfaces exactly the boundary-reached runs with an attached completion', async () => {
+    registerManagedRun({ packetId: 'packet-1', userId: 'user-1', phase: 'preparing' });
+    registerManagedRun({ packetId: 'packet-2', userId: 'user-2', phase: 'submitting' });
+    registerManagedRun({ packetId: 'packet-3', userId: 'user-3', phase: 'submitting' });
+    markManagedRunBoundaryReached('packet-2');
+    markManagedRunBoundaryReached('packet-3');
+    // packet-2 is boundary-reached but has no attached completion yet (e.g. submit() has been
+    // marked but its own promise has not been created) - it must not appear.
+    const completion = Promise.resolve('reconciled');
+    attachManagedRunBoundaryCompletion('packet-3', completion);
+    const waits = listInFlightManagedRunBoundaryCompletions();
+    assert.equal(waits.length, 1);
+    assert.equal(waits[0]!.packetId, 'packet-3');
+    assert.equal(waits[0]!.userId, 'user-3');
+    assert.equal(await waits[0]!.promise, 'reconciled');
   });
 });
 

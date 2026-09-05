@@ -61,6 +61,11 @@ export const MANAGED_RUN_BOOT_SWEEP_MAX_CANDIDATES = 200;
 export interface ManagedRunBootSweepCandidate {
   id: string;
   user_id: string;
+  /** The stored run_owner THIS SELECT observed - carried forward so releaseOrphanedManagedRun can
+   * re-confirm it under its own FOR UPDATE lock rather than trusting this plain, unlocked read.
+   * See that function's own doc on expectedRunOwner for the race this closes: a row can be claimed
+   * anew, or already released by another actor, in the window between this query and that lock. */
+  run_owner: string;
 }
 
 /**
@@ -83,6 +88,7 @@ export async function findOrphanedManagedRunCandidates(
   const rows = await db.select({
     id: generated_resumes.id,
     user_id: generated_resumes.user_id,
+    run_owner: sql<string>`${generated_resumes.spec}->'_review'->>'run_owner'`,
   }).from(generated_resumes).where(and(
     sql`${generated_resumes.spec}->'_review'->>'status' in ('preparing', 'filling', 'submitting')`,
     sql`${generated_resumes.spec}->'_review'->>'run_owner' is not null`,
@@ -111,6 +117,7 @@ export async function runManagedRunBootSweep(
     const result = await releaseOrphanedManagedRun({
       packetId: candidate.id,
       userId: candidate.user_id,
+      expectedRunOwner: candidate.run_owner,
       log,
     });
     if (result.outcome === 'released') released += 1;
