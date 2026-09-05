@@ -388,3 +388,216 @@ test('scoping the resolution to GPA does not cost the GPA fix', () => {
   assert.deepEqual(reaching(packet, BAND), [], 'and must still never reach the band');
   assert.deepEqual(reaching(packet, SCALE), [], 'nor the scale menu');
 });
+
+/* THE OTHER ONE-WORD ANCHOR THE ORIGINAL AUDIT NAMED, GIVEN THE SAME TREATMENT HERE.
+ *
+ * PR #920's own audit named 'Discipline' as carrying the identical hazard, then left it uncovered:
+ * its call site replicated the suppression gate inline (packetControlFailed('discipline--0') plus
+ * managedSpeculativeLabelFillSuppressed, by hand) instead of routing through
+ * managedFillByLabelUnlessHandled, so it never reached managedAnchorResolution at all. A Greenhouse
+ * form can render the fixed education row's taxonomy control - discipline--0, whose full label some
+ * employers customise to something like "Discipline/Major" - beside a SEPARATE custom question such
+ * as "Field of study or discipline", a genuine write-in for what the taxonomy does not cover. Both
+ * labels contain the bare word "Discipline", the anchor fallback emits that same one word, and the
+ * runner's exact-then-loose-then-.first() resolution decided which control got the value with no
+ * more evidence than DOM order - byte-identical on main and on #920, confirmed by execution.
+ *
+ * The fix is the same function GPA already uses, not a new one: 'Discipline' now passes
+ * resolveAmbiguousAnchor true. It also passes one argument GPA never needed, selfControlId, and the
+ * reason is specific to this control. discipline--0 already gets its own combobox-aware
+ * fill+Enter+select sequence from pushGreenhouseEducationComboboxActions, unconditionally, a few
+ * lines above the anchor fallback. A discipline--0 candidate whose OWN probe came back 'text' with no
+ * options - the exact shape questionMetadata.ts documents for a react-select caught before its menu
+ * opens - is, at the evidence managedAnchorCandidateRefusesValue can see, indistinguishable from a
+ * genuinely open write-in. Paired against a second, separately-refused control, that shape would
+ * otherwise make discipline--0 the sole holder and bind a bare `fill` there: no Enter, no option
+ * click, on top of the sequence that already filled it, reopening a closed menu with nothing left in
+ * the build to close it again. selfControlId turns that specific bind into a stand-aside instead:
+ * discipline--0 keeps exactly the fill it already had, and only a genuinely different control can
+ * ever be bound to from this anchor. The third test below is that shape, constructed rather than
+ * merely asserted safe.
+ *
+ * THE TRUNCATED-READ-LIST HAZARD THAT SCOPED THE FLAG OUT OF END DATE YEAR DOES NOT TRAVEL HERE.
+ * That hazard is specifically a POPULATED option list that is not the whole list - end-year--0 is
+ * read by a path with no window cap, so a short real list there is indistinguishable from a
+ * truncated one. discipline--0 is read exclusively through pushManagedReactSelectOptionProbeActions's
+ * open/extract/close probe (line ~1410), documented above it (line ~1457) as measured stopping at
+ * exactly MANAGED_OPTION_LISTBOX_RENDER_CAP rows on the live Anduril posting, ending on "European
+ * Studies" - and parsedManagedOptionLines (line ~1486) discards a read landing on exactly that count
+ * as 'windowed' before managedResultFieldOptions ever writes it to fieldOptions. So discipline--0 can
+ * only ever reach this resolution as its true, complete list, or as no list at all; never as a
+ * partial one a membership check could be fooled by. A discipline--0 read with no options - unprobed
+ * or a discarded window, indistinguishable here and treated alike - still refuses on
+ * measuredClosedListShape alone, the same unconditional-on-value refusal an unread GPA band gets,
+ * and that path never depended on what the option list actually contained.
+ */
+const FIELD_OF_STUDY_LABEL = 'Field of study or discipline';
+const DISCIPLINE_COMBO_LABEL = 'Discipline/Major';
+
+const DISCIPLINE_COMBO = { selector: '#discipline--0', label: DISCIPLINE_COMBO_LABEL };
+const FIELD_OF_STUDY = { selector: '#question_77770001', label: FIELD_OF_STUDY_LABEL };
+
+const DISCIPLINE_COMBO_QUESTION = {
+  question: DISCIPLINE_COMBO_LABEL,
+  answer: '',
+  portalSelector: DISCIPLINE_COMBO.selector,
+  portalInputType: 'combobox',
+};
+
+const FIELD_OF_STUDY_QUESTION = {
+  question: FIELD_OF_STUDY_LABEL,
+  answer: '',
+  portalSelector: FIELD_OF_STUDY.selector,
+  portalInputType: 'text',
+};
+
+function disciplinePacket(overrides: Record<string, unknown> = {}): SubmissionPacket {
+  return hrtPacket({
+    major: 'Computer Science & Business Administration, Finance Emphasis',
+    ...overrides,
+  });
+}
+
+// Isolated to this call site's own label, 'education_discipline_label', because the id-scoped
+// combobox builder a few lines above ALSO emits "Computer Science" - at #discipline--0, under
+// 'education_discipline_combo:0' - and a value-only filter (as the GPA helpers above use) would
+// conflate the two. This is the one action set the ambiguous-anchor fix controls.
+const disciplineFallback = (packet: SubmissionPacket) =>
+  build(packet).filter((action) => action.label === 'education_discipline_label');
+const reachingDiscipline = (packet: SubmissionPacket, control: { selector: string; label: string }) =>
+  disciplineFallback(packet).filter((action) => actionCouldReach(action, control));
+
+test('the discipline value is left in the write-in beside the fixed taxonomy control, never the control itself', () => {
+  // discipline--0 unprobed: no fieldOptions entry, closed shape from portalInputType 'combobox'.
+  // Refused on measuredClosedListShape alone, the same path an unread GPA band takes.
+  const packet = disciplinePacket({
+    questions: [BAND_QUESTION, SCALE_QUESTION, WRITE_IN_QUESTION, DISCIPLINE_COMBO_QUESTION, FIELD_OF_STUDY_QUESTION],
+  });
+  assert.deepEqual(
+    reachingDiscipline(packet, FIELD_OF_STUDY).map((action) => ({ type: action.type, selector: action.selector })),
+    [{ type: 'fill', selector: FIELD_OF_STUDY.selector }],
+    'the value belongs in the write-in, addressed by the id discovery read off that control',
+  );
+  assert.deepEqual(
+    reachingDiscipline(packet, DISCIPLINE_COMBO),
+    [],
+    'and must never additionally land on the taxonomy control through this ambiguous fallback',
+  );
+  // discipline--0 still gets its own, correct, unconditional fill regardless: the combobox builder
+  // a few lines above the anchor fallback owns it and never consulted this resolution at all.
+  const ownFill = build(packet).filter((action) => action.label === 'education_discipline_combo:0' && action.type === 'fill');
+  assert.deepEqual(
+    ownFill.map((action) => ({ selector: action.selector, value: action.value })),
+    [{ selector: DISCIPLINE_COMBO.selector, value: 'Computer Science' }],
+    'the taxonomy control keeps its own combobox-aware fill throughout',
+  );
+  // And carrying a discipline candidate on the same packet must not cost the GPA fix either.
+  assert.deepEqual(
+    reaching(packet, WRITE_IN).map((action) => ({ type: action.type, selector: action.selector })),
+    [{ type: 'fill', selector: WRITE_IN.selector }],
+    'the GPA fix is unaffected by this packet also carrying a discipline candidate',
+  );
+});
+
+test('the probe-failure case: a candidate read as portalInputType text with no options must not become the holder', () => {
+  /* discipline--0's OWN probe came back exactly the shape questionMetadata.ts documents for a
+   * react-select caught before its menu opens: portalInputType 'text', no options. Paired only
+   * against the genuine write-in - itself 'text' with no options, and never excludable - neither
+   * candidate is provably wrong, so this stands aside entirely rather than guess between two
+   * controls it cannot tell apart. */
+  const packet = disciplinePacket({
+    questions: [
+      BAND_QUESTION, SCALE_QUESTION, WRITE_IN_QUESTION,
+      { ...DISCIPLINE_COMBO_QUESTION, portalInputType: 'text' },
+      FIELD_OF_STUDY_QUESTION,
+    ],
+  });
+  /* Not asserted as reachingDiscipline(...) === [] against either control: a plain fillByLabelText
+   * with text 'Discipline' genuinely COULD reach either label by the runner's own loose match (both
+   * contain the word), and that is the pre-existing ambiguity this fix leaves standing here, not a
+   * new one. What must hold is that discipline--0 receives no BOUND (id-scoped) duplicate. */
+  assert.deepEqual(
+    disciplineFallback(packet).filter((action) => action.type === 'fill'),
+    [],
+    'a misprobed taxonomy control must not become the holder of a bound fill',
+  );
+  assert.deepEqual(
+    disciplineFallback(packet).map((action) => ({ type: action.type, text: action.text, value: action.value })),
+    [{ type: 'fillByLabelText', text: 'Discipline', value: 'Computer Science' }],
+    'the original ambiguous label fill goes out exactly as it did before this fix existed',
+  );
+});
+
+test('a misprobed taxonomy control is not bound to even when a genuinely different control is refused beside it', () => {
+  /* THE SHAPE THAT PROVES selfControlId IS DOING WORK, NOT JUST DOCUMENTING SAFETY THAT ALREADY
+   * EXISTED. Pair discipline--0's misprobed 'text'-with-no-options shape against a control that IS
+   * separately, provably refused - a real closed list that does not carry "Computer Science" - and
+   * holders narrows to exactly one candidate: discipline--0 itself. Without selfControlId,
+   * managedAnchorResolution cannot tell that shape apart from a genuine write-in and binds a bare
+   * `fill` straight at #discipline--0 - no Enter, no option click - on top of the sequence that
+   * already filled it two actions earlier, reopening a closed react-select with nothing left in the
+   * build to close it again. Measured directly: reverting the selfControlId argument at the call
+   * site turns the first assertion below from [] into a second `fill` at #discipline--0. */
+  const otherLabel = 'Which department is this discipline within?';
+  const other = { selector: '#question_77770002', label: otherLabel };
+  const packet = disciplinePacket({
+    fieldOptions: {
+      question_68000287: BAND_OPTIONS,
+      question_68000288: SCALE_OPTIONS,
+      question_77770002: ['Marketing', 'Sales', 'Operations'],
+    },
+    questions: [
+      BAND_QUESTION, SCALE_QUESTION, WRITE_IN_QUESTION,
+      { ...DISCIPLINE_COMBO_QUESTION, portalInputType: 'text' },
+      { question: otherLabel, answer: '', portalSelector: other.selector, portalInputType: 'combobox' },
+    ],
+  });
+  // The dangerous shape: every OTHER anchor-matching candidate is refused, so without selfControlId
+  // discipline--0 would be the sole holder and receive a bound `fill` straight from this fallback.
+  assert.deepEqual(
+    disciplineFallback(packet).filter((action) => action.type === 'fill'),
+    [],
+    'discipline--0 must not receive a second, bare-fill bind on top of its own combobox sequence',
+  );
+  assert.deepEqual(
+    build(packet).filter((action) => action.selector === DISCIPLINE_COMBO.selector && action.type === 'fill'),
+    build(packet).filter((action) => action.label === 'education_discipline_combo:0' && action.type === 'fill'),
+    'every fill this build sends to #discipline--0 comes from its own combobox builder, none from the anchor fallback',
+  );
+  // It stands aside to the pre-existing ambiguous fill rather than going silent, exactly like the
+  // probe-failure case above: no worse than before this fix, not newly silent either.
+  assert.deepEqual(
+    disciplineFallback(packet).map((action) => ({ type: action.type, text: action.text, value: action.value })),
+    [{ type: 'fillByLabelText', text: 'Discipline', value: 'Computer Science' }],
+    'the original ambiguous label fill still goes out',
+  );
+});
+
+test('a single discipline candidate keeps the behaviour it already had', () => {
+  // The regression guard for every ordinary Greenhouse form: no competing custom question, nothing
+  // ambiguous, the plain label fill goes out exactly as it did before this fix existed.
+  const packet = disciplinePacket({ questions: [BAND_QUESTION, SCALE_QUESTION, WRITE_IN_QUESTION] });
+  assert.deepEqual(
+    disciplineFallback(packet).map((action) => ({ type: action.type, text: action.text, value: action.value })),
+    [{ type: 'fillByLabelText', text: 'Discipline', value: 'Computer Science' }],
+    "a single named control is the runner's to resolve, as it always was",
+  );
+});
+
+test('a discipline control the form spells exactly is left on the path that already resolves it', () => {
+  // Most Greenhouse boards render the fixed control's bare label, "Discipline", not "Discipline/
+  // Major". The runner's exact match already reaches that deterministically before the loose pass
+  // ever runs, so this fix stands aside exactly as the equivalent GPA test does above.
+  const packet = disciplinePacket({
+    questions: [
+      BAND_QUESTION, SCALE_QUESTION, WRITE_IN_QUESTION,
+      { ...DISCIPLINE_COMBO_QUESTION, question: 'Discipline' },
+      FIELD_OF_STUDY_QUESTION,
+    ],
+  });
+  assert.deepEqual(
+    disciplineFallback(packet).map((action) => ({ type: action.type, text: action.text, value: action.value })),
+    [{ type: 'fillByLabelText', text: 'Discipline', value: 'Computer Science' }],
+    'an unambiguous exact anchor keeps the label fill it has always had',
+  );
+});

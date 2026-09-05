@@ -2759,6 +2759,22 @@ function managedAnchorResolution(
   packet: SubmissionPacket,
   text: string,
   value: string | undefined,
+  /* THE ONE CONTROL THIS RESOLUTION MAY NEVER BIND TO, EVEN AS THE LAST CANDIDATE STANDING.
+   *
+   * discipline--0 is one of GREENHOUSE_OPTION_PROBE_IDS: a KNOWN Greenhouse react-select, already
+   * given its own combobox-aware fill+Enter+select sequence by pushGreenhouseEducationComboboxActions
+   * earlier in the same build, regardless of what THIS packet's discovery managed to read for it.
+   * measuredClosedListShape only sees what a given run's probe reported, and questionMetadata.ts
+   * documents the probe reporting 'text' with no options for a react-select it caught before the
+   * menu opened - indistinguishable, at the evidence this function sees, from a genuinely open write-
+   * in. Measured by construction here: pair that misprobed shape against a SECOND, distinct control
+   * that IS provably refused (a real closed list that does not carry the value), and holders narrows
+   * to exactly the misprobed one, which would otherwise bind a bare `fill` at #discipline--0 - no
+   * Enter, no option click - right on top of the sequence that already filled it correctly, reopening
+   * a closed menu and abandoning it there. selfControlId exists so that exact shape refuses to bind
+   * regardless of how the evidence reads, and stands aside to the label fill instead - the same
+   * outcome discipline--0 already had before this file ever routed through this function. */
+  selfControlId?: string,
 ): ManagedAnchorResolution | undefined {
   const wanted = value?.trim();
   if (!wanted) return undefined;
@@ -2791,6 +2807,9 @@ function managedAnchorResolution(
   // A control with no durable handle cannot be addressed precisely, and addressing it by the same
   // ambiguous label is the defect this whole function exists to end.
   if (!selector) return { kind: 'refuse' };
+  // Stand aside rather than refuse: this is exactly the pre-existing label fill's own target, so
+  // falling through to it changes nothing for the one control this call was already reaching.
+  if (selfControlId && managedOptionInventoryKeyFromSelector(selector) === selfControlId) return undefined;
   return { kind: 'bind', selector };
 }
 
@@ -2820,8 +2839,13 @@ function managedFillByLabelUnlessHandled(
    * reintroduces the regression above; the fixture that catches it is the two-row education section
    * with row 0 as a combobox, in ambiguousLabelAnchor.test.ts. */
   resolveAmbiguousAnchor = false,
+  // Forwarded to managedAnchorResolution's own selfControlId: see that function's doc comment. Every
+  // other caller leaves this undefined, which is a no-op ahead of the id comparison there.
+  selfControlId?: string,
 ) {
-  const resolution = resolveAmbiguousAnchor ? managedAnchorResolution(packet, text, value) : undefined;
+  const resolution = resolveAmbiguousAnchor
+    ? managedAnchorResolution(packet, text, value, selfControlId)
+    : undefined;
   if (resolution?.kind === 'refuse') return;
   /* The id-scoped fill deliberately runs ahead of managedSpeculativeLabelFillSuppressed, whose own
    * doc comment scopes it to LABEL-resolved fills. That guard stands the ladder down because a
@@ -7968,11 +7992,48 @@ function pushFixedFieldActions(
       // (fillByLabelText resolves the label's container to its one input), so handing it the stored
       // sentence leaves unmatched search text sitting in a control that was about to be filled
       // correctly.
+      /* THE OTHER ONE-WORD ANCHOR PR #920's AUDIT NAMED, NOW GIVEN THE SAME RESOLUTION.
+       *
+       * 'Discipline' is exactly as bare as 'GPA' was, and Greenhouse forms measured carrying a
+       * SEPARATE "Field of study or discipline" write-in beside the fixed taxonomy control repeat
+       * the identical shape: two controls share the word, DOM order decides which one the runner's
+       * `.first()` lands on, and nothing before this recorded that a choice had even been made.
+       *
+       * THE TRUNCATED-READ-LIST HAZARD THAT SCOPED THE FLAG OUT OF THE EDUCATION-YEAR ROWS DOES NOT
+       * REACH HERE. That hazard is specifically "a populated option list that is not the whole
+       * list", and discipline--0's list cannot arrive at managedAnchorCandidateRefusesValue in that
+       * shape. It is read exclusively through pushManagedReactSelectOptionProbeActions's open/
+       * extract/close probe, and parsedManagedOptionLines discards a read that lands on exactly
+       * MANAGED_OPTION_LISTBOX_RENDER_CAP rows as 'windowed' before managedResultFieldOptions ever
+       * writes it to fieldOptions - measured on the live Anduril posting, the Discipline menu stops
+       * at exactly 100 rows ending on "European Studies". So this control can only ever reach the
+       * resolution as its true, complete list or as no list at all, never as a partial one a
+       * membership check could be fooled by. End date year carries no such guarantee: it is not one
+       * of the four probed ids, its narrow per-row list is read by a different path with no window
+       * cap behind it, and a short real list there is indistinguishable from a truncated one - which
+       * is exactly why that anchor stays off this flag.
+       *
+       * A discipline--0 candidate recorded with no options at all - genuinely unprobed, or a
+       * discarded windowed read, the two are indistinguishable here and treated alike - still refuses
+       * on measuredClosedListShape alone, same as an unread GPA band. That refusal never depends on
+       * what the value is, only on the control being closed with nothing vouching for it, so it
+       * carries none of the "not on this window" risk either.
+       *
+       * 'discipline--0' IS PASSED AS selfControlId, deliberately, and this is not the education-year
+       * carve-out repeating itself under a new name. discipline--0 already gets its own combobox-
+       * aware fill+Enter+select sequence a few lines above, from pushGreenhouseEducationComboboxActions,
+       * unconditionally. If THIS control's own probe is the one that came back 'text' with no options -
+       * the exact shape questionMetadata.ts documents for a react-select caught before its menu opens -
+       * and a second, unrelated question on the same anchor is separately, provably refused, holders
+       * narrows to discipline--0 alone and would otherwise bind a bare `fill` there: no Enter, no
+       * option click, right on top of the sequence that already filled it, reopening a closed menu
+       * with nothing to close it again. selfControlId turns that specific bind into a stand-aside, so
+       * discipline--0 keeps exactly the fill it already had and only a genuinely OTHER control - the
+       * write-in this fix exists for - can ever be bound to from here. */
       const disciplineValue = greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet));
-      if (!packetControlFailed(packet, 'discipline--0')
-        && !managedSpeculativeLabelFillSuppressed(packet, 'Discipline', disciplineValue)) {
-        managedFillByLabel(actions, 'Discipline', disciplineValue, 'education_discipline_label');
-      }
+      managedFillByLabelUnlessHandled(
+        actions, packet, 'Discipline', disciplineValue, 'education_discipline_label', true, 'discipline--0',
+      );
     }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
