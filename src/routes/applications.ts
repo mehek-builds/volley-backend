@@ -4402,7 +4402,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         documents: storedDocuments(row),
         handoff_packet_valid,
         /* Why a receipt the row holds still cannot be projected, in the classifier's own words. */
-        ...(parkedRepair.kind === 'still_parked' ? { projection_repair_reasons: parkedRepair.reasons } : {}),
+        ...(parkedRepair.kind === 'still_parked'
+          ? { projection_repair_reasons: parkedRepair.reasons, projection_repair_details: parkedRepair.details }
+          : {}),
         configured: isBrowserbaseConfigured(),
         // Present only when the header actually would change - see resumeContactStaleness. Absent
         // is the common case and must stay cheap to read: no PDF fetch, no packet audit, just the
