@@ -655,14 +655,15 @@ test('the floor and the autonomy rule are enforced against the same set of porta
   // Every pollable board is either fully autonomous - surfaced in onboarding, submitted end-to-end,
   // and counted toward the floor - or an assisted exception: pollable and fully fillable, but its
   // final human-check + send belongs to the applicant, so it is surfaced on the dashboard only
-  // (fill-and-handoff) and is NOT part of the autonomous set the floor is measured on. rippling is
-  // the one assisted exception (Cloudflare-Turnstile-gated on submit; witnessed 2026-08-20).
+  // (fill-and-handoff) and is NOT part of the autonomous set the floor is measured on. rippling
+  // (witnessed 2026-08-20) and workable (witnessed 2026-09-05) are the assisted exceptions, both
+  // Cloudflare-Turnstile-gated on submit.
   //
   // The invariant that must not drift: the autonomous set and the floor's counting set are the same,
   // and no board is BOTH counted by the floor AND unable to be completed. Assisted boards are polled
   // (POLLABLE) but excluded from AUTONOMOUS, so they never inflate the floor with jobs the board
   // cannot autonomously finish.
-  const ASSISTED_EXCEPTIONS = new Set<string>(['rippling']);
+  const ASSISTED_EXCEPTIONS = new Set<string>(['rippling', 'workable']);
   for (const board of POLLABLE_JOB_BOARDS) {
     if (ASSISTED_EXCEPTIONS.has(board)) {
       assert.equal(portalCanAutoSubmit(board), false,

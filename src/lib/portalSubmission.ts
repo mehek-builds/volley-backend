@@ -172,7 +172,7 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // compile time and not only at runtime. That is what lets the jobs board's own union be checked
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
-type CaptchaGatedFamily = 'jazzhr' | 'bamboohr' | 'comeet' | 'rippling';
+type CaptchaGatedFamily = 'jazzhr' | 'bamboohr' | 'comeet' | 'rippling' | 'workable';
 type ConsentGatedFamily = 'teamtailor';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
@@ -192,8 +192,22 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // confirmation). Litos reaches and fills the Rippling form fully, so it fills-and-hands-off the human
 // check + send, exactly as it does for the reCAPTCHA boards below. Standing rule: Litos never attempts
 // the challenge. Re-promoting rippling to AUTONOMOUS requires a live witness that the gate is gone.
+// Workable joins it for the same measured reason, 2026-09-05, on the live TWG Global posting
+// (apply.workable.com/twgai/j/772CD136FF/apply). Its application-form chunk
+// (shared.applicationForm.*.chunk.js) injects https://challenges.cloudflare.com/turnstile/v0/api.js
+// and its form onSubmit does, in order: toggleSubmitting(true) -> await executeTurnstile() (a widget
+// rendered with appearance "interaction-only", action "application-form-submit", retry "never") ->
+// POST /api/v1/jobs/<code>/apply with the token in X-TURNSTILE-TOKEN. A 409 from that POST is mapped
+// to the tenant string "We couldn't process your request. Please access the application from a
+// different browser and try again." The v3 send pressed the real Submit control, the button read
+// "Submitting..." for the whole 30-second post-submit watch, the network witness recorded NO
+// write-shaped request at all (the POST is issued only after the Turnstile promise resolves), the
+// form stayed on screen, and no confirmation email arrived. Every one of the six earlier Workable
+// sends this session ended the same way: pressed, no_confirmation_state. The token is minted by a
+// human check that Litos never attempts, so Workable fills-and-hands-off exactly like Rippling.
+// Re-promoting workable to AUTONOMOUS requires a live witness that the Turnstile gate is gone.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jazzhr', 'bamboohr', 'comeet', 'rippling'] satisfies CaptchaGatedFamily[],
+  ['jazzhr', 'bamboohr', 'comeet', 'rippling', 'workable'] satisfies CaptchaGatedFamily[],
 );
 
 // These forms are fillable, but their final action belongs to the applicant. Personio tenants can
@@ -525,6 +539,10 @@ export function isCaptchaGatedFamily(portal: SupportedPortal): boolean {
 // rather than a guess - a wrong provider label is worse than an absent one, because the whole point
 // of recording it is to decide which families are worth building around.
 export function captchaProviderForFamily(portal: SupportedPortal): CaptchaProvider {
+  const family = portalFamily(portal);
+  // Both measured on the live press: Rippling 2026-08-20, Workable 2026-09-05 (see
+  // CAPTCHA_GATED_FAMILIES). Neither carries a reCAPTCHA response field.
+  if (family === 'rippling' || family === 'workable') return 'turnstile';
   return isCaptchaGatedFamily(portal) ? 'recaptcha_v2' : 'unknown';
 }
 
@@ -635,7 +653,9 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
   'greenhouse',
   'lever',
   'ashby',
-  'workable',
+  // Workable left this list 2026-09-05: its Submit awaits a Cloudflare Turnstile token before the
+  // application POST is ever issued (see CAPTCHA_GATED_FAMILIES). It stays POLLABLE, like rippling,
+  // so its jobs still reach the dashboard's fill-and-handoff flow.
   // Added 2026-07-29 from live capture: a single-step, CAPTCHA-free form with a real submit button,
   // which is the whole bar for this list. Rippling was added the same day from that same capture, but
   // has since been demoted to CAPTCHA_GATED_FAMILIES: the 2026-08-20 press-window witness proved its
@@ -658,12 +678,13 @@ export function isAutonomousPortalFamily(value: string): value is AutonomousPort
 }
 
 // The families a MONITORED (polled) row can be canonicalized for: the autonomous set plus the
-// assisted exception (rippling). This is exactly the pollable set (SupportedJobBoard), and it is the
-// right gate for monitored URLs because monitored rows only ever come from pollable boards. It is
-// deliberately WIDER than isAutonomousPortalFamily: rippling is polled and its jobs are canonicalized
-// and filled for the dashboard fill-and-handoff flow, even though it is never autonomously submitted.
-function isMonitoredPortalFamily(value: string): value is AutonomousPortalFamily | 'rippling' {
-  return isAutonomousPortalFamily(value) || value === 'rippling';
+// assisted exceptions (rippling, workable). This is exactly the pollable set (SupportedJobBoard), and
+// it is the right gate for monitored URLs because monitored rows only ever come from pollable boards.
+// It is deliberately WIDER than isAutonomousPortalFamily: the assisted boards are polled and their
+// jobs are canonicalized and filled for the dashboard fill-and-handoff flow, even though they are
+// never autonomously submitted.
+function isMonitoredPortalFamily(value: string): value is AutonomousPortalFamily | 'rippling' | 'workable' {
+  return isAutonomousPortalFamily(value) || value === 'rippling' || value === 'workable';
 }
 
 // Why a run stopped short of submitting, in the student's words. Surfaced on the blocker card so

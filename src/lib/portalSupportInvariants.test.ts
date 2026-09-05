@@ -204,3 +204,19 @@ test('rippling is the assisted tier: pollable, CAPTCHA-gated, never autonomous',
   );
   assert.match(portalHandoffReason('rippling') ?? '', /prove you are human/);
 });
+
+/* Workable is the second assisted-tier board, demoted 2026-09-05 on a live witness: its form's
+ * onSubmit awaits a Cloudflare Turnstile token (appearance "interaction-only", retry "never") and only
+ * then POSTs /api/v1/jobs/<code>/apply. On the TWG Global send the real Submit control was pressed,
+ * the button read "Submitting..." for the whole post-submit watch, no write-shaped request was ever
+ * observed, and the form stayed on screen. Same pin as rippling, for the same reason. */
+test('workable is the assisted tier: pollable, CAPTCHA-gated, never autonomous', () => {
+  assert.equal(isCaptchaGatedFamily('workable'), true, 'workable must be CAPTCHA-gated (fill-and-handoff)');
+  assert.equal(portalCanAutoSubmit('workable'), false, 'workable must never auto-submit');
+  assert.equal(isAutonomousPortalFamily('workable'), false, 'workable must not be autonomous');
+  assert.equal(
+    (POLLABLE_JOB_BOARDS as readonly string[]).includes('workable'), true,
+    'workable must stay pollable so its jobs are ingested for the dashboard assisted flow',
+  );
+  assert.match(portalHandoffReason('workable') ?? '', /prove you are human/);
+});
