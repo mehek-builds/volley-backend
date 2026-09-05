@@ -1025,6 +1025,9 @@ test('a page carrying both reCAPTCHA and Turnstile reports Turnstile', async () 
 test('the known-gated families carry their measured provider, others stay unknown', () => {
   assert.equal(captchaProviderForFamily('jazzhr'), 'recaptcha_v2');
   assert.equal(captchaProviderForFamily('bamboohr'), 'recaptcha_v2');
+  // The two Turnstile-gated boards say so rather than borrowing the reCAPTCHA label.
+  assert.equal(captchaProviderForFamily('rippling'), 'turnstile');
+  assert.equal(captchaProviderForFamily('workable'), 'turnstile');
   assert.equal(captchaProviderForFamily('greenhouse'), 'unknown');
   assert.equal(isCaptchaGatedFamily('jazzhr'), true);
   assert.equal(isCaptchaGatedFamily('greenhouse'), false);

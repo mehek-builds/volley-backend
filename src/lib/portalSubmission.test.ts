@@ -689,9 +689,10 @@ test('the jobs board may only source from portals Litos can finish alone', () =>
   // board is EITHER fully autonomous (finished end-to-end, surfaced in the onboarding match) OR an
   // assisted exception: pollable and fully fillable, but its final human-check + send belongs to the
   // applicant, so it is surfaced on the dashboard only (fill-and-handoff) and never in onboarding.
-  // rippling is the one assisted exception (Cloudflare-Turnstile-gated on submit). Onboarding's gate
-  // is boardConditions -> AUTONOMOUS_PORTAL_FAMILIES, so an assisted board can never leak into it.
-  const ASSISTED_EXCEPTIONS = new Set<string>(['rippling']);
+  // rippling and workable are the assisted exceptions (both Cloudflare-Turnstile-gated on submit).
+  // Onboarding's gate is boardConditions -> AUTONOMOUS_PORTAL_FAMILIES, so an assisted board can never
+  // leak into it.
+  const ASSISTED_EXCEPTIONS = new Set<string>(['rippling', 'workable']);
   for (const board of POLLABLE_JOB_BOARDS) {
     if (ASSISTED_EXCEPTIONS.has(board)) {
       // Assisted: polled and fillable, but NEVER autonomously completed and NEVER autonomous-listed.
@@ -708,8 +709,10 @@ test('the jobs board may only source from portals Litos can finish alone', () =>
     assert.equal(isAutonomousPortalFamily(blocked), false, blocked);
     assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes(blocked), false, blocked);
   }
-  // Workable can finish alone and has a public-board fetcher, so it belongs on the jobs board.
-  assert.equal(isAutonomousPortalFamily('workable'), true);
+  // Workable has a public-board fetcher, so it stays on the jobs board, but its Submit awaits a
+  // Cloudflare Turnstile token before the application POST is issued (2026-09-05 witness), so it is
+  // assisted: pollable and OUT of AUTONOMOUS, exactly like rippling.
+  assert.equal(isAutonomousPortalFamily('workable'), false);
   assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes('workable'), true);
   // rippling is pollable but assisted: it must be BOTH in POLLABLE and out of AUTONOMOUS.
   assert.equal((POLLABLE_JOB_BOARDS as readonly string[]).includes('rippling'), true);
@@ -5241,7 +5244,10 @@ test('managed Workable US phone selects exact United States and proves national 
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
 });
 
-test('managed Workable submit is gated by invalid nonempty phones but not an absent phone', () => {
+test('managed Workable fills refuse an invalid nonempty phone and never append a submit', () => {
+  /* Workable is CAPTCHA-gated (its Submit awaits a Cloudflare Turnstile token, 2026-09-05 witness),
+   * so no Workable action list ever ends in confirmAndSubmit, valid phone or not. The phone gate
+   * itself still holds: an invalid nonempty phone is not typed into the form at all. */
   const invalidPhones = [
     '+442071234567',
     '+1 213',
@@ -5250,22 +5256,19 @@ test('managed Workable submit is gated by invalid nonempty phones but not an abs
   ];
   for (const phone of invalidPhones) {
     const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
-    assert.equal(
-      actions.some((action) => action.type === 'confirmAndSubmit'),
-      false,
-      phone,
-    );
+    assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false, phone);
     assert.equal(actions.some((action) => action.label === 'phone_country_open'), false, phone);
     assert.equal(actions.some((action) => action.label === 'phone'), false, phone);
   }
 
   for (const phone of ['+1 213 574 6270', '+971 56 741 7451']) {
     const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
-    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1, phone);
+    assert.equal(actions.some((action) => action.label === 'phone'), true, phone);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 0, phone);
   }
   for (const phone of [undefined, '']) {
     const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
-    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 0);
   }
 });
 
@@ -6033,11 +6036,12 @@ test('a portal that cannot auto-submit is stopped before either provider path, n
   // about (a) the code that then called readManagedReceipt and wrote status:'submitted' anyway, or
   // (b) the direct-Playwright path, which calls clickFinalSubmit(page) unconditionally. The real
   // guarantee has to be enforced by the caller, so assert the predicate the caller keys off.
-  for (const portal of ['jazzhr', 'paylocity', 'controlled_jazzhr', 'controlled_paylocity'] as const) {
+  // workable joined the stopped set 2026-09-05 (Cloudflare Turnstile on Submit, see CAPTCHA_GATED_FAMILIES).
+  for (const portal of ['jazzhr', 'paylocity', 'workable', 'controlled_jazzhr', 'controlled_paylocity', 'controlled_workable'] as const) {
     assert.equal(portalCanAutoSubmit(portal), false, portal);
     assert.ok(portalHandoffReason(portal), `${portal} must explain the handoff to the student`);
   }
-  for (const portal of ['workable', 'greenhouse', 'lever', 'ashby'] as const) {
+  for (const portal of ['greenhouse', 'lever', 'ashby'] as const) {
     assert.equal(portalCanAutoSubmit(portal), true, portal);
   }
 });
@@ -6049,7 +6053,9 @@ test('each handoff reason names its own cause rather than a generic stop', () =>
   assert.match(wizard, /last page/);
   assert.notEqual(captcha, wizard);
   assert.equal(portalHandoffReason('controlled_jazzhr'), captcha);
-  assert.equal(portalHandoffReason('workable'), null);
+  // Workable shares the human-check sentence since its 2026-09-05 Turnstile demotion.
+  assert.equal(portalHandoffReason('workable'), captcha);
+  assert.equal(portalHandoffReason('greenhouse'), null);
 });
 
 test('the wizard is only walked on a real submit run, never on the preview that the human approves', () => {
@@ -6273,11 +6279,12 @@ test('Paylocity leaves the parse-my-resume checkbox alone so it cannot overwrite
 });
 
 test('the portals that cannot auto-submit each explain why in plain language', () => {
-  for (const portal of ['jazzhr', 'paylocity'] as const) {
+  for (const portal of ['jazzhr', 'paylocity', 'workable'] as const) {
     const reason = portalHandoffReason(portal);
     assert.ok(reason && reason.length > 0, `${portal} must explain its handoff`);
   }
-  assert.equal(portalHandoffReason('workable'), null, 'a fully supported portal has nothing to explain');
+  assert.match(portalHandoffReason('workable') ?? '', /prove you are human/);
+  assert.equal(portalHandoffReason('greenhouse'), null, 'a fully supported portal has nothing to explain');
 });
 
 test('every controlled variant maps to its real family and keeps that family’s guarantees', () => {

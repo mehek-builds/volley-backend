@@ -33,10 +33,11 @@ import {
 //      below. The onboarding match filters on AUTONOMOUS_PORTAL_FAMILIES only, so assisted boards are
 //      ingested and surfaced on the dashboard (fill-and-handoff), never recommended during onboarding.
 //
-// Rippling is the one assisted exception. It is pollable and fully fillable, but its Apply press is
-// gated by an invisible Cloudflare Turnstile challenge (2026-08-20 press-window witness), so it is
-// CAPTCHA_GATED in portalSubmission.ts, not autonomous. It stays here so its jobs are still ingested
-// for the dashboard fill-and-handoff flow.
+// Rippling and Workable are the assisted exceptions. Both are pollable and fully fillable, but each
+// Apply press is gated by an invisible Cloudflare Turnstile challenge (Rippling: 2026-08-20
+// press-window witness; Workable: 2026-09-05 TWG Global send, Submit awaited the Turnstile token and
+// never issued its POST), so both are CAPTCHA_GATED in portalSubmission.ts, not autonomous. They stay
+// here so their jobs are still ingested for the dashboard fill-and-handoff flow.
 //
 // Rippling, Breezy and Recruitee were wired 2026-08-29. Rippling and Breezy could not reuse the
 // single-fetch-then-normalize shape the other five share: both publish a list endpoint with no
@@ -44,7 +45,7 @@ import {
 // distinct posting. See fetchRipplingJobs and fetchBreezyJobs.
 export const POLLABLE_JOB_BOARDS = [
   'greenhouse', 'lever', 'ashby', 'workable', 'rippling', 'breezy', 'recruitee', 'crelate',
-] as const satisfies readonly (AutonomousPortalFamily | 'rippling')[];
+] as const satisfies readonly (AutonomousPortalFamily | 'rippling' | 'workable')[];
 
 export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
 

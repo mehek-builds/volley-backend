@@ -171,7 +171,11 @@ test('every managed application submit defaults to v3 and reserves its confirmat
   }
 });
 
-test('only one exact native Workable application route emits the cross-repo v4 contract', () => {
+test('a Workable application route never carries a submit: the form is Turnstile-gated', () => {
+  /* Demoted 2026-09-05 (see CAPTCHA_GATED_FAMILIES): Workable's Submit awaits a Cloudflare Turnstile
+   * token before its application POST exists, so buildManagedPortalActions fills and stops. The exact
+   * page capability is still pinned to the route, the scope selector is still the cross-repo contract
+   * stratus binds when v4 returns, and neither a v3 nor a v4 press is appended. */
   const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
   const actions = buildManagedPortalActions('workable', packet, true, applicationUrl);
   const exactCapabilities = actions.filter((action) => action.type === 'requireCapability'
@@ -188,6 +192,16 @@ test('only one exact native Workable application route emits the cross-repo v4 c
     MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
     'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"])',
   );
+  assert.deepEqual(atomicCapabilities, []);
+  assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false);
+  assert.ok(actions.some((action) => action.label === 'resume'), 'the fill itself still runs');
+});
+
+test('the v4 contract Workable would emit if it were promoted back', { skip: 'Workable is CAPTCHA-gated (Turnstile on Submit, 2026-09-05); re-enable with the live witness that the gate is gone' }, () => {
+  const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
+  const actions = buildManagedPortalActions('workable', packet, true, applicationUrl);
+  const atomicCapabilities = actions.filter((action) => action.type === 'requireCapability'
+    && action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY);
   if (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED) {
     assert.deepEqual(atomicCapabilities, [{
       type: 'requireCapability',
@@ -258,11 +272,12 @@ test('host, family, and application route all have to match before managed v4 is
   for (const url of v4Urls) {
     /* The native route is the shape v4 selects on - but v4 is switched off for Workable until it can
        carry a resume (WORKABLE_ATOMIC_SUBMIT_V4_ENABLED, see managedApplicationUsesAtomicSubmitV4),
-       so today these take v3 like every other family. */
+       and since 2026-09-05 Workable is CAPTCHA-gated outright (Turnstile on Submit), so no press of
+       either version is appended to a Workable action list. */
     assert.equal(managedApplicationUsesAtomicSubmitV4('workable', url), WORKABLE_ATOMIC_SUBMIT_V4_ENABLED, url);
     assert.equal(
-      buildManagedPortalActions('workable', packet, true, url).at(-1)?.chooserPolicy?.version,
-      WORKABLE_ATOMIC_SUBMIT_V4_ENABLED ? 4 : MANAGED_SUBMIT_CHOOSER_POLICY.version,
+      buildManagedPortalActions('workable', packet, true, url).some((action) => action.type === 'confirmAndSubmit'),
+      false,
       url,
     );
   }
@@ -755,14 +770,18 @@ test('Lever and Workable keep every fixed core field or block before confirmatio
         const actions = buildManagedPortalActions(family, crowded, true);
         const labels = new Set(actions.map((action) => action.label));
         for (const label of expected[family]) assert.ok(labels.has(label), `${family} lost ${label} at ${count}`);
-        assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
+        // Workable is CAPTCHA-gated (2026-09-05): its list fills and stops without a press.
+        assert.equal(actions.at(-1)?.type === 'confirmAndSubmit', family === 'lever', `${family} at ${count}`);
       } catch (error) {
         assert.ok(error instanceof ManagedActionBudgetError, `${family} threw the wrong error at ${count}`);
         assert.equal(error.submitActionAppended, false);
         blocked += 1;
       }
     }
-    assert.ok(blocked > 0, `${family} never exercised its fail-closed budget path`);
+    /* The fail-closed budget refusal exists to keep a press off a list that lost a required field.
+       Workable appends no press since its 2026-09-05 Turnstile demotion, so only Lever still has a
+       submit for the budget to guard; Workable's half of this test is the core-field survival above. */
+    if (family === 'lever') assert.ok(blocked > 0, `${family} never exercised its fail-closed budget path`);
   }
 });
 
