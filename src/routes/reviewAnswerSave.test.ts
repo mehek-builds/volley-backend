@@ -1224,3 +1224,36 @@ test('the restart the refusal names is fed the posted answers and re-opens the a
       `the restart must clear ${cleared} - the corrected answer and the picture of the filled form move together or the invariant is gone`);
   }
 });
+
+test('explicit save-only correction discards a prepared form without queueing a run', async () => {
+  const blockers = [{ kind: 'missing_exact_options' as const, required: true, question: 'University', portal_input_type: 'select-one' }];
+  const id = await applicationWith(readyForFinalApproval({ question_metadata_blockers: blockers }));
+  const response = await app.inject({
+    method: 'PUT', url: `/applications/${id}/review/answers`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { discard_prepared_form: true, questions: [{ ...HELD_QUESTION, answer: 'A corrected answer' }] },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, 'A corrected answer');
+  assert.equal(persisted.status, 'questions_ready');
+  assert.equal(persisted.submission_run_id, undefined);
+  assert.equal(persisted.preview_screenshot_url, undefined);
+  assert.equal(persisted.final_approved_at, undefined);
+  assert.equal(persisted.packet_audit, undefined);
+  assert.deepEqual(persisted.question_metadata_blockers, blockers);
+});
+
+test('save-only cannot discard a held or possibly sent prepared application', async () => {
+  for (const evidence of [{ submission_claim_id: 'held' }, { submission_attempted_at: STOPPED_AT }]) {
+    const original = readyForFinalApproval(evidence);
+    const id = await applicationWith(original);
+    const response = await app.inject({
+      method: 'PUT', url: `/applications/${id}/review/answers`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { discard_prepared_form: true, questions: [{ ...HELD_QUESTION, answer: 'Changed' }] },
+    });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.deepEqual(await storedReview(id), JSON.parse(JSON.stringify(original)));
+  }
+});
