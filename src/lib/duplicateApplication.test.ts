@@ -455,6 +455,73 @@ describe('every path that can write status submitted is behind the guard', () =>
   });
 });
 
+describe('the match names the attempt and packet the guard actually matched', () => {
+  const twinAttempt: BlockingSubmissionAttempt = {
+    attemptId: '23f289d6-f68b-4f90-ab6f-b3951b11f242',
+    parentAttemptId: null,
+    userId: 'a18f774b-0000-4000-8000-000000000000',
+    packetId: '9f1d9e52-06b0-4786-baa6-201d3422104a',
+    applicationId: '222d70a6-6f4b-4293-b752-4252c768482f',
+    source: 'legacy_backfill',
+    operation: 'initial_submission',
+    postingIdentity: {
+      postingKey: null,
+      jobId: '3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c',
+      companyRole: 'notion|software engineer intern summer 2027',
+      company: 'Notion',
+      role: 'Software Engineer Intern (Summer 2027)',
+      portalUrl: 'https://jobs.ashbyhq.com/notion/3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c/application',
+      portalIdentity: 'https://jobs.ashbyhq.com/notion',
+    },
+    retrySafety: {
+      kind: 'blocked_unverified',
+      attemptId: '23f289d6-f68b-4f90-ab6f-b3951b11f242',
+      at: '2026-08-17T20:01:00.000Z',
+      reason: 'pressed',
+    },
+  };
+
+  test('a ledger twin carries its attempt and its packet beside the Tracker row it points to', () => {
+    /* Notion a4b7295c, 2026-09-05: refused for a press on canonical application 222d70a6, whose
+       attempt lives on packet 9f1d9e52 - a row the applicant could not find from the sentence,
+       because application_id named the canonical row and nothing named the packet. */
+    const verdict = duplicateAmong(
+      { company: 'Notion', role: 'Software Engineer Intern (Summer 2027)', job_id: '3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c' },
+      'https://jobs.ashbyhq.com/notion/3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c/application',
+      [ledgerTwin(twinAttempt)],
+      'a4b7295c-9d70-4b93-8c76-a6d4ba05f781',
+    );
+    assert.equal(verdict.kind, 'duplicate');
+    if (verdict.kind !== 'duplicate') return;
+    assert.equal(verdict.match.application_id, '222d70a6-6f4b-4293-b752-4252c768482f');
+    assert.equal(verdict.match.attempt_id, '23f289d6-f68b-4f90-ab6f-b3951b11f242');
+    assert.equal(verdict.match.packet_id, '9f1d9e52-06b0-4786-baa6-201d3422104a');
+    assert.equal(verdict.match.certainty, 'unverified');
+    assert.equal(verdict.match.send_evidence, 'pressed');
+  });
+
+  test('a legacy Sent row with no attempt names its own packet and no attempt', () => {
+    const legacyRow: SubmittedTwinRow = {
+      id: '4bfd5827-5518-4fb6-8fae-4b79f3e0cde0',
+      job_context: { company: 'Deepgram', role: 'Software Engineering- Internship (Fall 2026/Summer 2027)', job_id: 'dc8693b5-72ce-4ca3-ab15-9c8434d35da1' },
+      portal_url: 'https://jobs.ashbyhq.com/deepgram/dc8693b5-72ce-4ca3-ab15-9c8434d35da1/application',
+      submitted_at: '2026-08-11T04:12:00.000Z',
+      mutable_sent_marker: true,
+      receipt_authority: 'confirmed',
+    };
+    const verdict = duplicateAmong(
+      { company: 'Deepgram', role: 'Software Engineering- Internship (Fall 2026/Summer 2027)', job_id: 'dc8693b5-72ce-4ca3-ab15-9c8434d35da1' },
+      'https://jobs.ashbyhq.com/deepgram/dc8693b5-72ce-4ca3-ab15-9c8434d35da1/application',
+      [legacyRow],
+      '4ef78910-b11b-47a8-878e-05fbc9fdf174',
+    );
+    assert.equal(verdict.kind, 'duplicate');
+    if (verdict.kind !== 'duplicate') return;
+    assert.equal(verdict.match.attempt_id, undefined);
+    assert.equal(verdict.match.packet_id, '4bfd5827-5518-4fb6-8fae-4b79f3e0cde0');
+  });
+});
+
 describe('ledgerTwin translates the attempt retry-safety reason into send evidence', () => {
   const blockingAttempt = (
     retrySafety: Extract<BlockingSubmissionAttempt['retrySafety'], { kind: 'blocked_unverified' }>,

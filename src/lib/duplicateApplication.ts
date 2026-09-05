@@ -100,6 +100,13 @@ export type DuplicateApplicationMatch = {
    * only opened is the false certainty this file exists to avoid. Absent means 'pressed'. */
   send_evidence?: 'pressed' | 'opened';
   tracker_available?: boolean;
+  /* WHICH ROW, EXACTLY. `application_id` above is the Tracker row the sentence sends her to, which
+   * for a ledger twin is the attempt's canonical application when it has one and its packet when it
+   * does not - so the reader cannot always tell from it which packet, or which attempt, the guard
+   * actually matched. These name them, for the read that lets her (or the next session) see the
+   * ledger the refusal is naming. Absent on a legacy Sent/Applied row with no attempt. */
+  attempt_id?: string;
+  packet_id?: string;
 };
 
 const DATE_FORMAT = new Intl.DateTimeFormat('en-GB', {
@@ -705,6 +712,8 @@ export function duplicateAmong(
       // does not claim a press, while a real or legacy press stays 'pressed'.
       ...(certainty === 'unverified' ? { send_evidence: row.unverified_send_evidence ?? 'pressed' } : {}),
       ...(row.tracker_available === false ? { tracker_available: false } : {}),
+      ...(row.attempt_id ? { attempt_id: row.attempt_id } : {}),
+      packet_id: row.packet_id ?? row.id,
     };
     const reason = duplicateApplicationReason(match);
     if (certainty === 'submitted') return { kind: 'duplicate', match, reason };
