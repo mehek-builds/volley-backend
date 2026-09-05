@@ -54,6 +54,32 @@ export const SUBMISSION_NOT_SENT_PROOF_KINDS = [
   'employer_verification_pending_not_filed',
   'provider_definitive_rejection',
   'extension_cancelled_before_press',
+  /* THE FOURTH WITNESS, alongside employer_rejected_not_filed's employer answer and the applicant's
+   * own look. `typed_pre_click_stop` is barred once `boundary_authorized` exists (see
+   * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS below) because that proof only ever asked "does an
+   * authorization exist on this attempt", and an authorization existing is not evidence about
+   * whether a press happened - which is exactly why a machine may not use it to close an attempt
+   * post-authorization.
+   *
+   * This proof kind asks a narrower, stronger question about the SAME run that was authorized:
+   * did Stratus's own run-progress record prove the click was never reached? It is written only for
+   * an attempt whose stop error is a ManagedBrowserAssertionFailureError or
+   * ManagedBrowserPreSubmitCrashError - both constructed in browserbase.ts's
+   * managedBrowserRequestError ONLY when managedBrowserProgressAllowsPreSubmitRetry(progress) held:
+   * submitPressed, applicationSubmitPressed and verificationSubmitPressed all false, and
+   * employerOutcome (if present) exactly 'not_attempted'. That is the identical proof this codebase
+   * already trusts to let runWithManagedPreSubmitCrashRetry retry an authorized attempt
+   * automatically - a decision at least as consequential as closing the ledger - so it is not a
+   * guess about this run, it is Stratus's own contained-transport witness.
+   *
+   * Measured 2026-09-05, Pony.ai application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb, ledger attempt
+   * b624e034: boundary_authorized was recorded, then the run died re-filling the Workable phone
+   * widget (`workable_phone_value_visible` / the `filled_field:phone` proof that follows it) before
+   * confirmAndSubmit was ever reached. No proof kind admissible after authorization could describe
+   * that, so the attempt could only be closed as blocked_unverified, and the applicant was told
+   * Litos had pressed Send and asked to check the employer's portal for an application that was
+   * never attempted. */
+  'run_progress_proven_not_pressed',
 ] as const;
 
 export type SubmissionNotSentProofKind = typeof SUBMISSION_NOT_SENT_PROOF_KINDS[number];
@@ -170,6 +196,10 @@ const PROOF_KIND_SET = new Set<string>(SUBMISSION_NOT_SENT_PROOF_KINDS);
 const PRE_CLICK_ONLY_PROOFS = new Set<SubmissionNotSentProofKind>([
   'typed_pre_click_stop',
   'extension_cancelled_before_press',
+  /* Same contradiction as its two neighbours: this proof also asserts the click never happened, so
+   * a press_observed event standing beside it on the same attempt is a logical contradiction and
+   * must fold to invalid_sequence exactly like theirs does. */
+  'run_progress_proven_not_pressed',
 ]);
 /* THE PROOFS STRONG ENOUGH TO CLOSE AN ATTEMPT AFTER AUTHORIZATION, ALONGSIDE HER OWN LOOK.
  *
@@ -194,6 +224,12 @@ const AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS = new Set<SubmissionNotSentProofK
   'applicant_checked_not_sent',
   'applicant_checked_all_possible_destinations_not_sent',
   'employer_rejected_not_filed',
+  /* THE THIRD MACHINE WITNESS, admitted for the same reason employer_rejected_not_filed was: it is
+   * not a guess about whether authorization implies a press, it is Stratus's own run-progress record
+   * for THIS exact run proving submitPressed (and both its typed kinds) stayed false all the way to
+   * the stop. See the proof kind's own definition in SUBMISSION_NOT_SENT_PROOF_KINDS for the full
+   * story and the measured packet. */
+  'run_progress_proven_not_pressed',
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /* FIVE MINUTES, THE CAP THIS FILE ALREADY ENFORCES, NOT THREE.

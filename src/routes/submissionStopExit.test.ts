@@ -188,8 +188,11 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.equal(persisted.unverified_submission, undefined);
     assert.doesNotMatch(persisted.attention_reason || '', /temporary secure-browser/);
     assert.doesNotMatch(persisted.attention_reason || '', /again in a few minutes/);
-    assert.match(persisted.attention_reason || '', /Nothing has been sent/);
-    assert.match(persisted.attention_reason || '', /could not prove one of the answers/);
+    assert.match(persisted.attention_reason || '', /nothing has gone to the employer/i);
+    // Names the exact field the runner's own label pointed at, generically derived rather than
+    // hardcoded - see assertionAppliesField.
+    assert.match(persisted.attention_reason || '', /re-filling the phone field/);
+    assert.doesNotMatch(persisted.attention_reason || '', /pressed Send/i);
     // The exact failed proof, evidence included, is what the row records for whoever debugs it.
     assert.match(persisted.submission_error || '', /expected exactly one match/);
     assert.match(persisted.submission_error || '', /workable_phone_readback_evidence=/);
