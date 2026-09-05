@@ -9490,6 +9490,22 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
       if (!reqId) return undefined;
       return `https://${url.hostname}${url.pathname.replace(/\/$/, '')}?reqId=${reqId}`;
     }
+    if (portal === 'paylocity') {
+      /* PAYLOCITY'S FORM IS ITS OWN ROUTE. A posting is stored as the page it was found on,
+         /recruiting/jobs/Details/<id>/<company>/<slug>, and the application form lives one route
+         over at /recruiting/jobs/Apply/<id>/<company>/<slug>. Measured on Celerant Tech 2950251,
+         2026-09-05T04:09Z: the run opened Details, reached the form through a button - not an
+         anchor, so the generic-click rule could declare no target - and stratus refused the
+         navigation ("A non-submit action attempted employer transport without exact final
+         authority (navigation transport: GET .../jobs/Apply/2950251/...)") after nine question
+         items had already been answered. Both routes answer 200 to a plain GET. Opening the Apply
+         route directly is the initial navigation every run is allowed, so nothing in the
+         containment moves; only where the run starts. Query and hash are tracking, not identity:
+         the id is the posting. */
+      const match = url.pathname.match(/^\/recruiting\/jobs\/(?:apply|details)\/(\d+)((?:\/[^/]+)*)\/?$/i);
+      if (!match) return undefined;
+      return `https://${url.hostname}/recruiting/jobs/Apply/${match[1]}${match[2] ?? ''}`;
+    }
     if (portalFamily(portal) === 'jazzhr') {
       url.search = '';
       url.hash = '';
