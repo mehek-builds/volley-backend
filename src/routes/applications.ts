@@ -4461,7 +4461,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const boundary = await submissionBoundaryAuthorization(userId, attempt.attemptId);
         if (boundary) leases[attempt.attemptId] = { active: boundary.active, expires_at: boundary.expiresAt };
       }
-      return reply.send({ application_id: row.id, attempts: packetLedgerSummary(events), leases });
+      /* THE TWIN THE GUARD SEES. The refusal "Litos already pressed Send on ... at <employer>" is
+       * decided over the user's whole ledger, so the earlier attempt it names may live on another
+       * packet - or on an attempt with no Tracker row at all. This is the guard's own verdict for
+       * this packet, read exactly as the send gates read it (a question, not a repair: nothing is
+       * healed or written here), so the row it names can be opened and answered. */
+      const review = readApplicationReview(row.spec);
+      const duplicate = await duplicateApplicationVerdict({
+        userId,
+        applicationId: row.id,
+        jobContext: row.job_context,
+        portalUrl: review?.portal_url,
+      });
+      return reply.send({ application_id: row.id, attempts: packetLedgerSummary(events), leases, duplicate });
     },
   );
 
