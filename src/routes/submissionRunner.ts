@@ -2,9 +2,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { decide, isBlocked } from '../engine/eligibility';
 import { chromium, type Page } from 'playwright-core';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
+import {
+  PARKED_CONFIRMED_PROJECTION_REASON,
+  parkedConfirmedProjectionMayRetry,
+  parkedConfirmedReceipt,
+} from '../lib/parkedConfirmedReceipt';
 import {
   application_profile,
   career_page_sources,
@@ -1676,8 +1681,7 @@ function runnerRepairRequiredReview(
     submitted_at: undefined,
     receipt,
     submission_error: undefined,
-    attention_reason: 'Litos captured the employer receipt, but its saved application projection '
-      + 'needs repair. Do not send this application again.',
+    attention_reason: PARKED_CONFIRMED_PROJECTION_REASON,
     attention_categories: ['unverified_submission'],
     unverified_submission: {
       at: receiptAt,
@@ -1844,6 +1848,94 @@ async function commitVerifiedSubmissionConfirmed(
     ));
     return false;
   });
+}
+
+/* THE SECOND PROJECTION. See lib/parkedConfirmedReceipt.ts for the shape this serves.
+ *
+ * Reads the exact attempt back from the ledger and re-runs the one confirmed commit over the receipt
+ * the row already holds. The commit is idempotent on the ledger - the confirmation event already
+ * exists under the same fact key, so nothing is appended - and it either proves the projection and
+ * writes `submitted`, or parks the row again exactly as before. Nothing here invents evidence: every
+ * input is the row's own receipt and the ledger's own events, and a row whose ledger does not carry
+ * the opening, the boundary, the press and the confirmation of its claim is left alone.
+ *
+ * Called from the submission read, so a parked row heals the first time it is looked at after the
+ * rule that binds its receipt ships (Bear Robotics b822b998: the tenant-host Breezy receipt rule).
+ * The read is polled every 2.5s; parkedConfirmedProjectionMayRetry keeps a projection that still
+ * cannot be proven from becoming a write per poll, and the reasons it fails for are logged and
+ * returned so the next session does not have to guess at them. */
+export type ParkedConfirmedProjectionRepair =
+  | { kind: 'not_parked' }
+  | { kind: 'resting' }
+  | { kind: 'no_exact_attempt' }
+  | { kind: 'repaired'; row: ResumeRow }
+  | { kind: 'still_parked'; reasons: string[] };
+
+export async function repairParkedConfirmedProjection(
+  row: ResumeRow,
+  log: FastifyBaseLogger,
+  now: () => number = Date.now,
+): Promise<ParkedConfirmedProjectionRepair> {
+  const review = readApplicationReview(row.spec);
+  const parked = review ? parkedConfirmedReceipt(review) : null;
+  if (!review || !parked) return { kind: 'not_parked' };
+  if (!parkedConfirmedProjectionMayRetry(review, now())) return { kind: 'resting' };
+  const events = (await submissionAttemptEventsForPacket(row.user_id, row.id))
+    .filter((event) => event.attempt_id === parked.claimId);
+  const opening = events.find((event) => event.event_kind === 'attempt_opened');
+  const confirmation = events.find((event) => event.event_kind === 'submission_confirmed'
+    && event.event_id === submissionAttemptEventId(parked.claimId, 'submission_confirmed', 'managed-receipt'));
+  if (!opening
+    || !confirmation?.evidence_code
+    || !events.some((event) => event.event_kind === 'boundary_authorized')
+    || !events.some((event) => event.event_kind === 'press_observed')) {
+    return { kind: 'no_exact_attempt' };
+  }
+  const evidenceCode = confirmation.evidence_code;
+  const attemptBinding = submissionAttemptBindingFromEvent(opening);
+  if (attemptBinding.packetId !== row.id || attemptBinding.userId !== row.user_id) {
+    return { kind: 'no_exact_attempt' };
+  }
+  const committed = await commitVerifiedSubmissionConfirmed(row, attemptBinding, {
+    capturedAt: parked.receipt.captured_at,
+    verification: review.verification,
+    ...(review.security_code ? { securityCode: review.security_code } : {}),
+    receipt: parked.receipt,
+    factKey: 'managed-receipt',
+    evidenceCode,
+  });
+  const [latest] = await db.select().from(generated_resumes).where(and(
+    eq(generated_resumes.id, row.id),
+    eq(generated_resumes.user_id, row.user_id),
+  )).limit(1);
+  if (committed && latest) {
+    log.info(
+      { applicationId: row.id, attemptId: attemptBinding.attemptId },
+      'parked employer receipt projected on read',
+    );
+    return { kind: 'repaired', row: latest };
+  }
+  /* Name what still stands in the way. The commit classified inside its own transaction and parked
+   * the row again; read the classifier once more here, outside it, purely for the reasons. */
+  let reasons: string[] = ['confirmed_commit_refused'];
+  try {
+    const canonical = await canonicalApplicationForAttemptProjection(db, attemptBinding);
+    const projections = await authoritativeSubmissionProjection({
+      userId: row.user_id,
+      packetIds: [row.id],
+      applicationIds: [canonical.id],
+    });
+    const projection = projections.byPacketId.get(row.id);
+    if (projection?.state === 'repair_required') reasons = [...projection.reasons];
+    else if (projection) reasons = [`projection_${projection.state}`];
+  } catch (error) {
+    reasons = ['canonical_application_unresolved', error instanceof Error ? error.message.slice(0, 120) : 'unknown'];
+  }
+  log.warn(
+    { applicationId: row.id, attemptId: attemptBinding.attemptId, reasons },
+    'parked employer receipt still cannot be projected',
+  );
+  return { kind: 'still_parked', reasons };
 }
 
 /**
