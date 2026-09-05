@@ -55,7 +55,7 @@ import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
-import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication, resolvePacketAuditQuestionFixpoint, resolvedPacketAuditQuestions,
+import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication, repairParkedConfirmedProjection, resolvePacketAuditQuestionFixpoint, resolvedPacketAuditQuestions,
   transportVerifiedBuiltPacket,
 } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
@@ -4319,6 +4319,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
       row = await repairStalledFillRun(row, request.jwtPayload!.userId, request.log) ?? row;
+      /* THE SECOND PROJECTION. A row parked with the employer's receipt in hand and its confirmation
+       * already in the ledger (lib/parkedConfirmedReceipt.ts) is projected again on read, so it heals
+       * the first time she looks at it after the rule that binds its receipt ships. */
+      const parkedRepair = await repairParkedConfirmedProjection(row, request.log);
+      if (parkedRepair.kind === 'repaired') row = parkedRepair.row;
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
@@ -4380,6 +4385,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         // since a Blob object is public-read forever to anyone holding its URL.
         documents: storedDocuments(row),
         handoff_packet_valid,
+        /* Why a receipt the row holds still cannot be projected, in the classifier's own words. */
+        ...(parkedRepair.kind === 'still_parked' ? { projection_repair_reasons: parkedRepair.reasons } : {}),
         configured: isBrowserbaseConfigured(),
         // Present only when the header actually would change - see resumeContactStaleness. Absent
         // is the common case and must stay cheap to read: no PDF fetch, no packet audit, just the

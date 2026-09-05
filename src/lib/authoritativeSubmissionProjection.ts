@@ -202,6 +202,10 @@ export function selfSubmittedSubmissionReceiptText(): string {
   return SELF_SUBMITTED_RECEIPT_TEXT;
 }
 const EXACT_WORKABLE_RECEIPT_TEXT = 'Your application has been submitted successfully.';
+/* Breezy's own success view, as the managed runner reads it off the page: the "Application Submitted"
+ * heading over "Your application has been submitted successfully. Good luck!" (both strings are
+ * Breezy's, from its portal translate bundle). Measured on Bear Robotics b822b998, 2026-09-05T01:50:46Z. */
+const EXACT_BREEZY_RECEIPT_TEXT = 'Application Submitted Your application has been submitted successfully. Good luck!';
 const CANONICAL_FREE_ARTIFACT_PREFIX = `${CANONICAL_FREE_DOCUMENT_BINDING_PREFIX}artifact:`;
 const EMPLOYER_EMAIL_CONFIRMATION_EVIDENCE_PREFIX = 'employer_email_confirmation_v1:';
 
@@ -1036,6 +1040,23 @@ export function measuredPersistedReceiptMatchesOpening(
     const final = new URL(finalUrl);
     return /\/(?:application_)?confirmation\/?$/i.test(final.pathname);
   }
+  /* BREEZY, ON ITS TENANT HOST. Every real Breezy posting lives at <tenant>.breezy.hr/p/<id>-<slug>
+   * (the runner's own host rule in lib/portalSubmission.ts), and Breezy answers a submitted form by
+   * navigating to .../apply/submitted and rendering its fixed success view. genericKnownPosting
+   * below knows only the jobs.breezy.hr aggregate, so a tenant-host receipt fell through this
+   * function to false: Bear Robotics b822b998 (2026-09-05T01:50:46Z) had the employer's receipt in
+   * hand, its confirmation in the ledger, and a row parked at "projection needs repair" because no
+   * rule here could bind the two. Same tenant, same whole posting segment, the submitted route, and
+   * Breezy's exact text - the frozen URL may be the bare posting or its /apply form. */
+  const frozenBreezy = breezyPostingFromUrl(frozenUrl);
+  if (frozenBreezy) {
+    const finalBreezy = breezyPostingFromUrl(finalUrl);
+    return finalBreezy !== null
+      && finalBreezy.tenant === frozenBreezy.tenant
+      && finalBreezy.posting === frozenBreezy.posting
+      && finalBreezy.route === 'submitted'
+      && confirmationText.replace(/\s+/g, ' ').trim() === EXACT_BREEZY_RECEIPT_TEXT;
+  }
   // Ashby's generic /application route and mutable success text do not bind a provider result.
   // A future repair may admit Ashby only after its immutable result or content-bound receipt is
   // stored in the attempt event. Until then this function deliberately falls through to false.
@@ -1050,6 +1071,37 @@ export function measuredPersistedReceiptMatchesOpening(
       && confirmationText.replace(/\s+/g, ' ').trim() === EXACT_WORKABLE_RECEIPT_TEXT;
   }
   return false;
+}
+
+/**
+ * <tenant>.breezy.hr/p/<id>-<slug>[/apply[/submitted]]. The posting is the WHOLE `/p/` segment, so an
+ * id is never matched against another slug's id; the route is the only part that moves between the
+ * frozen posting URL and its receipt. The bare breezy.hr marketing site and the jobs.breezy.hr
+ * aggregate (a different path shape, read by genericKnownPosting) are not tenant postings.
+ */
+export function breezyPostingFromUrl(
+  rawUrl: string,
+): { tenant: string; posting: string; route: 'posting' | 'apply' | 'submitted' } | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:') return null;
+  const host = url.hostname.toLowerCase();
+  const suffix = '.breezy.hr';
+  if (!host.endsWith(suffix)) return null;
+  const tenant = host.slice(0, -suffix.length);
+  if (!tenant || tenant.includes('.') || tenant === 'jobs' || tenant === 'www') return null;
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments[0]?.toLowerCase() !== 'p' || !segments[1]) return null;
+  const posting = segments[1];
+  if (segments.length === 2) return { tenant, posting, route: 'posting' };
+  if (segments[2]?.toLowerCase() !== 'apply') return null;
+  if (segments.length === 3) return { tenant, posting, route: 'apply' };
+  if (segments.length === 4 && segments[3]?.toLowerCase() === 'submitted') return { tenant, posting, route: 'submitted' };
+  return null;
 }
 
 function exactLegacyAutofillReceiptMatchesOpening(
