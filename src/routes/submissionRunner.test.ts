@@ -22,6 +22,9 @@ import {
   packetUsesControlledResumeFixture,
   FORM_NOT_REACHED_REASON,
   preparationEvidenceBlockers,
+  managedVanishedControlFields,
+  managedFormTextCollapsed,
+  vanishedFormEvidenceReason,
   questionMetadataMeasurementIsComplete,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
@@ -84,7 +87,7 @@ import type {
   SubmissionAttemptBinding,
   SubmissionBoundaryAuthorization,
 } from '../lib/submissionAttemptLedger';
-import type { SubmissionPacket } from '../lib/portalSubmission';
+import type { SubmissionPacket, ManagedUnexplainedAnswer } from '../lib/portalSubmission';
 import { createEmployerDeliveryBindings, employerDeliveryEnvelope } from '../lib/employerDeliveryIdentity';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
 import {
@@ -5989,6 +5992,129 @@ test('the greenhouse closed banner is believed even when the page looks reached'
   assert.equal(blockers.length, 1);
   assert.match(blockers[0], /taken this posting down/);
   assert.match(blockers[0], /no longer open/);
+});
+
+/* A FORM THAT VANISHED PARTWAY THROUGH IS NOT A FORM applicationFormWasReached CAN SEE, because it
+ * is satisfied by the FIRST filled field. Measured on Pony.ai packet fdcf4ccb-eca9-44dc-b0cb-
+ * d400805ebdeb, managed PREPARE run 5648ed71, 2026-09-05: the row was written
+ * status: ready_for_final_approval with filled_fields carrying seven fixed fields and
+ * unexplained_fills carrying exactly these three - country, postcode, summary - each with a raw
+ * mention that means the control was gone, not merely unwritten. The preview screenshot was
+ * Workable's own "Sorry, an unknown error occurred" view: the resume upload's S3 window had closed
+ * and replaced the form with an error page mid-run, and the readiness gate never asked whether the
+ * page it finished on was still the one discovery started on. */
+test('managedVanishedControlFields names a planned control discovery just found and the fill lost', () => {
+  const discoveredThisRun = [{ question: 'Country' }, { question: 'Postcode' }, { question: 'Summary' }, { question: 'City' }];
+  const unexplained: ManagedUnexplainedAnswer[] = [
+    {
+      label: 'question:Country',
+      question: 'Country',
+      rawMentions: ['question:Country: locator.fill: Timeout 30000ms exceeded.'],
+    },
+    {
+      label: 'question:Postcode',
+      question: 'Postcode',
+      rawMentions: ['question:Postcode: nothing matched #postcode'],
+    },
+    {
+      label: 'question:Summary',
+      question: 'Summary',
+      rawMentions: ['question:Summary: nothing matched #summary'],
+    },
+  ];
+  const fields = managedVanishedControlFields(unexplained, discoveredThisRun);
+  assert.deepEqual(fields, ['Country', 'Postcode', 'Summary']);
+
+  // A silent unexplained answer (no raw mention at all, the DRW/Deepgram shape) is a real defect
+  // too, but it is not evidence the CONTROL was absent - it could just as well mean the run moved on
+  // without saying anything about a control that was there the whole time. Left alone: it stays
+  // informational via managedUnexplainedAnswerReasons, exactly as it always has.
+  const silent: ManagedUnexplainedAnswer[] = [{ label: 'question:Legal first name', question: 'Legal first name', rawMentions: [] }];
+  assert.deepEqual(managedVanishedControlFields(silent, [{ question: 'Legal first name' }]), []);
+
+  // A "value did not persist" mention is the OTHER failure managedUnexplainedAnswers already
+  // discharges before either of us ever sees it (managedSkipExplainsLoss), so this is a defence in
+  // depth check: even if one slipped through, it does not mean the control was absent.
+  const persisted: ManagedUnexplainedAnswer[] = [{
+    label: 'question:GPA',
+    question: 'GPA',
+    rawMentions: ['question:GPA: some other provider note, not an absence'],
+  }];
+  assert.deepEqual(managedVanishedControlFields(persisted, [{ question: 'GPA' }]), []);
+});
+
+/* THE ACCEPTED DRIFT THIS MUST NOT TOUCH: a question the packet carries from an earlier round whose
+ * control THIS run's own discovery never re-found is a form that may honestly have fewer fields
+ * than it used to - the ordinary R-076/R-122 shape, shown to her as an informational sentence and
+ * never gating. What separates the vanished-form case above is that discovery and the fill
+ * disagreed about the SAME run; a question discovery never even attempted this time carries no such
+ * disagreement to report, optional or required. */
+test('an unexplained optional question discovery never saw this run is left alone', () => {
+  const unexplained: ManagedUnexplainedAnswer[] = [{
+    label: 'question:Preferred pronouns',
+    question: 'Preferred pronouns',
+    rawMentions: ['question:Preferred pronouns: nothing matched #pronouns'],
+  }];
+  // Discovery this run found other controls, but never this one - it is a stored, optional
+  // question from a prior round, and the live form no longer carries it.
+  const discoveredThisRun = [{ question: 'Email' }, { question: 'Resume' }];
+  assert.deepEqual(managedVanishedControlFields(unexplained, discoveredThisRun), []);
+  // With nothing named and no text collapse, the honesty gate has nothing new to add: the run stays
+  // exactly as safe as it already was, and this stale field's loss is told only through the
+  // existing informational sentence (managedUnexplainedAnswerReasons), unchanged by this fix.
+  assert.equal(vanishedFormEvidenceReason({ vanishedFields: [], formTextCollapsed: false }), null);
+});
+
+test('managedFormTextCollapsed reads the drop against this run’s own discovery pass, not a floor', () => {
+  // TWG Global packet 8b26619f, run 9c7b21eb, 2026-09-05: discovery's own text ran to roughly 1188
+  // characters; the very next fill pass on the same posting came back with 205.
+  const discoveryText = 'A'.repeat(1188);
+  assert.equal(managedFormTextCollapsed(discoveryText, 'B'.repeat(205)), true);
+
+  // A real, short form: discovery itself only ever saw a little text, so a similarly short fill
+  // pass proves nothing was lost. This is the "a real form with fewer fields is fine" case.
+  assert.equal(managedFormTextCollapsed('A short careers form.', 'A short careers form, filled.'), false);
+
+  // No discovery text to compare against (this call site never ran one, or it failed): nothing to
+  // measure a collapse against, so this signal stays silent and leaves the decision to the rest of
+  // the gate.
+  assert.equal(managedFormTextCollapsed(undefined, 'B'.repeat(50)), false);
+
+  // Workable's own generic failure view is recognised on sight, independent of any length math.
+  assert.equal(
+    managedFormTextCollapsed(
+      undefined,
+      'Sorry, an unknown error occurred. The page you are looking for might have been removed, '
+      + 'had its name changed, or is temporarily unavailable.',
+    ),
+    true,
+  );
+});
+
+test('vanishedFormEvidenceReason names the fields, classifies form_not_reached, and leaves the ledger alone', () => {
+  const named = vanishedFormEvidenceReason({
+    vanishedFields: ['Country', 'Postcode', 'Summary'],
+    formTextCollapsed: true,
+  });
+  assert.ok(named);
+  assert.match(named!, /never reached the application form/);
+  assert.match(named!, /"Country"/);
+  assert.match(named!, /"Postcode"/);
+  assert.match(named!, /"Summary"/);
+  assert.match(named!, /Nothing has been sent/);
+  // No press language, no submission claim, no employer-facing verb - this is a park, not a stop.
+  assert.doesNotMatch(named!, /submit|pressed|sent to the employer/i);
+  assert.deepEqual(attentionCategoriesForReasons([named!]), ['form_not_reached']);
+
+  // The text-collapse-only shape (TWG): no controls to name, still an honest, classifiable sentence.
+  const collapsedOnly = vanishedFormEvidenceReason({ vanishedFields: [], formTextCollapsed: true });
+  assert.ok(collapsedOnly);
+  assert.match(collapsedOnly!, /never reached the application form/);
+  assert.deepEqual(attentionCategoriesForReasons([collapsedOnly!]), ['form_not_reached']);
+
+  // Neither signal fired: nothing new to say, and `null` is what lets prepareManaged skip adding it
+  // to evidenceBlockers - a clean fill's `safe` computation is exactly as it was before this fix.
+  assert.equal(vanishedFormEvidenceReason({ vanishedFields: [], formTextCollapsed: false }), null);
 });
 
 /* THE DRIFT HOLD NAMES WHAT MOVED, to the applicant and to the log. Before this, a packet parked
