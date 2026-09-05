@@ -487,7 +487,8 @@ test('a browser binding carries one digest per projected part, and a drift is na
   assert.deepEqual(employerDeliveryDriftFields(delivered, bindings, otherEnvelope), ['envelope']);
   assert.deepEqual(employerDeliveryDriftFields({ ...delivered, phone: '+1 000 000 0000' }, bindings, envelope), ['phone']);
   // A binding minted before per-part digests names nothing rather than guessing.
-  assert.equal(employerDeliveryDriftFields(moved, { version: 'employer_delivery_v1', mode: 'browser', sha256: bindings.sha256 }, envelope), null);
+  const legacyBinding = { version: 'employer_delivery_v1', mode: 'browser', sha256: bindings.sha256 } as typeof bindings;
+  assert.equal(employerDeliveryDriftFields(moved, legacyBinding, envelope), null);
   // The extension binding is unchanged: no per-part digests, no drift naming.
   const extension = createEmployerDeliveryBindings(sample, review, {
     mode: 'extension', envelope, extensionProjection: { resume: { sha256: 'x', sizeBytes: 1 } },
