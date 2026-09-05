@@ -209,14 +209,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
  * managedInitialProviderDeadlineAt already refuse to exceed, so nothing downstream widens. What it
  * spends is skew headroom: the stratus host refuses a deadline more than five minutes past its own
  * clock, so a runner clock more than ten seconds behind the database clock refuses every send
- * (pre-run, the safe direction), where three minutes left 130 seconds of slack.
- *
- * SEVEN MINUTES, raised from five together with the prepare-fill deadline (MANAGED_PREPARE_FILL_DEADLINE_MS,
- * 420 s). The send is one run that fills the whole form again before it presses, so it needs at least
- * what the preview fill needed: TWG Global (Workable) filled five of six questions in the 280 seconds it
- * was given on 2026-09-05 and died on the sixth. The stratus host now admits a deadline up to eight
- * minutes past its own clock (stratus #189); seven leaves a minute for clock skew between the two hosts. */
-export const SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 7 * 60 * 1000;
+ * (pre-run, the safe direction), where three minutes left 130 seconds of slack. */
+export const SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 5 * 60 * 1000;
 export const ORPHAN_ATTRIBUTION_OPENING_EVIDENCE = 'applicant_attributed_orphan_opening';
 export const ORPHAN_ATTRIBUTION_CONFIRMATION_EVIDENCE = 'applicant_attributed_orphan_confirmation';
 /** The shared evidence code for a `not_sent_proven` fact written because the immutable event
@@ -667,8 +661,8 @@ export async function authorizeFinalSubmissionBoundary(
   },
 ): Promise<FinalSubmissionBoundaryAuthorization> {
   const ttlMs = options.ttlMs ?? SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS;
-  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > 8 * 60 * 1000) {
-    throw new Error('Submission boundary authorization TTL must be between 1 ms and 8 minutes');
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > 5 * 60 * 1000) {
+    throw new Error('Submission boundary authorization TTL must be between 1 ms and 5 minutes');
   }
   await assertSubmissionAccountNotDraining(options.executor, binding.userId);
   const events = await options.executor.select().from(application_submission_attempt_events).where(and(
