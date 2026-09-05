@@ -3492,8 +3492,14 @@ test('every managed provider start, continuation POST, and direct session creati
   const bodyStart = fenceSource.indexOf('export async function withProviderCallFence');
   assert.ok(bodyStart > 0, 'the provider call fence must be one named, testable function');
   const fenceBody = fenceSource.slice(bodyStart);
-  // Bounded since 2026-09-05 (PROVIDER_CALL_LOCK_TIMEOUT_MS): the fence's own acquire must always
-  // pass a lock timeout, never the unbounded two-argument form account.ts's deletion drain uses.
+  // Bounded since 2026-09-05: the fence's own acquire must always resolve to a real
+  // PROVIDER_CALL_LOCK_TIMEOUT_MS-derived value, never the unbounded two-argument form
+  // account.ts's deletion drain uses. A prefix match on `(tx, userId, {` alone would equally
+  // accept a caller that regressed to passing `{}` (or dropped the `?? PROVIDER_CALL_LOCK_TIMEOUT_MS`
+  // fallback) and still silently waited forever - this pins the actual default-composition
+  // expression, not just that a third argument of some shape is present.
+  assert.ok(fenceBody.includes('lockTimeoutMs: options.lockTimeoutMs ?? PROVIDER_CALL_LOCK_TIMEOUT_MS'),
+    'the fence must resolve a real lock timeout, not merely pass some object as a third argument');
   assert.ok(fenceBody.includes('lockSubmissionProviderCallUser(tx, userId, {'));
   assert.ok(!fenceBody.includes('lockSubmissionAttemptUser('),
     'the provider fence must not hold the ledger key across a provider call');
@@ -3561,12 +3567,20 @@ test('every managed provider start, continuation POST, and direct session creati
    * withProviderCallFence, in the one place that took the key directly instead of through it.
    *
    * The deletion fence is untouched by the swap: account deletion takes BOTH keys (asserted
-   * above, ledger first), so holding the provider-call key alone still excludes a drain. */
+   * above, ledger first), so holding the provider-call key alone still excludes a drain.
+   *
+   * Bounded since 2026-09-05, the same as withProviderCallFence and for the identical reason: a
+   * second direct caller of this shared key left unbounded would silently reintroduce the exact
+   * wedge-locks-out-every-future-call defect this file's own header describes. Pinning the resolved
+   * `PROVIDER_CALL_LOCK_TIMEOUT_MS` expression, not just a bare call with some object literal,
+   * because the latter would equally accept a caller that regressed to passing `{}`. */
   assert.ok(!create.includes('await lockSubmissionAttemptUser('),
     'a 15s provider POST must not hold the key every write on the account needs');
+  assert.ok(create.includes('lockSubmissionProviderCallUser(tx, input.userId, { lockTimeoutMs: PROVIDER_CALL_LOCK_TIMEOUT_MS })'),
+    'createFencedBrowserSession must resolve a real lock timeout, not call the unbounded form');
   assert.ok(create.indexOf('reserveBrowserProviderResource({')
-    < create.indexOf('await lockSubmissionProviderCallUser(tx, input.userId)'));
-  assert.ok(create.indexOf('await lockSubmissionProviderCallUser(tx, input.userId)')
+    < create.indexOf('lockSubmissionProviderCallUser(tx, input.userId, {'));
+  assert.ok(create.indexOf('lockSubmissionProviderCallUser(tx, input.userId, {')
     < create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)'));
   assert.ok(create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)')
     < create.indexOf('await createReservedBrowserSession('));

@@ -12637,8 +12637,20 @@ export function submissionFailureReview(
   }
   /* Thrown by withProviderCallFence's lock acquire, strictly before the fenced provider call it
    * guards can start - see SubmissionProviderCallLockTimeoutError and PROVIDER_CALL_LOCK_TIMEOUT_MS.
-   * Same family as the drain above: nothing reached the employer, so this releases exactly like it. */
-  if (error instanceof SubmissionProviderCallLockTimeoutError) {
+   * NOT THE SAME SHAPE AS THE DRAIN ABOVE, despite the family resemblance, and that difference is why
+   * this arm alone among the ones above also requires ledger.employerBoundaryReached === false.
+   * SubmissionAccountDeletionDrainError is safe to release unconditionally because account.ts waits
+   * out this exact key UNBOUNDED before it can even insert the drain row - so by the time that error
+   * is observable, any provider call that was holding the key has structurally already finished.
+   * A lock timeout is the opposite shape: it fires precisely BECAUSE something else still holds the
+   * key when this caller gives up, which the claim mechanism should mean is always a different
+   * posting for this account - but this function is documented and used as safe in isolation, not
+   * only under whatever defense-in-depth its one current caller happens to also apply, so it earns
+   * its release from ledger fact the same way every untyped stop below already does, rather than
+   * from the error's type alone. When the ledger cannot say employerBoundaryReached is false - not
+   * consulted, or true - this falls through to the same uncertain-after-claim treatment any other
+   * unclassified post-claim stop gets. */
+  if (error instanceof SubmissionProviderCallLockTimeoutError && ledger.employerBoundaryReached === false) {
     return nextReview(current, {
       status: 'needs_attention',
       ...preClickNoSubmitReleasePatch(),

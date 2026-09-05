@@ -121,6 +121,10 @@ describe('lockSubmissionProviderCallUser: the bounded form', () => {
         assert.ok(error instanceof SubmissionProviderCallLockTimeoutError);
         assert.equal(error.code, 'SUBMISSION_PROVIDER_CALL_LOCK_TIMEOUT');
         assert.match(error.message, /5000ms/);
+        // The underlying pg/Drizzle error must survive as .cause: it is the only way to see what
+        // Postgres actually said (detail, hint, the exact statement) if this classification is ever
+        // wrong, or if the incident needs confirming without reproducing it.
+        assert.equal(error.cause, wrapped);
         return true;
       },
     );
@@ -182,6 +186,22 @@ describe('lockSubmissionProviderCallUser: the bounded form', () => {
     );
   });
 
+  it('rejects a timeout past the sanity ceiling before ever touching the executor', async () => {
+    // Guards specifically against a unit slip (milliseconds mistaken for micro- or nanoseconds)
+    // overshooting into a value Postgres's own lock_timeout GUC would otherwise silently accept -
+    // and then reject with an out-of-range error this file's 55P03 check would not recognize,
+    // producing an unclassified failure instead of either a clean validation error or the intended
+    // typed timeout.
+    const reached = () => { throw new Error('REACHED_EXECUTOR'); };
+    const executor = { execute: reached } as unknown as Pick<typeof db, 'execute'>;
+    for (const tooLarge of [10 * 60 * 1000 + 1, 240_000_000, Number.MAX_SAFE_INTEGER]) {
+      await assert.rejects(
+        lockSubmissionProviderCallUser(executor, USER_ID, { lockTimeoutMs: tooLarge }),
+        /positive integer/,
+      );
+    }
+  });
+
   it('rejects a non-positive or non-integer timeout before ever touching the executor', async () => {
     const reached = () => { throw new Error('REACHED_EXECUTOR'); };
     const executor = { execute: reached } as unknown as Pick<typeof db, 'execute'>;
@@ -209,5 +229,48 @@ describe('lockSubmissionProviderCallUser: the account-deletion call shape is unt
       assert.match(call[1]!.trim(), /^tx,\s*userId$/,
         `account.ts's deletion drain must call lockSubmissionProviderCallUser with no options (an unbounded wait), found: lockSubmissionProviderCallUser(${call[1]})`);
     }
+  });
+
+  it('every OTHER real caller of lockSubmissionProviderCallUser resolves a real bound', async () => {
+    /* The completeness check the account.ts pin alone cannot give: that test only proves account.ts
+     * stayed unbounded, not that every OTHER caller is bounded - which is exactly how
+     * browserProviderResourceCleanup.ts's createFencedBrowserSession shipped as a second, unbounded,
+     * undocumented caller of this same key in the first place. This greps the whole src tree so a
+     * FOURTH caller added later without a lockTimeoutMs fails here too, rather than silently
+     * reintroducing the wedge this file exists to close. */
+    const { readFileSync, readdirSync } = await import('node:fs');
+    const { join, relative } = await import('node:path');
+    const srcRoot = join(__dirname, '..');
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules') continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) files.push(full);
+      }
+    };
+    walk(srcRoot);
+    const unboundedCalls: string[] = [];
+    const boundedCalls: string[] = [];
+    for (const file of files) {
+      const relativePath = relative(srcRoot, file);
+      if (relativePath === 'routes/account.ts') continue; // covered by its own test above
+      const source = readFileSync(file, 'utf8');
+      for (const call of source.matchAll(/lockSubmissionProviderCallUser\(([^)]*)\)/g)) {
+        const args = call[1]!.trim();
+        if (/^tx,\s*userId$/.test(args) || /^executor,\s*userId$/.test(args)) {
+          unboundedCalls.push(`${relativePath}: lockSubmissionProviderCallUser(${args})`);
+        } else if (/lockTimeoutMs\s*:/.test(args)) {
+          boundedCalls.push(relativePath);
+        }
+        // A definition site (`executor: Pick<...>, userId: string, options...`) matches neither
+        // regex and is silently ignored, which is correct - it is not a call.
+      }
+    }
+    assert.deepEqual(unboundedCalls, [],
+      'every caller of lockSubmissionProviderCallUser outside account.ts must resolve a real lockTimeoutMs');
+    assert.ok(boundedCalls.includes('lib/submissionAccountFence.ts'));
+    assert.ok(boundedCalls.includes('lib/browserProviderResourceCleanup.ts'));
   });
 });

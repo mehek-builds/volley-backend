@@ -503,21 +503,77 @@ export class SubmissionAccountDeletionDrainError extends Error {
 
 /* Thrown by lockSubmissionProviderCallUser's bounded form when SET LOCAL lock_timeout expires before
  * pg_advisory_xact_lock acquires `submission-provider-call:<userId>`. Structurally this can only fire
- * BEFORE the caller's own provider call starts - see lockSubmissionProviderCallUser - so, exactly like
- * SubmissionAccountDeletionDrainError, submissionFailureReview treats it as a stop that provably
- * precedes any employer contact. See PROVIDER_CALL_LOCK_TIMEOUT_MS in submissionAccountFence.ts for
- * why 55P03 here is a class of stop this codebase has to name, not swallow as a bare Error: an
+ * BEFORE the caller's own provider call starts - see lockSubmissionProviderCallUser - but that alone
+ * does not prove the employer boundary was never reached FOR THIS ATTEMPT: unlike
+ * SubmissionAccountDeletionDrainError, a lock timeout fires precisely because some other call still
+ * holds the key, which could be a concurrent attempt on the same account. submissionRunner.ts's
+ * submissionFailureReview accordingly requires ledger.employerBoundaryReached === false, not just
+ * this type, before it treats a stop as provably pre-click. See PROVIDER_CALL_LOCK_TIMEOUT_MS below
+ * for why 55P03 here is a class of stop this codebase has to name, not swallow as a bare Error: an
  * untyped throw here would classify 'unclassified' the same way the 2026-09-02 drift refusal and
  * destination-probe refusal did before they were typed, and read the row as an uncertain send it
  * plainly is not. */
 export class SubmissionProviderCallLockTimeoutError extends Error {
   readonly code = 'SUBMISSION_PROVIDER_CALL_LOCK_TIMEOUT';
 
-  constructor(lockTimeoutMs: number) {
-    super(`Timed out after ${lockTimeoutMs}ms waiting for an earlier submission provider call for this account to finish`);
+  constructor(lockTimeoutMs: number, options: { cause?: unknown } = {}) {
+    super(
+      `Timed out after ${lockTimeoutMs}ms waiting for an earlier submission provider call for this account to finish`,
+      options,
+    );
     this.name = 'SubmissionProviderCallLockTimeoutError';
   }
 }
+
+/**
+ * How long a bounded lockSubmissionProviderCallUser call will wait for an earlier one on the same
+ * account before giving up with SubmissionProviderCallLockTimeoutError. Shared by every caller that
+ * opts into a bound - withProviderCallFence (submissionAccountFence.ts) and createFencedBrowserSession
+ * (browserProviderResourceCleanup.ts) - rather than defined in either, because both need the identical
+ * value and neither may import it from the other: submissionAccountFence.ts already imports
+ * databaseNow from browserProviderResourceCleanup.ts, so the reverse import would cycle.
+ *
+ * THIS IS BOUNDED BY VOLLEY-BACKEND'S OWN REQUEST LIFETIME, NOT BY STRATUS'S. As of #974, stratus can
+ * legitimately take up to MANAGED_PREPARE_FILL_DEADLINE_MS (420s) to fill a long form, because
+ * stratus's OWN execution host - its Railway-hosted local runner - can wait that long
+ * (MAX_RUN_TIMEOUT_MS 480s, validated against MAX_PROVIDER_DEADLINE_MS 8min; see browserbase.ts's
+ * comment on that constant). That budget belongs to stratus's infrastructure, not this backend's.
+ * volley-backend itself is still a single Vercel function: vercel.json's `api/index.ts` maxDuration
+ * is 300s and untouched by #974, so the request making an outbound call through either caller above -
+ * the one the lock wait and the provider call it guards both run inside - is killed by the PLATFORM at
+ * 300s regardless of what stratus itself would still be willing to do. Nothing either caller wraps,
+ * and no wait for it, can usefully exceed that 300s ceiling: a second call queued behind a first one
+ * already running long would have too little of its OWN 300s budget left to dispatch anything by the
+ * time it got the lock - exactly the gap assertManagedBrowserRequestBudgetAtClock's
+ * minimumDispatchBudgetMs already refuses to dispatch into - so it was never going to complete in the
+ * same request either way. The only question this constant answers is how quickly a WEDGED holder
+ * gets reported instead of hanging silently until Vercel kills the request with no trace, which is
+ * what happens today with no bound at all.
+ *
+ * 240s (4 minutes) sits comfortably above what a typical call needs - 420-480s describe stratus's OWN
+ * worst-case ceiling, which this backend's own 300s platform limit already makes largely unreachable
+ * from in here regardless - while still leaving a full 60s of this request's own 300s budget for the
+ * timeout error to surface, for recordSubmissionRunnerFailure to close the ledger attempt, and for a
+ * response to reach the caller: strictly better than the platform silently killing the request with
+ * nothing written, which is what happens today once a wait runs that long.
+ *
+ * providerCallLockTimeoutCeiling.test.ts asserts this stays under vercel.json's own maxDuration, the
+ * way boundaryLeaseCeiling.test.ts and browserbase.test.ts already guard their sibling budget
+ * constants - both of which have moved more than once. If Vercel's maxDuration ever rises to actually
+ * accommodate stratus's current ceilings, or if MANAGED_PREPARE_FILL_DEADLINE_MS or
+ * SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS move again, this needs re-deriving against the new
+ * numbers, not just left alone - and that test will fail loudly rather than let it drift unnoticed.
+ */
+export const PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
+
+/* Comfortably above any duration this codebase's own managed-call ceilings could plausibly reach
+ * (MANAGED_BROWSER_REQUEST_TIMEOUT_MAX_MS is 8 minutes as of #974) while still catching the concrete
+ * mistake a wrong unit would produce - seconds mistaken for milliseconds is a too-SMALL value, which
+ * a positive-integer check alone cannot distinguish from a deliberately short test timeout, but
+ * milliseconds mistaken for microseconds or nanoseconds overshoots by 1000x or more and lands well
+ * past this ceiling. Postgres's own `lock_timeout` GUC tops out far higher (a signed 32-bit int of
+ * milliseconds, ~24.8 days); this is deliberately much tighter than that hardware ceiling. */
+const LOCK_TIMEOUT_SANITY_CEILING_MS = 10 * 60 * 1000;
 
 /* Postgres `lock_not_available`, the SQLSTATE SET LOCAL lock_timeout raises when it expires.
  *
@@ -634,9 +690,10 @@ export async function lockSubmissionAttemptUser(
  * SubmissionProviderCallLockTimeoutError instead. Account deletion (account.ts) calls this with NO
  * options, on purpose: it must keep waiting out a real in-flight call no matter how long that call
  * legitimately takes, because giving up early is the one thing that would let deletion and a live
- * provider call overlap. Only withProviderCallFence, which exists to bound exactly one provider call
- * rather than to guarantee deletion ordering, opts into a timeout. See PROVIDER_CALL_LOCK_TIMEOUT_MS
- * in submissionAccountFence.ts for the value and the reasoning behind it.
+ * provider call overlap. withProviderCallFence (submissionAccountFence.ts) and
+ * createFencedBrowserSession (browserProviderResourceCleanup.ts) - the only two callers that fence an
+ * actual outbound provider POST rather than guaranteeing deletion ordering - opt into
+ * PROVIDER_CALL_LOCK_TIMEOUT_MS, above, for the same reason.
  */
 export async function lockSubmissionProviderCallUser(
   executor: Pick<typeof db, 'execute'>,
@@ -651,8 +708,8 @@ export async function lockSubmissionProviderCallUser(
     return;
   }
   const { lockTimeoutMs } = options;
-  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
-    throw new Error('lockSubmissionProviderCallUser lock timeout must be a positive integer of milliseconds');
+  if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs <= 0 || lockTimeoutMs > LOCK_TIMEOUT_SANITY_CEILING_MS) {
+    throw new Error(`lockSubmissionProviderCallUser lock timeout must be a positive integer of milliseconds, at most ${LOCK_TIMEOUT_SANITY_CEILING_MS}`);
   }
   /* set_config, not `SET LOCAL ... = ${...}`: SET's own grammar takes a literal, never a bind
    * parameter, so a dynamic value can only reach it through string interpolation. set_config is an
@@ -663,7 +720,7 @@ export async function lockSubmissionProviderCallUser(
   try {
     await acquire();
   } catch (error) {
-    if (isLockNotAvailableError(error)) throw new SubmissionProviderCallLockTimeoutError(lockTimeoutMs);
+    if (isLockNotAvailableError(error)) throw new SubmissionProviderCallLockTimeoutError(lockTimeoutMs, { cause: error });
     throw error;
   }
   /* Reached only when the lock was actually acquired: a timed-out acquire above throws INSIDE this

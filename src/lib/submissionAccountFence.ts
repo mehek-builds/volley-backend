@@ -30,6 +30,7 @@ import { databaseNow } from './browserProviderResourceCleanup';
 import {
   assertSubmissionAccountNotDraining,
   lockSubmissionProviderCallUser,
+  PROVIDER_CALL_LOCK_TIMEOUT_MS,
 } from './submissionAttemptLedger';
 
 export type ProviderCallFenceContext = {
@@ -38,39 +39,7 @@ export type ProviderCallFenceContext = {
   fenceDatabaseNow: () => Promise<Date>;
 };
 
-/**
- * How long withProviderCallFence will wait for an earlier provider call on the same account before
- * giving up with a SubmissionProviderCallLockTimeoutError.
- *
- * THIS IS BOUNDED BY VOLLEY-BACKEND'S OWN REQUEST LIFETIME, NOT BY STRATUS'S. As of #974, stratus can
- * legitimately take up to MANAGED_PREPARE_FILL_DEADLINE_MS (420s) to fill a long form, because
- * stratus's OWN execution host - its Railway-hosted local runner - can wait that long
- * (MAX_RUN_TIMEOUT_MS 480s, validated against MAX_PROVIDER_DEADLINE_MS 8min; see browserbase.ts's
- * comment on that constant). That budget belongs to stratus's infrastructure, not this backend's.
- * volley-backend itself is still a single Vercel function: vercel.json's `api/index.ts` maxDuration
- * is 300s and untouched by #974, so the request making this outbound call - the one this fence's lock
- * wait and the provider call it guards both run inside - is killed by the PLATFORM at 300s regardless
- * of what stratus itself would still be willing to do. Nothing this fence wraps, and no wait for it,
- * can usefully exceed that 300s ceiling: a second call queued behind a first one already running long
- * would have too little of its OWN 300s budget left to dispatch anything by the time it got the lock -
- * exactly the gap assertManagedBrowserRequestBudgetAtClock's minimumDispatchBudgetMs already refuses
- * to dispatch into - so it was never going to complete in the same request either way. The only
- * question this constant answers is how quickly a WEDGED holder gets reported instead of hanging
- * silently until Vercel kills the request with no trace, which is what happens today with no bound at
- * all.
- *
- * 240s (4 minutes) sits comfortably above what a typical call needs - 420-480s describe stratus's OWN
- * worst-case ceiling, which this backend's own 300s platform limit already makes largely unreachable
- * from in here regardless - while still leaving a full 60s of this request's own 300s budget for the
- * timeout error to surface, for recordSubmissionRunnerFailure to close the ledger attempt, and for a
- * response to reach the caller: strictly better than the platform silently killing the request with
- * nothing written, which is what happens today once a wait runs that long.
- *
- * If Vercel's maxDuration ever rises to actually accommodate stratus's current ceilings, or if
- * MANAGED_PREPARE_FILL_DEADLINE_MS or SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS move again, this needs
- * re-deriving against the new numbers, not just left alone.
- */
-export const PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
+export { PROVIDER_CALL_LOCK_TIMEOUT_MS };
 
 /**
  * Run one provider call with this user's provider-call key held for its whole duration, after
@@ -82,9 +51,10 @@ export const PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
  * Can reject with SubmissionProviderCallLockTimeoutError before `call` ever runs, if an earlier call
  * for this account is still holding the key past `options.lockTimeoutMs` (default
  * PROVIDER_CALL_LOCK_TIMEOUT_MS) after this one started waiting. That is always a stop strictly
- * before this call's own provider request begins - see lockSubmissionProviderCallUser - and
- * submissionRunner.ts's submissionFailureReview treats it that way, the same as
- * SubmissionAccountDeletionDrainError.
+ * before this call's own provider request begins - see lockSubmissionProviderCallUser -
+ * so submissionRunner.ts's submissionFailureReview can treat it as pre-click once the ledger
+ * confirms the boundary was never reached for this exact attempt (see SubmissionProviderCallLockTimeoutError's
+ * own comment for why that check, unlike SubmissionAccountDeletionDrainError's, cannot be skipped).
  *
  * `options.lockTimeoutMs` exists for tests that need to prove the timeout fires against a real
  * contended lock without waiting the real four minutes out - see submissionProviderCallFence.db.test.ts
