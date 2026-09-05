@@ -656,6 +656,26 @@ export function routeInboundApplicationEmail(input: {
   return { kind: 'applicant_reply' };
 }
 
+/* AN EMPLOYER CONFIRMATION MAY FILE AN APPLICATION AS SENT ONLY WHEN THE MAIL IS AUTHENTICATED.
+ *
+ * senderAuthenticationFailed below is the applicant-reply rule: silence is not a failure, so a
+ * reply with no verdicts is still relayed. A submission confirmation is held to the opposite bar,
+ * because it does something no reply does - it moves a packet to `submitted` and closes the ledger
+ * attempt without the applicant looking at anything. For that, the receiving provider's own
+ * Authentication-Results must carry a positive verdict (DKIM or SPF pass) and no failing one. A
+ * message with no verdicts at all is stored and forwarded exactly as before, but it is not evidence
+ * that the employer sent it, so it does not file anything; see commitPacketConfirmationAtomically,
+ * which returns 'sender_unauthenticated' for it. */
+export function confirmationSenderAuthenticated(
+  authentication: InboundApplicationEmail['authentication'],
+): boolean {
+  if (!authentication) return false;
+  const verdict = (value: string | undefined) => value?.trim().toLowerCase();
+  const verdicts = [authentication.spf, authentication.dkim, authentication.dmarc].map(verdict);
+  if (verdicts.some((value) => value === 'fail')) return false;
+  return verdict(authentication.dkim) === 'pass' || verdict(authentication.spf) === 'pass';
+}
+
 export function senderAuthenticationFailed(
   authentication: InboundApplicationEmail['authentication'],
 ): boolean {
@@ -689,6 +709,10 @@ export function relayRecipientFor(
     return candidate;
   }
   return null;
+}
+
+function isObjectRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function safeEqual(left: string, right: string): boolean {
@@ -812,7 +836,7 @@ export type SubmissionConfirmationOutcome =
   | {
     resolved: false;
     reason: 'packet_not_found' | 'review_missing' | 'already_submitted' | 'stale_confirmation'
-      | 'confirmation_evidence_missing';
+      | 'confirmation_evidence_missing' | 'sender_unauthenticated';
   };
 
 /* A RECEIPT MAY ONLY MOVE A PACKET FORWARD, never backwards over something newer.
@@ -867,6 +891,9 @@ export type SubmissionConfirmationInput = {
   messageId?: string;
   subject?: string;
   receivedAt: Date;
+  /** The receiving provider's verdicts on the message, when the caller has them in hand. The live
+   * commit reads the STORED verdicts off the message row instead; see confirmationSenderAuthenticated. */
+  authentication?: InboundApplicationEmail['authentication'];
 };
 
 /* Scoped by OWNER as well as by id, on both the read and the write.
@@ -935,6 +962,16 @@ async function commitPacketConfirmationAtomically(
       sql`${application_email_messages.direction} <> 'outbound'`,
     )).limit(1).for('update');
     if (!message) return { resolved: false, reason: 'confirmation_evidence_missing' };
+    /* THE STORED VERDICTS, never the caller's word: the row was written by the inbound webhook from
+     * the provider's own Authentication-Results, and a replay (reconcileSubmissionConfirmations)
+     * has nothing else to go on. */
+    const storedAuthentication = isObjectRecordValue(message.raw_json)
+      && isObjectRecordValue(message.raw_json.authentication)
+      ? message.raw_json.authentication as InboundApplicationEmail['authentication']
+      : undefined;
+    if (!confirmationSenderAuthenticated(storedAuthentication)) {
+      return { resolved: false, reason: 'sender_unauthenticated' };
+    }
     const receivedAt = message.received_at ?? message.created_at;
     if (confirmationIsStale(current, receivedAt)) {
       return { resolved: false, reason: 'stale_confirmation' };
@@ -1054,6 +1091,9 @@ export async function resolvePacketFromConfirmation(
      * all, and the guarded UPDATE makes the heal a no-op when nothing is wrong. */
     await syncCanonical();
     return { resolved: false, reason: 'already_submitted' };
+  }
+  if (input.authentication !== undefined && !confirmationSenderAuthenticated(input.authentication)) {
+    return { resolved: false, reason: 'sender_unauthenticated' };
   }
   if (confirmationIsStale(current, input.receivedAt)) return { resolved: false, reason: 'stale_confirmation' };
   const review = reviewFromSubmissionConfirmation(current, input);
@@ -1180,6 +1220,7 @@ export type StoredEmployerMessageDeps = {
     messageId: string;
     subject?: string;
     receivedAt: Date;
+    authentication?: InboundApplicationEmail['authentication'];
   }) => Promise<SubmissionConfirmationOutcome>;
   /** True when this process now owns the forward. False means another one already does. */
   claimForwarding: (messageId: string) => Promise<boolean>;
@@ -1248,6 +1289,7 @@ export async function handleStoredEmployerMessage(input: {
   message: StoredInboundMessage | null;
   classification: ApplicationEmailClassification;
   receivedAt: Date;
+  authentication?: InboundApplicationEmail['authentication'];
 }, deps: StoredEmployerMessageDeps): Promise<InboundApplicationEmailResult> {
   const { aliasRow, message, classification, receivedAt } = input;
   let resolved = false;
@@ -1272,6 +1314,7 @@ export async function handleStoredEmployerMessage(input: {
         messageId: message.id,
         subject: message.subject ?? undefined,
         receivedAt: message.received_at ?? receivedAt,
+        ...(input.authentication !== undefined ? { authentication: input.authentication } : {}),
       });
       resolved = outcome.resolved;
     } catch (error) {
@@ -1464,6 +1507,7 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     message: message ?? null,
     classification: storedClassification,
     receivedAt,
+    ...(input.authentication !== undefined ? { authentication: input.authentication } : {}),
   }, storedEmployerMessageDeps(aliasRow));
 }
 
