@@ -187,7 +187,7 @@ import {
   unverifiedSubmissionReason,
   type ManagedReceiptResult,
 } from '../lib/managedSubmitOutcome';
-import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
+import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord, type SubmissionStopReason } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
   advanceCanonicalApplicationPreparedSend,
@@ -12002,16 +12002,24 @@ export type SubmissionFailureOutcome =
   | { status: TerminalRunStatus; attentionReason: string; attentionCategories: ApplicationAttentionCategory[] };
 
 /** Turn a runner assertion label into a phrase an applicant can read, without naming any one field
- * by hand. `filled_field:phone` becomes "the phone field", `workable_phone_value_visible` becomes
- * "the phone value field" (underscores to spaces, trailing "_value"/"visible" noise left as-is
- * rather than guessed away), and an unrecognised or missing label falls back to the same
- * cause-neutral phrase the rest of this file already uses for "some answer, unspecified". */
+ * by hand. `filled_field:<name>` becomes "the &lt;name&gt; field" (underscores/colons in the name
+ * turned to spaces); any of the Workable phone-widget labels (`phone_country_open`,
+ * `phone_country_close`, `phone_country_option`, or anything starting `workable_phone_` - see
+ * portalSubmission.ts's WORKABLE_PHONE_* label constants) collapse to the one plain phrase an
+ * applicant recognises, "the phone field", instead of surfacing the widget's own internal step name;
+ * and an unrecognised or missing label falls back to the same cause-neutral phrase the rest of this
+ * file already uses for "some answer, unspecified" - deliberately NOT the raw label with underscores
+ * swapped for spaces, which read as internal telemetry ("the workable phone value visible field")
+ * rather than a field an applicant filled in. */
 export function assertionAppliesField(label: string | null | undefined): string {
   if (!label) return 'one of the answers it typed';
   const fieldMatch = /^filled_field:(.+)$/.exec(label);
-  const raw = fieldMatch ? fieldMatch[1]! : label;
-  const words = raw.replace(/[_:]+/g, ' ').trim();
-  return words ? `the ${words} field` : 'one of the answers it typed';
+  if (fieldMatch) {
+    const name = fieldMatch[1]!.replace(/[_:]+/g, ' ').trim();
+    return name ? `the ${name} field` : 'one of the answers it typed';
+  }
+  if (/^(?:workable_)?phone(?:_|:|$)/.test(label)) return 'the phone field';
+  return 'one of the answers it typed';
 }
 
 export function submissionFailureOutcome(input: {
@@ -12145,7 +12153,15 @@ export function submissionFailureOutcome(input: {
            b624e034: the label was `filled_field:phone` and the applicant was told instead that
            "Litos pressed Send" and sent to check the employer's portal, for a run that died
            re-filling the phone widget before confirmAndSubmit was ever reached. */
-        ? `Litos could not finish this application: it stopped while re-filling ${assertionAppliesField(fieldProofFailedLabel)}, before the button that sends it was ever pressed, so nothing has gone to the employer. Retrying will very likely succeed once the page settles, so try again from your dashboard.`
+        /* DETERMINISTIC, NOT TEMPORARY. browserbase.ts's ManagedBrowserAssertionFailureError
+           documents exactly this refusal as reproducing on every attempt - it is the required
+           extract assertion doing its fail-closed job on a page whose DOM no longer matches the
+           proof selector, not a sandbox crash. Telling her to retry because "the page will settle"
+           promised a fix that never arrives; the honest promise is that this needs the field's read
+           fixed, not another attempt. ManagedBrowserPreSubmitCrashError is the transient sibling and
+           does not reach this arm - it is typed separately (providerSessionFailureBeforeSubmit) and
+           takes the "temporary secure-browser error ... try again in a few minutes" sentence below. */
+        ? `Litos could not finish this application: it stopped while re-filling ${assertionAppliesField(fieldProofFailedLabel)}, before the button that sends it was ever pressed, so nothing has gone to the employer. Retrying will very likely stop at the same place until this field's read is fixed, so open it when you have a minute and finish it off.`
       : destinationUnverifiedBeforeSend
         /* RANKED WITH THE PRE-CLICK FAMILY, mirroring classifySubmissionStop exactly. The probe is
            a separate read-only run made before the fill-and-submit list is assembled, so nothing
@@ -12472,6 +12488,51 @@ export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
 
+/* THE STOP REASONS BACKED BY STRATUS'S OWN RUN-PROGRESS RECORD, and the ONLY ones
+ * releasedClaimProofKind below may credit with `run_progress_proven_not_pressed`. Each is set only
+ * by submissionFailureReview's fieldProofFailedBeforeSubmit or providerSessionFailureBeforeSubmit,
+ * which browserbase.ts's managedBrowserRequestError constructs (ManagedBrowserAssertionFailureError,
+ * ManagedBrowserPreSubmitCrashError) ONLY when managedBrowserProgressAllowsPreSubmitRetry held for
+ * Stratus's own reported progress - see the proof kind's own definition in
+ * SUBMISSION_NOT_SENT_PROOF_KINDS for the full story. */
+const RUN_PROGRESS_BACKED_STOP_REASONS = new Set<SubmissionStopReason>([
+  'field_proof_failed_before_submit',
+  'provider_session_failure_before_submit',
+]);
+
+/**
+ * Which not-sent proof kind actually backs a released claim, derived from the run's OWN typed stop
+ * rather than assumed from whether the attempt happens to carry a boundary_authorized event.
+ *
+ * THE BUG THIS REPLACES. recordSubmissionRunnerFailure used to reason "an authorization already
+ * exists on this attempt, so any release found here must be the run-progress proof" and minted
+ * `run_progress_proven_not_pressed` on that inference alone. But `failed.submission_claim_id` is
+ * also cleared, unconditionally, by preClickNoSubmitReview - the NoSubmitControlError /
+ * ManagedRequiredFieldConfirmationError arm submissionFailureReview delegates to for
+ * assertManagedRequiredFieldsConfirmed's pressClaimed guard - and that release has nothing to do
+ * with Stratus's run-progress record. Crediting it with `run_progress_proven_not_pressed` would
+ * write a proof kind that was never actually observed, letting a stop that is NOT provably
+ * run-progress-backed slip past the ledger's own admissibility rule
+ * (submissionAttemptLedger.ts's AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS), which exists precisely to
+ * refuse an unproven machine claim once an authorization is on record.
+ *
+ * The fix asks the run's own typed stop (`submission_stop.reason`, written by submissionFailureReview
+ * on every arm including the ones that release outright) rather than re-deriving "was this
+ * run-progress-backed" from the error type a second time here. Everything that is not one of the two
+ * run-progress-backed reasons writes the general `typed_pre_click_stop` kind instead - including the
+ * no-submit-control release - and if that arrives after an authorization already exists, the
+ * ledger's own admissibility rule is what decides its fate (folding it to 'invalid_sequence'), not a
+ * proof kind manufactured here to dodge that rule.
+ */
+export function releasedClaimProofKind(
+  stopReason: SubmissionStopReason | undefined,
+  authorizedAlready: boolean,
+): SubmissionNotSentProofKind {
+  return authorizedAlready && stopReason !== undefined && RUN_PROGRESS_BACKED_STOP_REASONS.has(stopReason)
+    ? 'run_progress_proven_not_pressed'
+    : 'typed_pre_click_stop';
+}
+
 /**
  * Linearize a runner failure against authorization, terminal evidence, and the packet projection.
  * A stale caller either updates the exact still-current attempt or writes nothing.
@@ -12548,19 +12609,16 @@ export async function recordSubmissionRunnerFailure(
       const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
       if (!opening) throw new Error('Submission attempt reservation was not durably recorded');
       const binding = submissionAttemptBindingFromEvent(opening);
-      /* The ledger's own admissibility rule (submissionAttemptLedger.ts,
-       * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS) refuses `typed_pre_click_stop` once
-       * `boundary_authorized` exists - that proof only ever asked whether an authorization existed,
-       * which by definition it now does, so writing it here would fold the attempt to
-       * 'invalid_sequence' instead of closing it. `run_progress_proven_not_pressed` is the proof
-       * kind admissible after authorization: it is written only when `failed.submission_claim_id`
-       * was cleared by this run's OWN Stratus-reported progress proof (see
-       * runProgressProvenNeverPressed in submissionFailureReview), which is exactly the case
-       * `boundary` being truthy here describes. */
+      /* releasedClaimProofKind reads the run's OWN typed stop (submission_stop.reason) rather than
+       * inferring the proof kind from `authorizedAlready` alone - see its doc comment for the
+       * defect that inference caused. Only the two run-progress-backed reasons may be credited with
+       * `run_progress_proven_not_pressed` once an authorization exists; every other pre-click
+       * release, including the no-submit-control one, writes `typed_pre_click_stop` and lets the
+       * ledger's own admissibility rule (submissionAttemptLedger.ts,
+       * AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS) decide whether that is admissible after
+       * authorization. */
       const authorizedAlready = exactEvents.some((event) => event.event_kind === 'boundary_authorized');
-      const proofKind: SubmissionNotSentProofKind = authorizedAlready
-        ? 'run_progress_proven_not_pressed'
-        : 'typed_pre_click_stop';
+      const proofKind = releasedClaimProofKind(failed.submission_stop?.reason, authorizedAlready);
       await appendSubmissionAttemptEvent({
         ...binding,
         eventId: submissionAttemptEventId(attemptId, 'not_sent_proven', proofKind),

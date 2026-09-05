@@ -193,6 +193,11 @@ describe('every post-claim stop leaves the row with a way out', () => {
     // hardcoded - see assertionAppliesField.
     assert.match(persisted.attention_reason || '', /re-filling the phone field/);
     assert.doesNotMatch(persisted.attention_reason || '', /pressed Send/i);
+    // DETERMINISTIC, NOT TEMPORARY: browserbase.ts documents this refusal as reproducing on every
+    // attempt, so the sentence must never promise a retry will "very likely succeed" - that was the
+    // regression this pins. It must instead say the retry will likely stop at the same place.
+    assert.doesNotMatch(persisted.attention_reason || '', /very likely succeed/i);
+    assert.match(persisted.attention_reason || '', /very likely stop at the same place/i);
     // The exact failed proof, evidence included, is what the row records for whoever debugs it.
     assert.match(persisted.submission_error || '', /expected exactly one match/);
     assert.match(persisted.submission_error || '', /workable_phone_readback_evidence=/);
