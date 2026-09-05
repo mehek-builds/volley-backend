@@ -192,6 +192,45 @@ export function employerDeliveryProjection(packet: SubmissionPacket): Record<str
      * only the hash projection drops what is not employer content. The one bit of the log that can
      * change what this employer sees - whether THIS employer appears in it - changes an ANSWER, and
      * answers are bound exactly, as `questions` in this same projection. */
+    /* WHAT THE EMPLOYER RECEIVES FROM A QUESTION IS ITS LABEL AND HER ANSWER, and on the ATS API
+     * channel the destination key. Everything else on a packet question is either the live form's
+     * own reading of itself or Litos's provenance about the answer, and binding it here made the
+     * drift gate refuse packets whose acknowledgement check had just PASSED.
+     *
+     * MEASURED 2026-09-05, Jump Trading packet 1d9f92ea, fifth prepare of the day (14:58Z, litos-api
+     * a711338): packetQuestionAcknowledgement found no missing, forged or unacknowledged question -
+     * the same twelve labels with the same twelve answers - and the run still parked on "browser
+     * employer-delivery payload changed after packet approval (moved: questions)". The four prepares
+     * before it had named the moving fields one at a time: `portalInputType` on the degree control
+     * (text on the audit's reading, checkbox once the live page was probed), `answerSource` on the
+     * consent control, and `orderChanged: true`. packetQuestionEqualsAcknowledged already exempts
+     * exactly these - LIVE_FORM_READING_FIELDS (portalSelector, portalInputType, required) because
+     * "where the answer is typed is the live form's business", the provenance fields because a snap
+     * may drop or re-stamp them, and order because "what she approved is the set of answers" - so
+     * the same packet was being accepted by the rule that understands questions and refused by a
+     * hash that binds every byte of them. The snapOnly fallback in verifiedBuiltPacketIssues could
+     * not rescue it either: it substitutes the prepare-time verified reading, whose portal_input_type
+     * was itself re-read from the page since the audit.
+     *
+     * Same narrowing rule as fieldOptions and failedFields above: the packet keeps every field, only
+     * the hash projection narrows to what crosses the boundary - label, answer, atsApiField - as a
+     * multiset (sorted by serialized form, duplicates preserved), because the live form's sequence is
+     * not applicant content. An answer that moves, a label that moves, a question added or dropped,
+     * or a destination key that moves still changes the hash; the same answers under a re-read
+     * control type, a renumbered selector, a re-advertised required flag, a re-stamped provenance,
+     * or a different order do not. */
+    if (key === 'questions' && Array.isArray(value)) {
+      projection[key] = (value as SubmissionPacket['questions'])
+        .map((question) => ({
+          question: question.question,
+          answer: question.answer,
+          ...(question.atsApiField !== undefined ? { atsApiField: question.atsApiField } : {}),
+        }))
+        .map((entry) => ({ entry, sortKey: JSON.stringify(entry) }))
+        .sort((left, right) => (left.sortKey < right.sortKey ? -1 : left.sortKey > right.sortKey ? 1 : 0))
+        .map(({ entry }) => entry);
+      continue;
+    }
     if (key === 'applicationProfile') {
       projection[key] = applicationProfileBindingValue(value);
       continue;

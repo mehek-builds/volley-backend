@@ -495,3 +495,42 @@ test('a browser binding carries one digest per projected part, and a drift is na
   });
   assert.equal(extension.fields, undefined);
 });
+
+/* THE QUESTIONS PART BINDS WHAT THE EMPLOYER RECEIVES. Jump Trading 1d9f92ea, 2026-09-05: five
+ * prepares parked on this hash while the acknowledgement rule accepted the very same questions,
+ * because the hash bound the live form's own reading (portalInputType text -> checkbox once probed,
+ * a renumbered selector, a re-advertised required flag), the answer's provenance, and the form's
+ * order. None of that crosses the boundary; the label, the answer and the ATS destination key do. */
+test('the questions part of the delivery binding moves on label, answer or destination key, never on the live form\u2019s reading or order', () => {
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed', destinationUrl: 'https://jobs.example.com/apply', portalFamily: 'greenhouse',
+  });
+  const review = { cover_letter_supported: true, transcript_supported: true };
+  const base = packet();
+  base.questions = [
+    { question: 'What degree are you currently pursuing?', answer: 'Bachelor\u2019s', portalSelector: '#question_1', portalInputType: 'text', required: true, answerSource: 'applicant_review' },
+    { question: 'Review our Notice at Collection', answer: 'Acknowledge/Confirm', portalSelector: '#question_2', portalInputType: 'checkbox', required: true },
+  ];
+  const digest = employerDeliverySha256(base, envelope);
+  const unchanged = (mutate: (questions: SubmissionPacket['questions']) => SubmissionPacket['questions'], why: string) => {
+    const candidate = { ...base, questions: mutate(base.questions.map((q) => ({ ...q }))) };
+    assert.equal(employerDeliverySha256(candidate, envelope), digest, why);
+    assert.deepEqual(employerDeliveryDriftFields(candidate, createEmployerDeliveryBindings(base, review, { mode: 'browser', envelope }), envelope), [], why);
+  };
+  const moves = (mutate: (questions: SubmissionPacket['questions']) => SubmissionPacket['questions'], why: string) => {
+    const candidate = { ...base, questions: mutate(base.questions.map((q) => ({ ...q }))) };
+    assert.notEqual(employerDeliverySha256(candidate, envelope), digest, why);
+    assert.deepEqual(employerDeliveryDriftFields(candidate, createEmployerDeliveryBindings(base, review, { mode: 'browser', envelope }), envelope), ['questions'], why);
+  };
+  unchanged((qs) => [qs[1], qs[0]], 'the live form\u2019s order is not applicant content');
+  unchanged((qs) => [{ ...qs[0], portalInputType: 'checkbox' }, qs[1]], 'a re-read control type is the form moving');
+  unchanged((qs) => [{ ...qs[0], portalSelector: '[data-litos-discovered-7]' }, qs[1]], 'a renumbered selector is the form moving');
+  unchanged((qs) => [{ ...qs[0], required: false }, qs[1]], 'a re-advertised required flag is the form moving');
+  unchanged((qs) => [qs[0], { ...qs[1], answerSource: 'consent_permission' }], 'a re-stamped provenance is Litos\u2019 record, not the employer\u2019s');
+  unchanged((qs) => [{ ...qs[0], answerOptionSource: 'Bachelor of Science' }, qs[1]], 'a snap claim is Litos\u2019 record, not the employer\u2019s');
+  moves((qs) => [{ ...qs[0], answer: 'Master\u2019s' }, qs[1]], 'an answer that moves crosses the boundary');
+  moves((qs) => [{ ...qs[0], question: 'What degree do you hold?' }, qs[1]], 'a label that moves crosses the boundary');
+  moves((qs) => [qs[0]], 'a dropped question crosses the boundary');
+  moves((qs) => [...qs, { question: 'Veteran status', answer: 'No' }], 'an added question crosses the boundary');
+  moves((qs) => [{ ...qs[0], atsApiField: 'degree' }, qs[1]], 'a destination key that moves crosses the boundary');
+});
