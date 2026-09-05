@@ -1,5 +1,3 @@
-import { outcomeRecoveryDue } from '../lib/submissionOutcomeRecovery';
-import { recoverUnverifiedSubmission } from './submissionRunner';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { deleteObjects, objectStorageUsesRailway, putObject } from '../lib/objectStorage';
@@ -4333,16 +4331,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * the first time she looks at it after the rule that binds its receipt ships. */
       const parkedRepair = await repairParkedConfirmedProjection(row, request.log);
       if (parkedRepair.kind === 'repaired') row = parkedRepair.row;
-      const recoveryCandidate = readApplicationReview(row.spec);
-      if (recoveryCandidate && outcomeRecoveryDue(recoveryCandidate)) {
-        try {
-          await recoverUnverifiedSubmission(row.id, fastify);
-        } catch (error) {
-          request.log.warn({ error, applicationId: row.id }, 'Automatic outcome recovery will retry');
-        }
-        row = await ownedResume(request, reply);
-        if (!row) return;
-      }
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);

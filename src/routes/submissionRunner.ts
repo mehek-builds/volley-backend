@@ -13597,12 +13597,6 @@ export async function processSubmissionApplication(
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   const row = rows[0];
   if (!row) return null;
-  const recoveryReview = readApplicationReview(row.spec);
-  if (recoveryReview && outcomeRecoveryDue(recoveryReview)) {
-    await recoverUnverifiedSubmission(row.id, fastify);
-    const [recovered] = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
-    return recovered ? readApplicationReview(recovered.spec) : null;
-  }
   let activeRow = row;
   /* REGISTERED HERE, FOR THE WHOLE STEP, AND NOWHERE ELSE. This is the one function every managed
    * prepare and every managed submit passes through - the cron's unattended sweep and both
@@ -13724,11 +13718,6 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
         or (${generated_resumes.spec}->'_review'->>'submission_claimed_at' is not null
           and (
             ${generated_resumes.spec}->'_review'->>'status' = 'submitting'
-            or (${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'
-              and jsonb_typeof(${generated_resumes.spec}->'_review'->'unverified_submission') = 'object'
-              and ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null
-              and coalesce(${generated_resumes.spec}->'_review'->'outcome_recovery'->>'state', 'pending') <> 'unresolved'
-              and coalesce(${generated_resumes.spec}->'_review'->'outcome_recovery'->>'next_check_at', '') <= to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
             or (
               ${generated_resumes.spec}->'_review'->'verification'->>'runner' = 'stratus-managed'
               and (
@@ -13766,8 +13755,7 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
       // guarantee is "about the cap", and buying an exact one costs a database counter updated
       // inside the submission claim.
       const queuedReview = readApplicationReview(row.spec);
-      const recoveringExistingAttempt = Boolean(queuedReview && outcomeRecoveryDue(queuedReview))
-        || submissionClaimIsHeld(queuedReview)
+      const recoveringExistingAttempt = submissionClaimIsHeld(queuedReview)
         || managedSecurityCodeContinuationRecoveryIsHeld(queuedReview);
       if (!recoveringExistingAttempt) {
         const already = await countSubmissionsClaimedToday(row.user_id);

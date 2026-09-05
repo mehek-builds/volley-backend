@@ -1344,11 +1344,9 @@ export type ManagedReceiptObservation<T extends ManagedReceiptResult> = {
 /**
  * Re-read an exact held Stratus page once when its first post-click verdict is still unknown.
  *
- * This helper owns the fail-closed boundary. It accepts only the ATS hooks the runner already
- * publishes for Ashby's success/failure containers, Greenhouse's confirmation route, and
- * Workable's successful-submit state on the exact bound job. A generic live region, body text,
- * another unknown result, or a continuation failure can improve the screenshot shown to the
- * applicant, but none of them can turn the row into submitted or refused.
+ * Ashby, Greenhouse and Workable use their exact ATS identity and receipt hooks. Other measured
+ * families use the shared acceptance validator after an exact original-page binding. Unknown,
+ * conditional and unrelated observations never become confirmations.
  *
  * The observer receives only the capability copied from this exact result. It receives no URL and
  * no action list, so it cannot reopen the employer page or press Send a second time. Stratus binds

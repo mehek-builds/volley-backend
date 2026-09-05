@@ -127,3 +127,37 @@ test('the sweep re-reads stored evidence first, looks at the page only when due,
   assert.deepEqual(reads, []);
   assert.deepEqual(reconciled, ['u1']);
 });
+
+test('retained-attempt confirmation is reloaded before any public page observation', async () => {
+  const calls: string[] = [];
+  const row = { id: 'p1', user_id: 'u1', spec: { _review: {
+    status: 'needs_attention', submission_claim_id: 'c1',
+    unverified_submission: record(),
+  } } };
+  const summary = await runSubmissionVerificationSweep({}, {
+    listCandidates: async () => [row],
+    recoverRetainedAttempt: async (id) => { calls.push(`recover:${id}`); },
+    reloadPacket: async () => ({ ...row, spec: { _review: { status: 'submitted' } } }),
+    readPage: async () => { throw new Error('A confirmed attempt must not open a page'); },
+    reconcileInbox: async () => {},
+  });
+  assert.deepEqual(calls, ['recover:p1']);
+  assert.equal(summary.outcomes.skipped, 1);
+  assert.equal(summary.outcomes.page_check_failed, 0);
+});
+
+test('a retained recovery failure does not starve the following packet', async () => {
+  const visited: string[] = [];
+  const row = (id: string) => ({ id, user_id: 'u1', spec: { _review: {
+    status: 'needs_attention', submission_claim_id: id, unverified_submission: record(),
+  } } });
+  const summary = await runSubmissionVerificationSweep({}, {
+    listCandidates: async () => [row('p1'), row('p2')],
+    recoverRetainedAttempt: async (id) => { visited.push(id); if (id === 'p1') throw new Error('temporary outage'); },
+    reloadPacket: async () => ({ ...row('p2'), spec: { _review: { status: 'submitted' } } }),
+    reconcileInbox: async () => {},
+  });
+  assert.deepEqual(visited, ['p1', 'p2']);
+  assert.equal(summary.outcomes.error, 1);
+  assert.equal(summary.outcomes.skipped, 1);
+});
