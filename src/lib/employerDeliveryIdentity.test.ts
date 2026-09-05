@@ -12,6 +12,8 @@ import {
   extensionEmployerDeliveryProjection,
   extensionEmployerDeliveryBindingIssue,
   transportBoundEmployerPacket,
+  employerDeliveryFieldDigests,
+  employerDeliveryDriftFields,
 } from './employerDeliveryIdentity';
 
 function packet(): SubmissionPacket {
@@ -450,4 +452,46 @@ test('every other applicationProfile and applicantSnapshot byte still moves the 
   } as SubmissionPacket;
   assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(movedProfile, envelope));
   assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(movedSnapshot, envelope));
+});
+
+
+/* Measured 2026-09-04/05 on this account: Belvedere c4413bff (22:27Z, 22:32Z) and Covenant House
+ * c24e48a2 (01:56Z) each parked their first approve on "browser employer-delivery payload changed
+ * after packet approval" with nothing anywhere naming which of the ~40 projected parts had moved.
+ * The whole-payload hash stays the authority; these pin that the binding now carries one digest per
+ * part beside it, that a drift can be named from them, and that nothing but digests is stored. */
+test('a browser binding carries one digest per projected part, and a drift is named by part', () => {
+  const sample = packet();
+  const review = { cover_letter_supported: true, transcript_supported: false } as Parameters<typeof createEmployerDeliveryBindings>[1];
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed', destinationUrl: 'https://jobs.example.com/apply', portalFamily: 'lever',
+    coverLetterSupported: true, transcriptSupported: false,
+  });
+  const bindings = createEmployerDeliveryBindings(sample, review, { mode: 'browser', envelope });
+  assert.ok(bindings.fields, 'per-part digests ride beside the whole-payload hash');
+  const delivered = packetForEmployerDelivery(sample, review, 'browser');
+  assert.deepEqual(bindings.fields, employerDeliveryFieldDigests(delivered, envelope));
+  for (const [key, digest] of Object.entries(bindings.fields!)) {
+    assert.match(digest, /^[a-f0-9]{64}$/, `${key} is a digest, never content`);
+  }
+  assert.ok(Object.keys(bindings.fields!).includes('questions'));
+  assert.ok(Object.keys(bindings.fields!).includes('envelope'));
+  // Unchanged: nothing moved.
+  assert.deepEqual(employerDeliveryDriftFields(delivered, bindings, envelope), []);
+  // One answer changed: exactly the questions part is named, and the whole-payload check still refuses.
+  const moved = { ...delivered, questions: delivered.questions.map((q, i) => (i === 0 ? { ...q, answer: `${q.answer} (edited)` } : q)) };
+  assert.deepEqual(employerDeliveryDriftFields(moved, bindings, envelope), ['questions']);
+  assert.ok(employerDeliveryBindingIssue(moved, bindings, 'browser', envelope));
+  // A moved envelope names the envelope; a moved phone names phone.
+  const otherEnvelope = { ...envelope, destinationUrl: 'https://jobs.example.com/other' };
+  assert.deepEqual(employerDeliveryDriftFields(delivered, bindings, otherEnvelope), ['envelope']);
+  assert.deepEqual(employerDeliveryDriftFields({ ...delivered, phone: '+1 000 000 0000' }, bindings, envelope), ['phone']);
+  // A binding minted before per-part digests names nothing rather than guessing.
+  const legacyBinding = { version: 'employer_delivery_v1', mode: 'browser', sha256: bindings.sha256 } as typeof bindings;
+  assert.equal(employerDeliveryDriftFields(moved, legacyBinding, envelope), null);
+  // The extension binding is unchanged: no per-part digests, no drift naming.
+  const extension = createEmployerDeliveryBindings(sample, review, {
+    mode: 'extension', envelope, extensionProjection: { resume: { sha256: 'x', sizeBytes: 1 } },
+  });
+  assert.equal(extension.fields, undefined);
 });
