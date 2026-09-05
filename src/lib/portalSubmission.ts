@@ -1189,6 +1189,23 @@ const MANAGED_FILL_TIMEOUT_MS = 10_000;
  * expectedValueDigits, so a phone that genuinely did not land still fails, four seconds sooner. */
 const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 4_000;
 
+/* THE BOUNDED RETRY ADDED ON TOP OF THE WAIT ABOVE, not a replacement for it.
+ *
+ * MEASURED 2026-09-05 12:33:00Z-12:33:50Z, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb SEND #2:
+ * `filled_field:phone: expected exactly one match for .iti input[type="tel"], body:not(:has(...))
+ * div[data-ui="phone"] input[type="tel"], body:not(:has(...)):not(:has(...)) input[name="phone"],
+ * found 0` - the full three-arm fallback chain, all zero, on a fill that had just proved exactly
+ * one match moments earlier (requireUnique, optional:false). One bounded wait plus one bounded
+ * extract had already run and neither caught the widget coming back, so the fix widens the number
+ * of independent chances rather than the length of any single one - a widget that remounts in a
+ * separate microtask than the first poll expects still gets caught by the second or third.
+ *
+ * Two SHORT extra attempts, not one long one: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS already isolates the
+ * cost of a widget that never comes back (see that constant's own accounting against
+ * MANAGED_RUN_TIMEOUT_MS), and stacking two 1s attempts after it adds a bounded, small tax
+ * (2s total) instead of re-opening that budget question. */
+const WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS = 1_000;
+
 /* MEASURED root cause of the SEND death this constant fixes, packet fdcf4ccb-eca9-44dc-b0cb-
  * d400805ebdeb (Pony.ai), two occurrences with byte-identical error text: 2026-09-04 21:35Z and
  * 2026-09-05 11:08:17Z-11:08:43Z (26s runtime), both `page.waitForSelector: Timeout 10000ms
@@ -6087,10 +6104,23 @@ function pushWorkableManagedPhoneActions(
    * present-but-not-visible can never satisfy it, so no timeout value would have helped.
    *
    * NOTHING IS WEAKENED BY THIS, and that is the whole reason it is safe: this action settles the
-   * page, it does not prove anything. The extract on the very next line is the evidence gate and is
-   * untouched - optional false, requireUnique, requireNonEmpty, and expectedValueDigits pinned to
-   * the planned number. A phone that genuinely did not land still fails there, and fails with a
-   * sentence about the phone rather than about the browser. */
+   * page, it does not prove anything. The extract that follows (after two more short bounded
+   * chances - see WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS) is the evidence gate and keeps
+   * requireUnique, requireNonEmpty, and expectedValueDigits pinned to the planned number. A phone
+   * that genuinely did not land still fails to persist, and the sentence is about the phone rather
+   * than about the browser.
+   *
+   * THE EXTRACT ITSELF IS NOW OPTIONAL TOO - the second half of the same fix, not a separate one.
+   * MEASURED 2026-09-05 12:33Z, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb SEND #2: the fill had
+   * just proved exactly one match (requireUnique, optional:false, immediately above), and the
+   * readback still found zero across the wait and its own bounded retry window - the remount can
+   * outlast every chance this action list gives it. Killing the whole run on that zero, after the
+   * fill already proved the value landed, is the wrong trade: it costs a full re-tailor-and-resend
+   * cycle to relearn a fact this run already knows. A zero-match readback now degrades to recorded
+   * evidence (see managedResultFilledFields's phoneDegradedToFillProof) instead of a fatal refusal.
+   * A match that DOES come back is still held to the exact planned digits - optional changes what a
+   * MISS costs, never what a HIT has to prove (see managedResultFilledFields for the digit check,
+   * which runs in this repo rather than trusting the provider to have enforced it silently). */
   actions.push({
     type: 'waitForSelector',
     selector: WORKABLE_PHONE_READBACK_SELECTOR,
@@ -6099,11 +6129,25 @@ function pushWorkableManagedPhoneActions(
     timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
   });
   actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
+    label: 'workable_phone_value_visible_retry_1',
+    optional: true,
+    timeout: WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
+    label: 'workable_phone_value_visible_retry_2',
+    optional: true,
+    timeout: WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS,
+  });
+  actions.push({
     type: 'extract',
     selector: WORKABLE_PHONE_READBACK_SELECTOR,
     attribute: 'value',
     label: 'filled_field:phone',
-    optional: false,
+    optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
     requireNonEmpty: true,
@@ -6111,9 +6155,14 @@ function pushWorkableManagedPhoneActions(
     stabilityWindowMs: 1_200,
   });
   if (plan.country) {
-    /* Same shape, same reason, same protection: the country readback extract below keeps
-     * optional false with requireNonEmpty and expectedValueDigits on the dial code, so the fact is
-     * still proved. Only the settling wait stands down. */
+    /* Same shape, same reason, same protection, same relief: bounded retry ahead of a readback
+     * that is now optional too, because the same remount that can hide the tel input for longer
+     * than one wait can just as easily hide the dial-code readback beside it. requireNonEmpty and
+     * expectedValueDigits are unchanged, so a match that does come back still has to be right;
+     * only a genuine zero-match stops being fatal. See managedResultFilledFields: unlike the phone
+     * proof, a missing country proof already fell back to "persisted" before this change (a
+     * packet with no recognised country plan never had one to find), so no new fallback is needed
+     * here - only the wait and the optional flag move to match the phone block. */
     actions.push({
       type: 'waitForSelector',
       selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
@@ -6122,10 +6171,24 @@ function pushWorkableManagedPhoneActions(
       timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
     });
     actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
+      label: 'workable_phone_country_visible_retry_1',
+      optional: true,
+      timeout: WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS,
+    });
+    actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
+      label: 'workable_phone_country_visible_retry_2',
+      optional: true,
+      timeout: WORKABLE_PHONE_REMOUNT_RETRY_TIMEOUT_MS,
+    });
+    actions.push({
       type: 'extract',
       selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
       label: 'filled_field:phone_country',
-      optional: false,
+      optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
@@ -7633,6 +7696,11 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
     }
   })();
   if (workableResult || workablePhoneProof.length > 0 || workableCountryProof.length > 0) {
+    // Captured before the delete below: whether the FILL itself (optional:false, requireUnique on
+    // the phone control) reported success. That is proof about a DIFFERENT action than the
+    // readback this block is about to evaluate, and it is what phoneDegradedToFillProof leans on
+    // when the readback found nothing at all to assert against.
+    const phoneFillSucceeded = fields.has('phone');
     // The provider's filledFields records that a command once succeeded. These extracts record what
     // the form still holds after uploads and autofill, so they replace rather than supplement it.
     fields.delete('phone');
@@ -7642,6 +7710,21 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
     const phonePersisted = assertionContract
       && Boolean(expectedPhoneDigits)
       && digitsOnly(phoneEvidence?.value) === expectedPhoneDigits;
+    /* THE DEGRADED ARM, for the readback that the fatal refusal used to own outright.
+     *
+     * MEASURED 2026-09-05 12:33Z, Pony.ai fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb SEND #2: the fill
+     * proved exactly one match and typed the planned value (requireUnique, optional:false), and the
+     * readback - now optional, see pushWorkableManagedPhoneActions - still found zero across its
+     * wait and bounded retry. `workablePhoneProof` is empty in exactly this shape: the runner never
+     * got a value to assert on, so nothing landed in `result.extracted` for this label at all (the
+     * same "absent means unreadable" contract the terminal re-read below already relies on).
+     *
+     * Deliberately narrower than "trust the fill whenever the readback disagrees": this arm only
+     * ever fires on ZERO evidence (workablePhoneProof.length === 0). A readback that DID find a
+     * control - right digits or wrong - still goes through phonePersisted above and nowhere else,
+     * so a wrongly-matched number is never waved through by this arm; there is no evidence for it
+     * to read. */
+    const phoneDegradedToFillProof = workablePhoneProof.length === 0 && phoneFillSucceeded;
     const countryEvidence = workableCountryProof.length === 1 ? workableCountryProof[0] : undefined;
     const expectedCountryDigits = countryEvidence?.expectedValueDigits;
     const countryPersisted = workableCountryProof.length === 0
@@ -7655,17 +7738,23 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
      * the widget unreadable, which five live refutations showed is the ordinary end-of-run state;
      * the proven early extract stands as the record, with the skip visible in skipped_reasons as
      * its provenance. A terminal read that returns a DIFFERENT number, or an emptied one, drops
-     * phone from filled_fields - fail closed, as a phone fact rather than a dead run. */
+     * phone from filled_fields - fail closed, as a phone fact rather than a dead run.
+     *
+     * When the early proof is itself degraded (expectedPhoneDigits undefined because nothing
+     * landed to echo it), there is no proven digit string left to hold a terminal value to either -
+     * so a terminal value is treated as inconclusive rather than a mismatch. It is a null terminal
+     * read (the ordinary case) that this arm is really for. */
     const terminalPhone = (result.extracted ?? [])
       .filter((item) => item.label === WORKABLE_PHONE_TERMINAL_READBACK_LABEL);
     const terminalPhoneConsistent = terminalPhone.every((item) =>
-      item.value === null || digitsOnly(item.value) === expectedPhoneDigits);
+      item.value === null || expectedPhoneDigits === undefined || digitsOnly(item.value) === expectedPhoneDigits);
     const terminalCountry = (result.extracted ?? [])
       .filter((item) => item.label === WORKABLE_PHONE_COUNTRY_TERMINAL_READBACK_LABEL);
     const terminalCountryConsistent = terminalCountry.every((item) =>
       item.value === null
       || (Boolean(expectedCountryDigits) && digitsOnly(item.value) === expectedCountryDigits));
-    if (phonePersisted && countryPersisted && terminalPhoneConsistent && terminalCountryConsistent) {
+    if ((phonePersisted || phoneDegradedToFillProof)
+      && countryPersisted && terminalPhoneConsistent && terminalCountryConsistent) {
       fields.add('phone');
     }
   }
