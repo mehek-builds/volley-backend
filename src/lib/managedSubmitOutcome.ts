@@ -1744,9 +1744,17 @@ export function unverifiedSubmissionReason(input: {
   const looksLike = CONFIRMATION_LOOKS_LIKE[(input.atsName ?? '').toLowerCase().trim()]
     ?? 'A sent application usually replaces the form with a short confirmation, and many employers '
       + 'email one too.';
+  /* Since 2026-09-05 the looking is Litos's job (lib/submissionVerificationSweep.ts): it re-reads
+   * the employer's page itself and watches the application inbox. The page is still named so the
+   * record says where, and the two buttons still work for an applicant who already knows. */
   const where = input.portalUrl
-    ? `Open ${input.portalUrl} and look.`
-    : 'Open the employer’s application page and look.';
+    ? `Litos will re-read ${input.portalUrl} itself.`
+    : 'Litos will re-read the employer’s application page itself.';
+  const litosVerifies = 'Litos will settle this on its own: it re-reads the employer’s page and watches '
+    + 'your application inbox for the employer’s confirmation, and records the send the moment either '
+    + 'proves it. Nothing is needed from you. Do not submit it by hand in the meantime, because two '
+    + 'applications to the same posting count against you and cannot be taken back. If you already '
+    + 'know the answer, the two buttons below record it.';
   if (input.cause === 'no_confirmation_state'
     && (input.challengeOnScreen || pressReachedOnlyChallengePlatform(input.network, input.portalUrl))) {
     const how = input.challengeOnScreen
@@ -1756,9 +1764,9 @@ export function unverifiedSubmissionReason(input: {
         + 'the only requests it made went to the verification service, and none reached the '
         + 'employer, so this application very likely did not go through.';
     return `${how} Litos cannot complete a human-verification check or claim a receipt that the `
-      + 'employer did not show. Choose “It is not there” below to record that nothing was sent and '
-      + 'release this saved application. The filled-form proof and every next action stay in this '
-      + 'dashboard.';
+      + 'employer did not show. Litos will record that nothing was sent and release this saved '
+      + 'application on its own once the send lease has expired; “It is not there” below does the '
+      + 'same now. The filled-form proof and every next action stay in this dashboard.';
   }
   /* CASE (a) OF THREE: THE SUBMIT REQUEST WAS NEVER ISSUED. Stronger, more specific evidence than
    * `pending` or a missing/status-less network entry: armSubmitNetworkWatch positively watched the
@@ -1769,9 +1777,10 @@ export function unverifiedSubmissionReason(input: {
   if (input.cause === 'no_confirmation_state' && input.submitRequestSeen === false) {
     return 'Litos pressed Send, but no request ever left the browser toward the employer’s server: '
       + 'the click registered, and nothing was sent, so this application very likely did not go '
-      + 'through. Litos cannot claim a receipt for a request that was never made. Choose “It is not '
-      + 'there” below to record that nothing was sent and release this saved application. The '
-      + 'filled-form proof and every next action stay in this dashboard.';
+      + 'through. Litos cannot claim a receipt for a request that was never made. Litos will record '
+      + 'that nothing was sent and release this saved application on its own once the send lease has '
+      + 'expired; “It is not there” below does the same now. The filled-form proof and every next '
+      + 'action stay in this dashboard.';
   }
   /* THE HONEST VERSION OF "NO CONFIRMATION STATE": the page had not finished answering, not that
    * the press produced nothing to wait for. Same next step as the generic sentence below - she still
@@ -1781,10 +1790,7 @@ export function unverifiedSubmissionReason(input: {
   if (input.cause === 'no_confirmation_state' && input.pending === true) {
     return 'Litos pressed Send, and the page was still showing "Submitting…" when Litos stopped '
       + `watching, so it does not know whether the employer’s server finished accepting it. ${where} `
-      + `${looksLike} Then tell Litos which you found: if it is there, Litos will record it as sent `
-      + 'and will not apply again; if it is not, Litos will send this one for you. Do not submit it '
-      + 'by hand in the meantime, because two applications to the same posting count against you and '
-      + 'cannot be taken back.';
+      + `${looksLike} ${litosVerifies}`;
   }
   /* CASE (c) OF THREE: THE REQUEST WAS ISSUED AND ANSWERED, WITH A STATUS THE PAGE ITSELF NEVER
    * SURFACED. A definite non-success status is real, specific evidence that something other than a
@@ -1811,10 +1817,7 @@ export function unverifiedSubmissionReason(input: {
    * inside this sentence: the dashboard passes attention_reason through its technical-error
    * filter, and an observed "Internal Server Error" or "HTTP 502" replaced the whole warning with
    * "Try again in a minute" - the opposite instruction (review of PR #881, finding 3). */
-  return `${what} ${where} ${looksLike} Then tell Litos which you found: if it is there, Litos will `
-    + 'record it as sent and will not apply again; if it is not, Litos will send this one for you. '
-    + 'Do not submit it by hand in the meantime, because two applications to the same posting count '
-    + 'against you and cannot be taken back.';
+  return `${what} ${where} ${looksLike} ${litosVerifies}`;
 }
 
 /**

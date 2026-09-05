@@ -1402,6 +1402,8 @@ type ManagedAuthorizedUnverifiedInput = {
   challengeOnScreen?: boolean;
   observedPageText?: string;
   finalUrl?: string;
+  submitRequestSeen?: boolean | null;
+  pending?: boolean;
   requireContinuationResumed?: boolean;
   allowInvalidContinuationBinding?: boolean;
   cleanupMarkers?: readonly ManagedTerminalCleanupMarker[];
@@ -1458,6 +1460,8 @@ export async function recordManagedAuthorizedAttemptUnverified(
         ...(input.challengeOnScreen ? { challengeOnScreen: true } : {}),
         ...(input.observedPageText ? { observedPageText: input.observedPageText } : {}),
         ...(input.finalUrl ? { finalUrl: input.finalUrl } : {}),
+        ...(input.submitRequestSeen !== undefined ? { submitRequestSeen: input.submitRequestSeen } : {}),
+        ...(input.pending ? { pending: true } : {}),
       }),
       ...(mergedSecurityCode ? { security_code: mergedSecurityCode } : {}),
       ...(mergedVerification ? { verification: mergedVerification } : {}),
@@ -12120,6 +12124,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         challengeOnScreen: pressChallengeOnScreen,
         ...(observedPageText ? { observedPageText } : {}),
         ...(landedUrl ? { finalUrl: landedUrl } : {}),
+        ...(pressSubmitRequestSeen !== null ? { submitRequestSeen: pressSubmitRequestSeen } : {}),
+        ...(pressPending ? { pending: true } : {}),
         cleanupMarkers: managedCleanupMarkers(),
       });
       await acknowledgeManagedCleanupMarkers();
@@ -12793,6 +12799,8 @@ function unverifiedSubmissionPatch(
     /* The runner's rendered page text after the press and where it landed; see the record's fields. */
     observedPageText?: string;
     finalUrl?: string;
+    submitRequestSeen?: boolean | null;
+    pending?: boolean;
   },
 ): Partial<ApplicationReviewState> {
   return {
@@ -12808,6 +12816,8 @@ function unverifiedSubmissionPatch(
       ...(input.challengeOnScreen ? { challenge_on_screen: true as const } : {}),
       ...(input.observedPageText ? { observed_page_text: input.observedPageText.replace(/\s+/g, ' ').trim().slice(0, 600) } : {}),
       ...(input.finalUrl ? { final_url: input.finalUrl.slice(0, 2000) } : {}),
+      ...(input.submitRequestSeen !== undefined ? { submit_request_seen: input.submitRequestSeen } : {}),
+      ...(input.pending ? { pending: true as const } : {}),
     },
     attention_reason: unverifiedSubmissionReason({
       atsName: review.ats_name,
@@ -12816,6 +12826,8 @@ function unverifiedSubmissionPatch(
       network: input.network ?? null,
       challengeOnScreen: input.challengeOnScreen,
       observedPageText: input.observedPageText ?? null,
+      ...(input.pending ? { pending: true } : {}),
+      ...(input.submitRequestSeen !== undefined ? { submitRequestSeen: input.submitRequestSeen } : {}),
     }),
     attention_categories: ['unverified_submission'],
   };
