@@ -575,36 +575,39 @@ export class SubmissionProviderCallLockTimeoutError extends Error {
  * value and neither may import it from the other: submissionAccountFence.ts already imports
  * databaseNow from browserProviderResourceCleanup.ts, so the reverse import would cycle.
  *
- * THIS IS BOUNDED BY VOLLEY-BACKEND'S OWN REQUEST LIFETIME, NOT BY STRATUS'S. As of #974, stratus can
- * legitimately take up to MANAGED_PREPARE_FILL_DEADLINE_MS (420s) to fill a long form, because
- * stratus's OWN execution host - its Railway-hosted local runner - can wait that long
+ * CORRECTED 2026-09-05, HOURS AFTER THIS CONSTANT WAS FIRST WRITTEN: an earlier version of this
+ * comment asserted "volley-backend itself is still a single Vercel function" killed by a 300s
+ * maxDuration, and derived 240s as "60s of slack under that platform kill." DEPLOY.md's own Shipping
+ * section says otherwise: "Merging to `main` deploys production, on Railway now" - `litos-api` runs
+ * `node dist/index.js`, which calls `app.listen(...)` (src/index.ts), a persistent Fastify listener
+ * with no per-request platform-imposed duration ceiling, not the `api/index.ts` serverless function
+ * vercel.json still configures. That Vercel path is kept only as DEPLOY.md's documented rollback
+ * target during the cutover, not the primary one - so the specific "killed by the platform at 300s"
+ * mechanism the earlier comment described is not what governs a live request today. The bounded-wait
+ * MECHANISM this constant configures is unaffected by which of the two is correct: an unbounded
+ * pg_advisory_xact_lock wait behind a wedged holder is exactly as unboundedly bad on a persistent
+ * listener as on a serverless one - arguably worse, since nothing ever kills the waiting request
+ * either. What was wrong was only the NUMBER's justification, not the fact that it needed one.
+ *
+ * THE RE-DERIVED REASONING. Stratus can legitimately take up to MANAGED_PREPARE_FILL_DEADLINE_MS
+ * (420s, #974) to fill a long form, on its own separate Railway-hosted execution host
  * (MAX_RUN_TIMEOUT_MS 480s, validated against MAX_PROVIDER_DEADLINE_MS 8min; see browserbase.ts's
- * comment on that constant). That budget belongs to stratus's infrastructure, not this backend's.
- * volley-backend itself is still a single Vercel function: vercel.json's `api/index.ts` maxDuration
- * is 300s and untouched by #974, so the request making an outbound call through either caller above -
- * the one the lock wait and the provider call it guards both run inside - is killed by the PLATFORM at
- * 300s regardless of what stratus itself would still be willing to do. Nothing either caller wraps,
- * and no wait for it, can usefully exceed that 300s ceiling: a second call queued behind a first one
- * already running long would have too little of its OWN 300s budget left to dispatch anything by the
- * time it got the lock - exactly the gap assertManagedBrowserRequestBudgetAtClock's
- * minimumDispatchBudgetMs already refuses to dispatch into - so it was never going to complete in the
- * same request either way. The only question this constant answers is how quickly a WEDGED holder
- * gets reported instead of hanging silently until Vercel kills the request with no trace, which is
- * what happens today with no bound at all.
+ * comment on that constant) - a budget that belongs to stratus's infrastructure, not this backend's.
+ * With no confirmed hard ceiling of this backend's own to derive against, 240s (4 minutes) is instead
+ * justified directly: comfortably above SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS's actual 5-minute
+ * lease and within reach of a typical fill (420-480s describe stratus's own worst case, not a normal
+ * duration), while still being a human-reasonable point to conclude a holder is wedged rather than
+ * merely slow, and to let recordSubmissionRunnerFailure close the ledger attempt with an honest
+ * message instead of the caller waiting indefinitely for an answer that may never come.
  *
- * 240s (4 minutes) sits comfortably above what a typical call needs - 420-480s describe stratus's OWN
- * worst-case ceiling, which this backend's own 300s platform limit already makes largely unreachable
- * from in here regardless - while still leaving a full 60s of this request's own 300s budget for the
- * timeout error to surface, for recordSubmissionRunnerFailure to close the ledger attempt, and for a
- * response to reach the caller: strictly better than the platform silently killing the request with
- * nothing written, which is what happens today once a wait runs that long.
- *
- * providerCallLockTimeoutCeiling.test.ts asserts this stays under vercel.json's own maxDuration, the
- * way boundaryLeaseCeiling.test.ts and browserbase.test.ts already guard their sibling budget
- * constants - both of which have moved more than once. If Vercel's maxDuration ever rises to actually
- * accommodate stratus's current ceilings, or if MANAGED_PREPARE_FILL_DEADLINE_MS or
- * SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS move again, this needs re-deriving against the new
- * numbers, not just left alone - and that test will fail loudly rather than let it drift unnoticed.
+ * providerCallLockTimeoutCeiling.test.ts asserts this stays under vercel.json's maxDuration with 60s
+ * of margin - not because that path is what production runs today, but because DEPLOY.md documents
+ * it as the rollback target, so this value staying safe there too costs nothing and removes one
+ * variable from an already-stressful rollback. If Railway's own request-handling behavior is ever
+ * given a confirmed, documented ceiling, this comment and that test should be re-derived against it
+ * instead. If MANAGED_PREPARE_FILL_DEADLINE_MS or SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS move
+ * again, or Vercel's maxDuration changes, this needs re-checking too - the test will fail loudly
+ * rather than let any of that drift unnoticed.
  */
 export const PROVIDER_CALL_LOCK_TIMEOUT_MS = 240_000;
 
