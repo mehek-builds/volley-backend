@@ -1,6 +1,11 @@
 import { mergeSubmittedApplicationReviewQuestions, type ApplicationReviewQuestion, type ApplicationReviewState } from './applicationReview';
 import type { JobCountry } from './jobLocation';
-import { knownAnswerLookup, refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
+import {
+  knownAnswerLookup,
+  refreshKnownQuestionAnswers,
+  snapStoredAnswersToOfferedOptions,
+  type ApplicationProfileLike,
+} from './questionDiscovery';
 import { packetQuestionFixpoint } from './packetQuestionIdentity';
 import { reopenUnfitClosedChoiceQuestions, snapStoredAnswersToProfileFieldOptions } from './questionMetadata';
 import { resolveProfileField } from './profileFieldResolution';
@@ -140,8 +145,22 @@ export function resolveSubmittedApplicationAnswers(options: {
    * made against - and building it once here is what stops the two halves of this function
    * disagreeing about that, the same reason the round is computed once. */
   const resolverAnswerFor = knownAnswerLookup(profile, current.jd_text, postingCountry, postingCountryCode, asOf);
+  /* THE SPELLING PASS RUNS ON THE STORED ROWS, HERE, AND BEFORE THE MERGE.
+   *
+   * Before the merge, because the merge asks whether a submitted answer is a round trip of what the
+   * screen displayed, and the screen displayed this: GET /applications/:id/submission serves the
+   * same shaping and does not persist. Comparing her post-back against the un-snapped stored string
+   * would read an untouched Save as an edit and stamp applicant_review on a spelling she never
+   * chose, which is the 802-answer laundering. Doing it here rather than by teaching
+   * knownAnswerLookup the same trick keeps the control's vocabulary out of `answer_override_of`,
+   * whose currency is judged by recomputing the resolver.
+   *
+   * Outside the fixpoint, because packetQuestionFixpoint re-applies its transform to its own output
+   * and the refresh inside it overwrites a stored answer with the profile's value; a spelling rule
+   * running in there re-spells the machine's answer from pass 2 on. See
+   * snapStoredAnswersToOfferedOptions for the measured trace. */
   const merged = mergeSubmittedApplicationReviewQuestions(
-    current.questions,
+    snapStoredAnswersToOfferedOptions(current.questions),
     submitted,
     questionsReviewedAt,
     resolverAnswerFor,
