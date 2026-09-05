@@ -94,12 +94,57 @@ export async function linkGeneratedPacketToCanonicalApplication(
     eq(application_artifacts.application_id, input.applicationId),
     eq(application_artifacts.purpose, 'resume'),
   ));
-  await tx.update(application_artifacts).set({ selected: true }).where(and(
+  /* THE LINK CARRIES THE CLOCK THE APPLICATION CARRIES. The authoritative projection proves a
+     managed receipt's document tuple only when the selected resume link's attached_at equals the
+     application's resume_attached_at (lib/authoritativeSubmissionProjection.ts,
+     generatedDocumentChecks). Until now nothing on this path wrote the link's stamp at all: the
+     application got its four linkage columns above, the link got `selected`, and attached_at stayed
+     NULL on every link this function ever selected. The 2026-09-04 migration stamped the links that
+     existed then; Bear Robotics b822b998 was re-tailored an hour later, pressed Send the next day,
+     captured Breezy's receipt, and parked with `link.attached_at=null` as the whole reason. Coalesce,
+     for the same reason resume_attached_at coalesces: a re-tailor is not a re-attach. */
+  await tx.update(application_artifacts).set({
+    selected: true,
+    attached_at: sql`coalesce(${application_artifacts.attached_at}, ${linked.resume_attached_at ?? new Date()})`,
+  }).where(and(
     eq(application_artifacts.application_id, input.applicationId),
     eq(application_artifacts.artifact_id, input.artifactId),
     eq(application_artifacts.purpose, 'resume'),
   ));
   return linked;
+}
+
+/**
+ * Complete the one absent value the document tuple can be missing on a row this module's own
+ * earlier writes left behind: the selected resume link's attached_at, copied from the application's
+ * resume_attached_at. Nothing that already carries a value is touched, and a link that carries a
+ * DIFFERENT clock than the application is left as it is - that disagreement is real and the
+ * projection is right to refuse it. Returns whether a link was stamped.
+ */
+export async function stampSelectedResumeLinkAttachedAt(
+  tx: ArtifactVersionTransaction,
+  input: { userId: string; applicationId: string },
+): Promise<boolean> {
+  const [application] = await tx.select({
+    selected_resume_artifact_id: applications.selected_resume_artifact_id,
+    resume_attached_at: applications.resume_attached_at,
+    resume_source: applications.resume_source,
+  }).from(applications).where(and(
+    eq(applications.id, input.applicationId),
+    eq(applications.user_id, input.userId),
+  )).limit(1);
+  if (!application?.selected_resume_artifact_id
+    || !application.resume_attached_at
+    || application.resume_source !== 'artifact') return false;
+  const stamped = await tx.update(application_artifacts).set({
+    attached_at: application.resume_attached_at,
+  }).where(and(
+    eq(application_artifacts.application_id, input.applicationId),
+    eq(application_artifacts.artifact_id, application.selected_resume_artifact_id),
+    eq(application_artifacts.purpose, 'resume'),
+    sql`${application_artifacts.attached_at} is null`,
+  )).returning({ artifact_id: application_artifacts.artifact_id });
+  return stamped.length > 0;
 }
 
 export async function appendEditedResumeArtifactVersion(
