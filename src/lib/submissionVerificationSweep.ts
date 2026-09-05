@@ -16,14 +16,18 @@
  *      from the wire: submission_confirmed on the ledger, `submitted` on the row, receipt on the
  *      card. Nothing is asked of anyone.
  *
- *   2. RELEASE WHAT THE RUNNER'S OWN RECORD PROVES NEVER LEFT THE BROWSER. Two shapes are definitive:
- *      the runner's endpoint binding existed and no request ever matched it
- *      (submit_request_seen === false), or every request the press made went to the human-check
- *      vendor and none to the employer (pressReachedOnlyChallengePlatform). Both used to be described
- *      to the applicant as "very likely did not go through, choose It is not there". The runner's own
- *      record is the provider's definitive word, so the sweep writes not_sent_proven with the
- *      `provider_definitive_rejection` proof kind and releases the packet to be sent again - once
- *      the boundary lease has expired, exactly as the applicant's own click is gated.
+ *   2. NAME WHAT THE RUNNER'S OWN RECORD SAYS, WITHOUT CLOSING ON IT. Two shapes say the press very
+ *      likely never reached the employer: the runner's endpoint binding existed and no request ever
+ *      matched it (submit_request_seen === false), or every request went to the human-check vendor
+ *      and none to the employer (pressReachedOnlyChallengePlatform). The sweep carries that onto the
+ *      card, but it does NOT write a not-sent proof for it: the ledger admits, after
+ *      boundary_authorized, only the applicant's own look and the employer server's own refusal
+ *      (AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS in submissionAttemptLedger.ts), and stratus's own
+ *      comment on submit_request_seen lists the ways a false "false" can still happen (a beacon
+ *      Chromium never surfaces, a popup page, the deadline race). Releasing on it would risk the
+ *      duplicate application the whole ledger exists to prevent. Measured 2026-09-05 16:34Z: the
+ *      first production pass tried exactly that release and the ledger's own safety recomputation
+ *      refused it (VERIFICATION_SWEEP_NOT_SENT_FACT_INCOMPLETE, rolled back) - the rule held.
  *
  *   3. LOOK AT THE EMPLOYER'S PAGE ITSELF. A read-only managed run (allowSubmit false, no actions)
  *      opens the page the press landed on, reads it, and keeps the reading as evidence on the record
@@ -62,7 +66,6 @@ import {
   submissionAttemptEventId,
   submissionAttemptEventsForPacket,
   submissionAttemptRetrySafety,
-  submissionBoundaryAuthorization,
 } from './submissionAttemptLedger';
 import { syncCanonicalApplicationRow } from './canonicalApplicationSync';
 import {
@@ -112,10 +115,20 @@ export function employerPageCheckDue(
 
 export type UnverifiedAutoDecision =
   | { kind: 'confirm'; confirmationText: string; evidence: string }
-  | { kind: 'release'; evidenceCode: 'provider_submit_request_never_issued' | 'provider_challenge_only_transport' }
   | { kind: 'no_verdict' };
 
-/* Steps 1 and 2 as one pure reading of the stored record, so a test can pin every branch without a
+/* What the runner's own record says about whether the press reached the employer at all. Copy only:
+ * see step 2 in the file header for why this never becomes a ledger proof. */
+export function providerRecordSaysNothingLeft(
+  record: Pick<UnverifiedSubmissionRecord, 'submit_request_seen' | 'network'>,
+  portalUrl: string | undefined,
+): 'submit_request_never_issued' | 'challenge_only_transport' | null {
+  if (record.submit_request_seen === false) return 'submit_request_never_issued';
+  if (pressReachedOnlyChallengePlatform(record.network ?? null, portalUrl)) return 'challenge_only_transport';
+  return null;
+}
+
+/* Step 1 as one pure reading of the stored record, so a test can pin every branch without a
  * database. */
 export function unverifiedAutoDecision(
   record: UnverifiedSubmissionRecord,
@@ -148,18 +161,13 @@ export function unverifiedAutoDecision(
       return { kind: 'confirm', confirmationText: verdict.confirmationText, evidence: verdict.evidence };
     }
   }
-  if (record.submit_request_seen === false) {
-    return { kind: 'release', evidenceCode: 'provider_submit_request_never_issued' };
-  }
-  if (pressReachedOnlyChallengePlatform(record.network ?? null, portalUrl)) {
-    return { kind: 'release', evidenceCode: 'provider_challenge_only_transport' };
-  }
   return { kind: 'no_verdict' };
 }
 
 export function litosVerificationSentence(input: {
   checks: readonly EmployerPageCheck[];
   portalUrl?: string;
+  providerRecord?: ReturnType<typeof providerRecordSaysNothingLeft>;
 }): string {
   const latest = input.checks[input.checks.length - 1];
   const when = latest ? new Date(latest.checked_at).toISOString().slice(11, 16) + ' UTC' : null;
@@ -178,15 +186,16 @@ export function litosVerificationSentence(input: {
   const next = remaining > 0
     ? `Litos will look again ${remaining === 1 ? 'once more' : `${remaining} more times`} and keeps watching your application inbox for the employer’s confirmation; `
     : 'Litos keeps watching your application inbox for the employer’s confirmation; ';
-  return `Litos pressed Send and is verifying this application on its own. ${looked}${next}`
+  const provider = input.providerRecord === 'submit_request_never_issued'
+    ? 'Litos’s own record shows the press never produced a request to the employer’s server, so this very likely did not go through. '
+    : input.providerRecord === 'challenge_only_transport'
+      ? 'Litos’s own record shows the press only reached the human-verification service, never the employer, so this very likely did not go through. '
+      : '';
+  return `Litos pressed Send and is verifying this application on its own. ${provider}${looked}${next}`
     + 'the moment either proves it, this application is recorded as sent. Nothing is needed from you. '
     + 'Do not submit it by hand in the meantime, because two applications to the same posting count '
     + 'against you and cannot be taken back. If you already know the answer, the two buttons below record it.';
 }
-
-export const LITOS_RELEASED_NOT_SENT_REASON = 'Litos verified on its own that nothing reached the '
-  + 'employer: the press never produced a request to the employer’s server. Nothing was sent. Litos '
-  + 'can send it again when you are ready.';
 
 type SweepRow = { id: string; user_id: string; spec: unknown };
 
@@ -225,12 +234,11 @@ const productionDeps: SubmissionVerificationSweepDeps = {
 
 export type SweepOutcome =
   | 'confirmed_from_response'
-  | 'released_not_sent'
-  | 'lease_active'
   | 'page_checked'
   | 'page_check_failed'
   | 'not_due'
-  | 'skipped';
+  | 'skipped'
+  | 'error';
 
 function reviewSpec(spec: unknown, review: ApplicationReviewState) {
   return { ...(spec as Record<string, unknown>), _review: review };
@@ -313,45 +321,15 @@ async function applyStoredEvidence(row: SweepRow, decision: UnverifiedAutoDecisi
       return 'confirmed_from_response';
     }
 
-    if (decision.kind === 'release') {
-      const boundary = await submissionBoundaryAuthorization(row.user_id, claimId, { executor: tx });
-      if (boundary?.active) return 'lease_active';
-      await appendSubmissionAttemptEvent({
-        ...binding,
-        eventId: submissionAttemptEventId(claimId, 'not_sent_proven', 'litos-verified-not-sent'),
-        eventKind: 'not_sent_proven',
-        proofKind: 'provider_definitive_rejection',
-        evidenceCode: decision.evidenceCode,
-        observedAt,
-      }, { executor: tx });
-      const exactEvents = (await submissionAttemptEventsForPacket(row.user_id, locked.id, { executor: tx }))
-        .filter((event) => event.attempt_id === claimId);
-      if (submissionAttemptRetrySafety(exactEvents).kind !== 'safe_not_sent') {
-        throw new Error('VERIFICATION_SWEEP_NOT_SENT_FACT_INCOMPLETE');
-      }
-      const next = applyReviewPatch(current, {
-        status: 'needs_attention',
-        unverified_submission: { ...pending, resolution: 'not_sent', resolved_at: nowIso },
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-        submission_packet_version: undefined,
-        submission_authorization: undefined,
-        attention_reason: LITOS_RELEASED_NOT_SENT_REASON,
-        attention_categories: ['unverified_submission'],
-      }, () => nowIso);
-      const [updated] = await tx.update(generated_resumes).set({ spec: reviewSpec(locked.spec, next) }).where(and(
-        eq(generated_resumes.id, locked.id),
-        eq(generated_resumes.user_id, row.user_id),
-        sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
-      )).returning({ id: generated_resumes.id });
-      if (!updated) throw new Error('VERIFICATION_SWEEP_NOT_SENT_WRITE_CONFLICT');
-      return 'released_not_sent';
-    }
     return 'skipped';
   });
 }
 
-async function recordEmployerPageCheck(row: SweepRow, check: EmployerPageCheck): Promise<SweepOutcome> {
+async function recordEmployerPageCheck(
+  row: SweepRow,
+  check: EmployerPageCheck,
+  providerRecord: ReturnType<typeof providerRecordSaysNothingLeft>,
+): Promise<SweepOutcome> {
   return db.transaction(async (tx): Promise<SweepOutcome> => {
     await lockSubmissionAttemptUser(tx, row.user_id);
     const [locked] = await tx.select().from(generated_resumes).where(and(
@@ -364,7 +342,7 @@ async function recordEmployerPageCheck(row: SweepRow, check: EmployerPageCheck):
     const checks = [...(pending.employer_page_checks ?? []), check].slice(-EMPLOYER_PAGE_CHECK_LIMIT);
     const next = applyReviewPatch(current, {
       unverified_submission: { ...pending, employer_page_checks: checks },
-      attention_reason: litosVerificationSentence({ checks, portalUrl: pending.portal_url ?? current.portal_url }),
+      attention_reason: litosVerificationSentence({ checks, portalUrl: pending.portal_url ?? current.portal_url, providerRecord }),
       attention_categories: ['unverified_submission'],
     }, () => check.checked_at);
     const [updated] = await tx.update(generated_resumes).set({ spec: reviewSpec(locked.spec, next) }).where(and(
@@ -385,8 +363,7 @@ export async function runSubmissionVerificationSweep(
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
   const rows = await deps.listCandidates(limit);
   const outcomes: Record<SweepOutcome, number> = {
-    confirmed_from_response: 0, released_not_sent: 0, lease_active: 0, page_checked: 0,
-    page_check_failed: 0, not_due: 0, skipped: 0,
+    confirmed_from_response: 0, page_checked: 0, page_check_failed: 0, not_due: 0, skipped: 0, error: 0,
   };
   const touchedUsers = new Set<string>();
   for (const row of rows) {
@@ -397,11 +374,17 @@ export async function runSubmissionVerificationSweep(
     const nowMs = deps.now();
     const nowIso = new Date(nowMs).toISOString();
     let outcome: SweepOutcome;
-    const decision = unverifiedAutoDecision(record, record.portal_url ?? review.portal_url);
-    if (decision.kind !== 'no_verdict') {
-      outcome = await applyStoredEvidence(row, decision, nowIso);
-      if (outcome !== 'lease_active' && outcome !== 'skipped') { outcomes[outcome] += 1; continue; }
-      if (outcome === 'lease_active') { outcomes.lease_active += 1; continue; }
+    /* One packet's failure must not abort the pass: every row is its own transaction, and a throw
+     * here would 500 the whole route and starve every later row on every later pass. */
+    try {
+      const decision = unverifiedAutoDecision(record, record.portal_url ?? review.portal_url);
+      if (decision.kind === 'confirm') {
+        outcome = await applyStoredEvidence(row, decision, nowIso);
+        if (outcome !== 'skipped') { outcomes[outcome] += 1; continue; }
+      }
+    } catch {
+      outcomes.error += 1;
+      continue;
     }
     if (!employerPageCheckDue(record, nowMs)) { outcomes.not_due += 1; continue; }
     const url = record.final_url ?? record.portal_url ?? review.portal_url;
@@ -418,6 +401,7 @@ export async function runSubmissionVerificationSweep(
           screenshotUrl = blob.url;
         } catch { /* the reading stands without its picture */ }
       }
+      const providerRecord = providerRecordSaysNothingLeft(record, record.portal_url ?? review.portal_url);
       const check: EmployerPageCheck = {
         checked_at: nowIso,
         url: (typeof page.url === 'string' && page.url ? page.url : url).slice(0, 2000),
@@ -425,7 +409,7 @@ export async function runSubmissionVerificationSweep(
         ...(page.text ? { page_text_excerpt: page.text.replace(/\s+/g, ' ').trim().slice(0, 600) } : {}),
         ...(screenshotUrl ? { screenshot_url: screenshotUrl } : {}),
       };
-      outcome = await recordEmployerPageCheck(row, check);
+      outcome = await recordEmployerPageCheck(row, check, providerRecord);
     } catch {
       outcome = 'page_check_failed';
     }
