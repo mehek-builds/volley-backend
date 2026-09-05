@@ -230,6 +230,89 @@ export function repairHistoryReviewPortalFromMonitoredJob(
   }
 }
 
+/* THE SAME POSTING UNDER A NEW ROW.
+ *
+ * monitored_jobs.source_id cascades on delete, so when a career_page_sources row is replaced (a
+ * duplicate source collapsed, a board re-seeded under a fresh source id) every posting it owned is
+ * deleted and re-inserted with a NEW monitored_jobs.id. A packet built while the old row existed
+ * keeps the old id in job_context.job_id forever: the lookup above finds nothing, the packet's URL
+ * is stripped, and every send gate answers job_not_available - while the very same posting sits
+ * live on the jobs board under its new id.
+ *
+ * Measured 2026-09-05 on Jump Trading "Campus Software Engineer (Intern)" (packet 1d9f92ea,
+ * job_context.job_id 5ee0d017, GET /jobs/5ee0d017 -> 404): the board carried the identical posting
+ * as b4146f30 (same tenant `jumptrading`, same Greenhouse job 8002989, same company, same title),
+ * and submit-request refused the packet with "Current verified posting not found". Tower Research
+ * packet 7203837c (job 51f7b8f5) was orphaned the same way.
+ *
+ * The rebind is deliberately STRICTER than the ordinary restore, not looser. The ordinary restore
+ * trusts the job id and checks company + title. Here the id is gone, so the packet's own stored
+ * URL has to prove the posting instead: canonicalMonitoredPortalUrl(current.portal_url, candidate's
+ * family, board token, external id) is defined only when the stored URL names that candidate's
+ * tenant AND that candidate's own posting id (see its Greenhouse arm: a `for` that is not the
+ * token, or a `token` that is not the external id, returns undefined). Company and title must
+ * agree as well, the candidate must be on an enabled source and is_active, and a packet with no
+ * stored URL at all cannot be rebound (there is nothing to prove with). Two candidates that both
+ * prove out (the same posting mirrored by two enabled sources) take the first; both name the same
+ * employer-owned form. Only the review's URL is restored; job_context.job_id stays as written,
+ * because this function is a read-time repair and the row is not its to rewrite. */
+async function rebindOrphanedMonitoredJob(
+  current: ApplicationReviewState,
+  expectedCompany: string,
+  expectedRole: string,
+): Promise<ApplicationReviewState | null> {
+  if (!current.portal_url) return null;
+  const candidates = await db.select({
+    external_id: monitored_jobs.external_id,
+    apply_url: monitored_jobs.apply_url,
+    posting_url: monitored_jobs.posting_url,
+    ats_name: career_page_sources.ats_name,
+    board_token: career_page_sources.board_token,
+    company_name: monitored_jobs.company_name,
+    title: monitored_jobs.title,
+    is_active: monitored_jobs.is_active,
+    last_seen_at: monitored_jobs.last_seen_at,
+  })
+    .from(monitored_jobs)
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    .where(and(
+      eq(career_page_sources.enabled, true),
+      eq(monitored_jobs.is_active, true),
+      sql`lower(${monitored_jobs.company_name}) = ${normalizedIdentity(expectedCompany)}`,
+      sql`lower(${monitored_jobs.title}) = ${normalizedIdentity(expectedRole)}`,
+    ))
+    .limit(20);
+  for (const candidate of candidates) {
+    if (normalizedIdentity(candidate.company_name) !== normalizedIdentity(expectedCompany)) continue;
+    if (normalizedIdentity(candidate.title) !== normalizedIdentity(expectedRole)) continue;
+    // The packet's stored URL, canonicalized AGAINST this candidate's tenant and posting id: defined
+    // only when it is this exact posting.
+    const provedByStoredUrl = canonicalMonitoredPortalUrl(
+      current.portal_url,
+      candidate.ats_name,
+      candidate.board_token,
+      candidate.external_id,
+      candidate.posting_url,
+    );
+    if (!provedByStoredUrl) continue;
+    const applyUrl = canonicalMonitoredPortalUrl(
+      candidate.apply_url,
+      candidate.ats_name,
+      candidate.board_token,
+      candidate.external_id,
+      candidate.posting_url,
+    );
+    if (!applyUrl) continue;
+    return {
+      ...current,
+      portal_url: applyUrl,
+      ats_name: detectPortal(applyUrl),
+      portal_supported: true,
+    };
+  }
+  return null;
+}
+
 export async function repairReviewPortalFromMonitoredJob(
   row: ResumeRow,
   current: ApplicationReviewState,
@@ -266,7 +349,11 @@ export async function repairReviewPortalFromMonitoredJob(
       eq(career_page_sources.enabled, true),
     ))
     .limit(1);
-  if (!job) return keepUsedPortal(current) ?? withoutPortal(current);
+  if (!job) {
+    const rebound = await rebindOrphanedMonitoredJob(current, expectedCompany, expectedRole);
+    if (rebound) return rebound;
+    return keepUsedPortal(current) ?? withoutPortal(current);
+  }
   const applyUrl = canonicalMonitoredPortalUrl(
     job.apply_url,
     job.ats_name,

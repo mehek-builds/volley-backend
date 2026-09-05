@@ -42,12 +42,15 @@ function jobContext() {
   };
 }
 
-function mockMonitoredJob(rows: unknown[]) {
+function mockMonitoredJob(rows: unknown[], ...laterSelects: unknown[][]) {
+  /* The first select answers the lookup by job id; each later array answers the next select in
+     order (the orphan rebind's candidate query). A select with no queued answer returns nothing. */
+  const queue = [rows, ...laterSelects];
   return mock.method(db, 'select', (() => ({
     from: () => ({
       innerJoin: () => ({
         where: () => ({
-          limit: async () => rows,
+          limit: async () => queue.shift() ?? [],
         }),
       }),
     }),
@@ -366,6 +369,82 @@ test('an explicit is_active: true is unaffected, same as an absent value', async
     );
     assert.equal(repaired.posting_status, undefined);
     assert.equal(repaired.portal_supported, true);
+  } finally {
+    select.mock.restore();
+  }
+});
+
+/* THE ORPHANED JOB ID. monitored_jobs.source_id cascades on delete, so a replaced source takes its
+ * postings' ids with it while the same postings come back under new ids. Measured 2026-09-05 on Jump
+ * Trading packet 1d9f92ea (job 5ee0d017 gone, the identical posting live as b4146f30): every send
+ * gate answered job_not_available for a posting the jobs board was showing. The packet's own stored
+ * URL proves the posting against the candidate's tenant and posting id, and the URL is restored. */
+const REBOUND_CANDIDATE = {
+  external_id: '8002989',
+  apply_url: 'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989',
+  posting_url: 'https://job-boards.greenhouse.io/jumptrading/jobs/8002989',
+  ats_name: 'greenhouse',
+  board_token: 'jumptrading',
+  company_name: 'Jump Trading',
+  title: 'Campus Software Engineer (Intern)',
+  is_active: true,
+  last_seen_at: '2026-09-05T13:00:00.000Z',
+};
+
+function jumpJobContext() {
+  return { job_id: JOB_ID, company: 'Jump Trading', role: 'Campus Software Engineer (Intern)', jd_hash: 'x' };
+}
+
+test('an orphaned job id rebinds to the live row for the same posting when the stored URL proves it', async () => {
+  const select = mockMonitoredJob([], [REBOUND_CANDIDATE]);
+  try {
+    const stored = review('https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989', 'greenhouse');
+    const rebound = await repairReviewPortalFromMonitoredJob(row(jumpJobContext()), stored);
+    assert.equal(rebound.portal_url, 'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989');
+    assert.equal(rebound.ats_name, 'greenhouse');
+    assert.equal(rebound.portal_supported, true);
+    assert.equal(select.mock.callCount(), 2, 'the rebind runs only after the id lookup came back empty');
+  } finally {
+    select.mock.restore();
+  }
+});
+
+test('an orphaned job id is NOT rebound to a same-named posting the stored URL does not prove', async () => {
+  const otherPosting = { ...REBOUND_CANDIDATE, external_id: '9999999',
+    apply_url: 'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=9999999',
+    posting_url: 'https://job-boards.greenhouse.io/jumptrading/jobs/9999999' };
+  const otherTenant = { ...REBOUND_CANDIDATE, board_token: 'evilcorp',
+    apply_url: 'https://job-boards.greenhouse.io/embed/job_app?for=evilcorp&token=8002989' };
+  const select = mockMonitoredJob([], [otherPosting, otherTenant]);
+  try {
+    const stored = review('https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989', 'greenhouse');
+    const stripped = await repairReviewPortalFromMonitoredJob(row(jumpJobContext()), stored);
+    assert.equal(stripped.portal_url, undefined, 'a different posting id or tenant is not this posting');
+    assert.equal(stripped.portal_supported, false);
+  } finally {
+    select.mock.restore();
+  }
+});
+
+test('an orphaned job id with no stored URL has nothing to prove with and still fails closed', async () => {
+  const select = mockMonitoredJob([], [REBOUND_CANDIDATE]);
+  try {
+    const bare = { ...review('https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989', 'greenhouse'), portal_url: undefined, ats_name: undefined, portal_supported: false };
+    const stripped = await repairReviewPortalFromMonitoredJob(row(jumpJobContext()), bare as ApplicationReviewState);
+    assert.equal(stripped.portal_url, undefined);
+    assert.equal(select.mock.callCount(), 1, 'no candidate query without a stored URL');
+  } finally {
+    select.mock.restore();
+  }
+});
+
+test('an orphaned job id whose company or title changed is not rebound by URL alone', async () => {
+  const renamed = { ...REBOUND_CANDIDATE, title: 'Campus Software Engineer (Full-time)' };
+  const select = mockMonitoredJob([], [renamed]);
+  try {
+    const stored = review('https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989', 'greenhouse');
+    const stripped = await repairReviewPortalFromMonitoredJob(row(jumpJobContext()), stored);
+    assert.equal(stripped.portal_url, undefined);
   } finally {
     select.mock.restore();
   }
