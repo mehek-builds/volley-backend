@@ -1173,7 +1173,7 @@ function corroboratedFamilyReceipt(
    * out of the page, and the whole body is where a footer "thank you" or a job title lives. */
   const body = confirmationText.replace(/\s+/g, ' ').trim();
   if (!body) return false;
-  if (RECEIPT_CLOSURE_CUE.test(body)) return false;
+  if (RECEIPT_CLOSURE_CUE.test(body) || NEGATED_APPLICATION_RECEIPT.test(body)) return false;
   if (isCrelateHostUrl(result.url)) return receiptProof(body, result.url).proven;
   return RECEIPT_APPLICATION_PHRASE.test(body);
 }
@@ -1192,6 +1192,7 @@ const RECEIPT_APPLICATION_PHRASE = /\bthank(?:s| you) for (?:submitting|applying
  * "pending our review" (bare "pending" still refuses, and "under review" already confirmed, so
  * refusing only the review phrasing was arbitrary), and "no further action is required" (the bare
  * word must keep refusing: "a cover letter is required" is exactly what this guard is for). */
+const NEGATED_APPLICATION_RECEIPT = /\b(?:not|never|hasn't|haven't|wasn't|weren't|isn't|aren't)\s+(?:(?:yet|been|successfully|fully|actually)\s+){0,4}(?:submitted|received|sent|accepted|filed|processed)\b/i;
 const RECEIPT_CLOSURE_CUE = /\b(?:no longer|has been filled|filled|withdrawn|not found|closed|cancell?ed|expired|declined|denied|unfortunately|already applied|not (?:be )?(?:submitted|sent|received|processed|accepted|eligible|found|available)|cannot be accepted|complete (?:the|your)|check your (?:email|inbox)|confirm your|verify|talent (?:network|community|pool)|draft|error|went wrong|try again|fail(?:ed|ure)?|unable|could ?n[o']?t|can ?not|can't|sign(?:ed)? in|log(?:ged)? in|timed? out|not currently|not hiring|on hold|questionnaire|assessment|next step|incomplete|pending(?! (?:our )?review)|invalid|captcha|robot|problem|forbidden|finish(?:ing)? your|continue|saved|redirect(?:ed|ing)?|partner|newsletter|subscribe|cookies?|page not found|404|maintenance|too many|please wait|one moment|submitting|processing|loading|uploading|do(?:es)? not meet|minimum requirements|apply (?:through|via|on))\b|\brequired\b(?<!no further action is required)/i;
 
 /* THE EMPLOYER'S OWN PAGE. On every family this arm serves the tenant IS the subdomain
@@ -1371,7 +1372,22 @@ export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(
   const expectedBinding = managedAtsBinding({ url: input.expectedApplicationUrl });
   const initialBinding = managedAtsBinding(input.initial);
   const receiptBinding = heldAtsBinding(initialBinding, expectedBinding);
-  if (!receiptBinding) return unchanged();
+  // Non-selector ATS families may use the same held-page observation. Require the initial
+  // posting path to match; a matching employer host alone could name another job.
+  const initialPageMatches = (() => {
+    try {
+      const expected = new URL(input.expectedApplicationUrl);
+      const initial = new URL(typeof input.initial.url === 'string' ? input.initial.url : '');
+      const supportedHost = /^(?:jobs(?:\.eu)?\.lever\.co|jobs\.crelate\.com|[a-z0-9-]+\.(?:recruitee\.com|(?:[a-z0-9-]+\.)?teamtailor\.com|breezy\.hr|pinpointhq\.com)|[a-z0-9-]+\.jobs\.personio\.(?:com|de))$/.test(expected.hostname);
+      return supportedHost && expected.protocol === 'https:' && initial.protocol === 'https:'
+        && !expected.username && !expected.password && !expected.port && !initial.port
+        && !initial.username && !initial.password
+        && expected.origin === initial.origin
+        && expected.pathname.replace(/\/$/, '') === initial.pathname.replace(/\/$/, '')
+        && expected.search === initial.search;
+    } catch { return false; }
+  })();
+  if (!receiptBinding && !initialPageMatches) return unchanged();
   if (input.initial.humanVerification != null || input.initial.continuationOffered !== true) return unchanged();
   const token = input.initial.continuationToken;
   const expiresAt = input.initial.continuationExpiresAt;
@@ -1389,8 +1405,12 @@ export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(
   const observedOutcome = readManagedSubmitOutcome(observed);
   const atsTerminal = observedOutcome?.pressed === true
     && (observedOutcome.state === 'confirmed' || observedOutcome.state === 'rejected')
-    && exactAtsReceipt(observed, observedOutcome, receiptBinding);
-  const heldPageMatches = sameAtsBinding(managedAtsBinding(observed), receiptBinding);
+    && (receiptBinding
+      ? exactAtsReceipt(observed, observedOutcome, receiptBinding)
+      : exactManagedSubmitVerdict(observed, input.expectedApplicationUrl).kind === 'confirmed');
+  const heldPageMatches = receiptBinding
+    ? sameAtsBinding(managedAtsBinding(observed), receiptBinding)
+    : observed.url === input.initial.url;
   const evidenceResult = observed.screenshot && (atsTerminal || heldPageMatches) ? observed : input.initial;
   return {
     receiptResult: atsTerminal ? observed : input.initial,

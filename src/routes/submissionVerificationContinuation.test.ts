@@ -37,7 +37,9 @@ test('a held managed claim retrieves its exact terminal result before any relaun
   const durableFold = recovery.indexOf('recordManagedSubmissionConfirmed(row, attemptBinding');
   const acknowledgement = recovery.lastIndexOf('acknowledgeManagedTerminalFold(');
   assert.ok(retrieval >= 0 && durableFold > retrieval && acknowledgement > durableFold);
-  assert.doesNotMatch(recovery, /runManagedBrowser\(|continueManagedBrowser(?:WithAccountFence)?\(/);
+  assert.doesNotMatch(recovery, /runManagedBrowser\(/);
+  assert.match(recovery, /continueManagedBrowserWithAccountFence\(row.user_id, row.id, token, \[\],/);
+  assert.match(recovery, /getManagedBrowserTerminalResult\(observationAttempt\)/);
 });
 
 /* THE PONY.AI GAP ON THE ASYNC RECOVERY PATH: recoverManagedSubmissionTerminalResult's own

@@ -1,3 +1,4 @@
+import type { SubmissionOutcomeRecovery } from './submissionOutcomeRecovery';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { PACKET_VISIBLE_QUESTION_FIELDS, type PacketAudit } from './packetAudit';
@@ -1111,6 +1112,7 @@ function compareSnapshotIdentity(left: string, right: string): number {
 }
 
 export type ApplicationReviewState = {
+  outcome_recovery?: SubmissionOutcomeRecovery;
   jd_text: string;
   role?: string;
   portal_url?: string;
