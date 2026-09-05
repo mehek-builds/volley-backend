@@ -8,7 +8,7 @@ const previous = process.env.INTERNAL_CRON_SECRET;
 before(() => { process.env.INTERNAL_CRON_SECRET = secret; });
 after(() => { if (previous === undefined) delete process.env.INTERNAL_CRON_SECRET; else process.env.INTERNAL_CRON_SECRET = previous; });
 
-const summary = { scanned: 1, outcomes: { confirmed_from_response: 1, released_not_sent: 0, lease_active: 0, page_checked: 0, page_check_failed: 0, not_due: 0, skipped: 0 } };
+const summary = { scanned: 1, outcomes: { confirmed_from_response: 1, page_checked: 0, page_check_failed: 0, not_due: 0, skipped: 0, error: 0 } };
 
 async function withApp(run: (app: ReturnType<typeof Fastify>, calls: unknown[]) => Promise<void>) {
   const calls: unknown[] = [];

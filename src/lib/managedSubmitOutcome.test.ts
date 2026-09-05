@@ -1280,7 +1280,7 @@ describe('the sentence for an unknown outcome leads somewhere', () => {
         submitRequestSeen: false,
       });
       assert.match(reason, /no request ever left the browser/);
-      assert.match(reason, /release this saved application/);
+      assert.match(reason, /It is not there/);
       assert.doesNotMatch(reason, /still showing/);
       assert.doesNotMatch(reason, /Nothing is needed from you/i);
     });
@@ -1792,7 +1792,7 @@ describe('the human-verification press sentence', () => {
       atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state', network: MEASURED,
     });
     assert.match(reason, /human-verification check instead of submitting/);
-    assert.match(reason, /release this saved application on its own/);
+    assert.match(reason, /Choose “It is not there”/);
     assert.match(reason, /stay in this dashboard/);
     assert.doesNotMatch(reason, /Open https:\/\//);
     assert.doesNotMatch(reason, /Nothing is needed from you/);
@@ -1847,7 +1847,7 @@ describe('the challenge-on-screen sentence', () => {
       network: LEVER_PRESS, challengeOnScreen: true,
     });
     assert.match(reason, /put up a human-verification challenge/);
-    assert.match(reason, /release this saved application on its own/);
+    assert.match(reason, /Choose “It is not there”/);
     assert.match(reason, /stay in this dashboard/);
     assert.doesNotMatch(reason, /Open https:\/\//);
     assert.doesNotMatch(reason, /Nothing is needed from you/);

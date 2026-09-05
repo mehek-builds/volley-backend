@@ -5,6 +5,7 @@ import {
   classifyEmployerPage,
   employerPageCheckDue,
   litosVerificationSentence,
+  providerRecordSaysNothingLeft,
   runSubmissionVerificationSweep,
   unverifiedAutoDecision,
   type UnverifiedSubmissionRecord,
@@ -33,28 +34,29 @@ test('a Greenhouse refusal code in a stored 2xx body is not an acceptance', () =
   assert.deepEqual(decision, { kind: 'no_verdict' });
 });
 
-test('the runner’s own record that no bound request was issued releases the packet', () => {
-  assert.deepEqual(unverifiedAutoDecision(record({ submit_request_seen: false }), WORKABLE_URL), {
-    kind: 'release', evidenceCode: 'provider_submit_request_never_issued',
-  });
-  // Traffic to the human-check vendor and nothing to the employer (the Rippling shape) is the same
-  // definitive word. A same-host Cloudflare beacon is NOT: pressReachedOnlyChallengePlatform counts
-  // any request to the employer's own host as reaching it, so that shape stays open for the page look.
-  assert.deepEqual(unverifiedAutoDecision(record({
+test('the runner’s own record that nothing left the browser is named on the card, never closed on', () => {
+  assert.equal(providerRecordSaysNothingLeft(record({ submit_request_seen: false }), WORKABLE_URL), 'submit_request_never_issued');
+  // Traffic to the human-check vendor and nothing to the employer (the Rippling shape). A same-host
+  // Cloudflare beacon is NOT that: pressReachedOnlyChallengePlatform counts any request to the
+  // employer's own host as reaching it.
+  assert.equal(providerRecordSaysNothingLeft(record({
     network: [{ method: 'POST', url: 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/flow/ov1/x', status: 200 }],
-  }), WORKABLE_URL), { kind: 'release', evidenceCode: 'provider_challenge_only_transport' });
-  assert.deepEqual(unverifiedAutoDecision(record({
+  }), WORKABLE_URL), 'challenge_only_transport');
+  assert.equal(providerRecordSaysNothingLeft(record({
     network: [{ method: 'POST', url: 'https://apply.workable.com/cdn-cgi/challenge-platform/h/g/jsd/oneshot/x', status: 200 }],
-  }), WORKABLE_URL), { kind: 'no_verdict' });
+  }), WORKABLE_URL), null);
+  // And neither one is a ledger decision: after boundary_authorized only the applicant's look or the
+  // employer server's refusal may close an attempt (AUTHORIZATION_ADMISSIBLE_NOT_SENT_PROOFS).
+  assert.deepEqual(unverifiedAutoDecision(record({ submit_request_seen: false }), WORKABLE_URL), { kind: 'no_verdict' });
+  const sentence = litosVerificationSentence({ checks: [], providerRecord: 'submit_request_never_issued' });
+  assert.match(sentence, /never produced a request to the employer’s server/);
+  assert.match(sentence, /Nothing is needed from you/);
 });
 
 test('silence, an unbound binding, or an already-recorded resolution decide nothing', () => {
   assert.deepEqual(unverifiedAutoDecision(record(), WORKABLE_URL), { kind: 'no_verdict' });
   assert.deepEqual(unverifiedAutoDecision(record({ submit_request_seen: null }), WORKABLE_URL), { kind: 'no_verdict' });
   assert.deepEqual(unverifiedAutoDecision(record({ submit_request_seen: false, resolution: 'sent' }), WORKABLE_URL), { kind: 'no_verdict' });
-  assert.deepEqual(unverifiedAutoDecision(record({ submit_request_seen: false }), undefined), {
-    kind: 'release', evidenceCode: 'provider_submit_request_never_issued',
-  });
 });
 
 test('the employer page is classified from what it shows, never from what Litos hopes', () => {
@@ -88,6 +90,20 @@ test('the card reports what Litos did and asks nothing of the applicant', () => 
   assert.match(sentence, /Nothing is needed from you/);
   assert.match(sentence, /2 more times/);
   assert.doesNotMatch(sentence, /Open .* and look/);
+});
+
+test('one packet’s failure is counted, not thrown, and the pass continues', async () => {
+  const rows = [
+    { id: 'p1', user_id: 'u1', spec: { _review: { status: 'needs_attention', submission_claim_id: 'c1', portal_url: WORKABLE_URL, unverified_submission: { at: new Date(Date.now() - 10 * 60_000).toISOString(), cause: 'no_confirmation_state', portal_url: WORKABLE_URL } } } },
+  ];
+  const summary = await runSubmissionVerificationSweep({}, {
+    listCandidates: async () => rows,
+    readPage: async () => { throw new Error('stratus is having a bad day'); },
+    storeScreenshot: async () => ({ url: 'urn:test' }),
+    reconcileInbox: async () => {},
+    now: () => Date.now(),
+  });
+  assert.equal(summary.outcomes.page_check_failed, 1);
 });
 
 test('the sweep re-reads stored evidence first, looks at the page only when due, and reconciles each account once', async () => {

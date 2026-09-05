@@ -1764,9 +1764,9 @@ export function unverifiedSubmissionReason(input: {
         + 'the only requests it made went to the verification service, and none reached the '
         + 'employer, so this application very likely did not go through.';
     return `${how} Litos cannot complete a human-verification check or claim a receipt that the `
-      + 'employer did not show. Litos will record that nothing was sent and release this saved '
-      + 'application on its own once the send lease has expired; “It is not there” below does the '
-      + 'same now. The filled-form proof and every next action stay in this dashboard.';
+      + 'employer did not show. Choose “It is not there” below to record that nothing was sent and '
+      + 'release this saved application. The filled-form proof and every next action stay in this '
+      + 'dashboard.';
   }
   /* CASE (a) OF THREE: THE SUBMIT REQUEST WAS NEVER ISSUED. Stronger, more specific evidence than
    * `pending` or a missing/status-less network entry: armSubmitNetworkWatch positively watched the
@@ -1777,10 +1777,9 @@ export function unverifiedSubmissionReason(input: {
   if (input.cause === 'no_confirmation_state' && input.submitRequestSeen === false) {
     return 'Litos pressed Send, but no request ever left the browser toward the employer’s server: '
       + 'the click registered, and nothing was sent, so this application very likely did not go '
-      + 'through. Litos cannot claim a receipt for a request that was never made. Litos will record '
-      + 'that nothing was sent and release this saved application on its own once the send lease has '
-      + 'expired; “It is not there” below does the same now. The filled-form proof and every next '
-      + 'action stay in this dashboard.';
+      + 'through. Litos cannot claim a receipt for a request that was never made. Choose “It is not '
+      + 'there” below to record that nothing was sent and release this saved application. The '
+      + 'filled-form proof and every next action stay in this dashboard.';
   }
   /* THE HONEST VERSION OF "NO CONFIRMATION STATE": the page had not finished answering, not that
    * the press produced nothing to wait for. Same next step as the generic sentence below - she still
