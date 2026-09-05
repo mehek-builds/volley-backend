@@ -1146,9 +1146,9 @@ test('submission runner requires confirmation proof before any receipt can be re
  */
 test('no continuation may carry a code that came from outside the run', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  assert.equal((source.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions, \{/g) ?? []).length, 2,
+  assert.equal((source.match(/continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, codeActions, \{/g) ?? []).length, 2,
     'live and lost-initial-response paths may each make the first continuation call, never a retry');
-  assert.equal((source.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, \[\], \{/g) ?? []).length, 1,
+  assert.equal((source.match(/continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, \[\], \{/g) ?? []).length, 1,
     'the only other continuation is a read-only receipt observation with no actions');
   const terminalRecoveryStart = source.indexOf('export async function recoverManagedSecurityCodeContinuationTerminalResult(');
   const terminalRecoveryEnd = source.indexOf('async function recoverManagedInitialSecurityCodeChallenge(', terminalRecoveryStart);
@@ -1165,7 +1165,7 @@ test('no continuation may carry a code that came from outside the run', () => {
 
 test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const continuation = source.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions, {');
   const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
   const verdict = source.indexOf('const typedConfirmationVerdict = exactManagedSubmitVerdict', continuationBarrier);
   const receipt = source.indexOf('const confirmedBeforeReceiptStorage = await recordManagedSubmissionConfirmed', verdict);

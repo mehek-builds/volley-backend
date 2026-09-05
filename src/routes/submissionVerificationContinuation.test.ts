@@ -272,8 +272,8 @@ test('managed verification resumes once by token, never by URL, then verifies th
      for a zero-action receipt observation after an unknown verdict. The action shapes, rather than
      the raw call count, prove that no second submit has crept back in. */
   assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(/g) ?? []).length, 2);
-  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions,/g) ?? []).length, 1);
-  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, \[\], \{/g) ?? []).length, 1);
+  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, codeActions,/g) ?? []).length, 1);
+  assert.equal((managed.match(/continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, \[\], \{/g) ?? []).length, 1);
   assert.match(managed, /submissionAttempt: securityCodeSubmissionAttempt/);
   assert.match(managed, /submissionAttempt: receiptObservationSubmissionAttempt/);
   // The supplied code is fingerprinted as superseded and never handed to an action list.
@@ -281,7 +281,7 @@ test('managed verification resumes once by token, never by URL, then verifies th
   assert.doesNotMatch(managed, /securityCodeContinuationActions\([^)]*options\.securityCode/);
   assert.match(managed, /if \(initialChallenge && managedResultNeedsEmailVerification\(result\)\) \{/);
   assert.doesNotMatch(managed, /runManagedBrowser\(result\.url/);
-  assert.match(managed, /receiptResult = await continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, codeActions,/);
+  assert.match(managed, /receiptResult = await continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, codeActions,/);
   assert.match(managed, /exactManagedSubmitVerdict\(receiptResult, applicationUrl\)/);
   const terminalVerification = managed.slice(managed.indexOf("verification = {\n        status: 'completed'"));
   assert.doesNotMatch(terminalVerification, /continuation_token:/);
@@ -303,7 +303,7 @@ test('managed alias permission is independent from connected-inbox consent and p
 test('a retained Greenhouse wall may read the exact older alias code once but never spend it twice', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const firstSubmit = runner.indexOf('const initialSubmitOutcome = readManagedSubmitOutcome(result)');
-  const continuation = runner.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions,', firstSubmit);
+  const continuation = runner.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions,', firstSubmit);
   assert.ok(firstSubmit > 0 && continuation > firstSubmit);
   const managed = runner.slice(firstSubmit, continuation);
   assert.match(managed, /standingChallenge: initialSubmitOutcome\?\.pressed === false/);
@@ -333,7 +333,7 @@ test('consent and the exact email route are revalidated after polling and before
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const ready = runner.indexOf("if (prepared.status === 'ready' && !codeWasAlreadyAttempted");
   const entered = runner.indexOf('enteredCode = prepared.code', ready);
-  const continuation = runner.indexOf('continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions,', entered);
+  const continuation = runner.indexOf('continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions,', entered);
   const actionGate = runner.slice(ready, entered);
   assert.ok(ready > 0 && entered > ready && continuation > entered);
   assert.match(actionGate, /await authorizationValidAtClick\(row, claimedReview\)/);
@@ -361,7 +361,7 @@ test('the locked continuation CAS rechecks consent version and entitlement immed
 
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const call = runner.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions,');
+  const call = runner.indexOf('receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, row.id, continuationToken, codeActions,');
   const receiptObservation = runner.indexOf('let receiptEvidenceResult = receiptResult', call);
   const continuation = runner.slice(call, receiptObservation);
   assert.match(continuation, /catch \(error\)/);
@@ -387,7 +387,7 @@ test('unknown receipt observation is one empty-action continuation with no URL o
   assert.match(observation, /if \(!initialChallenge\)/);
   assert.equal((observation.match(/continueManagedBrowserWithAccountFence\(/g) ?? []).length, 1);
   assert.match(observation, /expectedApplicationUrl: applicationUrl/);
-  assert.match(observation, /continueManagedBrowserWithAccountFence\(row\.user_id, continuationToken, \[\], \{[\s\S]*screenshot: true,[\s\S]*submissionAttempt: receiptObservationSubmissionAttempt/);
+  assert.match(observation, /continueManagedBrowserWithAccountFence\(row\.user_id, row\.id, continuationToken, \[\], \{[\s\S]*screenshot: true,[\s\S]*submissionAttempt: receiptObservationSubmissionAttempt/);
   assert.doesNotMatch(observation, /runManagedBrowser|result\.url|codeActions|confirmAndSubmit|type: 'click'/);
 });
 

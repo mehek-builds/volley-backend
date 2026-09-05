@@ -637,6 +637,32 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Same as delay(), deliberately WITHOUT unref(). Used only for the shutdown-deadline race in
+ * releaseManagedRunsBeforeExit/runManagedRunShutdownSequence below, where this timer firing is the
+ * one thing guaranteeing the race returns at all.
+ *
+ * An unref'd timer does not count toward keeping the event loop open - if it is the only handle
+ * left when everything else the process was doing (an app.close() that hung, a release that never
+ * settles) has gone quiet, Node is free to decide the loop has nothing left to do and let it drain
+ * WITHOUT the timer ever firing, exactly as if it had been cancelled. That is invisible in normal
+ * production operation, where the HTTP server and other timers keep the loop alive regardless - but
+ * it is exactly the shape of runManagedRunShutdownSequence's own bounded-deadline tests: the deadline
+ * delay ends up the only outstanding handle in the process, so an unref'd one can starve and the
+ * `await` on the race never resolves. Left uncaught, the same starvation is a live production risk
+ * too: it defeats the one guarantee this deadline exists to provide - that
+ * runManagedRunShutdownSequence returns and process.exit(0) runs before Railway's SIGKILL - in
+ * precisely the case where release() or app.close() has already wedged and nothing else is pending.
+ * A ref'd timer costs nothing here: the whole point of this race is for the process to stay alive
+ * for up to deadlineMs while it decides whether to keep waiting, so there being a live handle for
+ * that exact span is the intended behaviour, not a leak.
+ */
+function boundedDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
  * Release every pre-boundary managed run this process still owns, AND wait (within the same
  * deadline) for any boundary-reached run's own reconciliation to finish - bounded so neither can
  * outlive Railway's own SIGKILL. Exported for its own targeted test; production reaches it only
@@ -710,7 +736,7 @@ export async function releaseManagedRunsBeforeExit(
   const settled = Promise.allSettled([...releases, ...boundaryCompletions]);
   const timedOut = await Promise.race([
     settled.then(() => false),
-    delay(deadlineMs).then(() => true),
+    boundedDelay(deadlineMs).then(() => true),
   ]);
   if (timedOut && boundaryWaits.length > 0) {
     log.warn(
@@ -752,7 +778,7 @@ export async function runManagedRunShutdownSequence(
   });
   await Promise.race([
     Promise.all([releasePromise, closePromise]),
-    delay(deadlineMs),
+    boundedDelay(deadlineMs),
   ]);
 }
 
