@@ -316,6 +316,64 @@ test('closed taxonomies use Other only for truthful referral and recent-experien
   ), undefined);
 });
 
+/* MEASURED 2026-09-05, account mehekmandal05@gmail.com, Five Rings packet 2231fc73.
+ *
+ * "how did you first hear about five rings?" - the word "first" sits between "you" and "hear" -
+ * used to miss the REFERRAL_SOURCE_CHOICE_QUESTION regex here entirely (it had no `hear\s+about`
+ * alternative, unlike GREENHOUSE_REFERRAL_LABEL_PREFIXES in portalSubmission.ts, which already
+ * treats this exact prefix as a referral field at fill time). truthfulOtherChoice therefore never
+ * proposed "Other" for the standing "Job board" default, and the fill reported
+ * `no option matched "Job board"` on a required control that DOES have an Other entry. */
+const FIVE_RINGS_REFERRAL_OPTIONS = [
+  'Coffee Chat',
+  'Conference',
+  'GitHub',
+  'Handshake',
+  'LinkedIn',
+  'Student Organization Newsletter or Event',
+  'University Career Fair / Networking Event',
+  'Word of Mouth',
+  'Information Session',
+  'Other',
+];
+
+test('REGRESSION: "how did you first hear about X" resolves the job-board default to Other', () => {
+  assert.equal(truthfulOtherChoice(
+    'how did you first hear about five rings?',
+    'Job board',
+    FIVE_RINGS_REFERRAL_OPTIONS,
+  ), 'Other');
+});
+
+test('a list with no job-board wording and no Other leaves the question for the applicant (Notion shape)', () => {
+  // Notion's own question is a checkbox ("select all that apply"), but truthfulOtherChoice judges
+  // only the offered option strings, so this pins the same "nothing truthful to pick" outcome
+  // directly: LinkedIn and Glassdoor must never be chosen for a job-board claim.
+  assert.equal(truthfulOtherChoice(
+    'how did you hear about this opportunity? (select all that apply)',
+    'Job board',
+    ['LinkedIn', 'Glassdoor', 'Notion Blog', 'Notion Employee', 'Notion Website', 'Billboard/Outdoor Ads', 'Conference or Meetup'],
+  ), undefined);
+});
+
+test('a generic job-board wording on the list is preferred over Other', () => {
+  assert.equal(truthfulOtherChoice(
+    'how did you first hear about five rings?',
+    'Job board',
+    ['LinkedIn', 'Referral', 'Online job board', 'Other'],
+  ), 'Online job board');
+});
+
+test('Other is chosen over a same-list Referral entry, never Referral', () => {
+  const result = truthfulOtherChoice(
+    'how did you first hear about five rings?',
+    'Job board',
+    ['Referral', 'Other', 'LinkedIn'],
+  );
+  assert.equal(result, 'Other');
+  assert.notEqual(result, 'Referral');
+});
+
 test('managed choice fallback carries the job-board detail and preserves the original fact as provenance', () => {
   const discovered = [
     {
@@ -594,6 +652,34 @@ test('a Job board source makes only an employee-referral detail non-applicable',
       'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
     ], unprovenOther.filter((question) => question.id !== 'employee-detail')),
     ['how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"'],
+  );
+});
+
+/* Round-2 review, PR #979. isTruthfulJobBoardOtherReferral used to compare the resolved answer
+ * against otherReferralOption alone, i.e. only the literal "Other" branch of
+ * jobBoardClosedListOption's ladder. Once the list offers a generic job-board wording
+ * (genericJobBoardOption), the ladder picks that ahead of "Other" - truthfulOtherChoice already does
+ * this - so an answer of "Online job board" was truthfully job-board-sourced but no longer matched
+ * the old literal comparison, and the employee-referral attention reason it should have retired
+ * stayed open. */
+test('a Job board source resolved to a generic board wording still retires the employee-referral detail', () => {
+  const discovered = [
+    { label: 'How did you hear about Optiver?', selector: '#source', inputType: 'combobox', maxLength: null, options: ['LinkedIn', 'Referral', 'Online job board', 'Other'] },
+    { label: 'If referred by an Optiver employee or Optiver intern, please provide their name', selector: '#employee-detail', inputType: 'text', maxLength: 100 },
+  ];
+  const resolved = resolveApplicantClosedChoiceFallbacks(discovered, [
+    { id: 'source', question: 'How did you hear about Optiver?', answer: 'Job board', kind: 'required', required: true, options: discovered[0]!.options },
+    { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
+  ]);
+
+  assert.equal(resolved[0]?.answer, 'Online job board');
+  assert.equal(resolved[0]?.answer_option_source, 'Job board');
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
+    ], resolved),
+    [],
+    'a generic job-board wording is exactly as truthful as the literal Other and must retire the same attention reason',
   );
 });
 

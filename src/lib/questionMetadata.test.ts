@@ -374,6 +374,112 @@ test('a label this function does not classify at all is left untouched', () => {
   assert.deepEqual(snapStoredAnswersToProfileFieldOptions([essay]), [essay]);
 });
 
+/* ── snapStoredAnswersToProfileFieldOptions: the employer-named referral gap ──────────────────────
+ *
+ * MEASURED 2026-09-05, account mehekmandal05@gmail.com, Five Rings packet 2231fc73. Her profile's
+ * referral_source_default is "Job board"; the question is "how did you first hear about five
+ * rings?" (combobox, required) offering Coffee Chat / Conference / GitHub / Handshake / LinkedIn /
+ * Student Organization Newsletter or Event / University Career Fair / Networking Event / Word of
+ * Mouth / Information Session / Other. The stored answer sat as "Job board" with no answer_source
+ * forever: profileFieldIntent only recognises an EMPLOYER-NAMED referral label by validating the
+ * name against a frozen job description (questionDiscovery.ts's parseReferralQuestion), and this
+ * function judges one row with no such context to validate against, so profileFieldIntent(label)
+ * came back null and the whole alias loop - gated on isProfileBackedKey - never ran. The fill then
+ * reported `no option matched "Job board"` on a required control even though "Other" was right
+ * there on the list. */
+const FIVE_RINGS_REFERRAL_OPTIONS = [
+  'Coffee Chat',
+  'Conference',
+  'GitHub',
+  'Handshake',
+  'LinkedIn',
+  'Student Organization Newsletter or Event',
+  'University Career Fair / Networking Event',
+  'Word of Mouth',
+  'Information Session',
+  'Other',
+];
+
+const fiveRingsReferralQuestion = (overrides: Partial<ApplicationReviewQuestion> = {}): ApplicationReviewQuestion => ({
+  id: 'five-rings-referral',
+  question: 'how did you first hear about five rings?',
+  answer: 'Job board',
+  kind: 'required',
+  required: true,
+  portal_input_type: 'combobox',
+  options: [...FIVE_RINGS_REFERRAL_OPTIONS],
+  ...overrides,
+});
+
+test('REGRESSION: an employer-named referral question snaps its job-board default to Other', () => {
+  const [snapped] = snapStoredAnswersToProfileFieldOptions([fiveRingsReferralQuestion()]);
+  assert.equal(snapped.answer, 'Other', 'no option on this list states "Job board", so Other is the truthful pick');
+  assert.equal(snapped.answer_option_source, 'Job board', 'the pre-snap claim is recorded, same shape every other snap here writes');
+  assert.equal(snapped.answer_source, undefined, 'a resolver pick is a machine value, never a stamped applicant review');
+});
+
+test('a generic phrasing of the same question ("how did you hear about us?") already worked, and still does', () => {
+  const [snapped] = snapStoredAnswersToProfileFieldOptions([
+    fiveRingsReferralQuestion({ question: 'how did you hear about us?' }),
+  ]);
+  assert.equal(snapped.answer, 'Other');
+});
+
+test('a list with no job-board wording and no Other is left exactly as it stands (Notion checkbox shape, generic label)', () => {
+  // Notion's own list is a checkbox, which REVIEWED_PICK_EXACT_OPTION_TYPE already excludes from
+  // this function entirely (see the "an open control... is never snapped" test above for the
+  // parallel case). This pins the same "nothing to pick, so leave it for her" outcome on a
+  // single-choice control, so the referral fallback cannot be blamed for guessing when the list
+  // itself offers no truthful answer.
+  const notionOptions = [
+    'LinkedIn',
+    'Glassdoor',
+    'Notion Blog',
+    'Notion Employee',
+    'Notion Website',
+    'Billboard/Outdoor Ads',
+    'Conference or Meetup',
+  ];
+  const stored = fiveRingsReferralQuestion({
+    question: 'how did you hear about this opportunity?',
+    portal_input_type: 'select-one',
+    options: notionOptions,
+  });
+  assert.deepEqual(
+    snapStoredAnswersToProfileFieldOptions([stored]),
+    [stored],
+    'no entry here states "a job board" or "Other", so nothing is invented - LinkedIn/Glassdoor must never be picked',
+  );
+});
+
+test('a checkbox referral question is left untouched by this function, exactly like every other checkbox', () => {
+  const checkbox = fiveRingsReferralQuestion({ portal_input_type: 'checkbox' });
+  assert.deepEqual(
+    snapStoredAnswersToProfileFieldOptions([checkbox]),
+    [checkbox],
+    'REVIEWED_PICK_EXACT_OPTION_TYPE excludes checkbox; a multi-select needs its own set-based match, not this one',
+  );
+});
+
+test('a list offering a generic job-board wording is preferred over Other', () => {
+  const [snapped] = snapStoredAnswersToProfileFieldOptions([
+    fiveRingsReferralQuestion({ options: ['LinkedIn', 'Referral', 'Online job board', 'Other'] }),
+  ]);
+  assert.equal(snapped.answer, 'Online job board');
+});
+
+test('Other is chosen over a same-list Referral entry, never Referral', () => {
+  const [snapped] = snapStoredAnswersToProfileFieldOptions([
+    fiveRingsReferralQuestion({ options: ['Referral', 'Other', 'LinkedIn'] }),
+  ]);
+  assert.equal(snapped.answer, 'Other');
+});
+
+test('an applicant-reviewed referral answer is never touched by the referral fallback either', () => {
+  const reviewed = fiveRingsReferralQuestion({ answer: 'Other', answer_source: 'applicant_review' });
+  assert.deepEqual(snapStoredAnswersToProfileFieldOptions([reviewed]), [reviewed]);
+});
+
 test('provenance made about the un-snapped string is dropped, and the pass is idempotent', () => {
   /* answer_source and answer_override_of are deliberately ABSENT from this fixture. Either one now
    * gates the snap entirely before it ever reaches this destructure - see the applicant-provenance

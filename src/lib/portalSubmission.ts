@@ -60,6 +60,7 @@ import {
 } from './submitReadinessGrammar';
 import {
   isJobBoardReferralClaim,
+  isReferralSourceQuestionLabel,
   otherReferralOption,
   referralSourceForApplication,
   referralSourceOptionCandidates,
@@ -3573,7 +3574,9 @@ function cityOnlyLocation(value: string): string | undefined {
 }
 
 function isReferralSourceQuestion(question: string): boolean {
-  return /\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|where\s+have\s+you\s+learned\s+about|source)\b/i.test(question);
+  // Canonical definition now lives in referralSource.ts, shared with the other two copies this
+  // exact regex had already drifted from - see isReferralSourceQuestionLabel's own header.
+  return isReferralSourceQuestionLabel(question);
 }
 
 function greenhouseComboboxValuesForQuestion(
