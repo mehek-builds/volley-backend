@@ -212,6 +212,11 @@ const EXACT_WORKABLE_RECEIPT_TEXT = 'Your application has been submitted success
  * heading over "Your application has been submitted successfully. Good luck!" (both strings are
  * Breezy's, from its portal translate bundle). Measured on Bear Robotics b822b998, 2026-09-05T01:50:46Z. */
 const EXACT_BREEZY_RECEIPT_TEXT = 'Application Submitted Your application has been submitted successfully. Good luck!';
+/* Ashby's own success view, as the managed runner reads it off the page: the "Success" heading over
+ * Ashby's fixed sentence. Employers may append their own notice below it (Deepgram appends a
+ * recruiter-impersonation warning), so the receipt is bound by how it OPENS, never by containment.
+ * Measured on Deepgram 4ef78910, 2026-09-05T04:48:14Z. */
+const EXACT_ASHBY_RECEIPT_OPENING = 'Success Your application was successfully submitted. We\'ll contact you if there are next steps.';
 const CANONICAL_FREE_ARTIFACT_PREFIX = `${CANONICAL_FREE_DOCUMENT_BINDING_PREFIX}artifact:`;
 const EMPLOYER_EMAIL_CONFIRMATION_EVIDENCE_PREFIX = 'employer_email_confirmation_v1:';
 
@@ -1064,9 +1069,22 @@ export function measuredPersistedReceiptMatchesOpening(
       && finalBreezy.route === 'submitted'
       && confirmationText.replace(/\s+/g, ' ').trim() === EXACT_BREEZY_RECEIPT_TEXT;
   }
-  // Ashby's generic /application route and mutable success text do not bind a provider result.
-  // A future repair may admit Ashby only after its immutable result or content-bound receipt is
-  // stored in the attempt event. Until then this function deliberately falls through to false.
+  /* ASHBY. The application route is the posting route (jobs.ashbyhq.com/<org>/<jobId>/application
+   * beside jobs.ashbyhq.com/<org>/<jobId>), so a receipt URL alone proves only that the run stayed
+   * on the posting; that is why this arm used to fall through to false. What binds the receipt is
+   * Ashby's own success view: a fixed "Success" heading and a fixed sentence that no employer copy
+   * can precede, read off the page after the press the ledger already requires. Same org, same job
+   * id, either route, and the text OPENS with Ashby's sentence - an employer's appended notice
+   * (Deepgram's recruiter-impersonation warning) may follow it and changes nothing. Measured on
+   * Deepgram 4ef78910, 2026-09-05T04:48:14Z: receipt in hand, row parked on this very arm. */
+  const frozenAshby = ashbyPostingFromUrl(frozenUrl);
+  if (frozenAshby) {
+    const finalAshby = ashbyPostingFromUrl(finalUrl);
+    return finalAshby !== null
+      && finalAshby.org === frozenAshby.org
+      && finalAshby.jobId === frozenAshby.jobId
+      && confirmationText.replace(/\s+/g, ' ').trim().startsWith(EXACT_ASHBY_RECEIPT_OPENING);
+  }
   const frozenKnown = genericKnownPosting(frozenUrl);
   const finalKnown = genericKnownPosting(finalUrl);
   if (frozenKnown?.provider === 'workable') {
@@ -1109,6 +1127,29 @@ export function breezyPostingFromUrl(
   if (segments.length === 3) return { tenant, posting, route: 'apply' };
   if (segments.length === 4 && segments[3]?.toLowerCase() === 'submitted') return { tenant, posting, route: 'submitted' };
   return null;
+}
+
+/**
+ * jobs.ashbyhq.com/<org>/<jobId>[/application]. The job id is Ashby's own UUID; the org is the
+ * tenant path segment. Anything else on that host (the org's board root, a different depth) is not a
+ * posting and binds nothing.
+ */
+export function ashbyPostingFromUrl(
+  rawUrl: string,
+): { org: string; jobId: string; route: 'posting' | 'application' } | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'jobs.ashbyhq.com') return null;
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (segments.length < 2 || segments.length > 3) return null;
+  const [org, jobId, route] = segments;
+  if (!org || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(jobId ?? '')) return null;
+  if (segments.length === 3 && route?.toLowerCase() !== 'application') return null;
+  return { org: org.toLowerCase(), jobId: jobId!.toLowerCase(), route: segments.length === 3 ? 'application' : 'posting' };
 }
 
 function exactLegacyAutofillReceiptMatchesOpening(

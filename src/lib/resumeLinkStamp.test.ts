@@ -38,13 +38,13 @@ describe('the selected resume link carries the application clock', () => {
     assert.match(stamp, /sql`\$\{application_artifacts\.attached_at\} is null`,/, 'an existing stamp, agreeing or not, is never overwritten');
   });
 
-  test('the parked read completes the stamp before it re-projects', async () => {
+  test('the parked read completes the linkage before it re-projects', async () => {
     const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
     const repair = runner.slice(runner.indexOf('export async function repairParkedConfirmedProjection('));
     const body = repair.slice(0, repair.indexOf('\n}\n'));
-    const stamp = body.indexOf('stampSelectedResumeLinkAttachedAt(db, { userId: row.user_id, applicationId: canonicalForPacket.id })');
+    const stamp = body.indexOf('completeSelectedResumeLinkage(db, {');
     const commit = body.indexOf('await commitVerifiedSubmissionConfirmed(row, attemptBinding, {');
-    assert.ok(stamp > 0 && commit > stamp, 'the stamp lands before the one commit that reads it');
+    assert.ok(stamp > 0 && commit > stamp, 'the completion lands before the one commit that reads it');
     assert.match(body, /eq\(applications\.legacy_generated_resume_id, row\.id\),/, 'the canonical application is the packet’s own');
   });
 });
