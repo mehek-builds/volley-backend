@@ -2002,11 +2002,13 @@ describe('the submit request itself proves an employer refusal', () => {
       'a GET is not a submit, and an analytics 4xx is not the employer answering');
   });
 
-  test('a 200/3xx submit with an unknown DOM state keeps today’s unverified handling', () => {
+  test('a 200/3xx submit with an unknown DOM state is the employer accepting, never a refusal', () => {
+    // Until 2026-09-05 this stayed unverified and sent the applicant to look. The bound endpoint's
+    // own success answer is the employer's word; see employerSubmitAcceptanceProof.
     for (const status of [200, 201, 302]) {
       const verdict = exactManagedSubmitVerdict(unknownResult({ status }), APPLY_URL);
-      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
-        `status ${status} must never be read as a refusal`);
+      assert.equal(verdict.kind, 'confirmed', `status ${status} is the employer accepting`);
+      assert.equal((verdict as { evidence: string }).evidence, `employer_submit_response:greenhouse:${status}`);
     }
   });
 
@@ -2099,13 +2101,14 @@ describe('a success or an unknown outcome anywhere on the bound endpoint blocks 
     };
   }
 
-  test('428 then 200 on the identical bound URL: the retry succeeded, this is not a refusal', () => {
+  test('428 then 200 on the identical bound URL: the retry succeeded, and that IS the verdict', () => {
     const verdict = exactManagedSubmitVerdict(
       twoEntryResult([{ status: 428 }, { status: 200 }]),
       APPLY_URL,
     );
-    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
-      'a 200 later in the run means a re-press went through - never call the earlier 428 a refusal');
+    assert.equal(verdict.kind, 'confirmed',
+      'a 200 later in the run means a re-press went through - the employer accepted it');
+    assert.equal((verdict as { evidence: string }).evidence, 'employer_submit_response:greenhouse:200');
   });
 
   test('200 then 428 on the identical bound URL: still not a proven refusal', () => {
@@ -2243,9 +2246,10 @@ describe('the submit request itself proves a Workable employer refusal', () => {
     assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
   });
 
-  test('a 2xx on the bound endpoint blocks the refusal, same as Greenhouse', () => {
+  test('a 2xx on the bound endpoint is the acceptance, same as Greenhouse', () => {
     const verdict = exactManagedSubmitVerdict(workableUnknownResult({ status: 201 }), APPLY_URL);
-    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+    assert.equal(verdict.kind, 'confirmed');
+    assert.equal((verdict as { evidence: string }).evidence, 'employer_submit_response:workable:201');
   });
 
   test('a 401/403 login wall is never read as the employer\'s own refusal', () => {
@@ -2505,4 +2509,122 @@ test('the closure vocabulary is the union of the runner\'s own doubt list', () =
   // ...while the bare words still refuse.
   assert.equal(lever('Thanks for applying. Your application is pending.'), 'unverified');
   assert.equal(lever('Thanks for applying. A cover letter is required.'), 'unverified');
+});
+
+/* THE EMPLOYER'S OWN ANSWER VERIFIES THE SEND. Every case below is a press from a fully filled form
+ * whose page never rendered a readable receipt inside the watch - the exact shape that parked Pony.ai
+ * (Workable) twice on 2026-08-16 and Skydio/kos.ai (Ashby) at unverified_submission - and asks
+ * whether the bound submit request's own response settles it. */
+describe('the submit request itself proves an employer acceptance', () => {
+  const WORKABLE_URL = 'https://apply.workable.com/twgai/j/772CD136FF/apply';
+  const GREENHOUSE_URL = 'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002989';
+  const ASHBY_URL = 'https://jobs.ashbyhq.com/deepgram/9c2a2f9e-0000-4000-8000-000000000000/application';
+
+  function pressed(url: string, network: unknown[], over: { formStillPresent?: boolean | null; state?: string; message?: string | null; source?: string | null; pressed?: boolean } = {}) {
+    return {
+      url,
+      submitOutcome: {
+        pressed: over.pressed ?? true,
+        state: over.state ?? 'unknown',
+        source: over.source ?? null,
+        evidence: null,
+        message: over.message ?? null,
+        formStillPresent: over.formStillPresent === undefined ? true : over.formStillPresent,
+        network,
+      },
+    };
+  }
+
+  test('a Workable 2xx on the posting’s own apply endpoint verifies the send from the wire', () => {
+    const verdict = exactManagedSubmitVerdict(pressed(WORKABLE_URL, [
+      { method: 'POST', url: 'https://workable-application-form.s3.us-east-1.amazonaws.com/x', status: 204 },
+      { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/772CD136FF/apply', status: 200, content_type: 'application/json', body_excerpt: '{"candidate":{"id":"redacted"}}' },
+    ]), WORKABLE_URL);
+    assert.equal(verdict.kind, 'confirmed');
+    assert.equal((verdict as { evidence: string }).evidence, 'employer_submit_response:workable:200');
+    assert.match((verdict as { confirmationText: string }).confirmationText, /Workable.s server accepted this application/);
+    assert.match((verdict as { confirmationText: string }).confirmationText, /HTTP 200/);
+  });
+
+  test('a Workable 2xx on a DIFFERENT job’s apply endpoint proves nothing about this posting', () => {
+    const verdict = exactManagedSubmitVerdict(pressed(WORKABLE_URL, [
+      { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/OTHERJOB00/apply', status: 200 },
+    ]), WORKABLE_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a Greenhouse 2xx on the bound embed submit verifies; the same status with a refusal code does not', () => {
+    const accepted = exactManagedSubmitVerdict(pressed(GREENHOUSE_URL, [
+      { method: 'POST', url: 'https://boards.greenhouse.io/embed/jumptrading/jobs/8002989', status: 200, content_type: 'text/html', body_excerpt: 'Thank you for applying' },
+    ]), GREENHOUSE_URL);
+    assert.equal(accepted.kind, 'confirmed');
+    assert.equal((accepted as { evidence: string }).evidence, 'employer_submit_response:greenhouse:200');
+    const redirected = exactManagedSubmitVerdict(pressed(GREENHOUSE_URL, [
+      { method: 'POST', url: 'https://boards.greenhouse.io/embed/jumptrading/jobs/8002989', status: 302 },
+    ]), GREENHOUSE_URL);
+    assert.equal(redirected.kind, 'confirmed');
+    const coded = exactManagedSubmitVerdict(pressed(GREENHOUSE_URL, [
+      { method: 'POST', url: 'https://boards.greenhouse.io/embed/jumptrading/jobs/8002989', status: 200, content_type: 'application/json', body_excerpt: '{"code":"invalid-attributes"}' },
+    ]), GREENHOUSE_URL);
+    assert.deepEqual(coded, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('a success followed by a refusal on the same bound endpoint is ambiguous and stays unverified', () => {
+    // The first press may already have filed; the 428 may be Greenhouse refusing a duplicate. Neither
+    // the acceptance arm nor the refusal arm may claim it (see the 200-then-428 test above).
+    const verdict = exactManagedSubmitVerdict({
+      ...pressed(GREENHOUSE_URL, [
+        { method: 'POST', url: 'https://boards.greenhouse.io/embed/jumptrading/jobs/8002989', status: 200 },
+        { method: 'POST', url: 'https://boards.greenhouse.io/embed/jumptrading/jobs/8002989', status: 428, content_type: 'application/json', body_excerpt: '{"code":"captcha-retry"}' },
+      ], { message: 'There was an error processing your application. Please try again.' }),
+    }, GREENHOUSE_URL);
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('an Ashby GraphQL body that says success verifies; one that says otherwise does not', () => {
+    const ok = exactManagedSubmitVerdict(pressed(ASHBY_URL, [
+      { method: 'POST', url: 'https://jobs.ashbyhq.com/api/non-user-graphql', status: 200, content_type: 'application/json', body_excerpt: '{"data":{"submitApplicationForm":{"success":true,"errorMessages":[]}}}' },
+    ]), ASHBY_URL);
+    assert.equal(ok.kind, 'confirmed');
+    assert.equal((ok as { evidence: string }).evidence, 'employer_submit_response:ashby:200');
+    for (const body of [
+      '{"data":{"submitApplicationForm":{"success":false,"errorMessages":["Resume is required"]}}}',
+      '{"errors":[{"message":"Internal error"}],"data":null}',
+      '{"data":{"jobPosting":{"id":"x"}}}',
+    ]) {
+      const not = exactManagedSubmitVerdict(pressed(ASHBY_URL, [
+        { method: 'POST', url: 'https://jobs.ashbyhq.com/api/non-user-graphql', status: 200, content_type: 'application/json', body_excerpt: body },
+      ]), ASHBY_URL);
+      assert.deepEqual(not, { kind: 'unverified', cause: 'no_confirmation_state' }, body);
+    }
+  });
+
+  test('no status, a 5xx, or an unpressed run leaves the verdict where it was', () => {
+    for (const entry of [
+      { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/772CD136FF/apply', status: null, outcome: 'unanswered' },
+      { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/772CD136FF/apply', status: 500 },
+      { method: 'GET', url: 'https://apply.workable.com/api/v1/jobs/772CD136FF/apply', status: 200 },
+    ]) {
+      assert.deepEqual(
+        exactManagedSubmitVerdict(pressed(WORKABLE_URL, [entry]), WORKABLE_URL),
+        { kind: 'unverified', cause: 'no_confirmation_state' },
+        JSON.stringify(entry),
+      );
+    }
+    assert.deepEqual(
+      exactManagedSubmitVerdict(pressed(WORKABLE_URL, [
+        { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/772CD136FF/apply', status: 200 },
+      ], { pressed: false, state: 'not_attempted' }), WORKABLE_URL),
+      { kind: 'not_attempted' },
+    );
+  });
+
+  test('a page receipt outside the exact family shape is corroborated by the wire instead of dropped', () => {
+    const verdict = exactManagedSubmitVerdict(pressed(WORKABLE_URL, [
+      { method: 'POST', url: 'https://apply.workable.com/api/v1/jobs/772CD136FF/apply', status: 200 },
+    ], { state: 'confirmed', source: 'page_text', message: 'Thanks! We received your application.', formStillPresent: false }), WORKABLE_URL);
+    assert.equal(verdict.kind, 'confirmed');
+    assert.equal((verdict as { confirmationText: string }).confirmationText, 'Thanks! We received your application.');
+    assert.equal((verdict as { evidence: string }).evidence, 'page_text+employer_submit_response:workable:200');
+  });
 });

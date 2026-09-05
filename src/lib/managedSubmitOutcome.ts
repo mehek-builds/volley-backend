@@ -349,7 +349,9 @@ export function readManagedSubmitOutcome(result: MaybeOutcome | null | undefined
 }
 
 export type ManagedSubmitVerdict =
-  /** The employer's own confirmation state was on screen. */
+  /** The employer's own confirmation state was on screen - or, since 2026-09-05, the employer's own
+   * server answered the posting's bound submit request with success (evidence begins with
+   * `employer_submit_response:`; see employerSubmitAcceptanceProof). */
   | { kind: 'confirmed'; confirmationText: string; evidence: string }
   /** The employer's own refusal state was on screen. Nothing was filed, and that is KNOWN. */
   | { kind: 'refused'; message: string }
@@ -912,6 +914,148 @@ function employerSubmitRefusalProof(
  * bannerText-only branch below, and only the employer name in that sentence needed to stop being a
  * literal.
  */
+/* THE SUBMIT REQUEST'S OWN RESPONSE PROVES THE ACCEPTANCE, exactly as it proves a refusal above.
+ *
+ * Until 2026-09-05 a 2xx on the posting's own submit endpoint was deliberately thrown away
+ * (boundEmployerSubmitNetworkEntry returns null for it) and the send was verified ONLY from the page
+ * the runner could read afterwards. Measured cost, on the owner's account: Pony.ai on Workable twice
+ * (2026-08-16), Skydio and kos.ai on Ashby, every one of them pressed from a fully filled form and
+ * parked at unverified_submission because the receipt panel did not render inside the watch, while
+ * the ONE fact that decides the question - did the employer's server take the application - had been
+ * on the wire the whole time. The applicant was then sent to the employer portal to look, which is
+ * the one place this product promises she never has to go.
+ *
+ * WHAT COUNTS. The request must be write-shaped and bound to THIS posting's own submit endpoint by
+ * tenant and job id (the same bindings the refusal proof uses, plus Ashby's GraphQL call, matched by
+ * its own response body since the operation name lives in a query string the runner strips), the
+ * response status must be a success (2xx, or the 3xx a form POST answers with before it redirects to
+ * the receipt), and the body - when the runner captured one - must not carry a refusal: a Greenhouse
+ * JSON body with a `code` is a pre-filing refusal whatever its status, and an Ashby GraphQL body
+ * answers `success: false` or `errors` with HTTP 200. Each client's own success logic is what is
+ * being read here, not a guess: Workable's form calls handleSuccessfulSubmission on any 2xx (read
+ * from its application-form chunk), Greenhouse's board navigates to its confirmation route on 2xx,
+ * Ashby's renders its success container on `success: true`.
+ *
+ * WHAT IT DOES NOT DO. It never outranks a proven refusal (checked first in exactManagedSubmitVerdict),
+ * never fires when the press itself is not recorded, and a bound entry with no status, a 4xx/5xx, or
+ * a body that says otherwise leaves the verdict exactly where it was. A later authenticated
+ * confirmation email (see applicationEmail.ts, commitPacketConfirmationAtomically) remains the
+ * recovery evidence for a send whose response the runner never observed. */
+export type EmployerSubmitAcceptanceProof = {
+  family: ManagedAtsFamily;
+  httpStatus: number;
+  endpoint: string;
+  bodyKind: 'json' | 'html' | 'text' | 'none';
+};
+
+function isSubmitSuccessStatus(status: number | null): status is number {
+  return typeof status === 'number' && status >= 200 && status < 400;
+}
+
+function parsedJsonBodyExcerpt(entry: SubmitNetworkEntry): Record<string, unknown> | null {
+  if (typeof entry.body_excerpt !== 'string' || !entry.body_excerpt.trim()) return null;
+  if (typeof entry.content_type === 'string' && !/json/i.test(entry.content_type)) return null;
+  try {
+    const parsed: unknown = JSON.parse(entry.body_excerpt);
+    return isObjectRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function ashbySubmitResponseAccepted(entry: SubmitNetworkEntry): boolean | null {
+  let url: URL;
+  try {
+    url = new URL(entry.url);
+  } catch {
+    return null;
+  }
+  if (url.hostname.toLowerCase() !== 'jobs.ashbyhq.com' || url.pathname !== '/api/non-user-graphql') return null;
+  const body = parsedJsonBodyExcerpt(entry);
+  if (!body) return null;
+  if (Array.isArray(body.errors) && body.errors.length > 0) return false;
+  const data = isObjectRecord(body.data) ? body.data : null;
+  const submit = data && isObjectRecord(data.submitApplicationForm) ? data.submitApplicationForm : null;
+  if (!submit) return null;
+  return submit.success === true;
+}
+
+function bodyKindOf(entry: SubmitNetworkEntry): EmployerSubmitAcceptanceProof['bodyKind'] {
+  if (typeof entry.body_excerpt !== 'string' || !entry.body_excerpt.trim()) return 'none';
+  if (typeof entry.content_type === 'string') {
+    if (/json/i.test(entry.content_type)) return 'json';
+    if (/html/i.test(entry.content_type)) return 'html';
+  }
+  return 'text';
+}
+
+export function employerSubmitAcceptanceProof(
+  outcome: ManagedSubmitOutcome,
+  expectedApplicationUrl: string,
+): EmployerSubmitAcceptanceProof | null {
+  if (outcome.pressed !== true || !outcome.network || outcome.network.length === 0) return null;
+  const expected = managedAtsBinding({ url: expectedApplicationUrl });
+  if (!expected) return null;
+  // Last bound success wins, same rule as the refusal arm: a retried press appends a later entry.
+  let accepted: EmployerSubmitAcceptanceProof | null = null;
+  let refusedLater = false;
+  for (const entry of outcome.network) {
+    if (!/^(?:POST|PUT|PATCH)$/i.test(entry.method)) continue;
+    let url: URL;
+    try {
+      url = new URL(entry.url);
+    } catch {
+      continue;
+    }
+    let bound = false;
+    let bodySaysAccepted: boolean | null = null;
+    if (expected.family === 'greenhouse') {
+      const binding = greenhouseEmbedSubmitBinding(url);
+      bound = Boolean(binding && binding.tenant === expected.tenant && binding.jobToken === expected.jobToken);
+      if (bound) {
+        const body = parsedJsonBodyExcerpt(entry);
+        // A Greenhouse JSON body carrying a `code` is the refusal shape whatever its status says.
+        if (body && typeof body.code === 'string') bodySaysAccepted = false;
+      }
+    } else if (expected.family === 'workable') {
+      const binding = workableApiSubmitBinding(url);
+      bound = Boolean(binding && binding.jobToken === expected.jobToken.toUpperCase());
+    } else {
+      const verdict = ashbySubmitResponseAccepted(entry);
+      if (verdict === null) continue;
+      bound = true;
+      bodySaysAccepted = verdict;
+    }
+    if (!bound) continue;
+    if (!isSubmitSuccessStatus(entry.status) || bodySaysAccepted === false) {
+      // A bound entry that did not succeed after an earlier success means the later word is a
+      // refusal; the ordering rule below keeps the LAST bound entry authoritative.
+      accepted = null;
+      refusedLater = true;
+      continue;
+    }
+    if (expected.family === 'ashby' && bodySaysAccepted !== true) continue;
+    refusedLater = false;
+    accepted = {
+      family: expected.family,
+      httpStatus: entry.status,
+      endpoint: url.origin + url.pathname,
+      bodyKind: bodyKindOf(entry),
+    };
+  }
+  return refusedLater ? null : accepted;
+}
+
+export function employerSubmitAcceptanceText(proof: EmployerSubmitAcceptanceProof): string {
+  const name = proof.family === 'greenhouse' ? 'Greenhouse' : proof.family === 'workable' ? 'Workable' : 'Ashby';
+  return `${name}’s server accepted this application: the posting’s own submit request answered `
+    + `HTTP ${proof.httpStatus}.`;
+}
+
+export function employerSubmitAcceptanceEvidence(proof: EmployerSubmitAcceptanceProof): string {
+  return `employer_submit_response:${proof.family}:${proof.httpStatus}`;
+}
+
 export function employerSubmitRefusalReason(input: {
   code?: string;
   bannerText?: string;
@@ -954,10 +1098,31 @@ export function exactManagedSubmitVerdict(
       };
     }
   }
+  /* THE EMPLOYER'S OWN ANSWER, read second only to a proven refusal. Two shapes reach here:
+   *   - the page never said (unverified/no_confirmation_state) but the bound submit request
+   *     answered success: the send is verified from the wire, and the applicant is not sent to look;
+   *   - the page did say (confirmed) but not in the exact receipt shape this module pins for the
+   *     family: the wire corroborates the page and the receipt keeps the page's own words. */
+  const acceptance = result
+    ? (() => {
+      const outcome = readManagedSubmitOutcome(result);
+      return outcome ? employerSubmitAcceptanceProof(outcome, expectedApplicationUrl) : null;
+    })()
+    : null;
+  if (verdict.kind === 'unverified' && verdict.cause === 'no_confirmation_state' && acceptance) {
+    return {
+      kind: 'confirmed',
+      confirmationText: employerSubmitAcceptanceText(acceptance),
+      evidence: employerSubmitAcceptanceEvidence(acceptance),
+    };
+  }
   if (verdict.kind !== 'confirmed') return verdict;
   if (result && exactManagedAtsReceipt({ result, expectedApplicationUrl })) return verdict;
   if (result && corroboratedFamilyReceipt(result, expectedApplicationUrl, verdict.confirmationText, readManagedSubmitOutcome(result)?.source ?? null)) {
     return { ...verdict, evidence: `${verdict.evidence}+receipt_proof` };
+  }
+  if (acceptance) {
+    return { ...verdict, evidence: `${verdict.evidence}+${employerSubmitAcceptanceEvidence(acceptance)}` };
   }
   return { kind: 'unverified', cause: 'no_confirmation_state' };
 }

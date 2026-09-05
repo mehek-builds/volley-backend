@@ -5,6 +5,7 @@ import type { ApplicationReviewState } from './applicationReview';
 import { isWaitingOnHuman } from './applicationStall';
 import {
   confirmationIsStale,
+  confirmationSenderAuthenticated,
   handleStoredEmployerMessage,
   reconcileSubmissionConfirmations,
   resolvePacketFromConfirmation,
@@ -795,4 +796,54 @@ test('the reconciliation path is a function and not a scheduled job', () => {
   assert.match(service, /export async function reconcileSubmissionConfirmations/);
   const vercel = readFileSync('vercel.json', 'utf8');
   assert.doesNotMatch(vercel, /reconcile/i);
+});
+
+/* AUTHENTICATED, OR IT FILES NOTHING. A confirmation moves a packet to submitted without anyone
+ * looking, so the receiving provider's own verdicts have to vouch for the sender first. Silence is
+ * not a pass here (the opposite of the applicant-reply rule in senderAuthenticationFailed). */
+test('a confirmation files only when DKIM or SPF passed and nothing failed', () => {
+  assert.equal(confirmationSenderAuthenticated({ spf: 'pass', dkim: 'pass', dmarc: 'pass' }), true);
+  assert.equal(confirmationSenderAuthenticated({ dkim: 'pass' }), true);
+  assert.equal(confirmationSenderAuthenticated({ spf: 'PASS' }), true);
+  assert.equal(confirmationSenderAuthenticated({ spf: 'pass', dkim: 'fail' }), false, 'one failing verdict refuses');
+  assert.equal(confirmationSenderAuthenticated({ dmarc: 'pass' }), false, 'DMARC alone names a policy, not a sender proof');
+  assert.equal(confirmationSenderAuthenticated({ spf: 'none', dkim: 'none' }), false);
+  assert.equal(confirmationSenderAuthenticated({}), false);
+  assert.equal(confirmationSenderAuthenticated(undefined), false, 'no verdicts is not a pass');
+});
+
+test('an unauthenticated confirmation is stored and forwarded but never resolves the packet', async () => {
+  const harness = resolverDeps(() => ({ review: AWAITING_A_CODE }));
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+    authentication: { spf: 'pass', dkim: 'fail' },
+  }, harness.deps);
+  assert.deepEqual(outcome, { resolved: false, reason: 'sender_unauthenticated' });
+  assert.equal(harness.saves.length, 0, 'nothing is written for an unauthenticated confirmation');
+  const passed = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+    authentication: { dkim: 'pass' },
+  }, harness.deps);
+  assert.equal(passed.resolved, true);
+  assert.equal(harness.saves.length, 1);
+});
+
+test('the stored handler carries the provider verdicts to the resolver', async () => {
+  const { deps, calls } = handlerDeps();
+  await handleStoredEmployerMessage({
+    aliasRow: ALIAS_ROW,
+    message: storedMessage(),
+    classification: 'submission_confirmation',
+    receivedAt: RECEIVED_AT,
+    authentication: { spf: 'pass', dkim: 'pass' },
+  }, deps);
+  assert.deepEqual((calls.resolved[0] as { authentication?: unknown }).authentication, { spf: 'pass', dkim: 'pass' });
 });
